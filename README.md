@@ -42,6 +42,7 @@ X == 0
 Y != 0
 ```
 
+
 ### Functions
 
 ```
@@ -54,11 +55,27 @@ max(x, y) ~ if x > y { x } else { y }
 
 
 ### Calculate PI
+Monte carlo simulation
 ```
 X ~ unif(-1, 1) ** 2
 Y ~ unif(-1, 1) ** 2
-P(X + Y < 1)
+
+C === "fall inside circle"
+C = X + Y < 1
+
+P(C) // prints 3.14
 ```
 
+### Dice
 
+```
+Dice ~ unif(1, 6)
 
+X === "gettting 4 with a dice"
+X = Dice == 4
+explain(P(X)) // "probability of gettting 4 with a dice is 1/6"
+p
+
+Y === "probability of getting 4, 10 times in a row"
+Y = P(X)**10
+```
