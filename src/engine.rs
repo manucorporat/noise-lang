@@ -1,6 +1,6 @@
 
 use ast::{Expr, Opcode, Unit};
-use noice_parser;
+use noise_parser;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -24,7 +24,7 @@ impl Engine {
   }
 
   pub fn parse(input: &str) -> Unit {
-    noice_parser::parse_Unit(input).unwrap()
+    noise_parser::parse_Unit(input).unwrap()
   }
 
   pub fn expr(&mut self, input: &str) -> Option<Ret> {

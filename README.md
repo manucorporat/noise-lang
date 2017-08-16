@@ -1,11 +1,11 @@
-# The Noice Programming Language
+# The Noise Programming Language
 
-Noicelang is a expression based, probabilitic language where variables does not take exact values
+Noiselang is a expression based, probabilitic language where variables does not take exact values
 but a probability distribution.
 
-Noice extracts away the details of the simulation and allows mathematicians to write idiomatic code to deal with random variables.
+Noise extracts away the details of the simulation and allows mathematicians to write idiomatic code to deal with random variables.
 
-Monte carlo simulations, queue theory simulations are trivial with Noice.
+Monte carlo simulations, queue theory simulations are trivial with Noise.
 
 
 ## Examples
