@@ -1,30 +1,50 @@
 use std::str::FromStr;
-use ast::{Expr, Opcode, Unit};
+use ast::{Expr, Opcode};
 
 grammar;
 
+pub Unit: Box<Expr> = Statements;
 
-pub Unit: Unit = {
-    <Expr*> => Unit::new(Vec::from(<>)),
+Block: Box<Expr> = "{" <Statements> "}";
+
+Statements: Box<Expr> = {
+    <FullStatement*> => Box::new(Expr::List(Vec::from(<>))),
+};
+
+FullStatement: Box<Expr> = <Statement> ";";
+
+Statement: Box<Expr> = {
+    Expr,
+    Assign,
 };
 
 Expr: Box<Expr> = {
-    Expr ExprOp Factor => Box::new(Expr::Op(<>)),
+    MathExpr,
     Factor,
+    Block,
 };
 
+Assign: Box<Expr> = {
+    Identifier AssignOp Expr => Box::new(Expr::Assign(<>)),
+};
+
+AssignOp: Opcode = {
+    "~" => Opcode::Ref,
+    "=" => Opcode::Assign,
+};
+
+MathExpr: Box<Expr> = {
+    Expr ExprOp Factor => Box::new(Expr::Op(<>)),
+};
 
 ExprOp: Opcode = {
-    "=" => Opcode::Assign,
-    "~" => Opcode::Ref,
     "+" => Opcode::Add,
     "-" => Opcode::Sub,
 };
 
-
 Factor: Box<Expr> = {
-    Factor FactorOp Term => Box::new(Expr::Op(<>)),
-    Term,
+    Factor FactorOp SubExpr => Box::new(Expr::Op(<>)),
+    SubExpr,
 };
 
 FactorOp: Opcode = {
@@ -32,16 +52,30 @@ FactorOp: Opcode = {
     "/" => Opcode::Div,
 };
 
-Term: Box<Expr> = {
-    Num => Box::new(Expr::Number(<>)),
-    Identifier => Box::new(Expr::Id(<>)),
-    "(" <Expr> ")"
+SubExpr: Box<Expr> = {
+    Literal,
+    "(" <Expr> ")",
+    // FnCall,
 };
 
-Num: f64 = {
-    r"[0-9]+" => f64::from_str(<>).unwrap()
+// FnCall: Box<Expr> = {
+//     <Identifier> "(" ")",
+// };
+
+Literal: Box<Expr> = {
+    Num,
+    Text,
+    Identifier => Box::new(Expr::Id(<>)),
+};
+
+Num: Box<Expr> = {
+    r"[0-9]+" => Box::new(Expr::Number(f64::from_str(<>).unwrap())),
+};
+
+Text: Box<Expr> = {
+    r"\x22[^\x22]*\x22" => Box::new(Expr::Text(<>.to_string())),
 };
 
 Identifier: String = {
-    r"[a-zA-Z_]+" => String::from_str(<>).unwrap()
+    r"[a-zA-Z][a-zA-Z0-9]*" => <>.to_string(),
 };

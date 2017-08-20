@@ -1,19 +1,12 @@
 use std::fmt::{Debug, Formatter, Error};
 
-pub struct Unit {
-    pub exprs: Vec<Box<Expr>>,
-}
-
-impl Unit {
-    pub fn new(exprs: Vec<Box<Expr>>) -> Unit {
-        Unit{exprs: exprs}
-    }
-}
-
 pub enum Expr {
   Number(f64),
   Op(Box<Expr>, Opcode, Box<Expr>),
+  Assign(String, Opcode, Box<Expr>),
+  List(Vec<Box<Expr>>),
   Id(String),
+  Text(String),
   Error,
 }
 
@@ -34,8 +27,10 @@ impl Debug for Expr {
         match self {
             &Number(n) => write!(fmt, "{:?}", n),
             &Id(ref id) => write!(fmt, "{:?}", id),
+            &Assign(ref l, op, ref r) => write!(fmt, "({:?} {:?} {:?})", l, op, r),
+            &Text(ref id) => write!(fmt, "{:?}", id),
             &Op(ref l, op, ref r) => write!(fmt, "({:?} {:?} {:?})", l, op, r),
-            &Error => write!(fmt, "error"),
+            _ => write!(fmt, "error"),
         }
     }
 }
