@@ -1,0 +1,54 @@
+---
+// A code listing with a filename header tab (e.g. "pi.noise"), monospace + syntax highlighting.
+// Lines are individually addressable (`.cl[data-ln]`) so scrollytelling demos can reveal /
+// highlight code progressively. Token colors live in global.css under `.code-body`.
+import { LISTING_LINES } from '../lib/highlight';
+
+interface Props {
+  filename: string;
+  code: string;
+  /** Optional extra class on the root (e.g. for sticky scrolly panels). */
+  class?: string;
+}
+const { filename, code, class: cls } = Astro.props;
+const lines = LISTING_LINES(code);
+---
+
+<div class:list={['code-panel', cls]}>
+  <div class="code-head">
+    <span class="code-name">{filename}</span>
+  </div>
+  <pre class="code-body"><code>{lines.map((l, i) => (
+    <span class="cl" data-ln={i} set:html={(l || ' ') } />
+  ))}</code></pre>
+</div>
+
+<style>
+  .code-panel {
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--paper-2);
+  }
+  .code-head {
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--ink-dim);
+    padding: 0.4rem 0.85rem;
+    border-bottom: 1px solid var(--rule);
+    background: rgba(0, 0, 0, 0.025);
+    display: flex;
+    align-items: center;
+  }
+  .code-name::before { content: '›\00a0'; color: var(--accent); }
+  .code-body {
+    margin: 0;
+    padding: 0.85rem 1rem;
+    font-size: 0.86rem;
+    line-height: 1.62;
+    overflow-x: auto;
+    color: var(--ink);
+  }
+  .code-body code { display: block; }
+  .cl { display: block; min-height: 1.62em; white-space: pre; }
+</style>

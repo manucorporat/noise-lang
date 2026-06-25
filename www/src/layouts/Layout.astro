@@ -1,6 +1,5 @@
 ---
 import '../styles/global.css';
-import ShaderBackground from '../components/ShaderBackground.astro';
 
 interface Props {
   title?: string;
@@ -24,24 +23,21 @@ const {
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:type" content="website" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="light" />
   </head>
   <body>
     <div class="scroll-progress" id="scroll-progress"></div>
-    <ShaderBackground />
     <slot />
 
     <script>
-      // Progressive scroll-reveal: elements marked [data-reveal] fade/slide in once they enter
-      // the viewport. Honors prefers-reduced-motion (the CSS shows them immediately there).
+      // Gentle scroll-reveal: [data-reveal] elements fade up once in view. Honors reduced motion.
       const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
       const revealables = document.querySelectorAll<HTMLElement>('[data-reveal]');
       if (reduce) {
         revealables.forEach((el) => el.classList.add('is-visible'));
       } else {
-        // Stagger children that share a [data-reveal-group] parent.
         document.querySelectorAll<HTMLElement>('[data-reveal-group]').forEach((group) => {
-          const step = Number(group.dataset.revealStep ?? '90');
+          const step = Number(group.dataset.revealStep ?? '70');
           group.querySelectorAll<HTMLElement>('[data-reveal]').forEach((el, i) => {
             el.style.setProperty('--reveal-delay', `${i * step}ms`);
           });
@@ -55,12 +51,12 @@ const {
               }
             }
           },
-          { threshold: 0.15, rootMargin: '0px 0px -8% 0px' },
+          { threshold: 0.12, rootMargin: '0px 0px -6% 0px' },
         );
         revealables.forEach((el) => io.observe(el));
       }
 
-      // Top scroll-progress bar.
+      // Thin top reading-progress rule.
       const bar = document.getElementById('scroll-progress');
       if (bar) {
         const onScroll = () => {

@@ -1,0 +1,123 @@
+---
+// A fair die and the law of large numbers, scroll-driven. Rolls accumulate automatically while
+// the stage is in view; each face's bar converges to 1/6 (dashed line). No buttons.
+import CodePanel from './CodePanel.astro';
+
+const code = `use rand;
+
+Dice ~ unif_int(1, 6)
+
+P(Dice == 4)`;
+---
+
+<div class="scrolly dice-demo">
+  <div class="scrolly-grid">
+    <div class="scrolly-stage">
+      <div class="stage-inner glass">
+        <h4 class="stage-title">A fair die</h4>
+        <div class="stage-canvas dice-canvas"><canvas id="dice-canvas" aria-label="Histogram of die rolls"></canvas></div>
+        <div class="dice-axis"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span></div>
+        <CodePanel filename="dice.noise" code={code} class="dice-code" />
+        <div class="stage-foot">
+          <span class="stat">rolls <b id="dice-n">0</b></span>
+          <span class="stat key">P(Dice = 4) ≈ <b id="dice-p">—</b></span>
+        </div>
+        <p class="stage-engine" id="dice-engine"></p>
+      </div>
+    </div>
+    <div class="scrolly-steps" id="dice-steps">
+      <div class="scrolly-step" data-step="0">
+        <h4>A discrete die</h4>
+        <p>It needs <code class="code-inline">unif_int</code> — whole numbers 1 to 6. (With continuous <code class="code-inline">unif</code>, landing exactly on 4 has probability zero.) <code class="code-inline">~</code> draws one roll.</p>
+      </div>
+      <div class="scrolly-step" data-step="1">
+        <h4>Ask a question</h4>
+        <p><code class="code-inline">P(Dice == 4)</code> is the probability of a four. We don't compute it by hand — we estimate it by rolling, which is exactly what the bars below will do.</p>
+      </div>
+      <div class="scrolly-step" data-step="2">
+        <h4>Roll it again, and again</h4>
+        <p>Early on the bars are jumpy — a few lucky fours, a drought of sixes. That's real sampling noise, not a loaded die.</p>
+      </div>
+      <div class="scrolly-step" data-step="3">
+        <h4>Every face settles at 1/6</h4>
+        <p>As the rolls pile up, each bar presses against the dashed 1/6 line — the law of large numbers: averages converge even when single rolls don't.</p>
+      </div>
+    </div>
+  </div>
+  <figcaption class="figure-caption"><span class="fig-n">Figure 3.</span> the law of large numbers, one die at a time.</figcaption>
+</div>
+
+<style>
+  .dice-canvas { height: 188px; }
+  .dice-axis { display: flex; justify-content: space-around; font-family: var(--mono); font-size: 0.78rem; color: var(--ink-dim); margin-top: -0.4rem; }
+  .dice-code { font-size: 0.82rem; }
+</style>
+
+<script>
+  import { runNoise } from '../lib/noise';
+
+  const root = document.querySelector('.dice-demo') as HTMLElement | null;
+  const canvas = document.getElementById('dice-canvas') as HTMLCanvasElement | null;
+  if (root && canvas) {
+    const gl = canvas.getContext('webgl', { antialias: true, alpha: false });
+    const nEl = document.getElementById('dice-n')!, pEl = document.getElementById('dice-p')!, engineEl = document.getElementById('dice-engine')!;
+    const codeBody = root.querySelector('.code-body') as HTMLElement | null;
+    const lines = codeBody ? Array.from(codeBody.querySelectorAll<HTMLElement>('.cl')) : [];
+    if (codeBody) codeBody.classList.add('progressive');
+    const STEPS = [
+      { show: 2, add: [2], run: false },
+      { show: 4, add: [4], run: false },
+      { show: 4, add: [], run: true },
+      { show: 4, add: [], run: true },
+    ];
+    let engineDone = false, stepRun = false;
+    function setStep(i: number) {
+      const c = STEPS[i];
+      stepRun = c.run;
+      lines.forEach((el, k) => { el.classList.toggle('shown', k <= c.show); el.classList.toggle('added', c.add.includes(k)); });
+      for (const el of root!.querySelectorAll('.scrolly-step')) el.classList.toggle('active', Number((el as HTMLElement).dataset.step) === i);
+      if (i === STEPS.length - 1 && !engineDone) { engineDone = true; engineResult(); }
+    }
+
+    if (gl) {
+      const MAX = 6000, PER = 70, TARGET = 1 / 6, YS = 0.32, BASE = -0.82, TOP = 0.9;
+      const vS = `attribute vec2 p; void main(){ gl_Position=vec4(p,0.0,1.0); }`;
+      const fS = `precision highp float; uniform vec3 u_c; void main(){ gl_FragColor=vec4(u_c,1.0); }`;
+      const sh = (t: number, s: string) => { const x = gl.createShader(t)!; gl.shaderSource(x, s); gl.compileShader(x); return x; };
+      const prog = gl.createProgram()!; gl.attachShader(prog, sh(gl.VERTEX_SHADER, vS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fS)); gl.linkProgram(prog); gl.useProgram(prog);
+      const buf = gl.createBuffer(), uC = gl.getUniformLocation(prog, 'u_c'), aP = gl.getAttribLocation(prog, 'p');
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const resize = () => { const r = canvas.getBoundingClientRect(); canvas.width = Math.floor(r.width * dpr); canvas.height = Math.floor(r.height * dpr); gl.viewport(0, 0, canvas.width, canvas.height); draw(); };
+      new ResizeObserver(resize).observe(canvas);
+      const counts = [0, 0, 0, 0, 0, 0]; let total = 0, raf = 0, inView = false;
+      const yOf = (f: number) => BASE + Math.min(f / YS, 1) * (TOP - BASE);
+      const rect = (x0: number, y0: number, x1: number, y1: number) => [x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1];
+      function drawTris(v: number[], c: number[]) { gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.DYNAMIC_DRAW); gl.enableVertexAttribArray(aP); gl.vertexAttribPointer(aP, 2, gl.FLOAT, false, 0, 0); gl.uniform3f(uC, c[0], c[1], c[2]); gl.drawArrays(gl.TRIANGLES, 0, v.length / 2); }
+      function draw() {
+        gl.clearColor(0.957, 0.945, 0.91, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+        drawTris(rect(-0.95, BASE - 0.006, 0.95, BASE + 0.006), [0.5, 0.47, 0.43]);
+        const slot = 1.8 / 6, bw = slot * 0.62, bars: number[] = [];
+        for (let i = 0; i < 6; i++) { const cx = -0.9 + slot * (i + 0.5); const f = total ? counts[i] / total : 0; bars.push(...rect(cx - bw / 2, BASE, cx + bw / 2, yOf(f))); }
+        drawTris(bars, [0.12, 0.43, 0.55]);
+        const ty = yOf(TARGET), dash: number[] = [];
+        for (let x = -0.92; x < 0.92; x += 0.08) dash.push(...rect(x, ty - 0.004, x + 0.045, ty + 0.004));
+        drawTris(dash, [0.54, 0.18, 0.29]);
+      }
+      function loop() {
+        if (inView && stepRun && total < MAX) { for (let i = 0; i < PER && total < MAX; i++) { counts[(Math.random() * 6) | 0]++; total++; } draw(); nEl.textContent = String(total); pEl.textContent = (counts[3] / total).toFixed(4); }
+        raf = requestAnimationFrame(loop);
+      }
+      new IntersectionObserver((es) => { for (const e of es) inView = e.isIntersecting; }, { threshold: 0.2 }).observe(canvas);
+      resize(); raf = requestAnimationFrame(loop);
+    }
+
+    async function engineResult() {
+      engineEl.textContent = 'engine (10⁶ samples)…';
+      try { const r = await runNoise('use rand; Dice ~ unif_int(1,6); P(Dice == 4)'); engineEl.innerHTML = `engine, 10⁶ samples: <span class="ok">${r.value ?? r.output.trim()}</span>`; } catch { engineEl.textContent = ''; }
+    }
+
+    const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting && e.intersectionRatio > 0.5) setStep(Number((e.target as HTMLElement).dataset.step)); }, { threshold: [0.5], rootMargin: '-18% 0px -18% 0px' });
+    for (const el of root.querySelectorAll('.scrolly-step')) io.observe(el);
+    setStep(0);
+  }
+</script>

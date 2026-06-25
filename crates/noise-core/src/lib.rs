@@ -13,12 +13,15 @@ pub mod error;
 pub mod eval;
 #[cfg(feature = "jit")]
 pub mod jit;
+pub mod kernel;
 pub mod lexer;
 pub mod parser;
 pub mod reduce;
 pub mod rng;
 pub mod sampler;
 pub mod signal;
+pub mod simplify;
+pub mod wasm_emit;
 pub mod value;
 
 pub use dist::RvId;

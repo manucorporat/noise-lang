@@ -57,13 +57,16 @@ impl Rng {
         }
     }
 
-    /// Fill a column with integers uniform over `lo..=hi` (inclusive), as `f64`. `u01 < 1`
-    /// so `floor(u01 * n)` is in `0..n`, giving exactly `lo..=hi`.
+    /// Fill a column with integers uniform over `lo..=hi` (inclusive), as `f64`, via Lemire's
+    /// multiply-high: the top 64 bits of `next_u64() * count` are uniform in `0..count` (bias ≤
+    /// `count / 2^64`, negligible) and — unlike `floor(u01 * count)` — need no `u64→f64` convert or
+    /// `floor`. `count >= 1`, so `count == 1` always yields `k == 0` (a point mass at `lo`).
     #[inline]
     pub fn fill_uniform_int(&mut self, lo: f64, hi: f64, out: &mut [f64]) {
-        let n = (hi - lo + 1.0).max(1.0);
+        let count = (hi - lo + 1.0).max(1.0) as u64;
         for x in out.iter_mut() {
-            *x = lo + (self.next_f64() * n).floor();
+            let k = ((self.next_u64() as u128 * count as u128) >> 64) as u64;
+            *x = lo + k as f64;
         }
     }
 
@@ -145,6 +148,84 @@ mod tests {
         assert_eq!(rng.next_u64(), 6_633_766_593_972_829_180);
         assert_eq!(rng.next_u64(), 211_316_841_551_650_330);
         assert_eq!(rng.next_u64(), 9_136_120_204_379_184_874);
+    }
+
+    #[test]
+    fn fill_uniform_int_is_uniform_over_range() {
+        // Lemire multiply-high must hit every face of `unif_int(1,6)` with ~equal frequency and
+        // never land outside `1..=6` — the properties a biased/off-by-one mapping would break.
+        let mut rng = Rng::seed_from_u64(99);
+        let mut col = vec![0.0f64; 6_000_000];
+        rng.fill_uniform_int(1.0, 6.0, &mut col);
+        let mut counts = [0u64; 7]; // index 1..=6
+        for &x in &col {
+            assert!((1.0..=6.0).contains(&x) && x.fract() == 0.0, "out-of-range face {x}");
+            counts[x as usize] += 1;
+        }
+        let expected = col.len() as f64 / 6.0;
+        for face in 1..=6 {
+            let dev = (counts[face] as f64 - expected).abs() / expected;
+            assert!(dev < 0.01, "face {face}: count {} deviates {dev:.4} from uniform", counts[face]);
+        }
+    }
+
+    /// Hypothesis test for the *real* RNG lever: the kernel is bound by xoshiro's serial state
+    /// chain (each `next_u64` depends on the last), so the only way faster is to run **independent
+    /// streams** whose chains the OoO core can overlap. This races 1/2/4/8 independent xoshiro
+    /// states doing the dice-sum work. If throughput scales with stream count, multi-stream
+    /// unrolling in the kernel is the win. Ignored; run with:
+    /// `cargo test -p noise-core --release -- --ignored --nocapture bench_rng_multistream`
+    #[test]
+    #[ignore]
+    fn bench_rng_multistream() {
+        use std::time::Instant;
+        let total = 48_000_000usize;
+        let count = 6u128;
+        let roll = |x: u64| ((x as u128 * count) >> 64) as u64; // Lemire dice in [0,6)
+
+        macro_rules! run {
+            ($k:literal, $rngs:expr) => {{
+                let mut rngs = $rngs;
+                for r in rngs.iter_mut() {
+                    for _ in 0..1000 {
+                        r.next_u64();
+                    }
+                }
+                let iters = total / $k;
+                let t = Instant::now();
+                let mut acc = 0u64;
+                for _ in 0..iters {
+                    // Fixed-size array indexed by a const-bound loop → LLVM keeps the $k states in
+                    // registers as independent chains (no aliasing through a slice).
+                    for i in 0..$k {
+                        let a = roll(rngs[i].next_u64());
+                        let b = roll(rngs[i].next_u64());
+                        acc = acc.wrapping_add(a + b + 2);
+                    }
+                }
+                let mps = (iters * $k) as f64 / t.elapsed().as_secs_f64() / 1e6;
+                std::hint::black_box(acc);
+                println!("    streams={:2}  {mps:7.0} M dice-samples/s", $k);
+            }};
+        }
+
+        println!("\n  dice-sum throughput by independent RNG stream count (single thread):");
+        run!(1, [Rng::seed_from_u64(1)]);
+        run!(2, [Rng::seed_from_u64(1), Rng::seed_from_u64(2)]);
+        run!(4, [Rng::seed_from_u64(1), Rng::seed_from_u64(2), Rng::seed_from_u64(3), Rng::seed_from_u64(4)]);
+        run!(
+            8,
+            [
+                Rng::seed_from_u64(1),
+                Rng::seed_from_u64(2),
+                Rng::seed_from_u64(3),
+                Rng::seed_from_u64(4),
+                Rng::seed_from_u64(5),
+                Rng::seed_from_u64(6),
+                Rng::seed_from_u64(7),
+                Rng::seed_from_u64(8)
+            ]
+        );
     }
 
     #[test]

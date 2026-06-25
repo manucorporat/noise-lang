@@ -3,7 +3,7 @@
 import type * as Monaco from 'monaco-editor';
 
 export const LANGUAGE_ID = 'noise';
-export const THEME_ID = 'noise-dark';
+export const THEME_ID = 'noise-paper';
 
 // Module-scoped builtin names, by role, so the highlighter can color them distinctly.
 const DISTRIBUTIONS = [
@@ -104,36 +104,36 @@ export function registerNoise(monaco: typeof Monaco): void {
     },
   } as Monaco.languages.IMonarchLanguage);
 
-  // A dark theme tuned to the site palette (cool indigo/teal/amber on near-black).
+  // A light "paper" theme: ink on cream, academic accent colors (maroon/teal/sienna/blue).
   monaco.editor.defineTheme(THEME_ID, {
-    base: 'vs-dark',
+    base: 'vs',
     inherit: true,
     rules: [
-      { token: 'comment', foreground: '5b6477', fontStyle: 'italic' },
-      { token: 'string', foreground: '8be2c0' },
-      { token: 'number', foreground: 'f0b66a' },
-      { token: 'number.float', foreground: 'f0b66a' },
-      { token: 'keyword', foreground: 'c08cf0', fontStyle: 'bold' },
-      { token: 'operator', foreground: 'ff8fb0' },
-      { token: 'namespace', foreground: '6fb7ff', fontStyle: 'italic' },
-      { token: 'support.function.query', foreground: 'ffd479', fontStyle: 'bold' },
-      { token: 'support.function.dist', foreground: '7fd1ff' },
-      { token: 'support.function', foreground: '9ad0ff' },
-      { token: 'constant.language', foreground: 'f0b66a', fontStyle: 'italic' },
-      { token: 'identifier', foreground: 'e6e9f0' },
-      { token: 'delimiter', foreground: '8891a8' },
+      { token: 'comment', foreground: '8a8473', fontStyle: 'italic' },
+      { token: 'string', foreground: '4f7a2e' },
+      { token: 'number', foreground: '9a5b00' },
+      { token: 'number.float', foreground: '9a5b00' },
+      { token: 'keyword', foreground: '8a2d4a', fontStyle: 'bold' },
+      { token: 'operator', foreground: 'a23e6a' },
+      { token: 'namespace', foreground: '6a6356', fontStyle: 'italic' },
+      { token: 'support.function.query', foreground: 'b5651d', fontStyle: 'bold' },
+      { token: 'support.function.dist', foreground: '1f6f8b' },
+      { token: 'support.function', foreground: '2a5a9c' },
+      { token: 'constant.language', foreground: '9a5b00', fontStyle: 'italic' },
+      { token: 'identifier', foreground: '1b1a17' },
+      { token: 'delimiter', foreground: '7a7468' },
     ],
     colors: {
-      'editor.background': '#0c0f1a00', // transparent — the shader shows through the glass panel
-      'editor.foreground': '#e6e9f0',
-      'editorLineNumber.foreground': '#3a4258',
-      'editorLineNumber.activeForeground': '#8aa0d0',
-      'editor.selectionBackground': '#3a4a8055',
-      'editor.lineHighlightBackground': '#ffffff08',
-      'editorCursor.foreground': '#9ad0ff',
-      'editorIndentGuide.background1': '#ffffff0c',
-      'editorWidget.background': '#121728',
-      'editorSuggestWidget.background': '#121728',
+      'editor.background': '#f4f1e8',
+      'editor.foreground': '#1b1a17',
+      'editorLineNumber.foreground': '#bcb6a3',
+      'editorLineNumber.activeForeground': '#8a2d4a',
+      'editor.selectionBackground': '#dfd6bf',
+      'editor.lineHighlightBackground': '#00000008',
+      'editorCursor.foreground': '#8a2d4a',
+      'editorIndentGuide.background1': '#0000000d',
+      'editorWidget.background': '#f4f1e8',
+      'editorSuggestWidget.background': '#f4f1e8',
     },
   });
 }

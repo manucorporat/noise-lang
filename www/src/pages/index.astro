@@ -2,194 +2,208 @@
 import Layout from '../layouts/Layout.astro';
 import Playground from '../components/Playground.astro';
 import Gallery from '../components/Gallery.astro';
+import ShaderFigure from '../components/ShaderFigure.astro';
+import CircleDemo from '../components/CircleDemo.astro';
+import DiceDemo from '../components/DiceDemo.astro';
+import CltDemo from '../components/CltDemo.astro';
+import GaltonDemo from '../components/GaltonDemo.astro';
+import AmFmDemo from '../components/AmFmDemo.astro';
 
 const ideas = [
   {
     k: 'Everything is a distribution',
-    d: 'A number is just a distribution with all its weight on one point. Operators lift over random variables automatically — so X above is random, and Y is random too, with no special syntax. Propagating uncertainty reads exactly like ordinary arithmetic.',
+    d: 'A number is just a distribution with all its weight on a single point. Operators lift over random variables automatically — so X below is random, and Y is random too, with no special syntax. Propagating uncertainty reads exactly like ordinary arithmetic.',
     code: 'X ~ unif(-1, 1)\nY = 2 * X + 3   # Y is a distribution too',
   },
   {
-    k: '~ draws, = transforms',
-    d: 'A name bound with ~ is one fixed random draw that every mention reuses — so X − X is exactly 0, never "two samples." Independence comes from separate ~ bindings, exactly like writing X₁, X₂ on paper. No hidden re-draws, no gotchas.',
-    code: 'A ~ unif_int(1, 6)\nB ~ unif_int(1, 6)   # two independent dice\nA + B                # a real 2d6 distribution',
+    k: 'The tilde draws; equals transforms',
+    d: 'A name bound with ~ is one fixed random draw that every mention reuses — so X − X is exactly 0, never "two samples." Independence comes from separate ~ bindings, exactly like writing X₁, X₂ on paper. No hidden re-draws, no surprises.',
+    code: 'A ~ unif_int(1, 6)\nB ~ unif_int(1, 6)   # two independent dice\nA + B                # a genuine 2d6 distribution',
   },
   {
-    k: 'Ask with P, E, Var, Q',
-    d: 'Nothing samples until you ask. A query runs a fast columnar Monte Carlo pass and reports an honest estimate — the printed digits reflect the standard error, and that error propagates through arithmetic so 4·P(C) rounds itself correctly.',
+    k: 'Queries: P, E, Var, Q',
+    d: 'Nothing is sampled until you ask. A query runs a fast columnar Monte-Carlo pass and reports an honest estimate — the printed digits reflect the standard error, and that error propagates through arithmetic, so 4·P(C) rounds itself correctly.',
     code: 'C = X**2 + Y**2 < 1\n4 * P(C)   # ≈ 3.14',
   },
 ];
 ---
 
 <Layout>
-  <header class="nav container">
-    <a class="brand" href="/">
-      <span class="brand-mark"></span>
-      noise<span class="brand-dim">-lang</span>
-    </a>
-    <nav class="nav-links">
-      <a href="#playground">Playground</a>
-      <a href="#examples">Examples</a>
-      <a href="#ideas">How it works</a>
-      <a href="https://github.com/" class="nav-gh">GitHub</a>
-    </nav>
+  <header class="topbar">
+    <div class="wide topbar-inner">
+      <a class="brand" href="/">noise<span class="brand-dim">-lang</span></a>
+      <nav class="topbar-links">
+        <a href="#tour">Tour</a>
+        <a href="#playground-section">Playground</a>
+        <a href="#examples">Examples</a>
+        <a href="#ideas">How it works</a>
+        <a href="https://github.com/">GitHub</a>
+      </nav>
+    </div>
   </header>
 
-  <section class="hero container">
-    <p class="eyebrow" data-reveal>A probabilistic programming language</p>
-    <h1 class="hero-title" data-reveal style="--reveal-delay: 80ms">
-      Write <span class="grad">randomness</span><br />like ordinary math.
-    </h1>
-    <p class="hero-sub" data-reveal style="--reveal-delay: 160ms">
-      In Noise every value is a probability distribution. Sample, transform, and ask
-      <code class="code-inline">P(event)</code> — then run the whole Monte Carlo experiment right
-      here in your browser, compiled to WebAssembly.
-    </p>
-    <div class="hero-cta" data-reveal style="--reveal-delay: 240ms">
-      <a href="#playground" class="btn-primary">Try it now ▶</a>
-      <a href="#ideas" class="btn-secondary">How it works</a>
-    </div>
-    <a class="scroll-cue" href="#playground" aria-label="Scroll to playground" data-reveal
-      style="--reveal-delay: 360ms"><span></span></a>
-  </section>
-
-  <section id="playground-section" class="section section-tight">
-    <div class="section-head" data-reveal>
-      <p class="eyebrow">Playground</p>
-      <h2>Run Noise in your browser</h2>
-      <p>Pick an example below or write your own. Press <span class="code-inline">⌘/Ctrl + Enter</span> to run.</p>
-    </div>
-    <Playground />
-  </section>
-
-  <Gallery />
-
-  <section id="ideas" class="section how">
-    <div class="section-head" data-reveal>
-      <p class="eyebrow">How it works</p>
-      <h2>Three rules, the whole language</h2>
-      <p>Noise is small on purpose. Everything you just ran is built from these three ideas.</p>
+  <article class="doc">
+    <div class="measure masthead">
+      <h1 class="doc-title" data-reveal>The Noise Programming Language</h1>
+      <p class="doc-meta" data-reveal style="--reveal-delay: 60ms">
+        A static random-variable algebra &amp; forward Monte-Carlo engine. Compiled to WebAssembly,
+        runnable in this page.
+      </p>
+      <div class="abstract" data-reveal style="--reveal-delay: 120ms">
+        <p>
+          <span class="abstract-label">Abstract.</span>
+          In Noise, every value is a probability distribution: a number is the degenerate case, a
+          point mass. Operators lift over random variables, the binding <code class="code-inline">~</code>
+          draws a fresh sample while <code class="code-inline">=</code> names a transformation, and a
+          query such as <code class="code-inline">P(event)</code> estimates a probability by simulation.
+          The result is a small language in which propagating uncertainty and running Monte-Carlo
+          experiments reads like ordinary mathematics.
+        </p>
+      </div>
     </div>
 
-    <div class="container how-steps">
-      {ideas.map((i, n) => (
-        <div class={`step ${n % 2 === 1 ? 'step-rev' : ''}`}>
-          <div class="step-text" data-reveal={n % 2 === 1 ? 'right' : 'left'}>
-            <div class="step-n">{String(n + 1).padStart(2, '0')}</div>
-            <h3>{i.k}</h3>
-            <p>{i.d}</p>
+    <div class="wide" data-reveal>
+      <ShaderFigure n={1} caption="the noise field this language is named for — a fractal-noise surface drawn as ink contours. Move your cursor to disturb it." />
+    </div>
+
+    <section id="tour" class="section">
+      <div class="measure">
+        <h2 class="sec" data-reveal>A visual tour</h2>
+        <p data-reveal>
+          Five short stories, simplest first. Just scroll — each one walks through its program, then
+          plays out what the numbers mean, and confirms the answer with the real engine. No buttons.
+        </p>
+      </div>
+
+      <div class="tour-item"><div class="wide"><CircleDemo /></div></div>
+      <div class="tour-item"><div class="wide"><DiceDemo /></div></div>
+      <div class="tour-item"><div class="wide"><CltDemo /></div></div>
+      <div class="tour-item"><div class="wide"><GaltonDemo /></div></div>
+      <div class="tour-item"><AmFmDemo /></div>
+    </section>
+
+    <section id="playground-section" class="section">
+      <div class="measure">
+        <h2 class="sec" data-reveal>The playground</h2>
+        <p data-reveal>
+          Now the full editor — the real Noise compiler, built to WebAssembly. Choose an example from
+          the menu or write your own, then press <span class="code-inline">⌘/Ctrl + Enter</span>.
+          Programs are shareable — the <em>Share</em> button puts the current program in the URL.
+        </p>
+      </div>
+      <div class="wide playground-host" data-reveal>
+        <Playground />
+      </div>
+    </section>
+
+    <section id="examples" class="section">
+      <div class="measure">
+        <h2 class="sec" data-reveal>Examples</h2>
+        <p data-reveal>
+          A catalogue of short programs, each a Monte-Carlo experiment with a known closed form, so
+          the printed answer can be checked. Open any one to run and edit it.
+        </p>
+      </div>
+      <div class="wide" data-reveal>
+        <Gallery />
+      </div>
+    </section>
+
+    <section id="ideas" class="section">
+      <div class="measure">
+        <h2 class="sec" data-reveal>How it works</h2>
+        <p data-reveal>
+          Noise is small by design. Everything above is built from three ideas.
+        </p>
+
+        {ideas.map((i) => (
+          <div class="subsec-block">
+            <h3 class="subsec" data-reveal>{i.k}</h3>
+            <p data-reveal>{i.d}</p>
+            <pre class="listing" data-reveal><code>{i.code}</code></pre>
           </div>
-          <pre class="step-code glass" data-reveal={n % 2 === 1 ? 'left' : 'right'}><code>{i.code}</code></pre>
-        </div>
-      ))}
-    </div>
-  </section>
+        ))}
+      </div>
+    </section>
 
-  <footer class="footer container" data-reveal>
-    <div>
-      <strong>noise-lang</strong>
-      <span class="muted"> — a static random-variable algebra + forward Monte Carlo engine.</span>
-    </div>
-    <div class="muted" id="footer-version">running on WebAssembly</div>
-  </footer>
+    <footer class="doc-footer measure">
+      <hr />
+      <p class="muted" id="footer-version">noise-lang — running on WebAssembly.</p>
+    </footer>
+  </article>
 </Layout>
 
 <style>
-  .nav {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding-top: 1.4rem;
-    padding-bottom: 1.4rem;
+  .topbar {
     position: sticky;
     top: 0;
     z-index: 30;
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    background: rgba(251, 250, 246, 0.88);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--rule);
   }
-  .brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 800; font-size: 1.2rem; color: var(--text); }
+  .topbar-inner {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding-top: 0.7rem; padding-bottom: 0.7rem;
+  }
+  .brand { font-family: var(--serif); font-weight: 700; font-size: 1.1rem; color: var(--ink); }
   .brand:hover { text-decoration: none; }
-  .brand-dim { color: var(--text-dim); font-weight: 600; }
-  .brand-mark {
-    width: 16px; height: 16px; border-radius: 5px;
-    background: linear-gradient(135deg, var(--accent), var(--accent-3));
-    box-shadow: 0 0 14px rgba(127, 209, 255, 0.6);
-  }
-  .nav-links { display: flex; gap: 1.4rem; align-items: center; }
-  .nav-links a { color: var(--text-dim); font-size: 0.95rem; }
-  .nav-links a:hover { color: var(--text); text-decoration: none; }
-  .nav-gh { border: 1px solid var(--line); padding: 0.35rem 0.8rem; border-radius: 8px; }
-  @media (max-width: 620px) { .nav-links a:not(.nav-gh) { display: none; } }
+  .brand-dim { color: var(--ink-dim); }
+  .topbar-links { display: flex; gap: 1.3rem; }
+  .topbar-links a { color: var(--ink-dim); font-size: 0.92rem; }
+  .topbar-links a:hover { color: var(--ink); text-decoration: none; }
+  @media (max-width: 680px) { .topbar-links a:not(:last-child) { display: none; } }
 
-  .hero { padding: 3rem 1.25rem 2rem; text-align: center; position: relative; }
-  .hero-title {
-    font-size: clamp(2.4rem, 6vw, 4.2rem);
-    margin: 0.6rem 0 1rem;
-    letter-spacing: -0.02em;
-  }
-  .grad {
-    background: linear-gradient(120deg, var(--accent), var(--accent-2), var(--accent-3));
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-  }
-  .hero-sub {
-    max-width: 620px; margin: 0 auto 1.8rem;
-    color: var(--text-dim); font-size: clamp(1rem, 2vw, 1.2rem);
-  }
-  .hero-cta { display: flex; gap: 0.8rem; justify-content: center; margin-bottom: 2rem; flex-wrap: wrap; }
-  .btn-primary {
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    color: #07090f; font-weight: 700; padding: 0.7rem 1.4rem; border-radius: 10px;
-  }
-  .btn-primary:hover { filter: brightness(1.08); text-decoration: none; }
-  .btn-secondary { border: 1px solid var(--line); color: var(--text); padding: 0.7rem 1.4rem; border-radius: 10px; }
-  .btn-secondary:hover { border-color: var(--accent-2); text-decoration: none; }
+  .doc { counter-reset: section; padding: 2.5rem 0 1rem; }
 
-  .scroll-cue {
-    display: inline-block; width: 26px; height: 42px; margin-top: 0.5rem;
-    border: 2px solid var(--line); border-radius: 14px; position: relative;
+  .masthead { padding-top: 1.5rem; }
+  .doc-title {
+    font-size: clamp(2.1rem, 5vw, 3.1rem);
+    letter-spacing: -0.01em;
+    margin: 0 0 0.5rem;
   }
-  .scroll-cue span {
-    position: absolute; top: 7px; left: 50%; width: 4px; height: 8px; margin-left: -2px;
-    background: var(--accent-2); border-radius: 2px; animation: cue 1.6s infinite;
+  .doc-meta { color: var(--ink-dim); font-size: 1.05rem; margin: 0 0 1.6rem; font-style: italic; }
+  .abstract {
+    border-left: 2px solid var(--rule);
+    padding: 0.1rem 0 0.1rem 1.2rem;
+    margin: 0 0 0.5rem;
   }
-  @keyframes cue { 0% { opacity: 0; transform: translateY(-4px); } 40% { opacity: 1; } 100% { opacity: 0; transform: translateY(10px); } }
-  @media (prefers-reduced-motion: reduce) { .scroll-cue span { animation: none; } }
+  .abstract p { margin: 0; font-size: 1.02rem; color: #2c2a24; }
+  .abstract-label { font-weight: 700; }
 
-  .section-tight { padding-top: 2rem; }
+  .section { padding: 2.5rem 0; }
 
-  /* progressive "how it works" steps */
-  .how-steps { display: flex; flex-direction: column; gap: 3.5rem; margin-top: 1rem; }
-  .step {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 2rem;
-    align-items: center;
+  /* numbered sections + subsections, paper-style */
+  .sec {
+    font-size: clamp(1.5rem, 3vw, 2rem);
+    margin: 0 0 0.8rem;
+    padding-bottom: 0.35rem;
+    border-bottom: 1px solid var(--rule);
   }
-  .step-rev .step-text { order: 2; }
-  .step-rev .step-code { order: 1; }
-  @media (max-width: 820px) {
-    .step { grid-template-columns: 1fr; gap: 1rem; }
-    .step-rev .step-text, .step-rev .step-code { order: initial; }
-  }
-  .step-n {
-    font-family: var(--mono); font-size: 2.4rem; font-weight: 800; line-height: 1;
-    background: linear-gradient(120deg, var(--accent), var(--accent-3));
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-    opacity: 0.85; margin-bottom: 0.5rem;
-  }
-  .step-text h3 { margin: 0 0 0.6rem; font-size: clamp(1.3rem, 2.5vw, 1.7rem); }
-  .step-text p { margin: 0; color: var(--text-dim); font-size: 1.02rem; line-height: 1.65; }
-  .step-code {
-    margin: 0; padding: 1.3rem 1.5rem; font-size: 0.95rem; color: #cfe9ff;
-    overflow-x: auto; white-space: pre; line-height: 1.6;
+  .tour-item { margin-top: 3.5rem; }
+  .tour-item .demo-title { margin-bottom: 0.5rem; }
+  .subsec-block { margin-top: 2rem; }
+  .subsec { font-size: 1.25rem; margin: 0 0 0.5rem; }
+
+  .playground-host { margin-top: 1.5rem; }
+
+  /* code listing on the page */
+  .listing {
+    background: var(--paper-2);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 1rem 1.2rem;
+    margin: 1rem 0 0;
+    font-size: 0.92rem;
+    line-height: 1.6;
+    overflow-x: auto;
+    white-space: pre;
+    color: #2c2a24;
   }
 
-  .footer {
-    display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;
-    padding-top: 3rem; padding-bottom: 3rem; margin-top: 2rem;
-    border-top: 1px solid var(--line); font-size: 0.9rem;
-  }
+  .doc-footer { padding-bottom: 3rem; }
+  .doc-footer p { font-size: 0.92rem; }
 </style>
 
 <script>
@@ -197,7 +211,7 @@ const ideas = [
   noiseVersion()
     .then((v) => {
       const el = document.getElementById('footer-version');
-      if (el) el.textContent = `Noise v${v} · WebAssembly`;
+      if (el) el.textContent = `noise-lang v${v} — running on WebAssembly.`;
     })
     .catch(() => {});
 </script>

@@ -166,55 +166,86 @@ fn run_parallel<R: Reducer>(
 
 // --- the moments reducer (mean + population variance), powering P / E / Var ---
 
-/// Welford state: count, running mean, and sum of squared deviations.
+/// Raw power sums: count, Σx, Σx². We deliberately accumulate sums rather than running Welford
+/// state — the per-element divide Welford needs (`delta / count`) is the hot-loop bottleneck for
+/// cheap graphs *and* blocks vectorization. Σx / Σx² is a plain reduction the compiler turns into
+/// SIMD (see [`MomentsReducer::absorb`]), and componentwise addition is an exactly-associative
+/// monoid — so merging is trivial and the chunk-order fold stays bit-for-bit deterministic.
+///
+/// The tradeoff is numerical: variance via `E[X²] − E[X]²` can cancel when the mean dwarfs the
+/// variance (`mean² / variance ≫ 1`). For this language's scales (dice, uniforms, modest normals)
+/// that's immaterial; if huge-magnitude data ever matters, accumulate deviations from a provisional
+/// mean per chunk. Note the merge is mathematically identical to one sequential accumulation, so
+/// parallelism adds *no* extra error over the single-threaded path.
 #[derive(Clone, Copy)]
 pub struct MomentAcc {
     count: u64,
-    mean: f64,
-    m2: f64,
+    sum: f64,
+    sum_sq: f64,
 }
 
 impl MomentAcc {
     pub fn into_moments(self) -> Moments {
-        let variance = if self.count > 0 { self.m2 / self.count as f64 } else { 0.0 };
-        Moments { mean: self.mean, variance }
+        if self.count == 0 {
+            return Moments { mean: 0.0, variance: 0.0 };
+        }
+        let n = self.count as f64;
+        let mean = self.sum / n;
+        // Population variance E[X²] − E[X]²; clamp away tiny negative rounding when var ≈ 0.
+        let variance = (self.sum_sq / n - mean * mean).max(0.0);
+        Moments { mean, variance }
     }
 }
 
-/// Streaming Welford within a chunk; Chan's parallel formula to merge chunks. Both are numerically
-/// stable, and the merge is associative + commutative (the parallel-correctness requirement).
+/// Number of independent accumulator lanes in [`MomentsReducer::absorb`]. Eight `f64` lanes give
+/// LLVM enough parallel reduction chains to fill the vector units (and break the serial
+/// `sum += x` dependency) while keeping the lane→element mapping a fixed function of position — so
+/// the fold is identical regardless of thread count.
+const REDUCE_LANES: usize = 8;
+
+/// Σx / Σx² over a chunk, then componentwise-add to merge chunks. Both are exactly associative, so
+/// the merge is a commutative monoid (the parallel-correctness requirement) and the index-ordered
+/// fold is bit-reproducible.
 pub struct MomentsReducer;
 
 impl Reducer for MomentsReducer {
     type Acc = MomentAcc;
 
     fn identity(&self) -> MomentAcc {
-        MomentAcc { count: 0, mean: 0.0, m2: 0.0 }
+        MomentAcc { count: 0, sum: 0.0, sum_sq: 0.0 }
     }
 
     fn absorb(&self, acc: &mut MomentAcc, col: &[f64]) {
-        for &x in col {
-            acc.count += 1;
-            let delta = x - acc.mean;
-            acc.mean += delta / acc.count as f64;
-            let delta2 = x - acc.mean;
-            acc.m2 += delta * delta2;
+        // Element `i` always lands in lane `i % REDUCE_LANES` — a fixed mapping, so the partial
+        // sums (and thus the final value) don't depend on scheduling. The `chunks_exact` + const
+        // inner loop is the idiom LLVM autovectorizes into NEON/AVX reduction code.
+        let mut lane_sum = [0.0f64; REDUCE_LANES];
+        let mut lane_sq = [0.0f64; REDUCE_LANES];
+        let mut chunks = col.chunks_exact(REDUCE_LANES);
+        for c in chunks.by_ref() {
+            for k in 0..REDUCE_LANES {
+                let x = c[k];
+                lane_sum[k] += x;
+                lane_sq[k] += x * x;
+            }
         }
+        // Tail (fewer than REDUCE_LANES elements), then fold the lanes — fixed order both times.
+        let (mut sum, mut sum_sq) = (0.0f64, 0.0f64);
+        for &x in chunks.remainder() {
+            sum += x;
+            sum_sq += x * x;
+        }
+        for k in 0..REDUCE_LANES {
+            sum += lane_sum[k];
+            sum_sq += lane_sq[k];
+        }
+        acc.count += col.len() as u64;
+        acc.sum += sum;
+        acc.sum_sq += sum_sq;
     }
 
     fn merge(&self, a: MomentAcc, b: MomentAcc) -> MomentAcc {
-        if a.count == 0 {
-            return b;
-        }
-        if b.count == 0 {
-            return a;
-        }
-        let count = a.count + b.count;
-        let delta = b.mean - a.mean;
-        let cf = count as f64;
-        let mean = a.mean + delta * (b.count as f64 / cf);
-        let m2 = a.m2 + b.m2 + delta * delta * (a.count as f64 * b.count as f64 / cf);
-        MomentAcc { count, mean, m2 }
+        MomentAcc { count: a.count + b.count, sum: a.sum + b.sum, sum_sq: a.sum_sq + b.sum_sq }
     }
 }
 
@@ -260,6 +291,50 @@ mod tests {
         }
         // ...and it actually estimates π/4 ≈ 0.785.
         assert!((base.mean - std::f64::consts::FRAC_PI_4).abs() < 2e-3, "mean = {}", base.mean);
+    }
+
+    /// Same-process A/B of the new Σx/Σx² absorb vs the old streaming-Welford absorb over an
+    /// identical large column — isolates the reduction speedup (no generation / multicore noise).
+    /// Ignored by default; run with:
+    /// `cargo test -p noise-core --release -- --ignored --nocapture bench_reduce`
+    #[test]
+    #[ignore]
+    fn bench_reduce_absorb() {
+        use std::time::Instant;
+
+        // A representative column (small-magnitude draws, like dice/uniform outputs).
+        let n = 4_000_000usize;
+        let mut col = vec![0.0f64; n];
+        let mut z = 0x1234_5678u64;
+        for x in col.iter_mut() {
+            z = z.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *x = ((z >> 11) as f64) * (1.0 / (1u64 << 53) as f64) * 12.0;
+        }
+
+        // New: Σx/Σx² (the shipped MomentsReducer).
+        let r = MomentsReducer;
+        let t = Instant::now();
+        let mut acc = r.identity();
+        r.absorb(&mut acc, &col);
+        let new_mps = n as f64 / t.elapsed().as_secs_f64() / 1e6;
+        let new_m = acc.into_moments();
+
+        // Old: streaming Welford with the per-element divide.
+        let t = Instant::now();
+        let (mut count, mut mean, mut m2) = (0u64, 0.0f64, 0.0f64);
+        for &x in &col {
+            count += 1;
+            let delta = x - mean;
+            mean += delta / count as f64;
+            m2 += delta * (x - mean);
+        }
+        let old_mps = n as f64 / t.elapsed().as_secs_f64() / 1e6;
+
+        println!("\n  reduce absorb (single thread, M elem/s):");
+        println!("    welford(old) {old_mps:7.0}   sum/sumsq(new) {new_mps:7.0}   speedup {:.2}x", new_mps / old_mps);
+        // Sanity: both estimate the same moments.
+        assert!((new_m.mean - mean).abs() < 1e-6, "mean mismatch {} vs {}", new_m.mean, mean);
+        assert!((new_m.variance - m2 / count as f64).abs() < 1e-6, "var mismatch");
     }
 
     /// Repeated `moments` calls are bit-identical despite work-stealing (index-ordered merge).

@@ -3,75 +3,68 @@ import { examplesByCategory } from '../data/examples';
 const groups = examplesByCategory();
 ---
 
-<section id="examples" class="section">
-  <div class="section-head" data-reveal>
-    <p class="eyebrow">Examples</p>
-    <h2>Learn by example</h2>
-    <p>Every card is a real Monte Carlo experiment with a known answer. Open one to run, tweak, and share it.</p>
-  </div>
-
-  <div class="container">
-    {groups.map((group) => (
-      <div class="cat">
-        <h3 class="cat-title" data-reveal>{group.category}</h3>
-        <div class="gallery" data-reveal-group data-reveal-step="50">
-          {group.items.map((ex) => (
-            <article class="card glass" data-id={ex.id} data-reveal="scale">
-              <header class="card-head">
-                <h4>{ex.title}</h4>
-                {ex.analytic && <span class="card-analytic">{ex.analytic}</span>}
-              </header>
-              <p class="card-blurb">{ex.blurb}</p>
-              <button class="card-open" data-id={ex.id} type="button">Open in playground →</button>
-            </article>
-          ))}
-        </div>
+<div class="cat-list">
+  {groups.map((group) => (
+    <div class="cat">
+      <h4 class="cat-title" data-reveal>{group.category}</h4>
+      <div class="gallery" data-reveal-group data-reveal-step="45">
+        {group.items.map((ex) => (
+          <article class="card glass" data-id={ex.id} data-reveal>
+            <header class="card-head">
+              <h5>{ex.title}</h5>
+              {ex.analytic && <span class="card-analytic">{ex.analytic}</span>}
+            </header>
+            <p class="card-blurb">{ex.blurb}</p>
+            <button class="card-open" data-id={ex.id} type="button">Open in playground →</button>
+          </article>
+        ))}
       </div>
-    ))}
-  </div>
-</section>
+    </div>
+  ))}
+</div>
 
 <style>
-  .cat { margin-bottom: 2.5rem; }
+  .cat-list { margin-top: 1.5rem; }
+  .cat { margin-bottom: 2.25rem; }
   .cat-title {
-    margin: 0 0 1rem;
+    margin: 0 0 0.9rem;
     font-size: 0.85rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--accent-2);
-    border-bottom: 1px solid var(--line);
-    padding-bottom: 0.5rem;
+    font-variant: small-caps;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 0.4rem;
   }
   .gallery {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-    gap: 1rem;
+    grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
+    gap: 0.9rem;
   }
   .card {
-    padding: 1.1rem 1.2rem 1rem;
+    padding: 0.95rem 1.05rem 0.85rem;
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
-    transition: transform 0.15s ease, border-color 0.15s ease;
+    gap: 0.45rem;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
   }
-  .card:hover { transform: translateY(-3px); border-color: var(--accent-2); }
+  .card:hover { border-color: var(--accent); box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06); }
   .card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
-  .card-head h4 { margin: 0; font-size: 1.05rem; }
+  .card-head h5 { margin: 0; font-size: 1.02rem; font-weight: 700; }
   .card-analytic {
     font-family: var(--mono);
-    font-size: 0.78rem;
-    color: var(--amber);
+    font-size: 0.76rem;
+    color: var(--accent);
     white-space: nowrap;
   }
-  .card-blurb { margin: 0; color: var(--text-dim); font-size: 0.92rem; flex: 1; }
+  .card-blurb { margin: 0; color: var(--ink-dim); font-size: 0.9rem; flex: 1; line-height: 1.45; }
   .card-open {
     align-self: flex-start;
-    margin-top: 0.3rem;
+    margin-top: 0.2rem;
     background: none;
     border: none;
-    color: var(--accent-2);
+    color: var(--link);
     font: inherit;
-    font-size: 0.9rem;
+    font-size: 0.88rem;
     cursor: pointer;
     padding: 0;
   }
@@ -79,7 +72,6 @@ const groups = examplesByCategory();
 </style>
 
 <script>
-  // Clicking a card (or its button) loads that example into the playground.
   for (const el of document.querySelectorAll<HTMLElement>('.card[data-id], .card-open[data-id]')) {
     el.addEventListener('click', (e) => {
       const id = (e.currentTarget as HTMLElement).dataset.id;

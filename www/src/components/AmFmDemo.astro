@@ -1,0 +1,349 @@
+---
+// Demo §5 (flagship): AM vs FM as a scrollytelling explainer. A sticky stage (WebGL phasor view +
+// the program) stays pinned while five steps scroll past; each step reveals more code and changes
+// the visualization. The carrier is a phasor [I,Q]: AM writes the message into its length, FM into
+// its angle — so the same static smears AM's radius but barely moves FM's angle. The real engine
+// confirms the MSE at the end. Code shown == code run.
+import CodePanel from './CodePanel.astro';
+
+const code = `use math; use vec; use signal;
+
+msg = sample(0.3 * sine(3), 64);
+
+am = [1 + msg, 0 * msg];
+fm = [cos(3 * msg), sin(3 * msg)];
+
+static = noise_white(0.3);
+rx_am = am + static;
+rx_fm = fm + static;
+
+rec_am = (rx_am[0]**2 + rx_am[1]**2)**0.5 - 1;
+rec_fm = atan(rx_fm[1] / rx_fm[0]) / 3;
+
+Print("AM error", E(mse(rec_am, msg), 40000));
+Print("FM error", E(mse(rec_fm, msg), 40000));`;
+---
+
+<div class="amfm">
+  <div class="amfm-grid">
+    <div class="amfm-stage">
+      <div class="amfm-inner glass">
+        <h4 class="stage-title">AM vs FM</h4>
+        <div class="amfm-canvas-wrap"><canvas id="amfm-canvas" aria-label="AM vs FM phasor visualization"></canvas></div>
+        <CodePanel filename="am_fm.noise" code={code} class="amfm-code" />
+        <p class="amfm-engine" id="amfm-engine">scroll through the steps →</p>
+      </div>
+    </div>
+    <div class="amfm-steps" id="amfm-steps">
+      <div class="amfm-step" data-step="0">
+        <h4>1 · The message</h4>
+        <p>A gentle tone — 64 samples of a slow sine. This is what we want to send through a noisy channel and get back intact.</p>
+      </div>
+      <div class="amfm-step" data-step="1">
+        <h4>2 · AM — message in the amplitude</h4>
+        <p>Write the carrier as a phasor <code class="code-inline">[I, Q]</code> — a spinning arrow. <strong>AM</strong> puts the message in its <em>length</em>: <code class="code-inline">I = 1 + m</code>. The tip slides in and out along one axis.</p>
+      </div>
+      <div class="amfm-step" data-step="2">
+        <h4>3 · FM — message in the angle</h4>
+        <p><strong>FM</strong> instead puts the message in the <em>angle</em>: the tip rides the unit circle while its length stays fixed. Same information, encoded in rotation rather than reach.</p>
+      </div>
+      <div class="amfm-step" data-step="3">
+        <h4>4 · Add the same static</h4>
+        <p>Identical noise hits both tips. It smears AM along the <em>radius</em> it reads from — but only nudges FM <em>around</em> the circle, barely changing the angle. Watch the clouds.</p>
+      </div>
+      <div class="amfm-step" data-step="4">
+        <h4>5 · Recover &amp; compare</h4>
+        <p>Read the length back for AM, the angle for FM, and compare to the original. FM returns far cleaner for the very same static — the payoff of spending bandwidth on the angle.</p>
+      </div>
+    </div>
+  </div>
+  <figcaption class="figure-caption">
+    <span class="fig-n">Figure 6.</span> AM vs FM, end to end. The carrier is a phasor; AM rides its
+    length, FM its angle. The same static corrupts the length but spares the angle — which is why FM
+    shrugs off noise. Numbers from the real engine.
+  </figcaption>
+</div>
+
+<style>
+  .amfm { margin-top: 1.75rem; }
+  .amfm-grid { display: grid; grid-template-columns: 1fr 0.62fr; gap: 2rem; align-items: start; }
+  @media (max-width: 820px) { .amfm-grid { grid-template-columns: 1fr; gap: 0; } }
+
+  .amfm-stage {
+    position: sticky;
+    top: 56px;
+    height: calc(100vh - 56px);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .amfm-inner {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    padding: 0.85rem;
+    max-height: 100%;
+    overflow: auto;
+  }
+  @media (max-width: 820px) {
+    .amfm-stage { position: static; height: auto; display: block; }
+    .amfm-inner { max-height: none; overflow: visible; }
+  }
+  .amfm-canvas-wrap { width: 100%; height: 30vh; max-height: 250px; background: #f4f1e8; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  #amfm-canvas { width: 100%; height: 100%; display: block; }
+  .amfm-code { font-size: 0.8rem; min-height: 0; }
+  /* the code body lives in CodePanel (separate component) — scope-pierce to cap its height */
+  :global(.amfm-code .code-body) { max-height: 24vh; overflow: auto; }
+  .amfm-engine { margin: 0; font-size: 0.85rem; color: var(--ink-dim); min-height: 1.2em; font-family: var(--mono); }
+  .amfm-engine .ok { color: #1f6f8b; font-weight: 700; }
+  .amfm-engine .am { color: #8a2d4a; font-weight: 700; }
+
+  .amfm-steps { display: flex; flex-direction: column; }
+  .amfm-step {
+    min-height: 72vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    opacity: 0.32;
+    transition: opacity 0.4s ease;
+  }
+  .amfm-step.active { opacity: 1; }
+  .amfm-step h4 { margin: 0 0 0.6rem; font-size: 1.2rem; color: var(--accent); }
+  .amfm-step p { margin: 0; color: var(--ink); font-size: 1.02rem; }
+  @media (max-width: 820px) {
+    .amfm-step { min-height: 56vh; }
+  }
+</style>
+
+<script>
+  import { runNoise } from '../lib/noise';
+
+  const canvas = document.getElementById('amfm-canvas') as HTMLCanvasElement | null;
+  const stepsEl = document.getElementById('amfm-steps');
+  const engineEl = document.getElementById('amfm-engine')!;
+  const codeBody = document.querySelector('.amfm .code-body') as HTMLElement | null;
+
+  const STEPS = [
+    { show: 2, add: [2], mode: 'msg' },
+    { show: 4, add: [4], mode: 'am' },
+    { show: 5, add: [5], mode: 'fm' },
+    { show: 9, add: [7, 8, 9], mode: 'noise' },
+    { show: 15, add: [11, 12, 14, 15], mode: 'compare' },
+  ];
+
+  // --- progressive code reveal ---
+  if (codeBody) {
+    codeBody.classList.add('progressive');
+    const lines = Array.from(codeBody.querySelectorAll<HTMLElement>('.cl'));
+    (window as any).__amfmReveal = (step: number) => {
+      const cfg = STEPS[step];
+      lines.forEach((el, i) => {
+        el.classList.toggle('shown', i <= cfg.show);
+        el.classList.toggle('added', cfg.add.includes(i));
+      });
+    };
+  }
+
+  let mode = 'msg';
+  let engineDone = false;
+
+  function setStep(step: number) {
+    mode = STEPS[step].mode;
+    (window as any).__amfmReveal?.(step);
+    for (const el of stepsEl?.querySelectorAll('.amfm-step') ?? [])
+      el.classList.toggle('active', Number((el as HTMLElement).dataset.step) === step);
+    if (step === STEPS.length - 1 && !engineDone) { engineDone = true; engineResult(); }
+  }
+
+  if (canvas) {
+    const gl = canvas.getContext('webgl', { antialias: true, alpha: false });
+    if (gl && stepsEl) {
+      const N = 64, DEV = 3;
+      const msg: number[] = [];
+      for (let k = 0; k < N; k++) msg.push(0.3 * Math.sin((2 * Math.PI * 3 * k) / N));
+
+      // gaussian noise via Box–Muller
+      const gauss = () => {
+        let u = 0, v = 0;
+        while (u === 0) u = Math.random();
+        while (v === 0) v = Math.random();
+        return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+      };
+      const SIGMA = 0.3;
+      let n1: number[] = [], n2: number[] = [];
+      const regen = () => { n1 = msg.map(() => SIGMA * gauss()); n2 = msg.map(() => SIGMA * gauss()); };
+      regen();
+
+      const trV = `attribute vec2 p; void main(){ gl_Position=vec4(p,0.0,1.0); }`;
+      const trF = `precision highp float; uniform vec3 u_col; void main(){ gl_FragColor=vec4(u_col,1.0); }`;
+      const ptV = `attribute vec2 p; uniform float u_size; void main(){ gl_Position=vec4(p,0.0,1.0); gl_PointSize=u_size; }`;
+      const ptF = `precision highp float; uniform vec3 u_col; void main(){ vec2 d=gl_PointCoord-0.5; if(dot(d,d)>0.25) discard; gl_FragColor=vec4(u_col,1.0); }`;
+      const sh = (t: number, s: string) => { const x = gl.createShader(t)!; gl.shaderSource(x, s); gl.compileShader(x); return x; };
+      const mk = (v: string, f: string) => { const p = gl.createProgram()!; gl.attachShader(p, sh(gl.VERTEX_SHADER, v)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, f)); gl.linkProgram(p); return p; };
+      const trP = mk(trV, trF), ptP = mk(ptV, ptF);
+      const buf = gl.createBuffer();
+
+      let W = 16, H = 9;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const resize = () => {
+        const r = canvas.getBoundingClientRect();
+        W = Math.max(1, Math.floor(r.width * dpr)); H = Math.max(1, Math.floor(r.height * dpr));
+        canvas.width = W; canvas.height = H; gl.viewport(0, 0, W, H);
+      };
+      new ResizeObserver(resize).observe(canvas);
+      const aspect = () => W / H; // x is wider; scale x by 1/aspect to keep planes circular
+
+      function tris(verts: number[], col: [number, number, number]) {
+        if (!verts.length) return;
+        gl.useProgram(trP); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.DYNAMIC_DRAW);
+        const a = gl.getAttribLocation(trP, 'p'); gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
+        gl.uniform3f(gl.getUniformLocation(trP, 'u_col'), col[0], col[1], col[2]);
+        gl.drawArrays(gl.TRIANGLES, 0, verts.length / 2);
+      }
+      function pts(verts: number[], size: number, col: [number, number, number]) {
+        if (!verts.length) return;
+        gl.useProgram(ptP); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.DYNAMIC_DRAW);
+        const a = gl.getAttribLocation(ptP, 'p'); gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
+        gl.uniform1f(gl.getUniformLocation(ptP, 'u_size'), size * dpr);
+        gl.uniform3f(gl.getUniformLocation(ptP, 'u_col'), col[0], col[1], col[2]);
+        gl.drawArrays(gl.POINTS, 0, verts.length / 2);
+      }
+      // thick polyline from [x,y,...] pairs
+      function line(pairs: number[][], wd: number, col: [number, number, number]) {
+        const v: number[] = [];
+        for (let i = 0; i < pairs.length - 1; i++) {
+          const [x0, y0] = pairs[i], [x1, y1] = pairs[i + 1];
+          let dx = x1 - x0, dy = y1 - y0; const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+          const nx = -dy * wd, ny = dx * wd;
+          v.push(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, x0 + nx, y0 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny);
+        }
+        tris(v, col);
+      }
+
+      const INK: [number, number, number] = [0.42, 0.40, 0.36];
+      const TEAL: [number, number, number] = [0.12, 0.43, 0.55];
+      const MAROON: [number, number, number] = [0.54, 0.18, 0.29];
+      const FAINT: [number, number, number] = [0.78, 0.75, 0.69];
+
+      // I/Q plane: map (I,Q) to screen around center cx,cy with scale s (corrected for aspect)
+      function P(cx: number, cy: number, s: number, I: number, Q: number): [number, number] {
+        return [cx + (I * s) / aspect(), cy + Q * s];
+      }
+      function ring(cx: number, cy: number, s: number, col: [number, number, number]) {
+        const pairs: number[][] = [];
+        for (let a = 0; a <= 48; a++) { const t = (a / 48) * Math.PI * 2; pairs.push(P(cx, cy, s, Math.cos(t), Math.sin(t))); }
+        line(pairs, 0.004, col);
+      }
+      function axes(cx: number, cy: number, s: number) {
+        line([P(cx, cy, s, -1.4, 0), P(cx, cy, s, 1.4, 0)], 0.003, FAINT);
+        line([P(cx, cy, s, 0, -1.4), P(cx, cy, s, 0, 1.4)], 0.003, FAINT);
+      }
+
+      let phase = 0, frame = 0;
+
+      function drawPlane(cx: number, kind: 'am' | 'fm', active: boolean, noisy: boolean) {
+        const s = 0.62;
+        axes(cx, 0, s);
+        if (kind === 'fm') ring(cx, 0, s, active ? FAINT : [0.85, 0.83, 0.78]);
+        const col = active ? (kind === 'am' ? MAROON : TEAL) : FAINT;
+        // locus tips
+        const tip: number[] = [];
+        for (let k = 0; k < N; k++) {
+          const I = kind === 'am' ? 1 + msg[k] : Math.cos(DEV * msg[k]);
+          const Q = kind === 'am' ? 0 : Math.sin(DEV * msg[k]);
+          const p = P(cx, 0, s, I, Q); tip.push(p[0], p[1]);
+        }
+        pts(tip, 2.6, col);
+        // noisy cloud
+        if (noisy) {
+          const cloud: number[] = [];
+          for (let k = 0; k < N; k++) {
+            const I0 = kind === 'am' ? 1 + msg[k] : Math.cos(DEV * msg[k]);
+            const Q0 = kind === 'am' ? 0 : Math.sin(DEV * msg[k]);
+            const p = P(cx, 0, s, I0 + n1[k], Q0 + n2[k]); cloud.push(p[0], p[1]);
+          }
+          pts(cloud, 3.0, kind === 'am' ? MAROON : TEAL);
+        }
+        // swept arrow to current sample
+        const k = Math.floor(phase) % N;
+        const I = kind === 'am' ? 1 + msg[k] : Math.cos(DEV * msg[k]);
+        const Q = kind === 'am' ? 0 : Math.sin(DEV * msg[k]);
+        line([P(cx, 0, s, 0, 0), P(cx, 0, s, I, Q)], 0.006, col);
+      }
+
+      function waveform(values: number[], yc: number, ys: number, col: [number, number, number], wd: number) {
+        const pairs: number[][] = [];
+        for (let k = 0; k < values.length; k++) {
+          const x = -0.9 + (k / (values.length - 1)) * 1.8;
+          pairs.push([x, yc + values[k] * ys]);
+        }
+        line(pairs, wd, col);
+      }
+
+      function draw() {
+        gl.clearColor(0.957, 0.945, 0.91, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+        if (mode === 'msg') {
+          line([[-0.92, 0], [0.92, 0]], 0.003, FAINT);
+          waveform(msg, 0, 2.4, INK, 0.01);
+        } else if (mode === 'am') {
+          drawPlane(0, 'am', true, false);
+        } else if (mode === 'fm') {
+          drawPlane(0, 'fm', true, false);
+        } else if (mode === 'noise') {
+          drawPlane(-0.5, 'am', true, true);
+          drawPlane(0.5, 'fm', true, true);
+        } else if (mode === 'compare') {
+          const recAm = msg.map((m, k) => Math.sqrt((1 + m + n1[k]) ** 2 + n2[k] ** 2) - 1);
+          const recFm = msg.map((m, k) => Math.atan((Math.sin(DEV * m) + n2[k]) / (Math.cos(DEV * m) + n1[k])) / DEV);
+          line([[-0.92, 0], [0.92, 0]], 0.003, FAINT);
+          waveform(msg, 0, 2.4, INK, 0.012);       // original
+          waveform(recAm, 0, 2.4, MAROON, 0.008);  // AM (noisy)
+          waveform(recFm, 0, 2.4, TEAL, 0.008);    // FM (clean)
+        }
+      }
+
+      function loop() {
+        frame++;
+        phase += 0.35;
+        if ((mode === 'noise' || mode === 'compare') && frame % 5 === 0) regen();
+        draw();
+        requestAnimationFrame(loop);
+      }
+      resize(); loop();
+
+      // step observer
+      const io = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting && e.intersectionRatio > 0.5) setStep(Number((e.target as HTMLElement).dataset.step));
+        }
+      }, { threshold: [0.5, 0.75], rootMargin: '-20% 0px -20% 0px' });
+      for (const el of stepsEl.querySelectorAll('.amfm-step')) io.observe(el);
+
+      setStep(0);
+    }
+  }
+
+  async function engineResult() {
+    engineEl.textContent = 'running the engine (40k noise realizations)…';
+    try {
+      const src = `use math; use vec; use signal;
+msg = sample(0.3 * sine(3), 64);
+am = [1 + msg, 0 * msg];
+fm = [cos(3 * msg), sin(3 * msg)];
+static = noise_white(0.3);
+rx_am = am + static;
+rx_fm = fm + static;
+rec_am = (rx_am[0]**2 + rx_am[1]**2)**0.5 - 1;
+rec_fm = atan(rx_fm[1] / rx_fm[0]) / 3;
+Print("AM", E(mse(rec_am, msg), 40000));
+Print("FM", E(mse(rec_fm, msg), 40000));`;
+      const res = await runNoise(src);
+      const out = res.output.trim().split('\n');
+      const am = (out.find((l) => l.startsWith('AM')) ?? '').replace('AM', '').trim();
+      const fm = (out.find((l) => l.startsWith('FM')) ?? '').replace('FM', '').trim();
+      engineEl.innerHTML = `engine: AM error <span class="am">${am}</span> · FM error <span class="ok">${fm}</span>`;
+    } catch { engineEl.textContent = ''; }
+  }
+</script>

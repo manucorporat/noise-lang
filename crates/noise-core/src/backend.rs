@@ -27,13 +27,16 @@ pub trait Backend {
 /// feature on a native target, this is the Cranelift JIT — which itself falls back to the
 /// interpreter for any graph it cannot profitably emit. Otherwise it is the columnar interpreter.
 pub fn compile_root(graph: &RvGraph, root: RvId) -> Box<dyn Program> {
+    // Simplify once (fold constants, apply identities, CSE) so the backend lowers a smaller DAG.
+    // The rewritten graph is local — backends copy what they need, retaining no reference to it.
+    let (graph, root) = crate::simplify::simplify(graph, root);
     #[cfg(feature = "jit")]
     {
-        crate::jit::JitBackend::new().compile(graph, root)
+        crate::jit::JitBackend::new().compile(&graph, root)
     }
     #[cfg(not(feature = "jit"))]
     {
-        InterpBackend.compile(graph, root)
+        InterpBackend.compile(&graph, root)
     }
 }
 

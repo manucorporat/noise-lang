@@ -316,14 +316,91 @@ to "compile the graph" behind a swappable backend seam, driven by a criterion ha
     parallelizes perfectly. Its modest *total* (≈9×) is only because the JIT layer barely helps a
     2-node graph (+12%, nothing to fuse); the earlier apparent "not scaling" was per-thread compile
     overhead dominating its tiny per-core slice, which this seam split removed.
+- **B3 — SIMD the generator kernel: tried, *rejected* on aarch64.** A width-generic `Lane` layer was
+  added to the JIT so the same emitters produce either a scalar or an `f64x2` (NEON) per-lane loop
+  with two independent xoshiro states. Measured single-thread (`jit::bench_simd_vs_scalar`), it is a
+  **net loss**: `pi` 1.01×, `dice` 0.83×, `poly_deep` **0.71×**, `normal_poly` 0.80×. Mechanism:
+  (a) NEON is only 2-wide; (b) key ops lack good 2-wide lowerings — `rotl` becomes 3 instructions
+  (vs one scalar `ror`), and `fcvt_from_uint.f64x2` scalarizes (worked around with the magic-number
+  int→double trick, recovering `pi` to break-even but no further); (c) decisively, Apple Silicon's
+  wide OoO core already overlaps the scalar loop's independent iterations via register renaming, so
+  SIMD exposes no new parallelism and only adds overhead — `poly_deep` (clean vectorizable `fmul`
+  chain) losing 30% is the proof. The scalar kernel stays the default `build`; the SIMD path is
+  retained + tested (may win on x86 AVX2/512: 4–8 lanes, native vector int→float — gate there once
+  measured). **The transferable lesson:** the win wasn't in the irregular *generator* but in the
+  regular *reduction* ↓.
+- **Reduction rewrite — the actual SIMD win. ✅** The `moments` reducer streamed Welford, whose
+  per-element `delta / count` **divide** ran at only **168 M elem/s** — slower than generation, so it
+  silently gated the *whole* pipeline (both backends). Replaced with raw power sums (`count`, `Σx`,
+  `Σx²`) over `REDUCE_LANES=8` fixed independent accumulators: no divide, and the `chunks_exact(8)`
+  idiom autovectorizes into NEON — the SIMD payoff that *was* extractable (the reduction is regular;
+  the generator isn't). Absorb went **168 → 1599 M/s (9.5×)** in a same-process A/B
+  (`reduce::bench_reduce_absorb`). Componentwise-add merge is an exactly-associative monoid, so the
+  index-ordered fold stays **bit-for-bit deterministic across thread counts** (tests still pass).
+  Tradeoff: variance via `E[X²]−E[X]²` can cancel for `mean² ≫ variance`; immaterial at this
+  language's scales (clamped at 0; constant-variance test exact). End-to-end N=1e6 multicore
+  **2–3×'d** (vs the compile-once baseline above): `pi_indicator` 896 M/s → **1.73 Gelem/s**,
+  `dice_sum` 1.05 → **1.78 Gelem/s**, `poly_deep` 900 M/s → **1.55 Gelem/s**, `poly_wide` 542 →
+  **726 M/s**, `exp_tail` 572 → **822 M/s**, `normal_sum` 252 → **320 M/s**, `normal_poly` 254 →
+  **320 M/s**. (Interpreter-only cases doubling too confirms the reduction was the shared ceiling.)
+- **RNG integer fast-path + multi-stream kernel. ✅** After the reduction fix, the cheap graphs are
+  *generator*-bound — and specifically **xoshiro-latency-bound**: the RNG state threads through every
+  loop iteration, so the whole kernel is one serial dependency chain, and the OoO core already hides
+  the surrounding arithmetic under it. Two findings followed:
+  - **Lemire multiply-high for `unif_int`** (`(next_u64() * count) >> 64`, replacing `floor(u01 *
+    count)`) — removes the `u64→f64`+`floor` round-trip in both the interpreter (`Rng`) and the
+    scalar JIT. *Perf-neutral on aarch64* (those ops were off the critical path, already hidden by
+    the OoO core) but cleaner/correct integer semantics; kept.
+  - **Multi-stream RNG — the actual win.** The only way past a latency-bound chain is independent
+    chains the core can overlap. A hand-written probe (`rng::bench_rng_multistream`) confirmed
+    ~2× from 4 independent xoshiro streams. The JIT kernel now interleaves [`STREAMS`]`=4`
+    independent states (emitting 4 samples/iteration) — the *scalar* form of SIMD, and it wins
+    exactly where the `f64x2` Cranelift kernel lost (no NEON per-op penalty). Single-thread,
+    isolated (`jit::bench_streams`): `pi_indicator` 351 → **655 M/s (1.87×)**, `dice_sum` 500 →
+    **883 M/s (1.77×)**; `poly_deep` ~neutral (arithmetic-bound, one draw). Stream count is
+    **graph-aware** (`choose_streams`): transcendental-libcall graphs (e.g. `normal_poly`) measured
+    *slower* multi-stream (libcalls don't overlap + register pressure), so they stay single-stream.
+    Determinism is preserved — each chunk reseeds 4 deterministic substreams; the cross-thread
+    bit-identity test still passes. (The dormant vector-SIMD path was *removed*: multi-stream scalar
+    strictly dominates it on every target.)
+- **Graph-level algebraic simplification. ✅** A once-per-compile rewrite (`simplify`, run inside
+  `compile_root`) that folds constants, applies finite-safe identities (`x+0`, `x*1`, `x/1`, `x**1`,
+  `x**0`, double `-`/`!`), and hash-conses (CSE) the root's cone into a fresh, smaller DAG — fewer
+  hot-loop ops/columns for *both* backends. Pure (builds a new graph, never mutates the engine's);
+  **source nodes are copied 1:1, never deduplicated** (independent `~` draws stay independent), and
+  the post-order rebuild matches the bytecode lowerer so surviving sources keep their order — i.e.
+  sampling is unchanged except for the ops actually removed (every prior test passes byte-for-byte).
+  Cone-size reduction (`report_node_reduction`) scales with redundancy: `dice` 0%, `pi` −11% and
+  `poly_deep` −9% (CSE folds a repeated constant / `X*X`), `(X+Y)` reused 3× −27%, an
+  identity-laden expr −67%. Risky identities (`x*0`, `x/x`) are intentionally *excluded* — wrong for
+  a non-finite lane (`inf*0`, `0/0`) the user could construct.
 
 Browser note: **B1/B2 (Cranelift) cannot run in the browser** — a WASM sandbox can't emit/execute
-native code. What's portable is the `RvGraph` IR, not the backend. The browser's equivalent is a
-future **WASM-emitter backend** (emit `wasm` bytes → JS host `instantiate`s) behind the same
-`Backend`/`Program`/`Runner` seam; the interpreter remains the wasm32 default until then. Note the
-B2 finding will recur there (a WASM kernel's `ln`/`cos` are also calls), so the profitability gate
-is reusable. Remaining Phase-4 options: **B3** (SIMD the per-lane kernel via CLIF vector types) and
-the **WASM-emitter** backend (the browser story).
+native code. What's portable is the `RvGraph` IR, not the backend. The browser's equivalent is the
+**WASM-emitter backend** (emit `wasm` bytes → JS host `instantiate`s); the interpreter remains the
+wasm32 default until the host wiring lands. (B3 SIMD was tried and rejected on aarch64 — see above;
+the reduction rewrite captured the real SIMD win.)
+
+- **Shared kernel support (`kernel`). ✅** Before the second backend, the backend-agnostic half of
+  the JIT was lifted into `kernel.rs`: the stream policy (`STREAMS`/`choose_streams`), the
+  SplitMix64 `seed_state` layout, the `const_int_exponent` power test, the `cone_size` slot count,
+  and the **profitability gate** (`profitable`/`walk_cost`). This is the single copy of *what the
+  graph means*; `jit` and `wasm_emit` are two thin emitters for *how to spell it* on each target.
+- **WASM-emitter backend (`wasm_emit`). ✅** The browser twin of the JIT: walks the *same* simplified
+  `RvGraph` the *same* post-order way and emits a complete WebAssembly module (`wasm-encoder`) —
+  `kernel(out, n, state)` over the module's own linear memory, same multi-stream interleave, the
+  inlined xoshiro/Box–Muller/inverse-CDF draws spelled in `f64.*`/`i64.*`, transcendentals imported
+  from module `"m"` (the host supplies `Math.*`; wasm has no native `ln`/`cos`). The B2 finding does
+  recur — those imports are non-inlined calls — so the *same* `kernel::profitable`/`choose_streams`
+  gate decides emit-vs-interpreter and stream count, exactly as native. `unif_int` uses the float
+  method (`lo + floor(u*count)`) since wasm lacks a 64×64→128 high-multiply; identical in
+  distribution. **Validated natively**: emitted modules are run through the `wasmi` interpreter
+  (dev-dep) and checked for distribution parity with the columnar oracle — uniform/arith, dice +
+  indicator, normal/exp/geometric, ufuncs + non-const `pow`, shared-draw CSE (`X-X≡0`), and the
+  multi-stream/single-stream split all match. The crate still compiles clean to
+  `wasm32-unknown-unknown`, so the emitter ships in the browser bundle. **Remaining**: the host seam
+  — a JS host that `instantiate`s the emitted module and drives it through `Backend`/`Program`/
+  `Runner` (browser-side), so the playground actually runs emitted kernels instead of the interpreter.
 
 ### Phase 5 — Browser playground
 - Real web UI on the `noise-wasm` build: code editor, run button, distribution/plot

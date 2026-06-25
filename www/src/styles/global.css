@@ -1,92 +1,213 @@
+/* Computer Modern (LaTeX) web fonts — falls back to a clean serif stack if the CDN is unavailable. */
+@import url('https://cdn.jsdelivr.net/gh/aaaakshat/cm-web-fonts@latest/fonts.css');
+
 :root {
-  --bg: #07090f;
-  --text: #e6e9f0;
-  --text-dim: #9aa3b8;
-  --line: rgba(255, 255, 255, 0.09);
-  --accent: #7fd1ff; /* teal-blue */
-  --accent-2: #8be2c0; /* mint */
-  --accent-3: #c08cf0; /* violet */
-  --amber: #f0b66a;
-  --pink: #ff8fb0;
-  --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
-  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Inter, sans-serif;
-  --glass: rgba(16, 20, 34, 0.55);
+  --paper: #fbfaf6;
+  --paper-2: #f4f1e8; /* listings / code backgrounds */
+  --ink: #1b1a17;
+  --ink-dim: #585347;
+  --ink-faint: #8a8473;
+  --rule: #ddd7c7; /* hairlines, borders */
+  --link: #1a4f8a; /* hyperref blue */
+  --link-hover: #0f3a6b;
+  --accent: #8a2d4a; /* maroon, for small emphases */
+
+  --serif: "Computer Modern Serif", "Latin Modern Roman", Georgia, "Times New Roman", Times, serif;
+  --sans: "Computer Modern Sans", "Latin Modern Sans", ui-sans-serif, system-ui, sans-serif;
+  --mono: "Computer Modern Typewriter", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  --measure: 720px; /* prose reading column */
+  --wide: 1080px; /* interactive / figure column */
 }
 
 * { box-sizing: border-box; }
 
-html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 84px;
+  background: var(--paper);
+}
 
 body {
   margin: 0;
-  font-family: var(--sans);
-  color: var(--text);
-  background: transparent; /* the shader canvas is the background */
-  line-height: 1.6;
+  font-family: var(--serif);
+  font-size: 19px;
+  line-height: 1.62;
+  color: var(--ink);
+  background: var(--paper);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
-a { color: var(--accent); text-decoration: none; }
-a:hover { text-decoration: underline; }
-
-h1, h2, h3 { line-height: 1.2; font-weight: 700; }
-
-code, pre { font-family: var(--mono); }
-
-.glass {
-  background: var(--glass);
-  backdrop-filter: blur(14px) saturate(120%);
-  -webkit-backdrop-filter: blur(14px) saturate(120%);
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+/* --- typography: left-aligned, document-like --- */
+h1, h2, h3, h4 {
+  font-family: var(--serif);
+  font-weight: 700;
+  line-height: 1.18;
+  color: var(--ink);
+  text-align: left;
 }
 
-.container { max-width: 1180px; margin: 0 auto; padding: 0 1.25rem; }
+p { text-align: left; }
 
-.section { padding: 5rem 0; }
-.section-head { text-align: center; max-width: 680px; margin: 0 auto 2.5rem; }
-.section-head h2 {
-  font-size: clamp(1.6rem, 3vw, 2.3rem);
-  margin: 0 0 0.6rem;
-  background: linear-gradient(120deg, var(--text), var(--accent));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+a {
+  color: var(--link);
+  text-decoration: none;
 }
-.section-head p { color: var(--text-dim); margin: 0; font-size: 1.05rem; }
+a:hover { color: var(--link-hover); text-decoration: underline; }
 
+hr {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: 2.5rem 0;
+}
+
+/* layout columns */
+.measure { max-width: var(--measure); margin: 0 auto; padding: 0 1.5rem; }
+.wide { max-width: var(--wide); margin: 0 auto; padding: 0 1.5rem; }
+.container { max-width: var(--wide); margin: 0 auto; padding: 0 1.5rem; }
+
+.section { padding: 3.25rem 0; }
+
+/* small caps eyebrow, used sparingly */
 .eyebrow {
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  font-size: 0.75rem;
-  color: var(--accent-2);
-  font-weight: 600;
+  font-variant: small-caps;
+  letter-spacing: 0.06em;
+  font-size: 0.95rem;
+  color: var(--ink-dim);
 }
 
-.muted { color: var(--text-dim); }
+.muted { color: var(--ink-dim); }
 
-/* --- scroll-reveal animations --- */
+/* inline + block code, typeset like a LaTeX listing */
+code, pre { font-family: var(--mono); }
+.code-inline {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.02em 0.32em;
+}
+
+/* code listing token colors (CodePanel + static listings; injected via set:html, so global) */
+.code-body .k { color: #8a2d4a; font-weight: 700; }
+.code-body .d { color: #1f6f8b; }
+.code-body .q { color: #b5651d; font-weight: 700; }
+.code-body .o { color: #a23e6a; }
+.code-body .c { color: #8a8473; font-style: italic; }
+/* scrollytelling line states: not-yet-revealed lines dim; newly-added lines get an accent rule */
+.code-body .cl { transition: opacity 0.35s ease, background 0.35s ease; }
+.code-body.progressive .cl { opacity: 0.18; }
+.code-body.progressive .cl.shown { opacity: 1; }
+.code-body .cl.added { background: rgba(138, 45, 74, 0.08); box-shadow: inset 2px 0 0 var(--accent); }
+
+/* a bordered panel — reused by the playground/gallery/figures (was the dark "glass") */
+.glass {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02);
+}
+
+/* a LaTeX-style figure: thin rule, centered content, italic numbered caption */
+.figure { margin: 2rem 0; }
+.figure-frame {
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--paper-2);
+}
+.figure-caption {
+  margin-top: 0.6rem;
+  font-size: 0.92rem;
+  color: var(--ink-dim);
+  text-align: left;
+}
+.figure-caption .fig-n { font-weight: 700; color: var(--ink); }
+
+/* --- gentle scroll-reveal (calmer than before, opacity-led) --- */
 [data-reveal] {
   opacity: 0;
-  transform: translateY(28px);
+  transform: translateY(12px);
   transition:
-    opacity 0.75s cubic-bezier(0.2, 0.7, 0.2, 1),
-    transform 0.75s cubic-bezier(0.2, 0.7, 0.2, 1);
+    opacity 0.55s ease,
+    transform 0.55s cubic-bezier(0.22, 0.61, 0.36, 1);
   transition-delay: var(--reveal-delay, 0ms);
   will-change: opacity, transform;
 }
-[data-reveal='left'] { transform: translateX(-40px); }
-[data-reveal='right'] { transform: translateX(40px); }
-[data-reveal='scale'] { transform: scale(0.94); }
 [data-reveal].is-visible { opacity: 1; transform: none; }
 
 @media (prefers-reduced-motion: reduce) {
   [data-reveal] { opacity: 1 !important; transform: none !important; transition: none !important; }
 }
 
-/* thin top progress bar that fills as you scroll */
+/* --- shared scrollytelling demo scaffold (sticky stage + scrolling narrative steps) --- */
+.scrolly { margin-top: 1.25rem; }
+.scrolly-grid { display: grid; grid-template-columns: 1fr 0.6fr; gap: 2.5rem; align-items: start; }
+@media (max-width: 860px) { .scrolly-grid { grid-template-columns: 1fr; gap: 0; } }
+
+/* Full-height sticky column that vertically centers its inner panel. No transform, so the panel
+   can never spill above its own section (which `translateY(-50%)` did). */
+.scrolly-stage {
+  position: sticky;
+  top: 56px;
+  height: calc(100vh - 56px);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.stage-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.85rem;
+  max-height: 100%;
+  overflow: auto;
+}
+.stage-title { margin: 0; font-size: 1.12rem; font-weight: 700; color: var(--ink); }
+@media (max-width: 860px) {
+  /* on a single column, let the stage flow normally instead of sticking */
+  .scrolly-stage { position: static; height: auto; display: block; }
+  .stage-inner { max-height: none; overflow: visible; }
+}
+.stage-canvas {
+  width: 100%;
+  background: #f4f1e8;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.stage-canvas canvas { width: 100%; height: 100%; display: block; }
+.stage-foot { display: flex; align-items: baseline; gap: 1.25rem; flex-wrap: wrap; }
+.stage-foot .stat { font-size: 0.85rem; color: var(--ink-dim); }
+.stage-foot .stat b { font-family: var(--mono); color: var(--ink); font-weight: 700; }
+.stage-foot .stat.key b { color: var(--accent); font-size: 1.05rem; }
+.stage-engine { margin: 0; font-size: 0.84rem; color: var(--ink-dim); font-family: var(--mono); min-height: 1.2em; }
+.stage-engine .ok { color: #1f6f8b; font-weight: 700; }
+.stage-engine .am { color: #8a2d4a; font-weight: 700; }
+
+.scrolly-steps { display: flex; flex-direction: column; }
+.scrolly-step {
+  min-height: 68vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  opacity: 0.3;
+  transition: opacity 0.4s ease;
+}
+.scrolly-step:first-child { padding-top: 8vh; }
+.scrolly-step:last-child { min-height: 60vh; }
+.scrolly-step.active { opacity: 1; }
+.scrolly-step h4 { margin: 0 0 0.55rem; font-size: 1.2rem; color: var(--accent); }
+.scrolly-step p { margin: 0; font-size: 1.04rem; color: var(--ink); }
+@media (max-width: 860px) { .scrolly-step { min-height: 52vh; } }
+
+/* a demo's heading + optional caption, story-style (no section numbering) */
+.demo-title { font-size: clamp(1.4rem, 2.6vw, 1.9rem); margin: 0 0 0.3rem; }
+.demo-lede { color: var(--ink-dim); font-size: 1.05rem; margin: 0; }
+
+/* thin reading-progress rule at the very top */
 .scroll-progress {
   position: fixed;
   top: 0;
@@ -95,18 +216,8 @@ code, pre { font-family: var(--mono); }
   width: 100%;
   transform: scaleX(0);
   transform-origin: 0 50%;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2), var(--accent-3));
+  background: var(--accent);
+  opacity: 0.7;
   z-index: 50;
   pointer-events: none;
-}
-
-/* code blocks in prose */
-.code-inline {
-  font-family: var(--mono);
-  font-size: 0.9em;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.05em 0.4em;
-  color: var(--accent-2);
 }

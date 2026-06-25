@@ -1,0 +1,146 @@
+---
+// π by Monte Carlo, as a scroll-driven story. No buttons: the darts rain as soon as the stage is
+// in view, and scrolling through the steps reveals the code and the meaning. Engine confirms.
+import CodePanel from './CodePanel.astro';
+
+const code = `use rand;
+
+X ~ unif(-1, 1)
+Y ~ unif(-1, 1)
+
+C = X**2 + Y**2 < 1
+
+4 * P(C)`;
+---
+
+<div class="scrolly pi-demo">
+  <div class="scrolly-grid">
+    <div class="scrolly-stage">
+      <div class="stage-inner glass">
+        <h4 class="stage-title">Estimating π</h4>
+        <div class="stage-canvas pi-canvas"><canvas id="pi-canvas" aria-label="Random darts inside a circle"></canvas></div>
+        <CodePanel filename="pi.noise" code={code} class="pi-code" />
+        <div class="stage-foot">
+          <span class="stat">darts <b id="pi-n">0</b></span>
+          <span class="stat">inside <b id="pi-in">0</b></span>
+          <span class="stat key">π ≈ <b id="pi-pi">—</b></span>
+        </div>
+        <p class="stage-engine" id="pi-engine"></p>
+      </div>
+    </div>
+    <div class="scrolly-steps" id="pi-steps">
+      <div class="scrolly-step" data-step="0">
+        <h4>Two random draws</h4>
+        <p>Start with the code. <code class="code-inline">X ~ unif(-1, 1)</code> and <code class="code-inline">Y ~ unif(-1, 1)</code> each draw a number anywhere in [-1, 1] — together, a random point in the square.</p>
+      </div>
+      <div class="scrolly-step" data-step="1">
+        <h4>Ask one yes/no question</h4>
+        <p><code class="code-inline">C = X**2 + Y**2 &lt; 1</code> is true exactly when the point falls inside the unit circle. In Noise that comparison is itself a random variable — an event.</p>
+      </div>
+      <div class="scrolly-step" data-step="2">
+        <h4>Now throw the darts</h4>
+        <p>Each dart is one draw of <code class="code-inline">(X, Y)</code>; teal if inside the circle, grey if not. They scatter evenly — no point is special.</p>
+      </div>
+      <div class="scrolly-step" data-step="3">
+        <h4>Four times the fraction is π</h4>
+        <p>The circle covers π/4 of the square, so the teal share hovers around π/4 — and <code class="code-inline">4 * P(C)</code> is π. More darts, sharper estimate.</p>
+      </div>
+    </div>
+  </div>
+  <figcaption class="figure-caption">
+    <span class="fig-n">Figure 2.</span> Monte-Carlo π. A probability becomes a number by sampling.
+  </figcaption>
+</div>
+
+<style>
+  .pi-canvas { aspect-ratio: 1 / 1; max-width: 230px; max-height: 230px; margin: 0 auto; }
+  .pi-code { font-size: 0.82rem; }
+</style>
+
+<script>
+  import { runNoise } from '../lib/noise';
+
+  const root = document.querySelector('.pi-demo') as HTMLElement | null;
+  const canvas = document.getElementById('pi-canvas') as HTMLCanvasElement | null;
+  if (root && canvas) {
+    const gl = canvas.getContext('webgl', { antialias: true, alpha: false });
+    const nEl = document.getElementById('pi-n')!, inEl = document.getElementById('pi-in')!,
+      piEl = document.getElementById('pi-pi')!, engineEl = document.getElementById('pi-engine')!;
+    const codeBody = root.querySelector('.code-body') as HTMLElement | null;
+    const lines = codeBody ? Array.from(codeBody.querySelectorAll<HTMLElement>('.cl')) : [];
+    if (codeBody) codeBody.classList.add('progressive');
+
+    const STEPS = [
+      { show: 3, add: [2, 3], run: false },
+      { show: 5, add: [5], run: false },
+      { show: 7, add: [7], run: true },
+      { show: 7, add: [], run: true },
+    ];
+    let engineDone = false, stepRun = false;
+    function setStep(i: number) {
+      const c = STEPS[i];
+      stepRun = c.run;
+      lines.forEach((el, k) => { el.classList.toggle('shown', k <= c.show); el.classList.toggle('added', c.add.includes(k)); });
+      for (const el of root!.querySelectorAll('.scrolly-step')) el.classList.toggle('active', Number((el as HTMLElement).dataset.step) === i);
+      if (i === STEPS.length - 1 && !engineDone) { engineDone = true; engineResult(); }
+    }
+
+    if (gl) {
+      const MAX = 4000, PER = 34;
+      const bgF = `precision highp float; uniform vec2 u_res; void main(){ vec2 p=(gl_FragCoord.xy/u_res)*2.0-1.0; p/=0.94; float r=length(p); vec3 paper=vec3(0.957,0.945,0.91); vec3 fill=vec3(0.925,0.945,0.955); vec3 ink=vec3(0.36,0.34,0.31); vec3 c=r<1.0?fill:paper; float ring=smoothstep(0.012,0.0,abs(r-1.0)); gl_FragColor=vec4(mix(c,ink,ring*0.9),1.0); }`;
+      const vS = `attribute vec2 p; void main(){ gl_Position=vec4(p,0.0,1.0); }`;
+      const ptV = `attribute vec2 pos; attribute vec3 col; varying vec3 vc; uniform float u_s; void main(){ gl_Position=vec4(pos*0.94,0.0,1.0); gl_PointSize=u_s; vc=col; }`;
+      const ptF = `precision highp float; varying vec3 vc; void main(){ vec2 d=gl_PointCoord-0.5; if(dot(d,d)>0.25) discard; gl_FragColor=vec4(vc,1.0); }`;
+      const sh = (t: number, s: string) => { const x = gl.createShader(t)!; gl.shaderSource(x, s); gl.compileShader(x); return x; };
+      const mk = (v: string, f: string) => { const p = gl.createProgram()!; gl.attachShader(p, sh(gl.VERTEX_SHADER, v)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, f)); gl.linkProgram(p); return p; };
+      const bgP = mk(vS, bgF), ptP = mk(ptV, ptF);
+      const tri = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, tri); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      const posBuf = gl.createBuffer(), colBuf = gl.createBuffer();
+      const pos = new Float32Array(MAX * 2), col = new Float32Array(MAX * 3);
+      const IN = [0.12, 0.43, 0.55], OUT = [0.74, 0.68, 0.6];
+      let count = 0, inside = 0, side = 1, raf = 0, inView = false;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const resize = () => { const r = canvas.getBoundingClientRect(); side = Math.max(1, Math.floor(Math.min(r.width, r.height) * dpr)); canvas.width = side; canvas.height = side; gl.viewport(0, 0, side, side); draw(); };
+      new ResizeObserver(resize).observe(canvas);
+
+      function draw() {
+        gl.useProgram(bgP); gl.bindBuffer(gl.ARRAY_BUFFER, tri);
+        let a = gl.getAttribLocation(bgP, 'p'); gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
+        gl.uniform2f(gl.getUniformLocation(bgP, 'u_res'), side, side); gl.drawArrays(gl.TRIANGLES, 0, 3);
+        if (!count) return;
+        gl.useProgram(ptP); gl.uniform1f(gl.getUniformLocation(ptP, 'u_s'), 3.2 * dpr);
+        gl.bindBuffer(gl.ARRAY_BUFFER, posBuf); gl.bufferData(gl.ARRAY_BUFFER, pos.subarray(0, count * 2), gl.DYNAMIC_DRAW);
+        const pl = gl.getAttribLocation(ptP, 'pos'); gl.enableVertexAttribArray(pl); gl.vertexAttribPointer(pl, 2, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, colBuf); gl.bufferData(gl.ARRAY_BUFFER, col.subarray(0, count * 3), gl.DYNAMIC_DRAW);
+        const cl = gl.getAttribLocation(ptP, 'col'); gl.enableVertexAttribArray(cl); gl.vertexAttribPointer(cl, 3, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.POINTS, 0, count);
+      }
+      function loop() {
+        if (inView && stepRun && count < MAX) {
+          for (let i = 0; i < PER && count < MAX; i++) {
+            const x = Math.random() * 2 - 1, y = Math.random() * 2 - 1, isIn = x * x + y * y < 1;
+            pos[count * 2] = x; pos[count * 2 + 1] = y;
+            const c = isIn ? IN : OUT; col[count * 3] = c[0]; col[count * 3 + 1] = c[1]; col[count * 3 + 2] = c[2];
+            if (isIn) inside++; count++;
+          }
+          draw();
+          nEl.textContent = String(count); inEl.textContent = String(inside);
+          piEl.textContent = ((4 * inside) / count).toFixed(3);
+        }
+        raf = requestAnimationFrame(loop);
+      }
+      // auto-start when the stage scrolls into view
+      new IntersectionObserver((es) => { for (const e of es) inView = e.isIntersecting; }, { threshold: 0.2 }).observe(canvas);
+      resize(); raf = requestAnimationFrame(loop);
+    }
+
+    async function engineResult() {
+      engineEl.textContent = 'engine (10⁶ samples)…';
+      try { const r = await runNoise('use rand; X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X**2 + Y**2 < 1)'); engineEl.innerHTML = `engine, 10⁶ samples: <span class="ok">${r.value ?? r.output.trim()}</span>`; } catch { engineEl.textContent = ''; }
+    }
+
+    const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting && e.intersectionRatio > 0.5) setStep(Number((e.target as HTMLElement).dataset.step)); }, { threshold: [0.5], rootMargin: '-18% 0px -18% 0px' });
+    for (const el of root.querySelectorAll('.scrolly-step')) io.observe(el);
+    setStep(0);
+  }
+</script>
