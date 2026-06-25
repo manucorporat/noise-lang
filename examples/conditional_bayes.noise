@@ -1,0 +1,9 @@
+# Conditional probability BY HAND (no native `observe` yet): P(D == 6 | D > 3).
+# Bayes: P(D==6 && D>3) / P(D>3) = (1/6)/(1/2) = 1/3 = 0.33333
+# Each P(...) carries its standard error, which propagates through the division, so the
+# ratio prints to its own justified precision automatically -- no manual round needed.
+use rand;
+
+D ~ unif_int(1, 6);
+p = P(D == 6 && D > 3) / P(D > 3);
+Print("P(rolled a 6 | rolled > 3) =", p)

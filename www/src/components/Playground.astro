@@ -1,0 +1,335 @@
+---
+// The interactive playground: a Monaco editor with Noise syntax highlighting, a Run button that
+// executes the program through the WASM engine, an output panel, a category-grouped example
+// picker (scales as examples are added), and a Share button that puts the current program in a
+// URL fragment (#x=<id> for a named example, #c=<encoded> for custom code).
+---
+
+<section id="playground" class="playground">
+  <div class="pg-grid">
+    <div class="pg-editor-wrap glass">
+      <div class="pg-toolbar">
+        <label class="pg-select-wrap">
+          <select id="pg-select" class="pg-select" aria-label="Choose an example"></select>
+        </label>
+        <button id="pg-run" class="btn btn-run" type="button">
+          <span class="btn-icon">▶</span> Run
+          <span class="kbd">⌘↵</span>
+        </button>
+        <button id="pg-reset" class="btn btn-ghost" type="button">Reset</button>
+        <button id="pg-share" class="btn btn-ghost" type="button">Share</button>
+        <span id="pg-status" class="pg-status"></span>
+      </div>
+      <div id="editor" class="pg-editor"></div>
+    </div>
+
+    <aside class="pg-side">
+      <div class="pg-explain glass">
+        <h3 id="pg-title">Loading…</h3>
+        <p id="pg-explanation"></p>
+      </div>
+      <div class="pg-output-wrap glass">
+        <div class="pg-output-head">
+          <span class="dot"></span> Output
+        </div>
+        <pre id="pg-output" class="pg-output"><span class="muted">Press Run to evaluate.</span></pre>
+      </div>
+    </aside>
+  </div>
+</section>
+
+<style>
+  .playground {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 1.25rem;
+  }
+
+  .pg-grid {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr;
+    gap: 1rem;
+    align-items: stretch;
+  }
+  @media (max-width: 880px) {
+    .pg-grid { grid-template-columns: 1fr; }
+  }
+
+  .pg-editor-wrap { display: flex; flex-direction: column; overflow: hidden; }
+  .pg-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  .pg-editor { height: 460px; width: 100%; }
+  @media (max-width: 880px) { .pg-editor { height: 340px; } }
+
+  .pg-select-wrap { position: relative; display: inline-flex; }
+  .pg-select {
+    appearance: none;
+    font: inherit;
+    font-size: 0.9rem;
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.45rem 1.9rem 0.45rem 0.8rem;
+    cursor: pointer;
+    max-width: 230px;
+  }
+  .pg-select:hover { border-color: var(--accent-2); }
+  .pg-select:focus-visible { outline: 2px solid var(--accent); }
+  .pg-select-wrap::after {
+    content: '▾';
+    position: absolute; right: 0.7rem; top: 50%; transform: translateY(-50%);
+    pointer-events: none; color: var(--text-dim); font-size: 0.8rem;
+  }
+  .pg-select optgroup { background: #121728; color: var(--text-dim); }
+  .pg-select option { background: #121728; color: var(--text); }
+
+  .btn {
+    font: inherit;
+    border-radius: 8px;
+    padding: 0.45rem 0.85rem;
+    cursor: pointer;
+    border: 1px solid var(--line);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    transition: transform 0.08s ease, filter 0.15s ease, color 0.15s ease;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn-run {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #07090f;
+    font-weight: 650;
+    border-color: transparent;
+  }
+  .btn-run:hover { filter: brightness(1.08); }
+  .btn-run[disabled] { opacity: 0.6; cursor: progress; }
+  .btn-icon { font-size: 0.7em; }
+  .btn-ghost { background: transparent; color: var(--text-dim); }
+  .btn-ghost:hover { color: var(--text); }
+  .kbd {
+    font-size: 0.7rem;
+    opacity: 0.7;
+    border: 1px solid currentColor;
+    border-radius: 5px;
+    padding: 0 0.3rem;
+  }
+  .pg-status { margin-left: auto; font-size: 0.8rem; color: var(--text-dim); }
+
+  .pg-side { display: flex; flex-direction: column; gap: 1rem; }
+  .pg-explain { padding: 1rem 1.1rem; }
+  .pg-explain h3 { margin: 0 0 0.5rem; font-size: 1.05rem; color: var(--text); }
+  .pg-explain p { margin: 0; color: var(--text-dim); font-size: 0.92rem; line-height: 1.55; }
+
+  .pg-output-wrap { flex: 1; display: flex; flex-direction: column; min-height: 160px; overflow: hidden; }
+  .pg-output-head {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.55rem 0.9rem;
+    border-bottom: 1px solid var(--line);
+    font-size: 0.8rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-dim);
+  }
+  .pg-output-head .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-2); box-shadow: 0 0 8px var(--accent-2); }
+  .pg-output {
+    margin: 0; padding: 0.9rem; flex: 1; overflow: auto;
+    font-family: var(--mono); font-size: 0.88rem; line-height: 1.5;
+    color: #d7f5e6; white-space: pre-wrap; word-break: break-word;
+  }
+  .pg-output .muted { color: var(--text-dim); }
+  .pg-output .val { color: #f0b66a; }
+  .pg-output .err { color: #ff8fb0; }
+  .pg-output .label { color: var(--text-dim); }
+</style>
+
+<script>
+  import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
+  import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+  import { registerNoise, LANGUAGE_ID, THEME_ID } from '../lib/noise-lang';
+  import { runNoise } from '../lib/noise';
+  import { examples, defaultExampleId, examplesByCategory } from '../data/examples';
+  import { parseHash, buildShareUrl } from '../lib/share';
+
+  // Noise has no language service worker; only the base editor worker is needed.
+  (self as any).MonacoEnvironment = { getWorker: () => new EditorWorker() };
+
+  const $ = (id: string) => document.getElementById(id)!;
+  const titleEl = $('pg-title');
+  const explEl = $('pg-explanation');
+  const statusEl = $('pg-status');
+  const outEl = $('pg-output');
+  const select = $('pg-select') as HTMLSelectElement;
+
+  registerNoise(monaco);
+
+  const byId = new Map(examples.map((e) => [e.id, e]));
+
+  // Populate the grouped dropdown.
+  for (const group of examplesByCategory()) {
+    const og = document.createElement('optgroup');
+    og.label = group.category;
+    for (const ex of group.items) {
+      const opt = document.createElement('option');
+      opt.value = ex.id;
+      opt.textContent = ex.title;
+      og.appendChild(opt);
+    }
+    select.appendChild(og);
+  }
+
+  let currentId: string | null = defaultExampleId;
+  let suppressHash = false; // guard so our own hash writes don't re-trigger a load
+
+  const editor = monaco.editor.create($('editor'), {
+    value: byId.get(defaultExampleId)?.code ?? examples[0]?.code ?? '',
+    language: LANGUAGE_ID,
+    theme: THEME_ID,
+    fontSize: 14,
+    fontFamily: 'ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace',
+    fontLigatures: true,
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    padding: { top: 14, bottom: 14 },
+    lineNumbers: 'on',
+    renderLineHighlight: 'line',
+    smoothScrolling: true,
+    automaticLayout: true,
+    scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
+  });
+
+  function clearOutput() {
+    outEl.innerHTML = '<span class="muted">Press Run to evaluate.</span>';
+  }
+
+  function setHash(value: string) {
+    suppressHash = true;
+    location.hash = value;
+    // release the guard after the hashchange event has fired
+    setTimeout(() => (suppressHash = false), 0);
+  }
+
+  function selectExample(id: string, { loadCode = true, updateHash = true } = {}) {
+    const ex = byId.get(id);
+    if (!ex) return;
+    currentId = id;
+    titleEl.textContent = ex.title;
+    explEl.textContent = ex.explanation;
+    select.value = id;
+    if (loadCode) editor.setValue(ex.code);
+    if (updateHash) setHash(`#x=${id}`);
+    clearOutput();
+  }
+
+  function loadCustom(code: string) {
+    currentId = null;
+    titleEl.textContent = 'Shared program';
+    explEl.textContent =
+      'A program shared via link. Edit and run it, or pick an example from the menu above.';
+    select.selectedIndex = -1;
+    editor.setValue(code);
+    clearOutput();
+  }
+
+  function loadFromHash({ updateHash = false } = {}) {
+    const parsed = parseHash(location.hash);
+    if (parsed.exampleId && byId.has(parsed.exampleId)) {
+      selectExample(parsed.exampleId, { loadCode: true, updateHash });
+    } else if (parsed.code !== undefined) {
+      loadCustom(parsed.code);
+    } else {
+      selectExample(defaultExampleId, { loadCode: false, updateHash: false });
+    }
+  }
+
+  // Initial load: honor a shared fragment if present, else the default example.
+  loadFromHash();
+
+  select.addEventListener('change', () => {
+    if (select.value) selectExample(select.value);
+  });
+
+  async function run() {
+    const runBtn = $('pg-run') as HTMLButtonElement;
+    runBtn.disabled = true;
+    statusEl.textContent = 'running…';
+    outEl.innerHTML = '<span class="muted">running…</span>';
+    const t0 = performance.now();
+    try {
+      const res = await runNoise(editor.getValue());
+      const ms = Math.round(performance.now() - t0);
+      statusEl.textContent = `done in ${ms} ms`;
+      renderResult(res);
+    } catch (e) {
+      statusEl.textContent = 'error';
+      outEl.innerHTML = `<span class="err">${escapeHtml(String(e))}</span>`;
+    } finally {
+      runBtn.disabled = false;
+    }
+  }
+
+  function renderResult(res: { ok: boolean; value: string | null; output: string; error: string | null }) {
+    const parts: string[] = [];
+    if (res.output) parts.push(escapeHtml(res.output.replace(/\n$/, '')));
+    if (res.ok) {
+      if (res.value !== null) {
+        parts.push(`<span class="label">⇒ </span><span class="val">${escapeHtml(res.value)}</span>`);
+      } else if (!res.output) {
+        parts.push('<span class="muted">(no output)</span>');
+      }
+    } else {
+      parts.push(`<span class="err">${escapeHtml(res.error ?? 'error')}</span>`);
+    }
+    outEl.innerHTML = parts.join('\n') || '<span class="muted">(no output)</span>';
+  }
+
+  function escapeHtml(s: string) {
+    return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]!));
+  }
+
+  // Share: a clean #x=id link when the code is an unmodified example, else a #c= snapshot.
+  async function share() {
+    const btn = $('pg-share') as HTMLButtonElement;
+    const code = editor.getValue();
+    const ex = currentId ? byId.get(currentId) : undefined;
+    const unmodified = ex && ex.code.trim() === code.trim();
+    const url = buildShareUrl(unmodified ? { exampleId: currentId! } : { code });
+    setHash(url.slice(url.indexOf('#')));
+    const label = btn.textContent;
+    try {
+      await navigator.clipboard.writeText(url);
+      btn.textContent = 'Copied link!';
+    } catch {
+      btn.textContent = 'Link in URL';
+    }
+    btn.style.color = 'var(--accent-2)';
+    setTimeout(() => {
+      btn.textContent = label;
+      btn.style.color = '';
+    }, 1600);
+  }
+
+  $('pg-run').addEventListener('click', run);
+  $('pg-reset').addEventListener('click', () => {
+    if (currentId) selectExample(currentId, { loadCode: true, updateHash: false });
+  });
+  $('pg-share').addEventListener('click', share);
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, run);
+
+  // React to back/forward or a pasted link changing the hash (ignore our own writes).
+  window.addEventListener('hashchange', () => {
+    if (!suppressHash) loadFromHash();
+  });
+
+  // Let gallery cards load an example into the editor.
+  window.addEventListener('noise:load-example', (e) => {
+    const id = (e as CustomEvent<string>).detail;
+    if (byId.has(id)) {
+      selectExample(id);
+      document.getElementById('playground')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  });
+</script>

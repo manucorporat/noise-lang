@@ -1,0 +1,13 @@
+# A 1-D preview of QJL's unbiased inner-product identity (TurboQuant, Lemma 4) — the building
+# block of TurboQuant_prod. For a standard normal s and unit scalars x = y = 1:
+#   E[ sqrt(pi/2) * s * sign(s) ] = sqrt(pi/2) * E|s| = sqrt(pi/2) * sqrt(2/pi) = 1 = <y, x>.
+# So the 1-bit sign quantizer, rescaled by sqrt(pi/2), is an UNBIASED estimator. analytic: 1.0.
+# Exercises: normal, E / var, sqrt, the `pi` constant, a user function, and lifted `if`.
+use rand;   # normal
+use math;   # sqrt, pi
+
+sign(t) = if t > 0 { 1 } else { -1 };
+s ~ normal(0, 1);
+estimate = sqrt(pi / 2) * s * sign(s);          # = sqrt(pi/2) * |s|
+Print("E[QJL 1-D estimate] =", E(estimate), "(unbiased target = 1.0)");
+Print("Var[estimate]       =", Var(estimate))

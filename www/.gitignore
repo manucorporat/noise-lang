@@ -1,0 +1,11 @@
+# build output
+dist/
+# deps
+node_modules/
+# astro
+.astro/
+# generated WASM package (rebuilt by `pnpm run wasm`)
+src/wasm/pkg/
+# misc
+.DS_Store
+*.log

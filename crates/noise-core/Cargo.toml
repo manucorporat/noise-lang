@@ -1,0 +1,28 @@
+[package]
+name = "noise-core"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core of the Noise probabilistic language: lexer, parser, evaluator, sampler."
+
+[dependencies]
+cranelift = { version = "0.127.4", optional = true }
+cranelift-jit = { version = "0.127.4", optional = true }
+cranelift-module = { version = "0.127.4", optional = true }
+cranelift-native = { version = "0.127.4", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+# Sampler throughput benchmarks (Phase 4 baseline). `harness = false` hands the binary to
+# Criterion. Run with `cargo bench -p noise-core`.
+[[bench]]
+name = "sampling"
+harness = false
+
+[features]
+# Native Cranelift JIT backend (Phase 4 "B"). Off by default so the crate stays WASM-clean and
+# dependency-light; enable with `--features jit` on a native target. Falls back to the columnar
+# interpreter for any graph it can't yet emit, so it never changes results.
+jit = ["dep:cranelift", "dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-native"]

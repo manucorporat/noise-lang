@@ -1,0 +1,8 @@
+# Pick three random numbers between 0 and 1 and add them up. How often is the total above 2?
+# That's a high bar — their average would have to top 2/3 — so it's fairly rare: 1/6 = 0.16667.
+use rand;   # unif, iid
+
+# Add three independent uniforms and ask how often the total clears 2.
+draws = iid(unif(0, 1), 3);
+total = vec::sum(draws);
+Print("P(sum of three uniforms > 2) =", P(total > 2))

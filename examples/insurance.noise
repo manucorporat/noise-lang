@@ -1,0 +1,9 @@
+# Insurance with a $200 deductible on a loss uniform over $0..$1000.
+# The insurer's claim payout is a random variable shaped by a lifted `if`.
+# P(the insurer pays anything) = P(loss > 200) = 0.8
+use rand;
+
+loss ~ unif(0, 1000);
+claim = if loss > 200 { loss - 200 } else { 0 };
+p = P(claim > 0);
+Print("P(insurer pays a claim) =", p)

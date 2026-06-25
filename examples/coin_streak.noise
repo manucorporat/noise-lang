@@ -1,0 +1,9 @@
+# Flip a fair coin three times. How often do you get heads all three times?
+# Each flip is 50/50 and they don't affect each other, so it's 1/2 x 1/2 x 1/2 = 1/8 = 0.125.
+use rand;   # bernoulli, iid
+
+# Flip one fair coin three times independently, then check whether all three are heads.
+coin   = bernoulli(0.5);
+flips  = iid(coin, 3);
+streak = vec::all(flips);
+Print("P(three heads in a row) =", P(streak))

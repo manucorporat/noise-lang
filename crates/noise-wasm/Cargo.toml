@@ -1,0 +1,20 @@
+[package]
+name = "noise-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "WebAssembly bindings for the Noise probabilistic language (browser playground)."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+noise-core = { path = "../noise-core" }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[package.metadata.wasm-pack.profile.release]
+# Smaller, faster-to-load artifact for the browser playground.
+wasm-opt = ["-O3"]

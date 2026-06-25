@@ -1,0 +1,13 @@
+# User-defined functions (LANG.md core model §4).
+#   `f(args) = body`  is a pure transform — `max` below works on numbers OR random variables.
+#   `f() ~ dist`      draws fresh on every call — so `roll() + roll()` is two INDEPENDENT dice.
+# analytic: P(higher of 2d6 == 6) = 11/36 = 0.30556;  P(two rolls sum to 7) = 6/36 = 0.16667.
+use rand;
+
+max(a, b) = if a > b { a } else { b };
+roll() ~ unif_int(1, 6);
+
+A ~ unif_int(1, 6);
+B ~ unif_int(1, 6);
+Print("P(higher of two d6 is a 6) =", P(max(A, B) == 6));
+Print("P(two independent rolls sum to 7) =", P(roll() + roll() == 7))

@@ -1,0 +1,10 @@
+# D&D "advantage": roll 2d20 and keep the HIGHER die. Chance the result is >= 15?
+# Now that `if` lifts over random variables, `max(A, B)` is just an if.
+# analytic: 1 - (14/20)^2 = 0.51
+use rand;
+
+A ~ unif_int(1, 20);
+B ~ unif_int(1, 20);
+higher = if A > B { A } else { B };
+p = P(higher >= 15);
+Print("P(advantage roll >= 15) =", p)

@@ -1,0 +1,21 @@
+# Dithering: how a single yes/no comparator can MEASURE an analog value — if you add noise first.
+# This is the trick inside 1-bit (sigma-delta) audio and stochastic ADCs: noise buys resolution.
+use rand;   # unif
+use math;   # sign
+
+# A 1-bit quantizer reports only the SIGN (+1 / -1) of its input. Ask it about a fixed level v and
+# it's useless: it answers "+1" for any positive v, telling you nothing about HOW big v is.
+v = 0.3;
+Print("no dither: E[sign(v)]     =", E(sign(v), 200000), " (stuck at +1 — says nothing about v =", v, ")");
+
+# Now add uniform dither in [-1, 1] BEFORE the comparator and average many comparisons. The noise
+# randomizes the threshold crossing so that, for |v| < 1, E[sign(v + u)] = v EXACTLY: the average
+# of the 1-bit answers reconstructs the analog level. One noisy bit, repeated, becomes a ruler.
+u ~ unif(-1, 1);
+Print("dithered:  E[sign(v + u)] =", E(sign(v + u), 200000), " (recovers v =", v, ")");
+
+# And it's not a fluke for one value — the response is LINEAR. Each level comes back on the nose.
+Print("linearity check (dithered average should equal the input):");
+Print("  v = -0.5 ->", E(sign(-0.5 + u), 200000));
+Print("  v =  0.0 ->", E(sign( 0.0 + u), 200000));
+Print("  v =  0.8 ->", E(sign( 0.8 + u), 200000))

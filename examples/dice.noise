@@ -1,0 +1,7 @@
+# Roll one fair six-sided die; how often do you get a 4? One face in six, so 1/6 = 0.16667.
+# A die is DISCRETE, so we use unif_int (with the continuous unif, P(== 4) would be exactly 0).
+use rand;
+
+Dice ~ unif_int(1, 6);
+p = P(Dice == 4);
+Print("P(rolling a 4) =", p)

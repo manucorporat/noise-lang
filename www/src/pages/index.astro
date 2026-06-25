@@ -1,0 +1,203 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Playground from '../components/Playground.astro';
+import Gallery from '../components/Gallery.astro';
+
+const ideas = [
+  {
+    k: 'Everything is a distribution',
+    d: 'A number is just a distribution with all its weight on one point. Operators lift over random variables automatically — so X above is random, and Y is random too, with no special syntax. Propagating uncertainty reads exactly like ordinary arithmetic.',
+    code: 'X ~ unif(-1, 1)\nY = 2 * X + 3   # Y is a distribution too',
+  },
+  {
+    k: '~ draws, = transforms',
+    d: 'A name bound with ~ is one fixed random draw that every mention reuses — so X − X is exactly 0, never "two samples." Independence comes from separate ~ bindings, exactly like writing X₁, X₂ on paper. No hidden re-draws, no gotchas.',
+    code: 'A ~ unif_int(1, 6)\nB ~ unif_int(1, 6)   # two independent dice\nA + B                # a real 2d6 distribution',
+  },
+  {
+    k: 'Ask with P, E, Var, Q',
+    d: 'Nothing samples until you ask. A query runs a fast columnar Monte Carlo pass and reports an honest estimate — the printed digits reflect the standard error, and that error propagates through arithmetic so 4·P(C) rounds itself correctly.',
+    code: 'C = X**2 + Y**2 < 1\n4 * P(C)   # ≈ 3.14',
+  },
+];
+---
+
+<Layout>
+  <header class="nav container">
+    <a class="brand" href="/">
+      <span class="brand-mark"></span>
+      noise<span class="brand-dim">-lang</span>
+    </a>
+    <nav class="nav-links">
+      <a href="#playground">Playground</a>
+      <a href="#examples">Examples</a>
+      <a href="#ideas">How it works</a>
+      <a href="https://github.com/" class="nav-gh">GitHub</a>
+    </nav>
+  </header>
+
+  <section class="hero container">
+    <p class="eyebrow" data-reveal>A probabilistic programming language</p>
+    <h1 class="hero-title" data-reveal style="--reveal-delay: 80ms">
+      Write <span class="grad">randomness</span><br />like ordinary math.
+    </h1>
+    <p class="hero-sub" data-reveal style="--reveal-delay: 160ms">
+      In Noise every value is a probability distribution. Sample, transform, and ask
+      <code class="code-inline">P(event)</code> — then run the whole Monte Carlo experiment right
+      here in your browser, compiled to WebAssembly.
+    </p>
+    <div class="hero-cta" data-reveal style="--reveal-delay: 240ms">
+      <a href="#playground" class="btn-primary">Try it now ▶</a>
+      <a href="#ideas" class="btn-secondary">How it works</a>
+    </div>
+    <a class="scroll-cue" href="#playground" aria-label="Scroll to playground" data-reveal
+      style="--reveal-delay: 360ms"><span></span></a>
+  </section>
+
+  <section id="playground-section" class="section section-tight">
+    <div class="section-head" data-reveal>
+      <p class="eyebrow">Playground</p>
+      <h2>Run Noise in your browser</h2>
+      <p>Pick an example below or write your own. Press <span class="code-inline">⌘/Ctrl + Enter</span> to run.</p>
+    </div>
+    <Playground />
+  </section>
+
+  <Gallery />
+
+  <section id="ideas" class="section how">
+    <div class="section-head" data-reveal>
+      <p class="eyebrow">How it works</p>
+      <h2>Three rules, the whole language</h2>
+      <p>Noise is small on purpose. Everything you just ran is built from these three ideas.</p>
+    </div>
+
+    <div class="container how-steps">
+      {ideas.map((i, n) => (
+        <div class={`step ${n % 2 === 1 ? 'step-rev' : ''}`}>
+          <div class="step-text" data-reveal={n % 2 === 1 ? 'right' : 'left'}>
+            <div class="step-n">{String(n + 1).padStart(2, '0')}</div>
+            <h3>{i.k}</h3>
+            <p>{i.d}</p>
+          </div>
+          <pre class="step-code glass" data-reveal={n % 2 === 1 ? 'left' : 'right'}><code>{i.code}</code></pre>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  <footer class="footer container" data-reveal>
+    <div>
+      <strong>noise-lang</strong>
+      <span class="muted"> — a static random-variable algebra + forward Monte Carlo engine.</span>
+    </div>
+    <div class="muted" id="footer-version">running on WebAssembly</div>
+  </footer>
+</Layout>
+
+<style>
+  .nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 1.4rem;
+    padding-bottom: 1.4rem;
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 800; font-size: 1.2rem; color: var(--text); }
+  .brand:hover { text-decoration: none; }
+  .brand-dim { color: var(--text-dim); font-weight: 600; }
+  .brand-mark {
+    width: 16px; height: 16px; border-radius: 5px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-3));
+    box-shadow: 0 0 14px rgba(127, 209, 255, 0.6);
+  }
+  .nav-links { display: flex; gap: 1.4rem; align-items: center; }
+  .nav-links a { color: var(--text-dim); font-size: 0.95rem; }
+  .nav-links a:hover { color: var(--text); text-decoration: none; }
+  .nav-gh { border: 1px solid var(--line); padding: 0.35rem 0.8rem; border-radius: 8px; }
+  @media (max-width: 620px) { .nav-links a:not(.nav-gh) { display: none; } }
+
+  .hero { padding: 3rem 1.25rem 2rem; text-align: center; position: relative; }
+  .hero-title {
+    font-size: clamp(2.4rem, 6vw, 4.2rem);
+    margin: 0.6rem 0 1rem;
+    letter-spacing: -0.02em;
+  }
+  .grad {
+    background: linear-gradient(120deg, var(--accent), var(--accent-2), var(--accent-3));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero-sub {
+    max-width: 620px; margin: 0 auto 1.8rem;
+    color: var(--text-dim); font-size: clamp(1rem, 2vw, 1.2rem);
+  }
+  .hero-cta { display: flex; gap: 0.8rem; justify-content: center; margin-bottom: 2rem; flex-wrap: wrap; }
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #07090f; font-weight: 700; padding: 0.7rem 1.4rem; border-radius: 10px;
+  }
+  .btn-primary:hover { filter: brightness(1.08); text-decoration: none; }
+  .btn-secondary { border: 1px solid var(--line); color: var(--text); padding: 0.7rem 1.4rem; border-radius: 10px; }
+  .btn-secondary:hover { border-color: var(--accent-2); text-decoration: none; }
+
+  .scroll-cue {
+    display: inline-block; width: 26px; height: 42px; margin-top: 0.5rem;
+    border: 2px solid var(--line); border-radius: 14px; position: relative;
+  }
+  .scroll-cue span {
+    position: absolute; top: 7px; left: 50%; width: 4px; height: 8px; margin-left: -2px;
+    background: var(--accent-2); border-radius: 2px; animation: cue 1.6s infinite;
+  }
+  @keyframes cue { 0% { opacity: 0; transform: translateY(-4px); } 40% { opacity: 1; } 100% { opacity: 0; transform: translateY(10px); } }
+  @media (prefers-reduced-motion: reduce) { .scroll-cue span { animation: none; } }
+
+  .section-tight { padding-top: 2rem; }
+
+  /* progressive "how it works" steps */
+  .how-steps { display: flex; flex-direction: column; gap: 3.5rem; margin-top: 1rem; }
+  .step {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+    align-items: center;
+  }
+  .step-rev .step-text { order: 2; }
+  .step-rev .step-code { order: 1; }
+  @media (max-width: 820px) {
+    .step { grid-template-columns: 1fr; gap: 1rem; }
+    .step-rev .step-text, .step-rev .step-code { order: initial; }
+  }
+  .step-n {
+    font-family: var(--mono); font-size: 2.4rem; font-weight: 800; line-height: 1;
+    background: linear-gradient(120deg, var(--accent), var(--accent-3));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    opacity: 0.85; margin-bottom: 0.5rem;
+  }
+  .step-text h3 { margin: 0 0 0.6rem; font-size: clamp(1.3rem, 2.5vw, 1.7rem); }
+  .step-text p { margin: 0; color: var(--text-dim); font-size: 1.02rem; line-height: 1.65; }
+  .step-code {
+    margin: 0; padding: 1.3rem 1.5rem; font-size: 0.95rem; color: #cfe9ff;
+    overflow-x: auto; white-space: pre; line-height: 1.6;
+  }
+
+  .footer {
+    display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;
+    padding-top: 3rem; padding-bottom: 3rem; margin-top: 2rem;
+    border-top: 1px solid var(--line); font-size: 0.9rem;
+  }
+</style>
+
+<script>
+  import { noiseVersion } from '../lib/noise';
+  noiseVersion()
+    .then((v) => {
+      const el = document.getElementById('footer-version');
+      if (el) el.textContent = `Noise v${v} · WebAssembly`;
+    })
+    .catch(() => {});
+</script>

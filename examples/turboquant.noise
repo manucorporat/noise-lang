@@ -1,0 +1,47 @@
+# TurboQuant (arXiv:2504.19874) — reproducing its headline result by Monte Carlo.
+#
+# To store a vector cheaply you QUANTIZE it: keep just 1 bit per coordinate (the sign), then
+# later DEQUANTIZE to approximate it. You use that approximation to estimate inner products
+# <y, x> — the core operation in similarity search and attention.
+#
+# The paper's finding: a quantizer tuned to minimize RECONSTRUCTION error ||x - xhat||^2 is the
+# wrong tool for inner products — it is BIASED, systematically shrinking every estimate of <y, x>
+# by a factor 2/pi ~ 0.637. Bias is the dangerous kind of error: averaging more samples (or
+# spending more bits) does NOT remove it. The fix ("QJL") rescales the SAME bits to be unbiased,
+# so its error is pure variance, which does shrink away.
+#
+# We measure both, live: the bias E[est]/true, and the actual mean-squared error E[(est-true)^2].
+#
+# Setup: a fixed unit vector x and query y, and a random d x d Gaussian projection S drawn fresh
+# each sample (the quantizer's randomness). The 1-bit code is q = sign(Sx); we reconstruct with
+# S transpose. Since S is Gaussian (not an exact rotation), (S^T)(S) ~ d*I, hence the 1/d. The
+# ONLY difference between the two reconstructions is the scaling constant:
+#   MSE-optimal codebook  sqrt(2/pi)  -> biased by 2/pi
+#   QJL (unbiased)        sqrt(pi/2)  -> unbiased     (their ratio is exactly 2/pi)
+use rand;   # normal, iidmat
+use math;   # pi, sqrt, sign
+
+# A fixed unit vector x and unit query y (iota(d) = [0, 1, ..., d-1]); any fixed pair works.
+d = 24;
+x = vec::normalize(vec::ones(d));
+y = vec::normalize(vec::iota(d));
+
+# Encode x to one bit per coordinate (the sign of a random Gaussian projection), then reconstruct
+# with S^T. Both quantizers share these same sign bits and differ ONLY in the rescaling constant.
+S     = iidmat(normal(0, 1), d, d);   # fresh Gaussian projection per Monte Carlo sample
+q     = sign(vec::matvec(S, x));
+recon = vec::matvec(vec::transpose(S), q);
+
+# Estimate <y, x> from the reconstruction two ways (scaling is plain broadcast multiplication).
+true_ip  = vec::dot(y, x);
+est_mse  = vec::dot(y, recon * (sqrt(2 / pi) / d));   # MSE-optimal codebook -> biased by 2/pi
+est_prod = vec::dot(y, recon * (sqrt(pi / 2) / d));   # QJL rescaling        -> unbiased
+
+Print("true <y,x>        =", true_ip);
+# The bias: the MSE estimate's average is stuck ~36% low; the fix's average lands on the truth.
+Print("MSE  E[est]       =", E(est_mse, 50000), " (biased by 2/pi =", 2 / pi, ")");
+Print("prod E[est]       =", E(est_prod, 50000), " (unbiased: ~ true)");
+# The payoff: the unbiased quantizer's mean-squared inner-product error is several times smaller,
+# because the MSE quantizer's error is dominated by that irreducible bias.
+Print("MSE  E[(est-t)^2] =", E((est_mse - true_ip) ** 2, 50000));
+Print("prod E[(est-t)^2] =", E((est_prod - true_ip) ** 2, 50000), " <- the fix loses less error")

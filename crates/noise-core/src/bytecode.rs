@@ -1,0 +1,279 @@
+//! Lowering (sample-DAG → flat bytecode with CSE) and the columnar VM (PLAN.md
+//! "Performance thesis").
+//!
+//! The RV expression compiles ONCE to a flat list of [`Inst`] over column registers. A
+//! register is a contiguous `[f64; BATCH]` buffer. `run_batch` walks the instruction list,
+//! filling each instruction's whole `dst` column before moving on — so one pass evaluates
+//! `BATCH` draws, never tree-walking per draw. CSE via `HashMap<RvId, Reg>` guarantees a
+//! shared sub-RV (e.g. `X` in `X + X`) compiles to ONE register/instruction, so both lanes
+//! read the SAME per-batch draw.
+
+use std::collections::HashMap;
+
+use crate::ast::{BinOp, UnOp};
+use crate::dist::{RvGraph, RvId, RvNode, Source};
+
+/// Batch / column width. 8 KiB per f64 column: small enough to stay in cache, large enough
+/// to amortize dispatch and give the autovectorizer long runs. Tunable in Phase 4.
+pub const BATCH: usize = 1024;
+
+/// Register index into the column file.
+pub type Reg = u32;
+
+#[derive(Debug, Clone, Copy)]
+pub enum Inst {
+    Uniform { dst: Reg, lo: f64, hi: f64 },
+    UniformInt { dst: Reg, lo: f64, hi: f64 },
+    Normal { dst: Reg, mu: f64, sigma: f64 },
+    Exp { dst: Reg, rate: f64 },
+    Poisson { dst: Reg, lambda: f64 },
+    Geometric { dst: Reg, p: f64 },
+    ConstNum { dst: Reg, val: f64 },
+    ConstBool { dst: Reg, val: f64 }, // 0.0 / 1.0
+    Un { dst: Reg, op: UnOp, a: Reg },
+    Bin { dst: Reg, op: BinOp, a: Reg, b: Reg },
+    /// Per-lane select: `dst = cond ? a : b` (lifted `if`).
+    Select { dst: Reg, cond: Reg, a: Reg, b: Reg },
+}
+
+pub struct Program {
+    pub insts: Vec<Inst>,
+    pub n_regs: usize,
+    pub root: Reg,
+}
+
+/// Lower the transitive cone of `root` to flat bytecode.
+///
+/// Post-order DFS with a `HashMap<RvId, Reg>` memo: a shared `RvId` compiles to ONE register
+/// and ONE instruction (CSE). First cut allocates one register per distinct node, no reuse —
+/// register-liveness reuse is deferred to Phase 4 (BATCH×n_regs memory is fine here).
+pub fn compile(graph: &RvGraph, root: RvId) -> Program {
+    let mut memo: HashMap<RvId, Reg> = HashMap::new();
+    let mut insts: Vec<Inst> = Vec::new();
+    let root_reg = lower(graph, root, &mut memo, &mut insts);
+    Program {
+        n_regs: insts.len(),
+        insts,
+        root: root_reg,
+    }
+}
+
+fn lower(
+    graph: &RvGraph,
+    id: RvId,
+    memo: &mut HashMap<RvId, Reg>,
+    insts: &mut Vec<Inst>,
+) -> Reg {
+    if let Some(&reg) = memo.get(&id) {
+        return reg;
+    }
+    // Lower children first, then self, so registers are assigned in post-order.
+    let node = graph.node(id).clone();
+    let inst = match node {
+        RvNode::Src(Source::Uniform(u)) => {
+            let dst = insts.len() as Reg;
+            insts.push(Inst::Uniform { dst, lo: u.lo, hi: u.hi });
+            dst
+        }
+        RvNode::Src(Source::UniformInt { lo, hi }) => {
+            let dst = insts.len() as Reg;
+            insts.push(Inst::UniformInt { dst, lo, hi });
+            dst
+        }
+        RvNode::Src(Source::Normal { mu, sigma }) => {
+            let dst = insts.len() as Reg;
+            insts.push(Inst::Normal { dst, mu, sigma });
+            dst
+        }
+        RvNode::Src(Source::Exp { rate }) => {
+            let dst = insts.len() as Reg;
+            insts.push(Inst::Exp { dst, rate });
+            dst
+        }
+        RvNode::Src(Source::Poisson { lambda }) => {
+            let dst = insts.len() as Reg;
+            insts.push(Inst::Poisson { dst, lambda });
+            dst
+        }
+        RvNode::Src(Source::Geometric { p }) => {
+            let dst = insts.len() as Reg;
+            insts.push(Inst::Geometric { dst, p });
+            dst
+        }
+        RvNode::ConstNum(v) => {
+            let dst = insts.len() as Reg;
+            insts.push(Inst::ConstNum { dst, val: v });
+            dst
+        }
+        RvNode::ConstBool(b) => {
+            let dst = insts.len() as Reg;
+            insts.push(Inst::ConstBool { dst, val: if b { 1.0 } else { 0.0 } });
+            dst
+        }
+        RvNode::Unary(op, a) => {
+            let ra = lower(graph, a, memo, insts);
+            let dst = insts.len() as Reg;
+            insts.push(Inst::Un { dst, op, a: ra });
+            dst
+        }
+        RvNode::Binary(op, a, b) => {
+            let ra = lower(graph, a, memo, insts);
+            let rb = lower(graph, b, memo, insts);
+            let dst = insts.len() as Reg;
+            insts.push(Inst::Bin { dst, op, a: ra, b: rb });
+            dst
+        }
+        RvNode::Select { cond, a, b } => {
+            let rc = lower(graph, cond, memo, insts);
+            let ra = lower(graph, a, memo, insts);
+            let rb = lower(graph, b, memo, insts);
+            let dst = insts.len() as Reg;
+            insts.push(Inst::Select { dst, cond: rc, a: ra, b: rb });
+            dst
+        }
+    };
+    memo.insert(id, inst);
+    inst
+}
+
+/// Run one batch: fill every register column for `BATCH` lanes by walking the instructions.
+///
+/// Because first-cut allocation is one-register-per-node, `dst` is always distinct from
+/// `a`/`b`. We borrow per-iteration scalars (not slices) so the borrow checker is satisfied
+/// without splitting the register vector.
+pub fn run_batch(program: &Program, regs: &mut [Box<[f64]>], rng: &mut crate::rng::Rng) {
+    for inst in &program.insts {
+        match *inst {
+            Inst::Uniform { dst, lo, hi } => {
+                rng.fill_uniform(lo, hi, &mut regs[dst as usize]);
+            }
+            Inst::UniformInt { dst, lo, hi } => {
+                rng.fill_uniform_int(lo, hi, &mut regs[dst as usize]);
+            }
+            Inst::Normal { dst, mu, sigma } => {
+                rng.fill_normal(mu, sigma, &mut regs[dst as usize]);
+            }
+            Inst::Exp { dst, rate } => {
+                rng.fill_exp(rate, &mut regs[dst as usize]);
+            }
+            Inst::Poisson { dst, lambda } => {
+                rng.fill_poisson(lambda, &mut regs[dst as usize]);
+            }
+            Inst::Geometric { dst, p } => {
+                rng.fill_geometric(p, &mut regs[dst as usize]);
+            }
+            Inst::ConstNum { dst, val } => {
+                for x in regs[dst as usize].iter_mut() {
+                    *x = val;
+                }
+            }
+            Inst::ConstBool { dst, val } => {
+                for x in regs[dst as usize].iter_mut() {
+                    *x = val;
+                }
+            }
+            Inst::Un { dst, op, a } => {
+                let (dst, a) = (dst as usize, a as usize);
+                for k in 0..BATCH {
+                    let x = regs[a][k];
+                    regs[dst][k] = apply_un(op, x);
+                }
+            }
+            Inst::Bin { dst, op, a, b } => {
+                let (dst, a, b) = (dst as usize, a as usize, b as usize);
+                for k in 0..BATCH {
+                    let xa = regs[a][k];
+                    let xb = regs[b][k];
+                    regs[dst][k] = apply_bin(op, xa, xb);
+                }
+            }
+            Inst::Select { dst, cond, a, b } => {
+                let (dst, cond, a, b) = (dst as usize, cond as usize, a as usize, b as usize);
+                for k in 0..BATCH {
+                    regs[dst][k] = if regs[cond][k] != 0.0 { regs[a][k] } else { regs[b][k] };
+                }
+            }
+        }
+    }
+}
+
+/// Scalar unary op. `Not` is logical not over a 0/1 bool column.
+#[inline]
+fn apply_un(op: UnOp, x: f64) -> f64 {
+    match op {
+        UnOp::Neg => -x,
+        UnOp::Not => {
+            if x == 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        UnOp::Sin => x.sin(),
+        UnOp::Cos => x.cos(),
+        UnOp::Atan => x.atan(),
+        // sign: -1 / 0 / +1 (0 at exactly zero, unlike f64::signum which is ±1 at ±0.0).
+        UnOp::Sign => (x > 0.0) as i32 as f64 - (x < 0.0) as i32 as f64,
+        UnOp::Round => x.round(),
+    }
+}
+
+/// Scalar binary op. Matches the deterministic evaluator's IEEE-754 behavior; comparisons
+/// produce 0.0/1.0 columns (the bool convention from PLAN.md, pre-wiring Phase 3's `P()`).
+#[inline]
+fn apply_bin(op: BinOp, a: f64, b: f64) -> f64 {
+    match op {
+        BinOp::Add => a + b,
+        BinOp::Sub => a - b,
+        BinOp::Mul => a * b,
+        BinOp::Div => a / b,
+        BinOp::Pow => a.powf(b),
+        BinOp::Lt => (a < b) as i32 as f64,
+        BinOp::Gt => (a > b) as i32 as f64,
+        BinOp::Le => (a <= b) as i32 as f64,
+        BinOp::Ge => (a >= b) as i32 as f64,
+        BinOp::Eq => (a == b) as i32 as f64,
+        BinOp::Ne => (a != b) as i32 as f64,
+        // Logical ops over 0/1 indicator columns.
+        BinOp::And => ((a != 0.0) && (b != 0.0)) as i32 as f64,
+        BinOp::Or => ((a != 0.0) || (b != 0.0)) as i32 as f64,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dist::{RvGraph, RvKind, RvNode, Source, Uniform};
+
+    #[test]
+    fn cse_shares_a_repeated_subexpression() {
+        // X + X: the shared `X` must compile to ONE register, so total = 2 (X, the Add) not 3.
+        let mut g = RvGraph::default();
+        let x = g.push(RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })), RvKind::Num);
+        let sum = g.push(RvNode::Binary(BinOp::Add, x, x), RvKind::Num);
+        let prog = compile(&g, sum);
+        assert_eq!(prog.n_regs, 2, "X must be shared (CSE), not duplicated");
+    }
+
+    #[test]
+    fn comparison_and_logical_kernels_yield_0_or_1() {
+        assert_eq!(apply_bin(BinOp::Lt, 1.0, 2.0), 1.0);
+        assert_eq!(apply_bin(BinOp::Lt, 2.0, 1.0), 0.0);
+        assert_eq!(apply_bin(BinOp::Eq, 3.0, 3.0), 1.0);
+        assert_eq!(apply_bin(BinOp::Ne, 3.0, 3.0), 0.0);
+        assert_eq!(apply_bin(BinOp::And, 1.0, 0.0), 0.0);
+        assert_eq!(apply_bin(BinOp::And, 1.0, 1.0), 1.0);
+        assert_eq!(apply_bin(BinOp::Or, 0.0, 0.0), 0.0);
+        assert_eq!(apply_bin(BinOp::Or, 1.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn arithmetic_kernels_match_ieee() {
+        assert_eq!(apply_bin(BinOp::Add, 2.0, 3.0), 5.0);
+        assert_eq!(apply_bin(BinOp::Pow, 2.0, 10.0), 1024.0);
+        assert_eq!(apply_un(UnOp::Neg, 4.0), -4.0);
+        // Not is logical over a 0/1 column.
+        assert_eq!(apply_un(UnOp::Not, 0.0), 1.0);
+        assert_eq!(apply_un(UnOp::Not, 1.0), 0.0);
+    }
+}

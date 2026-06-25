@@ -1,0 +1,9 @@
+# A bet shaped by a random outcome: win 10 on a six, otherwise lose 2.
+# `payoff` is itself a random variable built with a lifted `if`.
+# P(you come out ahead) = P(roll a 6) = 1/6 = 0.16667
+use rand;
+
+D ~ unif_int(1, 6);
+payoff = if D == 6 { 10 } else { 0 - 2 };
+p = P(payoff > 0);
+Print("P(come out ahead) =", p)

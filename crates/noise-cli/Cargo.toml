@@ -1,0 +1,14 @@
+[package]
+name = "noise-cli"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "REPL and file runner for the Noise language."
+
+[[bin]]
+name = "noise"
+path = "src/main.rs"
+
+[dependencies]
+noise-core = { path = "../noise-core" }

@@ -1,0 +1,12 @@
+# Monty Hall, reframed: switching wins EXACTLY when your first pick was wrong.
+# analytic: 2/3 = 0.66667.  The `if` prints a verdict instead of a hardcoded message.
+use rand;
+
+car  ~ unif_int(1, 3);
+pick ~ unif_int(1, 3);
+p = P(pick != car);
+if p > 0.5 {
+  Print("Switch! You win", p, "of the time.")
+} else {
+  Print("Stay. Switching only wins", p, "of the time.")
+}

@@ -1,0 +1,9 @@
+# Roll two dice and keep the higher one; how often is that higher die a 6?
+# It's a 6 unless BOTH dice miss: 1 - (5/6)^2 = 11/36 = 0.3056.  (the max is a lifted `if`)
+use rand;
+
+A ~ unif_int(1, 6);
+B ~ unif_int(1, 6);
+higher = if A > B { A } else { B };
+p = P(higher == 6);
+Print("P(higher of 2d6 is a 6) =", p)
