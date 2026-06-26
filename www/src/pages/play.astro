@@ -1,0 +1,84 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Playground from '../components/Playground.astro';
+---
+
+<Layout
+  title="Noise playground — run Noise in your browser"
+  description="The Noise playground: write probabilistic programs and run them in your browser on the real WebAssembly engine. Pick an example or share your own via link."
+>
+  <header class="topbar">
+    <div class="wide topbar-inner">
+      <a class="brand" href="/">noise<span class="brand-tilde">~</span><span class="brand-dim">lang</span></a>
+      <nav class="topbar-links">
+        <a href="/#ideas">How it works</a>
+        <a href="/#performance">Performance</a>
+        <a href="/play" aria-current="page">Playground</a>
+        <a href="/skill">Skills</a>
+        <a href="https://github.com/manucorporat/noise-lang">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="play-main">
+    <div class="play-host">
+      <Playground />
+    </div>
+  </main>
+
+  <footer class="doc-footer measure">
+    <hr />
+    <p class="muted" id="footer-version">noise~lang — running on WebAssembly.</p>
+  </footer>
+</Layout>
+
+<style>
+  /* Topbar — mirrors the home page (src/pages/index.astro). */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    background: rgba(251, 250, 246, 0.88);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--rule);
+  }
+  .topbar-inner {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding-top: 0.7rem; padding-bottom: 0.7rem;
+  }
+  .brand { font-family: var(--serif); font-weight: 700; font-size: 1.1rem; color: var(--ink); }
+  .brand:hover { text-decoration: none; }
+  .brand-dim { color: var(--ink-dim); }
+  .brand-tilde {
+    font-family: var(--mono);
+    font-weight: 500;
+    color: var(--accent);
+    margin: 0 0.04em;
+    vertical-align: baseline;
+    position: relative;
+    top: 0.02em;
+  }
+  .topbar-links { display: flex; gap: 1.3rem; }
+  .topbar-links a { color: var(--ink-dim); font-size: 0.92rem; }
+  .topbar-links a:hover { color: var(--ink); text-decoration: none; }
+  .topbar-links a[aria-current='page'] { color: var(--ink); }
+  @media (max-width: 680px) { .topbar-links a:not(:last-child):not([aria-current='page']) { display: none; } }
+
+  .play-main { padding: 1.6rem 0 1rem; }
+  /* the playground claims most of the viewport width (wider than the prose `.wide` column) */
+  .play-host { max-width: min(1640px, 95vw); margin: 0 auto; padding: 0 1.5rem; }
+
+  .doc-footer { padding: 2.5rem 0 3rem; }
+  .doc-footer p { font-size: 0.92rem; }
+</style>
+
+<script>
+  import { noiseVersion } from '../lib/noise';
+  noiseVersion()
+    .then((v) => {
+      const el = document.getElementById('footer-version');
+      if (el) el.textContent = `noise~lang v${v} — running on WebAssembly.`;
+    })
+    .catch(() => {});
+</script>

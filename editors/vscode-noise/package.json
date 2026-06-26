@@ -1,0 +1,35 @@
+{
+  "name": "noise-lang",
+  "displayName": "Noise Language",
+  "description": "Syntax highlighting for the Noise probabilistic language (.noise).",
+  "version": "0.1.0",
+  "publisher": "noise-lang",
+  "engines": {
+    "vscode": "^1.0.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "noise",
+        "aliases": [
+          "Noise",
+          "noise"
+        ],
+        "extensions": [
+          ".noise"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "noise",
+        "scopeName": "source.noise",
+        "path": "./syntaxes/noise.tmLanguage.json"
+      }
+    ]
+  }
+}

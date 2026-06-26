@@ -3,10 +3,8 @@
 // in view, and scrolling through the steps reveals the code and the meaning. Engine confirms.
 import CodePanel from './CodePanel.astro';
 
-const code = `use rand;
-
-X ~ unif(-1, 1)
-Y ~ unif(-1, 1)
+const code = `X ~ rand::unif(-1, 1)
+Y ~ rand::unif(-1, 1)
 
 C = X**2 + Y**2 < 1
 
@@ -17,7 +15,7 @@ C = X**2 + Y**2 < 1
   <div class="scrolly-grid">
     <div class="scrolly-stage">
       <div class="stage-inner glass">
-        <h4 class="stage-title">Estimating π</h4>
+        <h4 class="stage-title">Estimating π with Monte Carlo</h4>
         <div class="stage-canvas pi-canvas"><canvas id="pi-canvas" aria-label="Random darts inside a circle"></canvas></div>
         <CodePanel filename="pi.noise" code={code} class="pi-code" />
         <div class="stage-foot">
@@ -27,6 +25,9 @@ C = X**2 + Y**2 < 1
         </div>
         <p class="stage-engine" id="pi-engine"></p>
       </div>
+      <figcaption class="figure-caption">
+        <span class="fig-n">Figure 2.</span> Monte-Carlo π. A probability becomes a number by sampling.
+      </figcaption>
     </div>
     <div class="scrolly-steps" id="pi-steps">
       <div class="scrolly-step" data-step="0">
@@ -47,9 +48,6 @@ C = X**2 + Y**2 < 1
       </div>
     </div>
   </div>
-  <figcaption class="figure-caption">
-    <span class="fig-n">Figure 2.</span> Monte-Carlo π. A probability becomes a number by sampling.
-  </figcaption>
 </div>
 
 <style>
@@ -71,10 +69,10 @@ C = X**2 + Y**2 < 1
     if (codeBody) codeBody.classList.add('progressive');
 
     const STEPS = [
-      { show: 3, add: [2, 3], run: false },
-      { show: 5, add: [5], run: false },
-      { show: 7, add: [7], run: true },
-      { show: 7, add: [], run: true },
+      { show: 1, add: [0, 1], run: false },
+      { show: 3, add: [3], run: false },
+      { show: 5, add: [5], run: true },
+      { show: 5, add: [], run: true },
     ];
     let engineDone = false, stepRun = false;
     function setStep(i: number) {
@@ -136,7 +134,7 @@ C = X**2 + Y**2 < 1
 
     async function engineResult() {
       engineEl.textContent = 'engine (10⁶ samples)…';
-      try { const r = await runNoise('use rand; X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X**2 + Y**2 < 1)'); engineEl.innerHTML = `engine, 10⁶ samples: <span class="ok">${r.value ?? r.output.trim()}</span>`; } catch { engineEl.textContent = ''; }
+      try { const r = await runNoise('X ~ rand::unif(-1,1); Y ~ rand::unif(-1,1); 4 * P(X**2 + Y**2 < 1)'); engineEl.innerHTML = `engine, 10⁶ samples: <span class="ok">${r.value ?? r.output.trim()}</span>`; } catch { engineEl.textContent = ''; }
     }
 
     const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting && e.intersectionRatio > 0.5) setStep(Number((e.target as HTMLElement).dataset.step)); }, { threshold: [0.5], rootMargin: '-18% 0px -18% 0px' });

@@ -108,19 +108,24 @@ impl Parser {
                     }
                 }
             }
-            // `Ident = ...` or `Ident ~ ...` → binding, right-associative.
-            let bind = match self.peek_at(1) {
-                TokKind::Eq => Some(BindKind::Assign),
-                TokKind::Tilde => Some(BindKind::Sample),
-                _ => None,
-            };
-            if let Some(kind) = bind {
+            // `Ident = rhs` → assignment, right-associative.
+            if *self.peek_at(1) == TokKind::Eq {
                 let start = self.span().start;
                 self.bump(); // ident
-                self.bump(); // = or ~
+                self.bump(); // =
                 let rhs = self.parse_expr()?;
                 let span = Span::new(start, rhs.span.end);
-                return Ok(Spanned::new(Expr::Bind(kind, name, Box::new(rhs)), span));
+                return Ok(Spanned::new(Expr::Bind(BindKind::Assign, name, Box::new(rhs)), span));
+            }
+            // `Ident ~[shape]? rhs` → a sample binding. This is sugar for `Ident = ~[shape]? rhs`:
+            // we leave the `~` in place so the prefix parser builds the draw, then bind the result
+            // with `=`. So the binding and the inline prefix `~` share one code path.
+            if *self.peek_at(1) == TokKind::Tilde {
+                let start = self.span().start;
+                self.bump(); // ident — cursor now sits on `~`
+                let rhs = self.parse_bp(0)?;
+                let span = Span::new(start, rhs.span.end);
+                return Ok(Spanned::new(Expr::Bind(BindKind::Assign, name, Box::new(rhs)), span));
             }
         }
         self.parse_bp(0)
@@ -205,6 +210,18 @@ impl Parser {
                 lhs = Spanned::new(Expr::Range(Box::new(lhs), Box::new(rhs)), span);
                 continue;
             }
+            // `@` (matrix product) builds its own `MatMul` node, not a `Binary`. It binds like
+            // `*` (same precedence as in Python), left-associative.
+            if *self.peek() == TokKind::At {
+                if MATMUL_LBP < min_bp {
+                    break;
+                }
+                self.bump(); // @
+                let rhs = self.parse_bp(MATMUL_RBP)?;
+                let span = Span::new(lhs.span.start, rhs.span.end);
+                lhs = Spanned::new(Expr::MatMul(Box::new(lhs), Box::new(rhs)), span);
+                continue;
+            }
             let Some((op, l_bp, r_bp)) = infix_op(self.peek()) else {
                 break;
             };
@@ -233,6 +250,19 @@ impl Parser {
                 let rhs = self.parse_bp(PREFIX_BP)?;
                 let span = Span::new(start, rhs.span.end);
                 Ok(Spanned::new(Expr::Unary(UnOp::Not, Box::new(rhs)), span))
+            }
+            // Prefix `~` / `~[n, m, …]` — the draw operator. `~recipe` draws one sample; a shape
+            // draws a nested array of independent samples (subsumes the old `iid`/`iidmat`).
+            TokKind::Tilde => {
+                self.bump(); // ~
+                let shape = if *self.peek() == TokKind::LBracket {
+                    self.parse_shape()?
+                } else {
+                    Vec::new()
+                };
+                let body = self.parse_bp(PREFIX_BP)?;
+                let span = Span::new(start, body.span.end);
+                Ok(Spanned::new(Expr::Sample { shape, body: Box::new(body) }, span))
             }
             _ => self.parse_postfix(),
         }
@@ -348,6 +378,30 @@ impl Parser {
         Ok((args, close.span.end))
     }
 
+    /// Shape list `[n, m, …]` after a prefix `~`. Like an array literal but kept as a bare
+    /// `Vec<Spanned>` of dimension expressions, and required to be non-empty (`~[]` is rejected —
+    /// use a bare `~` for a scalar draw).
+    fn parse_shape(&mut self) -> Result<Vec<Spanned>> {
+        let open = self.expect(TokKind::LBracket)?;
+        let mut dims = Vec::new();
+        if *self.peek() != TokKind::RBracket {
+            loop {
+                dims.push(self.parse_expr()?);
+                if !self.eat(&TokKind::Comma) {
+                    break;
+                }
+            }
+        }
+        let close = self.expect(TokKind::RBracket)?;
+        if dims.is_empty() {
+            return Err(NoiseError::parse(
+                "empty draw shape `~[]` — use a bare `~` for a single sample".to_string(),
+                Span::new(open.span.start, close.span.end),
+            ));
+        }
+        Ok(dims)
+    }
+
     /// Array literal `[a, b, …]` (or empty `[]`). A trailing comma is not allowed (matches the
     /// call-argument rule).
     fn parse_array(&mut self) -> Result<Spanned> {
@@ -429,6 +483,10 @@ const PREFIX_BP: u8 = 13;
 /// left-leaning, though chained `a..b..c` is a runtime error (a range isn't a number).
 const RANGE_LBP: u8 = 1;
 const RANGE_RBP: u8 = 2;
+
+/// `@` (matrix product) binding powers — same precedence as `* /`, left-associative.
+const MATMUL_LBP: u8 = 11;
+const MATMUL_RBP: u8 = 12;
 
 /// Returns `(op, left_bp, right_bp)` for an infix token. Left-assoc ops have
 /// `left_bp < right_bp`; `**` is right-assoc (`left_bp > right_bp`).
@@ -537,6 +595,49 @@ mod tests {
     }
 
     #[test]
+    fn prefix_sample_and_shape_parse() {
+        // bare `~e` is a shapeless draw
+        match parse_one("~normal(0, 1)") {
+            Expr::Sample { shape, body } => {
+                assert!(shape.is_empty());
+                assert!(matches!(body.expr, Expr::Call(_, _)));
+            }
+            other => panic!("got {other:?}"),
+        }
+        // `~[n, m] e` carries a shape list
+        match parse_one("~[a, 3] normal(0, 1)") {
+            Expr::Sample { shape, .. } => assert_eq!(shape.len(), 2),
+            other => panic!("got {other:?}"),
+        }
+        // the statement form `x ~[3] e` is sugar for `x = ~[3] e`
+        match parse_one("x ~[3] unif(0, 1)") {
+            Expr::Bind(BindKind::Assign, name, rhs) => {
+                assert_eq!(name, "x");
+                assert!(matches!(rhs.expr, Expr::Sample { .. }));
+            }
+            other => panic!("got {other:?}"),
+        }
+        // `~[]` (empty shape) is a parse error
+        assert!(matches!(parse("xs ~[] unif(0, 1)").unwrap_err().kind, ErrorKind::Parse(_)));
+    }
+
+    #[test]
+    fn matmul_operator_parses_like_star() {
+        // `a @ b` is a MatMul node, not a Binary
+        assert!(matches!(parse_one("a @ b"), Expr::MatMul(_, _)));
+        // `@` binds like `*` (tighter than `+`): `1 + a @ b` is `1 + (a @ b)`
+        match parse_one("1 + a @ b") {
+            Expr::Binary(BinOp::Add, _, r) => assert!(matches!(r.expr, Expr::MatMul(_, _))),
+            other => panic!("got {other:?}"),
+        }
+        // left-associative: `a @ b @ c` is `(a @ b) @ c`
+        match parse_one("a @ b @ c") {
+            Expr::MatMul(l, _) => assert!(matches!(l.expr, Expr::MatMul(_, _))),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
     fn range_parses_below_arithmetic() {
         // `0..10` is a range of two number bounds
         match parse_one("0..10") {
@@ -588,7 +689,7 @@ mod tests {
         // `use module;`
         assert!(matches!(parse_one("use rand"), Expr::Use(m) if m == "rand"));
         // a path can be indexed/called like any primary: `vec::range(0, 3)[1]`
-        assert!(matches!(parse_one("rand::iid(d, 3)[0]"), Expr::Index(_, _)));
+        assert!(matches!(parse_one("rand::normal(0, 1)[0]"), Expr::Index(_, _)));
         // errors: dangling `::`, bad `use`
         assert!(matches!(parse("rand::").unwrap_err().kind, ErrorKind::Parse(_)));
         assert!(matches!(parse("use ;").unwrap_err().kind, ErrorKind::Parse(_)));

@@ -9,8 +9,9 @@
 //!   * [`STREAMS`] / [`choose_streams`] — the multi-stream RNG policy.
 //!   * [`seed_state`] — SplitMix64 expansion of a seed into the per-stream xoshiro state layout.
 //!   * [`profitable`] / [`walk_cost`] — the cost model deciding whether codegen beats the
-//!     interpreter (the "B2" gate; reused verbatim by the WASM backend, where a kernel's `ln`/`cos`
-//!     are also non-inlined calls — see PLAN.md "Browser note").
+//!     interpreter (the "B2" gate). One cost function, parameterized by `inline_trans`: the native
+//!     JIT inlines `ln`/`sin`/`cos` (passes `true`), the WASM emitter still imports them from the
+//!     host (passes `false`) — see PLAN.md "Browser note".
 //!   * [`const_int_exponent`] — the `x ** k` small-integer-power test (repeated multiply vs a `pow`
 //!     call), shared so both backends agree on which exponents fuse.
 
@@ -62,12 +63,18 @@ pub fn const_int_exponent(graph: &RvGraph, id: RvId) -> Option<u32> {
 
 /// Whether codegen is expected to outperform the interpreter for this graph: the graph is supported
 /// (no `Poisson` — its Knuth loop stays interpreter-only) **and** the count of fused nodes strictly
-/// exceeds the transcendental-call weight. See [`walk_cost`] for the calibration. Used as the gate
-/// by both the native JIT and the WASM emitter.
-pub fn profitable(graph: &RvGraph, root: RvId) -> bool {
+/// exceeds the transcendental-call weight. See [`walk_cost`] for the calibration.
+///
+/// `inline_trans` says whether *this backend* inlines `ln`/`sin`/`cos` as polynomials. The native
+/// JIT does ([`crate::approx`] / `jit::emit_ln`), so it passes `true` and a `normal`/`exp`/trig
+/// graph counts as fusible. The WASM emitter still imports those from the host (a per-draw call
+/// across the JS boundary — even costlier than a native libcall), so it passes `false` and such
+/// graphs stay on the interpreter, exactly as before. `atan`/`round`/non-integer `pow` are calls on
+/// both backends regardless.
+pub fn profitable(graph: &RvGraph, root: RvId, inline_trans: bool) -> bool {
     let mut seen = HashSet::new();
     let (mut fusible, mut libcalls) = (0u32, 0u32);
-    if walk_cost(graph, root, &mut seen, &mut fusible, &mut libcalls) {
+    if walk_cost(graph, root, &mut seen, &mut fusible, &mut libcalls, inline_trans) {
         fusible > libcalls
     } else {
         false // unsupported (Poisson) → interpreter
@@ -75,81 +82,123 @@ pub fn profitable(graph: &RvGraph, root: RvId) -> bool {
 }
 
 /// Accumulate `(fusible, libcalls)` weights over the distinct nodes of `id`'s cone (each `RvId`
-/// counted once, matching CSE). Returns `false` if the cone contains an unsupported node.
-///
-/// Calibrated against `benches/sampling.rs`: per-draw `ln`/`cos`/`pow` are non-inlined calls and
-/// (for `normal`) do ~2× the transcendental work of the interpreter's pair-sharing column fill, so
-/// a transcendental-bound graph is faster interpreted while an arithmetic-dominated one is faster
-/// fused. `fusible > libcalls` puts the crossover between those measured cases.
+/// counted once, matching CSE). Returns `false` if the cone contains an unsupported node. See
+/// [`profitable`] for the meaning of `inline_trans`.
 pub fn walk_cost(
     graph: &RvGraph,
     id: RvId,
     seen: &mut HashSet<RvId>,
     fusible: &mut u32,
     libcalls: &mut u32,
+    inline_trans: bool,
 ) -> bool {
+    // Charge a transcendental as fusible when the backend inlines it, else as a call (`normal` is
+    // ln+cos = 2 calls — the heaviest; `exp`/`geometric` are one `ln`).
+    let charge = |weight: u32, fusible: &mut u32, libcalls: &mut u32| {
+        if inline_trans {
+            *fusible += 1;
+        } else {
+            *libcalls += weight;
+        }
+    };
     if !seen.insert(id) {
         return true; // shared node already counted
     }
     match graph.node(id) {
-        RvNode::Src(Source::Poisson { .. }) => false,
-        // A normal costs two calls (ln + cos) and draws two uniforms per lane — the heaviest.
+        RvNode::Src(Source::Poisson { .. }) => false, // Knuth loop stays interpreter-only
+        RvNode::Gather { .. } => false, // data-dependent addressing stays interpreter-only
         RvNode::Src(Source::Normal { .. }) => {
-            *libcalls += 2;
+            charge(2, fusible, libcalls);
             true
         }
         RvNode::Src(Source::Exp { .. }) | RvNode::Src(Source::Geometric { .. }) => {
-            *libcalls += 1;
+            charge(1, fusible, libcalls);
             true
         }
         RvNode::Src(_) => {
-            *fusible += 1; // uniform / uniform_int: cheap inline draw
+            *fusible += 1; // uniform / uniform_int: cheap inline draw on every backend
             true
         }
         RvNode::ConstNum(_) | RvNode::ConstBool(_) => true, // neutral
         RvNode::Unary(op, a) => {
-            if matches!(op, UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Round) {
-                *libcalls += 1;
-            } else {
-                *fusible += 1;
+            match op {
+                UnOp::Sin | UnOp::Cos => charge(1, fusible, libcalls), // inlined on native
+                UnOp::Atan | UnOp::Round => *libcalls += 1,            // still a call everywhere
+                _ => *fusible += 1,
             }
-            walk_cost(graph, *a, seen, fusible, libcalls)
+            walk_cost(graph, *a, seen, fusible, libcalls, inline_trans)
         }
         RvNode::Binary(crate::ast::BinOp::Pow, a, b) => {
             if const_int_exponent(graph, *b).is_some() {
                 *fusible += 1; // repeated multiply, no call
-                walk_cost(graph, *a, seen, fusible, libcalls)
+                walk_cost(graph, *a, seen, fusible, libcalls, inline_trans)
             } else {
                 *libcalls += 1; // pow call
-                walk_cost(graph, *a, seen, fusible, libcalls)
-                    && walk_cost(graph, *b, seen, fusible, libcalls)
+                walk_cost(graph, *a, seen, fusible, libcalls, inline_trans)
+                    && walk_cost(graph, *b, seen, fusible, libcalls, inline_trans)
             }
         }
         RvNode::Binary(_, a, b) => {
             *fusible += 1;
-            walk_cost(graph, *a, seen, fusible, libcalls)
-                && walk_cost(graph, *b, seen, fusible, libcalls)
+            walk_cost(graph, *a, seen, fusible, libcalls, inline_trans)
+                && walk_cost(graph, *b, seen, fusible, libcalls, inline_trans)
         }
         RvNode::Select { cond, a, b } => {
             *fusible += 1;
-            walk_cost(graph, *cond, seen, fusible, libcalls)
-                && walk_cost(graph, *a, seen, fusible, libcalls)
-                && walk_cost(graph, *b, seen, fusible, libcalls)
+            walk_cost(graph, *cond, seen, fusible, libcalls, inline_trans)
+                && walk_cost(graph, *a, seen, fusible, libcalls, inline_trans)
+                && walk_cost(graph, *b, seen, fusible, libcalls, inline_trans)
         }
     }
 }
 
 /// Pick the RNG stream count for a graph. Multi-stream pays off only when the kernel is bound by the
-/// xoshiro latency chain — i.e. pure inline arithmetic/draws. A transcendental call (`ln`/`cos`/
-/// `pow`) doesn't overlap across streams and the extra states add register pressure, so
-/// call-bearing graphs measured *slower* multi-stream; those stay single-stream.
+/// **xoshiro latency chain** — pure inline arithmetic over `uniform`/`uniform_int` draws (`pi`,
+/// `dice`) — because independent streams let the out-of-order core overlap the otherwise-serial
+/// chains (~2×, see `jit::bench_streams`).
+///
+/// Transcendental draws/ufuncs are different: even inlined (`ln`/`sin`/`cos` polynomials), they are
+/// *arithmetic-throughput*-bound, not latency-bound — the execution units are already saturated, so
+/// adding streams just multiplies the work with nothing to overlap (measured flat `s1≈s4`, with
+/// worse register pressure on large kernels). Those — and any remaining real call (`atan`/`round`/
+/// non-integer `pow`) — stay single-stream. So the rule is "multi-stream iff latency-bound".
 pub fn choose_streams(graph: &RvGraph, root: RvId) -> usize {
     let mut seen = HashSet::new();
-    let (mut fusible, mut libcalls) = (0u32, 0u32);
-    if walk_cost(graph, root, &mut seen, &mut fusible, &mut libcalls) && libcalls == 0 {
+    if latency_bound(graph, root, &mut seen) {
         STREAMS
     } else {
         1
+    }
+}
+
+/// Whether `root`'s cone is purely the xoshiro-latency-bound regime: only `uniform`/`uniform_int`
+/// sources and plain fusible arithmetic — no transcendental draw (`normal`/`exp`/`geometric`) or
+/// ufunc (`sin`/`cos`/`atan`/`round`) and no non-integer `pow`. (`Poisson` returns `false` here too,
+/// but the backend selector rejects it earlier via [`profitable`].)
+fn latency_bound(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>) -> bool {
+    if !seen.insert(id) {
+        return true; // shared node already checked
+    }
+    match graph.node(id) {
+        RvNode::Src(Source::Uniform(_) | Source::UniformInt { .. }) => true,
+        RvNode::Src(_) => false, // normal / exp / geometric / poisson: not latency-bound
+        RvNode::Gather { .. } => false, // interpreter-only (gated out before this is consulted)
+        RvNode::ConstNum(_) | RvNode::ConstBool(_) => true,
+        RvNode::Unary(op, a) => {
+            !matches!(op, UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Round)
+                && latency_bound(graph, *a, seen)
+        }
+        RvNode::Binary(crate::ast::BinOp::Pow, a, b) => {
+            const_int_exponent(graph, *b).is_some()
+                && latency_bound(graph, *a, seen)
+                && latency_bound(graph, *b, seen)
+        }
+        RvNode::Binary(_, a, b) => latency_bound(graph, *a, seen) && latency_bound(graph, *b, seen),
+        RvNode::Select { cond, a, b } => {
+            latency_bound(graph, *cond, seen)
+                && latency_bound(graph, *a, seen)
+                && latency_bound(graph, *b, seen)
+        }
     }
 }
 
@@ -160,6 +209,7 @@ pub fn choose_streams(graph: &RvGraph, root: RvId) -> usize {
 pub fn supported(graph: &RvGraph, root: RvId) -> bool {
     match graph.node(root) {
         RvNode::Src(Source::Poisson { .. }) => false,
+        RvNode::Gather { .. } => false,
         RvNode::Src(_) => true,
         RvNode::ConstNum(_) | RvNode::ConstBool(_) => true,
         RvNode::Unary(_, a) => supported(graph, *a),
@@ -189,6 +239,12 @@ pub fn cone_size(graph: &RvGraph, root: RvId) -> usize {
                 go(graph, *cond, seen);
                 go(graph, *a, seen);
                 go(graph, *b, seen);
+            }
+            RvNode::Gather { elems, index } => {
+                for &e in elems.iter() {
+                    go(graph, e, seen);
+                }
+                go(graph, *index, seen);
             }
         }
     }

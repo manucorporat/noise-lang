@@ -50,6 +50,10 @@ pub struct Engine {
     /// WASM playground reads it to show program output in the browser. Buffering (instead of a
     /// bare `println!`) keeps `Print` portable to `wasm32`, where stdout goes nowhere.
     output: String,
+    /// Default Monte Carlo budget for `P`/`E`/`Var`/`Q` when a call carries no explicit sample
+    /// count. Starts at [`builtins::P_DEFAULT_N`]; a program tunes it for the whole run with
+    /// `engine::set_max_loops(N)`. An explicit per-call count (`P(event, n)`) still wins over this.
+    max_loops: usize,
 }
 
 impl Default for Engine {
@@ -67,6 +71,7 @@ impl Engine {
             call_depth: 0,
             used: HashSet::new(),
             output: String::new(),
+            max_loops: builtins::P_DEFAULT_N,
         }
     }
 
@@ -130,12 +135,14 @@ impl Engine {
                 //   `=` binds the evaluated value verbatim — crucially, a recipe STAYS a recipe,
                 //        so a later `~` on it draws an independent copy.
                 let bound = match kind {
-                    BindKind::Sample => self.draw_if_recipe(v),
+                    BindKind::Sample => self.draw_if_recipe(v)?,
                     BindKind::Assign => v,
                 };
                 self.vars.insert(name.clone(), bound.clone());
                 Ok(bound)
             }
+            Expr::Sample { shape, body } => self.eval_sample(shape, body),
+            Expr::MatMul(l, r) => self.eval_matmul(l, r, node.span),
             Expr::FnDef { kind, name, params, body } => {
                 // Defining a function registers it (cloning the body out of the AST so it
                 // outlives this `run`) and evaluates to unit.
@@ -209,7 +216,7 @@ impl Engine {
                     self.output.push('\n');
                     Ok(Value::Unit)
                 } else {
-                    builtins::call(base, &arg_vals, &self.graph, node.span)
+                    builtins::call(base, &arg_vals, &self.graph, self.max_loops, node.span)
                 }
             }
             // Extracted into methods to keep `eval`'s stack frame small (recursion-depth budget).
@@ -220,7 +227,7 @@ impl Engine {
             Expr::Use(module) => {
                 if !is_module(module) {
                     return Err(NoiseError::runtime(
-                        format!("unknown module '{module}' (known modules: rand, math, vec, builtin)"),
+                        format!("unknown module '{module}' (known modules: rand, math, vec, signal, engine, builtin)"),
                         node.span,
                     ));
                 }
@@ -296,7 +303,7 @@ impl Engine {
             Some(m) => {
                 if !is_module(m) {
                     return Err(NoiseError::runtime(
-                        format!("unknown module '{m}' (known modules: rand, math, vec, builtin)"),
+                        format!("unknown module '{m}' (known modules: rand, math, vec, signal, engine, builtin)"),
                         span,
                     ));
                 }
@@ -380,6 +387,10 @@ impl Engine {
                 ))
             }
         };
+        // A random-variable index is a per-lane *gather*: each sample selects its own element.
+        if is_dist(&iv) {
+            return self.gather(&xs, iv, arr.span, idx.span);
+        }
         let i = self.array_index(&iv, idx.span)?;
         if i >= xs.len() {
             return Err(NoiseError::runtime(
@@ -388,6 +399,48 @@ impl Engine {
             ));
         }
         Ok(xs[i].clone())
+    }
+
+    /// Build a per-lane gather node for `xs[index]` where `index` is a random variable. Every
+    /// element is lifted to an RV (constants fold into `ConstNum`/`ConstBool` nodes); they must be
+    /// scalars of one kind — gathering a matrix row into a single lane is out of scope. At sample
+    /// time each lane rounds its `index` to the nearest integer and **clamps** it into range (a
+    /// permutation index is always valid, so the clamp only guards malformed inputs).
+    fn gather(&mut self, xs: &[Value], index: Value, arr_span: Span, idx_span: Span) -> Result<Value> {
+        if xs.is_empty() {
+            return Err(NoiseError::runtime(
+                "cannot gather from an empty array".to_string(),
+                arr_span,
+            ));
+        }
+        let (index_id, index_kind) = self.operand_to_rv(index, idx_span)?;
+        if index_kind != RvKind::Num {
+            return Err(NoiseError::runtime(
+                format!("array index must be a number, got {}", index_kind.type_name()),
+                idx_span,
+            ));
+        }
+        let mut elems = Vec::with_capacity(xs.len());
+        let mut elem_kind: Option<RvKind> = None;
+        for x in xs.iter() {
+            let (id, k) = self.operand_to_rv(x.clone(), arr_span)?;
+            match elem_kind {
+                None => elem_kind = Some(k),
+                Some(k0) if k0 != k => {
+                    return Err(NoiseError::runtime(
+                        "a gathered array must have elements of a single type".to_string(),
+                        arr_span,
+                    ))
+                }
+                _ => {}
+            }
+            elems.push(id);
+        }
+        let kind = elem_kind.expect("non-empty array has a kind");
+        let id = self
+            .graph
+            .push(RvNode::Gather { elems: elems.into_boxed_slice(), index: index_id }, kind);
+        Ok(Value::Dist(id))
     }
 
     fn eval_for(&mut self, var: &str, iter: &Spanned, body: &Spanned) -> Result<Value> {
@@ -450,24 +503,67 @@ impl Engine {
         // A stochastic (`~`) function draws on each call (recipe → fresh RV); a deterministic
         // (`=`) function returns its body value verbatim.
         match f.kind {
-            BindKind::Sample => Ok(self.draw_if_recipe(result?)),
+            BindKind::Sample => self.draw_if_recipe(result?),
             BindKind::Assign => result,
         }
     }
 
     /// `~` semantics in one place: a recipe is drawn into a fresh RV; anything else (a point
-    /// mass, an already-drawn RV) binds as-is, since there is nothing new to draw.
-    fn draw_if_recipe(&mut self, v: Value) -> Value {
+    /// mass, an already-drawn RV) binds as-is, since there is nothing new to draw. Fallible because
+    /// a structured recipe (`rotation`) builds a whole matrix and could surface a shape error;
+    /// scalar recipe draws never fail.
+    fn draw_if_recipe(&mut self, v: Value) -> Result<Value> {
         match v {
             Value::Recipe(r) => self.draw(r),
-            other => other,
+            other => Ok(other),
         }
+    }
+
+    /// The prefix draw operator `~[shape]? body` (LANG.md §2). Evaluate the operand once to a
+    /// recipe (or any value), then materialize: a bare `~` draws a single sample; a shape draws a
+    /// nested array with an *independent* draw at every leaf. Kept out of the `eval` match so that
+    /// arm's locals don't inflate the (deeply recursive) `eval` stack frame.
+    fn eval_sample(&mut self, shape: &[Spanned], body: &Spanned) -> Result<Value> {
+        let v = self.eval(body)?;
+        if shape.is_empty() {
+            return self.draw_if_recipe(v);
+        }
+        let mut dims = Vec::with_capacity(shape.len());
+        for dim in shape {
+            let dv = self.eval(dim)?;
+            dims.push(self.count_arg("~", &dv, dim.span)?);
+        }
+        self.draw_shaped(&dims, &v)
+    }
+
+    /// Build a nested array of the given shape, drawing the recipe independently at every leaf
+    /// (`draw_if_recipe` instantiates fresh source nodes each call, so the leaves are iid). A
+    /// non-recipe operand is repeated as-is. Backs the shaped prefix draw `~[n, m, …] recipe`.
+    fn draw_shaped(&mut self, dims: &[usize], recipe: &Value) -> Result<Value> {
+        let (n, rest) = (dims[0], &dims[1..]);
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            if rest.is_empty() {
+                out.push(self.draw_if_recipe(recipe.clone())?);
+            } else {
+                out.push(self.draw_shaped(rest, recipe)?);
+            }
+        }
+        Ok(Value::Array(Rc::new(out)))
     }
 
     /// Draw a fresh random variable from a recipe — the *only* place sampling-DAG source nodes
     /// are created (LANG.md §2: `~` is the only thing that draws). Each call instantiates new
-    /// source node(s), so two `~` on the same recipe are independent.
-    fn draw(&mut self, r: Recipe) -> Value {
+    /// source node(s), so two `~` on the same recipe are independent. The scalar recipes return a
+    /// `Value::Dist`; the structured `rotation` recipe returns a `Value::Array` (a matrix of RVs).
+    fn draw(&mut self, r: Recipe) -> Result<Value> {
+        // The multivariate recipes: drawing them builds a whole array of correlated draws.
+        if let Recipe::Rotation { d } = r {
+            return self.draw_rotation(d);
+        }
+        if let Recipe::Permutation { n } = r {
+            return self.draw_permutation(n);
+        }
         let id = match r {
             Recipe::Uniform { lo, hi } => {
                 self.graph.push(RvNode::Src(Source::Uniform(Uniform { lo, hi })), RvKind::Num)
@@ -504,8 +600,11 @@ impl Engine {
                 let c = self.graph.push(RvNode::ConstNum(p), RvKind::Num);
                 self.graph.push(RvNode::Binary(BinOp::Lt, u, c), RvKind::Bool)
             }
+            // Handled above with an early return (they yield arrays, not a scalar `id`).
+            Recipe::Rotation { .. } => unreachable!("rotation drawn via draw_rotation"),
+            Recipe::Permutation { .. } => unreachable!("permutation drawn via draw_permutation"),
         };
-        Value::Dist(id)
+        Ok(Value::Dist(id))
     }
 
     /// Lift a unary op over a random variable. The operand is a `Value::Dist` (the caller's
@@ -894,7 +993,7 @@ impl Engine {
         }
     }
 
-    /// Resolve a non-negative integer count argument (`iid`/`iidmat` sizes).
+    /// Resolve a non-negative integer count argument (a `~[shape]` dimension, a `rotation` size).
     fn count_arg(&self, name: &str, v: &Value, span: Span) -> Result<usize> {
         let n = match v {
             Value::Num(n) => *n,
@@ -915,6 +1014,24 @@ impl Engine {
         Ok(n as usize)
     }
 
+    /// `engine::set_max_loops(N)` — set the default Monte Carlo budget (the sample count `P`/`E`/
+    /// `Var`/`Q` use when called without an explicit count) for the rest of the run. Lets a program
+    /// trade accuracy for speed once, up front, instead of threading `n` through every query; an
+    /// explicit per-call count still overrides it. Returns unit (it's a setting, not a value).
+    fn lib_set_max_loops(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [n] = arity1("set_max_loops", args, span)?;
+        let n = self.count_arg("set_max_loops", n, span)?;
+        if n < 1 {
+            return Err(NoiseError::runtime(
+                "set_max_loops(N) needs N >= 1 (the Monte Carlo budget must draw at least once)"
+                    .to_string(),
+                span,
+            ));
+        }
+        self.max_loops = n;
+        Ok(Value::Unit)
+    }
+
     /// Dispatch a library call (collections / linear algebra). Returns `None` if `name` is not a
     /// library function, so the caller falls through to the pure builtins. These live here (not in
     /// `builtins.rs`) because they build graph nodes and/or draw — they need `&mut self` (§0).
@@ -928,8 +1045,8 @@ impl Engine {
             };
         }
         let r = match name {
-            "iid" => self.lib_iid(args, span),
-            "iidmat" => self.lib_iidmat(args, span),
+            "set_max_loops" => self.lib_set_max_loops(args, span),
+            "quantize" => self.lib_quantize(args, span),
             "sum" => self.lib_sum(args, span),
             "count" => self.lib_count(args, span),
             "any" => self.lib_any(args, span),
@@ -1078,7 +1195,7 @@ impl Engine {
             return Vec::new();
         }
         // Octaves spanning timescales from 1 up to ~n (capped so node count stays bounded).
-        let octaves = (usize::BITS - (n as usize).leading_zeros()).clamp(1, 16) as usize;
+        let octaves = (usize::BITS - n.leading_zeros()).clamp(1, 16) as usize;
         let sigma_oct = sigma / (octaves as f64).sqrt();
         let mut acc = self.ou_ids(sigma_oct, 1.0, n);
         for i in 1..octaves {
@@ -1091,34 +1208,114 @@ impl Engine {
         acc
     }
 
-    /// `iid(d, n)` — an array of `n` independent draws of recipe `d` (each `~` is a fresh node).
-    /// A non-recipe element (e.g. a point mass) is repeated as-is.
-    fn lib_iid(&mut self, args: &[Value], span: Span) -> Result<Value> {
-        let [d, n] = arity2("iid", args, span)?;
-        let n = self.count_arg("iid", n, span)?;
-        let mut out = Vec::with_capacity(n);
+    /// Draw a `rotation(d)` recipe: a fresh `d`×`d` random **orthonormal** matrix per Monte Carlo
+    /// sample (a Haar rotation: the random rotation `Π` of TurboQuant Algorithm 1, so `Π·x` is
+    /// uniform on the unit sphere and each coordinate is `≈ N(0, 1/d)`). Built by drawing a Gaussian
+    /// seed matrix and orthonormalizing its rows with (modified) Gram–Schmidt, lowered into the RV
+    /// graph — it reuses `dot`/`vsub`/`normalize`, so every entry is an ordinary RV node sampled per
+    /// lane. The cost is `O(d³)` graph nodes, so keep `d` modest (≤ ~32 for interactive runs). The
+    /// inner reducers can't actually fail here (we control the shapes), so the span is synthetic.
+    fn draw_rotation(&mut self, d: usize) -> Result<Value> {
+        let span = Span::default();
+        // Gaussian seed: `d` rows of `d` iid N(0,1) draws (a fresh source node per entry).
+        let mut seed = Vec::with_capacity(d);
+        for _ in 0..d {
+            let mut row = Vec::with_capacity(d);
+            for _ in 0..d {
+                row.push(self.draw(Recipe::Normal { mu: 0.0, sigma: 1.0 })?);
+            }
+            seed.push(Value::Array(Rc::new(row)));
+        }
+        // Modified Gram–Schmidt over the rows: subtract the projection onto each previously
+        // orthonormalized row (which, being unit, has projection coefficient `dot(u, qⱼ)`), then
+        // normalize. The resulting rows are orthonormal, hence the whole matrix is orthogonal.
+        let mut q: Vec<Value> = Vec::with_capacity(d);
+        for v in seed.into_iter() {
+            let mut u = v;
+            for qj in q.iter() {
+                let coeff = self.lib_dot(&[u.clone(), qj.clone()], span)?;
+                let proj = self.binop(BinOp::Mul, qj.clone(), coeff, span)?;
+                u = self.lib_vsub(&[u, proj], span)?;
+            }
+            q.push(self.lib_normalize(&[u], span)?);
+        }
+        Ok(Value::Array(Rc::new(q)))
+    }
+
+    /// Draw a `permutation(n)` recipe: a fresh uniform random permutation of `0..n` per Monte
+    /// Carlo sample, returned as a length-`n` array. Built the same way `rotation` is — as
+    /// arithmetic over shared iid sources, so each element is an ordinary RV node and the entries
+    /// are jointly a permutation per lane. We draw `n` iid uniform keys and take their **argsort**:
+    /// `deck[k] = rank(keyₖ) = #{ j : keyⱼ < keyₖ }`. With continuous keys there are no ties (prob
+    /// 0), so the ranks are a permutation of `0..n`. Cost is `O(n²)` comparison nodes, so keep `n`
+    /// modest. The inner ops can't fail here (we control the shapes), so the span is synthetic.
+    fn draw_permutation(&mut self, n: usize) -> Result<Value> {
+        let span = Span::default();
+        // `n` iid uniform keys (a fresh source node each).
+        let mut keys = Vec::with_capacity(n);
         for _ in 0..n {
-            out.push(self.draw_if_recipe(d.clone()));
+            keys.push(self.draw(Recipe::Uniform { lo: 0.0, hi: 1.0 })?);
+        }
+        // Each element is the rank of its key: count how many other keys are strictly smaller.
+        let mut out = Vec::with_capacity(n);
+        for k in 0..n {
+            let mut rank = Value::Num(0.0);
+            for (j, key_j) in keys.iter().enumerate() {
+                if j == k {
+                    continue;
+                }
+                let lt = self.binop(BinOp::Lt, key_j.clone(), keys[k].clone(), span)?;
+                let ind = self.indicator(lt, span)?;
+                rank = self.binop(BinOp::Add, rank, ind, span)?;
+            }
+            out.push(rank);
         }
         Ok(Value::Array(Rc::new(out)))
     }
 
-    /// `iidmat(d, n, m)` — an `n`×`m` matrix (array of `n` iid rows of length `m`).
-    fn lib_iidmat(&mut self, args: &[Value], span: Span) -> Result<Value> {
-        if args.len() != 3 {
-            return Err(arity_err("iidmat", 3, args.len(), span));
+    /// `quantize(v, centroids)` — snap each coordinate of `v` to its **nearest** value in `centroids`
+    /// (the optimal scalar quantizer of TurboQuant Algorithm 1: a Voronoi/Lloyd–Max decision rule
+    /// whose cell boundaries are the midpoints between consecutive sorted centroids). `centroids`
+    /// must be constants. Each coordinate lowers to a chain of `select(v < midpoint, …)` nodes, so a
+    /// random `v` stays a random variable. With a 1-element codebook this is a constant map.
+    fn lib_quantize(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [v, c] = arity2("quantize", args, span)?;
+        let xs = self.expect_array("quantize", v, span)?;
+        let cs = self.expect_array("quantize", c, span)?;
+        if cs.is_empty() {
+            return Err(NoiseError::runtime("quantize needs a non-empty codebook".to_string(), span));
         }
-        let n = self.count_arg("iidmat", &args[1], span)?;
-        let m = self.count_arg("iidmat", &args[2], span)?;
-        let mut rows = Vec::with_capacity(n);
-        for _ in 0..n {
-            let mut row = Vec::with_capacity(m);
-            for _ in 0..m {
-                row.push(self.draw_if_recipe(args[0].clone()));
+        let mut levels: Vec<f64> = Vec::with_capacity(cs.len());
+        for e in cs.iter() {
+            match scalar_const(e) {
+                Some(n) => levels.push(n),
+                None => {
+                    return Err(NoiseError::runtime(
+                        "quantize centroids must be constant numbers, not random variables".to_string(),
+                        span,
+                    ))
+                }
             }
-            rows.push(Value::Array(Rc::new(row)));
         }
-        Ok(Value::Array(Rc::new(rows)))
+        levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut out = Vec::with_capacity(xs.len());
+        for x in xs.iter() {
+            out.push(self.nearest_centroid(x.clone(), &levels, span)?);
+        }
+        Ok(Value::Array(Rc::new(out)))
+    }
+
+    /// Snap a single value to the nearest of `levels` (sorted ascending) via a nested `select`
+    /// over the midpoint thresholds. Outermost test wins, so `x < t₀ → levels[0]`, then
+    /// `x < t₁ → levels[1]`, …, else the top level.
+    fn nearest_centroid(&mut self, x: Value, levels: &[f64], span: Span) -> Result<Value> {
+        let mut result = Value::Num(levels[levels.len() - 1]);
+        for i in (0..levels.len() - 1).rev() {
+            let t = 0.5 * (levels[i] + levels[i + 1]);
+            let cond = self.binop(BinOp::Lt, x.clone(), Value::Num(t), span)?;
+            result = self.select(cond, Value::Num(levels[i]), result, span)?;
+        }
+        Ok(result)
     }
 
     /// `sum(xs)` — fold `+` over the elements (`0` for an empty array).
@@ -1254,6 +1451,74 @@ impl Engine {
         Ok(Value::Array(Rc::new(out)))
     }
 
+    /// Evaluate both operands of `@`, then dispatch by shape. Split out of the `eval` match so its
+    /// locals don't enlarge the (deeply recursive) `eval` stack frame — see `eval_sample`.
+    fn eval_matmul(&mut self, l: &Spanned, r: &Spanned, span: Span) -> Result<Value> {
+        let lv = self.eval(l)?;
+        let rv = self.eval(r)?;
+        self.matmul(lv, rv, span)
+    }
+
+    /// The matrix-product operator `@` (`Expr::MatMul`). Dispatches on operand rank (0 = scalar,
+    /// 1 = vector, 2 = matrix), lowering to the existing dot / broadcast machinery so every result
+    /// element is an ordinary value/RV node:
+    ///   - `vec @ vec` → scalar dot product
+    ///   - `mat @ vec` → matrix–vector product (`out[i] = dot(M[i], v)`)
+    ///   - `vec @ mat` → row-vector × matrix (`out[j] = Σ_p v[p]·M[p][j]`)
+    ///   - `mat @ mat` → matrix–matrix product (each result row is `A[i] @ B`)
+    /// A scalar operand is an error — `@` is for linear algebra; use `*` for scaling.
+    fn matmul(&mut self, l: Value, r: Value, span: Span) -> Result<Value> {
+        match (value_rank(&l), value_rank(&r)) {
+            (1, 1) => self.lib_dot(&[l, r], span),
+            (2, 1) => self.lib_matvec(&[l, r], span),
+            (1, 2) => {
+                let rows = self.expect_array("@", &r, span)?;
+                let weights = self.expect_array("@", &l, span)?;
+                self.weighted_row_sum(&weights, &rows, span)
+            }
+            (2, 2) => {
+                let arows = self.expect_array("@", &l, span)?;
+                let brows = self.expect_array("@", &r, span)?;
+                let mut out = Vec::with_capacity(arows.len());
+                for a in arows.iter() {
+                    let w = self.expect_array("@", a, span)?;
+                    out.push(self.weighted_row_sum(&w, &brows, span)?);
+                }
+                Ok(Value::Array(Rc::new(out)))
+            }
+            _ => Err(NoiseError::runtime(
+                format!(
+                    "`@` (matrix product) needs vector/matrix operands, got {} @ {} — use `*` to scale",
+                    l.type_name(),
+                    r.type_name()
+                ),
+                span,
+            )),
+        }
+    }
+
+    /// `Σ_p weights[p] · rows[p]` — the weighted sum of the matrix `rows` by a vector of `weights`,
+    /// returning a single row vector. The scalar·row product broadcasts and the row sum is
+    /// elementwise, so this lifts over random variables. Backs `vec @ mat` and each row of
+    /// `mat @ mat`. Requires the inner dimensions to match and be non-empty.
+    fn weighted_row_sum(&mut self, weights: &[Value], rows: &[Value], span: Span) -> Result<Value> {
+        if weights.len() != rows.len() {
+            return Err(length_mismatch("@", weights.len(), rows.len(), span));
+        }
+        if weights.is_empty() {
+            return Err(NoiseError::runtime(
+                "`@` needs a non-empty inner dimension".to_string(),
+                span,
+            ));
+        }
+        let mut acc = self.binop(BinOp::Mul, weights[0].clone(), rows[0].clone(), span)?;
+        for (w, row) in weights.iter().zip(rows.iter()).skip(1) {
+            let term = self.binop(BinOp::Mul, w.clone(), row.clone(), span)?;
+            acc = self.binop(BinOp::Add, acc, term, span)?;
+        }
+        Ok(acc)
+    }
+
     /// `normalize(v)` — `v / norm(v)` (unit vector). The division broadcasts the scalar `1/norm`
     /// across the array, the same way `c * v` would.
     fn lib_normalize(&mut self, args: &[Value], span: Span) -> Result<Value> {
@@ -1350,7 +1615,7 @@ fn is_dist(v: &Value) -> bool {
 }
 
 /// The built-in modules. `builtin` is always active; the others need a `use`.
-const MODULES: [&str; 5] = ["rand", "math", "vec", "signal", "builtin"];
+const MODULES: [&str; 6] = ["rand", "math", "vec", "signal", "engine", "builtin"];
 
 /// Whether `m` names a known module.
 #[inline]
@@ -1368,11 +1633,12 @@ fn is_module(m: &str) -> bool {
 /// Euler's number, so these two are intentionally distinct and never aliased to each other.
 fn module_of(name: &str) -> Option<&'static str> {
     Some(match name {
-        // distribution constructors + iid construction (random)
+        // distribution constructors, including `rotation` (a recipe for a random orthonormal matrix,
+        // drawn with `~` like any distribution). Batched sampling is the prefix `~[shape]` operator,
+        // not a builtin — see the `Sample` AST node.
         "Unif" | "unif" | "Unif_int" | "unif_int" | "Bernoulli" | "bernoulli" | "Normal"
         | "normal" | "Normal_int" | "normal_int" | "Exp" | "exp" | "Exp_int" | "exp_int"
-        | "Poisson" | "poisson" | "Geometric" | "geometric" | "Iid" | "iid" | "Iidmat"
-        | "iidmat" => "rand",
+        | "Poisson" | "poisson" | "Geometric" | "geometric" | "rotation" | "permutation" => "rand",
         // math constants (lowercase only) + scalar math (sin/cos/atan/sign ufuncs lift/map)
         "pi" | "e" => "math",
         "Sqrt" | "sqrt" | "Round" | "round" | "Log" | "log" | "Log10" | "log10" | "Sin" | "sin"
@@ -1383,10 +1649,13 @@ fn module_of(name: &str) -> Option<&'static str> {
         | "norm" | "Vadd" | "vadd" | "Vsub" | "vsub"
         | "Matvec" | "matvec" | "Transpose" | "transpose" | "Normalize" | "normalize"
         | "Has_duplicate" | "has_duplicate" | "Mse" | "mse" | "Ones" | "ones" | "Zeros"
-        | "zeros" | "Iota" | "iota" => "vec",
+        | "zeros" | "Iota" | "iota" | "quantize" => "vec",
         // signal generation (DSP waveforms) + colored noise + materialization
         "Sine" | "sine" | "Cosine" | "cosine" | "Sample" | "sample" | "noise_white"
         | "noise_brown" | "noise_pink" | "noise_ou" => "signal",
+        // run-time knobs: tune the evaluator itself (e.g. the Monte Carlo budget). Capital-only,
+        // no lowercase alias — these are imperative settings, not value-producing builtins.
+        "set_max_loops" => "engine",
         // always-on core: probability/expectation, IO, array length. These are **capital-only** (no
         // lowercase alias). Arrays are fixed-size: the half-open range has dedicated `a..b` syntax
         // (not a `range` builtin), and there is no `Push` (arrays are never grown).
@@ -1430,6 +1699,20 @@ fn scalar_const(v: &Value) -> Option<f64> {
         Value::Num(n) => Some(*n),
         Value::Est { val, .. } => Some(*val),
         _ => None,
+    }
+}
+
+/// Tensor rank for the `@` operator: `0` = scalar, `1` = vector (array of non-arrays), `2` =
+/// matrix (array whose first element is an array). An empty array is treated as a rank-1 vector.
+/// Higher ranks and jaggedness aren't distinguished here — `@` only needs to tell these three
+/// apart, and the dot/broadcast helpers it delegates to validate shape from there.
+fn value_rank(v: &Value) -> u8 {
+    match v {
+        Value::Array(xs) => match xs.first() {
+            Some(Value::Array(_)) => 2,
+            _ => 1,
+        },
+        _ => 0,
     }
 }
 

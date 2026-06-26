@@ -1,0 +1,122 @@
+---
+import Layout from '../layouts/Layout.astro';
+import ShaderFigure from '../components/ShaderFigure.astro';
+// Single source of truth: the agent skill IS the docs. Astro renders the markdown at build
+// time, so editing .claude/skills/noise-lang/SKILL.md updates this page. ```noise fences are
+// highlighted with the shared TextMate grammar (see astro.config.mjs).
+import { Content, frontmatter } from '../../../.claude/skills/noise-lang/SKILL.md';
+---
+
+<Layout title="Noise skill — the language guide" description={frontmatter.description}>
+  <header class="topbar">
+    <div class="wide topbar-inner">
+      <a class="brand" href="/">noise<span class="brand-tilde">~</span><span class="brand-dim">lang</span></a>
+      <nav class="topbar-links">
+        <a href="/#ideas">How it works</a>
+        <a href="/#performance">Performance</a>
+        <a href="/play">Playground</a>
+        <a href="/skill">Skills</a>
+        <a href="https://github.com/manucorporat/noise-lang">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="measure docs">
+    <p class="docs-kicker">The language guide</p>
+
+    <div class="skill-install">
+      <ShaderFigure
+        n={1}
+        install="npx skills add manucorporat/noise-lang"
+        caption="the language guide below is also a portable skill — install it into your coding agent (Claude Code, Cursor, Codex, Copilot, Windsurf…) with the command above. Click to copy."
+      />
+    </div>
+
+    <Content />
+  </main>
+
+  <footer class="docs-foot measure">
+    <p>
+      This page is rendered from the project's agent skill
+      (<a href="https://github.com/manucorporat/noise-lang/blob/master/.claude/skills/noise-lang/SKILL.md"><code>SKILL.md</code></a>).
+      The full language spec is
+      <a href="https://github.com/manucorporat/noise-lang/blob/master/LANG.md"><code>LANG.md</code></a>.
+    </p>
+  </footer>
+</Layout>
+
+<style>
+  /* Topbar — mirrors the home page (src/pages/index.astro). */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    background: rgba(251, 250, 246, 0.88);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--rule);
+  }
+  .topbar-inner {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding-top: 0.7rem; padding-bottom: 0.7rem;
+  }
+  .brand { font-family: var(--serif); font-weight: 700; font-size: 1.1rem; color: var(--ink); }
+  .brand:hover { text-decoration: none; }
+  .brand-dim { color: var(--ink-dim); }
+  .brand-tilde {
+    font-family: var(--mono); font-weight: 500; color: var(--accent);
+    margin: 0 0.04em; vertical-align: baseline; position: relative; top: 0.02em;
+  }
+  .topbar-links { display: flex; gap: 1.3rem; }
+  .topbar-links a { color: var(--ink-dim); font-size: 0.92rem; }
+  .topbar-links a:hover { color: var(--ink); text-decoration: none; }
+  @media (max-width: 680px) { .topbar-links a:not(:last-child):not([href="/skill"]) { display: none; } }
+
+  /* The install card (shader + copy pill) gets breathing room before the guide starts. */
+  .skill-install { margin-bottom: 2.6rem; }
+
+  /* Prose — document-like, matching the paper aesthetic. */
+  .docs { padding-top: 2.4rem; padding-bottom: 4rem; }
+  .docs-kicker {
+    font-family: var(--sans); text-transform: uppercase; letter-spacing: 0.12em;
+    font-size: 0.72rem; color: var(--ink-faint); margin: 0 0 0.4rem;
+  }
+  .docs :global(h1) { font-size: 2rem; margin: 0 0 1.2rem; line-height: 1.15; }
+  .docs :global(h2) {
+    font-size: 1.35rem; margin: 2.4rem 0 0.8rem; padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .docs :global(h3) { font-size: 1.08rem; margin: 1.8rem 0 0.6rem; }
+  .docs :global(p), .docs :global(li) { line-height: 1.65; }
+  .docs :global(a) { color: var(--link); }
+  .docs :global(table) {
+    width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.92rem;
+  }
+  .docs :global(th), .docs :global(td) {
+    text-align: left; padding: 0.4rem 0.7rem; border: 1px solid var(--rule); vertical-align: top;
+  }
+  .docs :global(th) { background: var(--paper-2); font-family: var(--sans); }
+  .docs :global(code) {
+    font-family: var(--mono); font-size: 0.88em;
+    background: var(--paper-2); border: 1px solid var(--rule);
+    border-radius: 3px; padding: 0.05em 0.3em;
+  }
+  .docs :global(pre) {
+    background: var(--paper-2); border: 1px solid var(--rule); border-radius: 5px;
+    padding: 0.9rem 1.1rem; overflow-x: auto; margin: 1rem 0; line-height: 1.5;
+  }
+  .docs :global(pre code) { background: none; border: none; padding: 0; font-size: 0.86rem; }
+  .docs :global(blockquote) {
+    margin: 1rem 0; padding: 0.2rem 0 0.2rem 1rem;
+    border-left: 3px solid var(--rule); color: var(--ink-dim);
+  }
+  .docs :global(ul), .docs :global(ol) { padding-left: 1.4rem; }
+  .docs :global(hr) { border: none; border-top: 1px solid var(--rule); margin: 2rem 0; }
+  .docs :global(input[type="checkbox"]) { margin-right: 0.4rem; }
+
+  .docs-foot {
+    padding-top: 1.4rem; padding-bottom: 3rem;
+    border-top: 1px solid var(--rule); color: var(--ink-faint); font-size: 0.85rem;
+  }
+  .docs-foot code { font-family: var(--mono); }
+</style>

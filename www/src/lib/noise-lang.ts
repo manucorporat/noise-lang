@@ -8,14 +8,14 @@ export const THEME_ID = 'noise-paper';
 // Module-scoped builtin names, by role, so the highlighter can color them distinctly.
 const DISTRIBUTIONS = [
   'unif', 'unif_int', 'bernoulli', 'normal', 'normal_int', 'exp', 'exp_int',
-  'poisson', 'geometric', 'iid', 'iidmat',
+  'poisson', 'geometric', 'rotation',
 ];
 const QUERIES = ['P', 'Q', 'E', 'Var']; // probability / moment / quantile queries
 const BUILTINS = [
   'Print', 'Len',
   'sqrt', 'round', 'log', 'log10', 'sin', 'cos', 'atan', 'sign',
   'sum', 'count', 'any', 'all', 'max', 'min', 'mean', 'dot', 'normsq', 'norm',
-  'vadd', 'vsub', 'matvec', 'transpose', 'normalize', 'has_duplicate', 'mse',
+  'vadd', 'vsub', 'matvec', 'transpose', 'normalize', 'quantize', 'has_duplicate', 'mse',
   'ones', 'zeros', 'iota', 'vsign', 'scale',
   'sine', 'cosine', 'noise_white', 'sample',
 ];
@@ -62,9 +62,9 @@ export function registerNoise(monaco: typeof Monaco): void {
     // longest-first so `**`, `==`, `..`, `::`, `&&` win over their prefixes
     operators: [
       '**', '==', '!=', '<=', '>=', '&&', '||', '..', '::',
-      '+', '-', '*', '/', '<', '>', '!', '=', '~',
+      '+', '-', '*', '/', '<', '>', '!', '=', '~', '@',
     ],
-    symbols: /[=~!<>+\-*/&|.:]+/,
+    symbols: /[=~!<>+\-*/&|.:@]+/,
     tokenizer: {
       root: [
         // comments

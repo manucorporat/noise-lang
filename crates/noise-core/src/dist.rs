@@ -86,6 +86,16 @@ pub enum Recipe {
     /// integer (composed at draw time as `round(continuous)`), so `==`/counts are meaningful.
     NormalInt { mu: f64, sigma: f64 },
     ExpInt { rate: f64 },
+    /// A random `d`×`d` orthonormal matrix (a Haar rotation). Unlike the scalar recipes above this
+    /// is a *structured, multivariate* draw: `~` instantiates `d²` correlated Gaussian sources and
+    /// orthonormalizes them (Gram–Schmidt), yielding a `Value::Array` of arrays rather than a
+    /// scalar `Value::Dist`. See `Engine::draw_rotation`.
+    Rotation { d: usize },
+    /// A uniform random permutation of `0..n` (a length-`n` array, each value once). Like
+    /// `Rotation` this is a *structured* draw: `~` instantiates `n` iid uniform keys and takes
+    /// their argsort (each element is `rank(keyₖ)`), so every entry is an ordinary RV node and the
+    /// `n` entries are jointly a permutation per Monte Carlo lane. See `Engine::draw_permutation`.
+    Permutation { n: usize },
 }
 
 impl std::fmt::Display for Recipe {
@@ -100,6 +110,8 @@ impl std::fmt::Display for Recipe {
             Recipe::Geometric { p } => write!(f, "geometric({p})"),
             Recipe::NormalInt { mu, sigma } => write!(f, "normal_int({mu}, {sigma})"),
             Recipe::ExpInt { rate } => write!(f, "exp_int({rate})"),
+            Recipe::Rotation { d } => write!(f, "rotation({d})"),
+            Recipe::Permutation { n } => write!(f, "permutation({n})"),
         }
     }
 }
@@ -117,6 +129,11 @@ pub enum RvNode {
     /// Per-lane select (lifted `if`): `cond ? a : b`. `cond` is a bool-RV; `a` and `b` share
     /// the result kind. Pure data-parallel — no sequential state.
     Select { cond: RvId, a: RvId, b: RvId },
+    /// Per-lane gather (a *random* array index, `xs[i]` with `i` an RV): each lane reads its own
+    /// `index` value, rounds and clamps it into `0..elems.len()`, and selects that element. The
+    /// element nodes share the result kind. This is the one node a code generator can't emit
+    /// (data-dependent addressing), so it forces the interpreter — see `kernel::walk_cost`.
+    Gather { elems: Box<[RvId]>, index: RvId },
 }
 
 /// Append-only arena. Structural sharing is REQUIRED for correctness.

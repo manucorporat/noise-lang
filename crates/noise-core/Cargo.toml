@@ -13,6 +13,12 @@ cranelift-module = { version = "0.127.4", optional = true }
 cranelift-native = { version = "0.127.4", optional = true }
 wasm-encoder = "0.252"
 
+# Browser-only: the WASM-emitter's host seam (`wasm_host`) calls into JS (`WebAssembly.instantiate`
+# the emitted kernel + run it) via wasm-bindgen. Native builds never compile that module, so this
+# dependency is wasm32-gated and keeps the native crate wasm-bindgen-free.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 wasmi = "1.1"

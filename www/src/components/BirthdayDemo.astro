@@ -1,0 +1,179 @@
+---
+// The birthday paradox, scroll-driven. As people are added to the room the probability that two of
+// them share a birthday climbs a surprisingly steep curve, crossing 50% at just 23 people. The strip
+// up top is the latest room's actual birthdays scattered over the year; matches flash maroon. No
+// buttons: the curve builds itself while the stage is in view. Engine confirms P at 23.
+import CodePanel from './CodePanel.astro';
+
+const code = `days ~[23] rand::unif_int(1, 365)
+
+match = vec::has_duplicate(days)
+
+P(match)`;
+---
+
+<div class="scrolly bday-demo">
+  <div class="scrolly-grid">
+    <div class="scrolly-stage">
+      <div class="stage-inner glass">
+        <h4 class="stage-title">The birthday paradox</h4>
+        <div class="stage-canvas bday-canvas"><canvas id="bday-canvas" aria-label="Probability of a shared birthday as people are added"></canvas></div>
+        <div class="bday-axis"><span>0</span><span>10</span><span>20</span><span>30</span><span>40</span><span>50</span><span>60</span></div>
+        <CodePanel filename="birthday.noise" code={code} class="bday-code" />
+        <div class="stage-foot">
+          <span class="stat">people <b id="bday-n">0</b></span>
+          <span class="stat">P(two share) <b id="bday-p">—</b></span>
+          <span class="stat key">at 23 <b id="bday-23">—</b></span>
+        </div>
+        <p class="stage-engine" id="bday-engine"></p>
+      </div>
+      <figcaption class="figure-caption"><span class="fig-n">Figure 3.</span> the birthday paradox — coincidence is far likelier than it feels.</figcaption>
+    </div>
+    <div class="scrolly-steps" id="bday-steps">
+      <div class="scrolly-step" data-step="0">
+        <h4>A room full of birthdays</h4>
+        <p><code class="code-inline">~[23]</code> hands 23 people one random day each — that whole batch is a single draw. The strip up top is one such room scattered across the 365 days of the year.</p>
+      </div>
+      <div class="scrolly-step" data-step="1">
+        <h4>Ask: does any pair collide?</h4>
+        <p><code class="code-inline">has_duplicate</code> checks all 253 pairwise comparisons at once and is true the moment two days land on top of each other — the matches flash maroon above.</p>
+      </div>
+      <div class="scrolly-step" data-step="2">
+        <h4>Add people, watch it climb</h4>
+        <p>Each extra person adds more pairs that could collide, so <code class="code-inline">P(match)</code> rises far faster than intuition expects — not a gentle ramp but a steep wall.</p>
+      </div>
+      <div class="scrolly-step" data-step="3">
+        <h4>23 beats a coin flip</h4>
+        <p>The curve crosses the dashed 50% line at just 23 people — fewer than a classroom. By 50 it's a near-certainty. Our intuition compares <em>ourselves</em> to others; the math counts every pair.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+  .bday-canvas { height: 234px; }
+  .bday-axis { display: flex; justify-content: space-between; padding: 0 0.4rem; font-family: var(--mono); font-size: 0.74rem; color: var(--ink-dim); margin-top: -0.4rem; }
+  .bday-code { font-size: 0.82rem; }
+</style>
+
+<script>
+  import { runNoise } from '../lib/noise';
+
+  const root = document.querySelector('.bday-demo') as HTMLElement | null;
+  const canvas = document.getElementById('bday-canvas') as HTMLCanvasElement | null;
+  if (root && canvas) {
+    const gl = canvas.getContext('webgl', { antialias: true, alpha: false });
+    const nEl = document.getElementById('bday-n')!, pEl = document.getElementById('bday-p')!,
+      kEl = document.getElementById('bday-23')!, engineEl = document.getElementById('bday-engine')!;
+    const codeBody = root.querySelector('.code-body') as HTMLElement | null;
+    const lines = codeBody ? Array.from(codeBody.querySelectorAll<HTMLElement>('.cl')) : [];
+    if (codeBody) codeBody.classList.add('progressive');
+
+    const STEPS = [
+      { show: 0, add: [0], run: false },
+      { show: 2, add: [2], run: false },
+      { show: 4, add: [4], run: true },
+      { show: 4, add: [], run: true },
+    ];
+    let engineDone = false, stepRun = false;
+    function setStep(i: number) {
+      const c = STEPS[i];
+      stepRun = c.run;
+      lines.forEach((el, k) => { el.classList.toggle('shown', k <= c.show); el.classList.toggle('added', c.add.includes(k)); });
+      for (const el of root!.querySelectorAll('.scrolly-step')) el.classList.toggle('active', Number((el as HTMLElement).dataset.step) === i);
+      if (i === STEPS.length - 1 && !engineDone) { engineDone = true; engineResult(); }
+    }
+
+    if (gl) {
+      const MAXN = 60, TRIALS_PER_N = 800, PER_FRAME = 260;
+      const LX = -0.9, RX = 0.9, BASE = -0.78, TOP = 0.6, BANDY = 0.86;
+      const colW = (RX - LX) / MAXN;
+      const TEAL = [0.12, 0.43, 0.55], DARKTEAL = [0.08, 0.32, 0.42], MAROON = [0.54, 0.18, 0.29],
+        GREY = [0.5, 0.47, 0.43], FAINT = [0.74, 0.68, 0.6];
+      const xOf = (n: number) => LX + (n / MAXN) * (RX - LX);
+      const yOf = (p: number) => BASE + Math.min(Math.max(p, 0), 1) * (TOP - BASE);
+
+      const vS = `attribute vec2 p; void main(){ gl_Position=vec4(p,0.0,1.0); }`;
+      const fS = `precision highp float; uniform vec3 u_c; void main(){ gl_FragColor=vec4(u_c,1.0); }`;
+      const sh = (t: number, s: string) => { const x = gl.createShader(t)!; gl.shaderSource(x, s); gl.compileShader(x); return x; };
+      const prog = gl.createProgram()!; gl.attachShader(prog, sh(gl.VERTEX_SHADER, vS)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fS)); gl.linkProgram(prog); gl.useProgram(prog);
+      const buf = gl.createBuffer(), uC = gl.getUniformLocation(prog, 'u_c'), aP = gl.getAttribLocation(prog, 'p');
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      let aspect = 2;
+      const resize = () => { const r = canvas.getBoundingClientRect(); canvas.width = Math.floor(r.width * dpr); canvas.height = Math.floor(r.height * dpr); aspect = canvas.width / canvas.height; gl.viewport(0, 0, canvas.width, canvas.height); draw(); };
+      new ResizeObserver(resize).observe(canvas);
+
+      const rect = (x0: number, y0: number, x1: number, y1: number) => [x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1];
+      const dot = (cx: number, cy: number, s: number) => rect(cx - s, cy - s * aspect, cx + s, cy + s * aspect);
+      function drawTris(v: number[], c: number[]) { if (!v.length) return; gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.DYNAMIC_DRAW); gl.enableVertexAttribArray(aP); gl.vertexAttribPointer(aP, 2, gl.FLOAT, false, 0, 0); gl.uniform3f(uC, c[0], c[1], c[2]); gl.drawArrays(gl.TRIANGLES, 0, v.length / 2); }
+
+      // estimation: fast duplicate test with a generation-stamped table (no per-trial clear)
+      const stamp = new Int32Array(366); let gen = 0;
+      function hasDup(n: number) { gen++; for (let i = 0; i < n; i++) { const d = 1 + (Math.random() * 365 | 0); if (stamp[d] === gen) return true; stamp[d] = gen; } return false; }
+      // display: one concrete room of n birthdays, with the colliding days flagged
+      const lastDays: number[] = []; const dupSet = new Set<number>();
+      function sampleRoom(n: number) { lastDays.length = 0; dupSet.clear(); const seen = new Set<number>(); for (let i = 0; i < n; i++) { const d = 1 + (Math.random() * 365 | 0); lastDays.push(d); if (seen.has(d)) dupSet.add(d); else seen.add(d); } }
+
+      const PROB = new Float32Array(MAXN + 1);
+      let curN = 1, accHits = 0, accTrials = 0, curP = 0, raf = 0, inView = false;
+
+      function draw() {
+        gl.clearColor(0.957, 0.945, 0.91, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+        // x axis
+        drawTris(rect(LX - 0.03, BASE - 0.006, RX + 0.03, BASE + 0.006), GREY);
+        // dashed 50% line
+        const hy = yOf(0.5), dash: number[] = [];
+        for (let x = LX; x < RX; x += 0.07) dash.push(...rect(x, hy - 0.0035, x + 0.04, hy + 0.0035));
+        drawTris(dash, MAROON);
+        // filled area + crisp top edge, one column per person count
+        const fill: number[] = [], edge: number[] = [];
+        for (let k = 1; k <= curN; k++) {
+          const p = k < curN ? PROB[k] : curP; if (p <= 0) continue;
+          const cx = xOf(k), y = yOf(p);
+          fill.push(...rect(cx - colW * 0.5, BASE, cx + colW * 0.52, y));
+          edge.push(...rect(cx - colW * 0.5, y - 0.006, cx + colW * 0.52, y + 0.006));
+        }
+        drawTris(fill, TEAL); drawTris(edge, DARKTEAL);
+        // vertical marker at 23 once the playhead reaches it
+        if (curN >= 23) {
+          const mx = xOf(23), my = yOf(PROB[23] || curP);
+          drawTris(rect(mx - 0.0035, BASE, mx + 0.0035, my), MAROON);
+          drawTris(dot(mx, my, 0.014), MAROON);
+        }
+        // moving tip
+        drawTris(dot(xOf(curN), yOf(curP), 0.012), DARKTEAL);
+        // birthday strip: the current room scattered across the year
+        const band: number[] = [], hits: number[] = [];
+        for (const d of lastDays) { const x = LX + (d / 365) * (RX - LX); (dupSet.has(d) ? hits : band).push(...dot(x, BANDY, 0.009)); }
+        drawTris(band, FAINT); drawTris(hits, MAROON);
+      }
+
+      function loop() {
+        if (inView && stepRun && curN <= MAXN) {
+          for (let t = 0; t < PER_FRAME && accTrials < TRIALS_PER_N; t++) { if (hasDup(curN)) accHits++; accTrials++; }
+          curP = accHits / accTrials;
+          sampleRoom(curN);
+          if (accTrials >= TRIALS_PER_N) {
+            PROB[curN] = curP;
+            if (curN === 23) kEl.textContent = curP.toFixed(3);
+            curN++; accHits = 0; accTrials = 0;
+          }
+          draw();
+          nEl.textContent = String(Math.min(curN, MAXN)); pEl.textContent = curP.toFixed(3);
+        }
+        raf = requestAnimationFrame(loop);
+      }
+      new IntersectionObserver((es) => { for (const e of es) inView = e.isIntersecting; }, { threshold: 0.2 }).observe(canvas);
+      resize(); raf = requestAnimationFrame(loop);
+    }
+
+    async function engineResult() {
+      engineEl.textContent = 'engine (10⁶ samples)…';
+      try { const r = await runNoise('days ~[23] rand::unif_int(1,365); P(vec::has_duplicate(days))'); engineEl.innerHTML = `engine, 10⁶ samples, 23 people: <span class="ok">${r.value ?? r.output.trim()}</span>`; } catch { engineEl.textContent = ''; }
+    }
+
+    const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting && e.intersectionRatio > 0.5) setStep(Number((e.target as HTMLElement).dataset.step)); }, { threshold: [0.5], rootMargin: '-18% 0px -18% 0px' });
+    for (const el of root.querySelectorAll('.scrolly-step')) io.observe(el);
+    setStep(0);
+  }
+</script>

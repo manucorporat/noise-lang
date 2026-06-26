@@ -46,17 +46,9 @@ type KernelFn = unsafe extern "C" fn(*mut f64, i64, *mut u64);
 
 // Scalar math the kernel can't express as a single CLIF instruction is delegated to these
 // `extern "C"` shims (registered as JIT symbols, called per draw). `sqrt`/`floor` are NOT here —
-// they are native CLIF instructions on the targets we run. Names are prefixed `nz_` to avoid any
-// clash with libm symbols the module might resolve itself.
-extern "C" fn nz_ln(x: f64) -> f64 {
-    x.ln()
-}
-extern "C" fn nz_sin(x: f64) -> f64 {
-    x.sin()
-}
-extern "C" fn nz_cos(x: f64) -> f64 {
-    x.cos()
-}
+// they are native CLIF instructions on the targets we run, and neither are `ln`/`sin`/`cos`, which
+// are inlined as polynomials (see `emit_ln`/`emit_trig` and [`crate::approx`]). Names are prefixed
+// `nz_` to avoid any clash with libm symbols the module might resolve itself.
 extern "C" fn nz_atan(x: f64) -> f64 {
     x.atan()
 }
@@ -69,9 +61,6 @@ extern "C" fn nz_pow(a: f64, b: f64) -> f64 {
 
 /// Module-level `FuncId`s for the math shims (declared once per build).
 struct MathIds {
-    ln: cranelift_module::FuncId,
-    sin: cranelift_module::FuncId,
-    cos: cranelift_module::FuncId,
     atan: cranelift_module::FuncId,
     round: cranelift_module::FuncId,
     pow: cranelift_module::FuncId,
@@ -81,9 +70,6 @@ struct MathIds {
 /// reused at every call site). `Copy`, so threading it through emission is free.
 #[derive(Clone, Copy)]
 struct MathRefs {
-    ln: cranelift::codegen::ir::FuncRef,
-    sin: cranelift::codegen::ir::FuncRef,
-    cos: cranelift::codegen::ir::FuncRef,
     atan: cranelift::codegen::ir::FuncRef,
     round: cranelift::codegen::ir::FuncRef,
     pow: cranelift::codegen::ir::FuncRef,
@@ -101,11 +87,12 @@ impl JitBackend {
 
 impl Backend for JitBackend {
     fn compile(&self, graph: &RvGraph, root: RvId) -> Box<dyn Program> {
-        // Use the JIT only where it's expected to *win* — see `kernel::profitable`. Transcendental-
-        // bound graphs (per-draw `ln`/`cos` libcalls, no pair-sharing) are slower than the
-        // interpreter's vectorized column fills, so they stay on the interpreter. Any codegen
-        // failure also falls back. Either way correctness is never at risk, only the speedup.
-        if !profitable(graph, root) {
+        // Use the JIT only where it's expected to *win* — see `kernel::profitable`. We inline the
+        // transcendentals (`emit_ln`/`emit_trig`), so `inline_trans = true`: `normal`/`exp`/trig
+        // graphs are fusible here and worth compiling. Only graphs still dominated by a real call
+        // (`atan`/`round`/non-integer `pow`) stay on the interpreter. Any codegen failure also falls
+        // back. Either way correctness is never at risk, only the speedup.
+        if !profitable(graph, root, /* inline_trans */ true) {
             return InterpBackend.compile(graph, root);
         }
         match build(graph, root) {
@@ -208,9 +195,6 @@ fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram,
         .map_err(|e| e.to_string())?;
     let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
     // Bind the math shim names to their Rust function pointers so the JIT can resolve the calls.
-    builder.symbol("nz_ln", nz_ln as *const u8);
-    builder.symbol("nz_sin", nz_sin as *const u8);
-    builder.symbol("nz_cos", nz_cos as *const u8);
     builder.symbol("nz_atan", nz_atan as *const u8);
     builder.symbol("nz_round", nz_round as *const u8);
     builder.symbol("nz_pow", nz_pow as *const u8);
@@ -239,9 +223,6 @@ fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram,
 
         // Resolve the math shims into this function once; `MathRefs` is Copy, reused at each call.
         let math = MathRefs {
-            ln: module.declare_func_in_func(math_ids.ln, fb.func),
-            sin: module.declare_func_in_func(math_ids.sin, fb.func),
-            cos: module.declare_func_in_func(math_ids.cos, fb.func),
             atan: module.declare_func_in_func(math_ids.atan, fb.func),
             round: module.declare_func_in_func(math_ids.round, fb.func),
             pow: module.declare_func_in_func(math_ids.pow, fb.func),
@@ -353,9 +334,6 @@ fn declare_math(module: &mut JITModule) -> Result<MathIds, String> {
         module.declare_function(name, Linkage::Import, sig).map_err(|e| e.to_string())
     };
     Ok(MathIds {
-        ln: decl(module, "nz_ln", &sig1)?,
-        sin: decl(module, "nz_sin", &sig1)?,
-        cos: decl(module, "nz_cos", &sig1)?,
         atan: decl(module, "nz_atan", &sig1)?,
         round: decl(module, "nz_round", &sig1)?,
         pow: decl(module, "nz_pow", &sig2)?,
@@ -393,10 +371,11 @@ fn emit_node(
     let v = match graph.node(id) {
         RvNode::Src(Source::Uniform(u)) => emit_uniform(fb, s, u.lo, u.hi),
         RvNode::Src(Source::UniformInt { lo, hi }) => emit_uniform_int(fb, s, *lo, *hi),
-        RvNode::Src(Source::Normal { mu, sigma }) => emit_normal(fb, s, math, *mu, *sigma),
-        RvNode::Src(Source::Exp { rate }) => emit_exp(fb, s, math, *rate),
-        RvNode::Src(Source::Geometric { p }) => emit_geometric(fb, s, math, *p),
+        RvNode::Src(Source::Normal { mu, sigma }) => emit_normal(fb, s, *mu, *sigma),
+        RvNode::Src(Source::Exp { rate }) => emit_exp(fb, s, *rate),
+        RvNode::Src(Source::Geometric { p }) => emit_geometric(fb, s, *p),
         RvNode::Src(Source::Poisson { .. }) => unreachable!("supported() excludes Poisson"),
+        RvNode::Gather { .. } => unreachable!("profitable() excludes Gather"),
         RvNode::ConstNum(x) => fb.ins().f64const(*x),
         RvNode::ConstBool(b) => fb.ins().f64const(if *b { 1.0 } else { 0.0 }),
         RvNode::Unary(op, a) => {
@@ -490,23 +469,121 @@ fn emit_uniform_int(fb: &mut FunctionBuilder, s: &[Variable; 4], lo: f64, hi: f6
     fb.ins().fadd(loc, kf)
 }
 
+/// Horner evaluation of `Σ c[i]·z^i` (coeffs low→high) as straight-line CLIF — the exact reduction
+/// `crate::approx::horner` performs, so the inlined transcendentals match the reference op-for-op.
+fn emit_horner(fb: &mut FunctionBuilder, z: Value, coeffs: &[f64]) -> Value {
+    let mut acc = fb.ins().f64const(*coeffs.last().unwrap());
+    for &c in coeffs.iter().rev().skip(1) {
+        let mul = fb.ins().fmul(acc, z);
+        let cc = fb.ins().f64const(c);
+        acc = fb.ins().fadd(mul, cc);
+    }
+    acc
+}
+
+/// Inlined `ln(x)` for `x > 0` — straight-line transcription of [`crate::approx::ln`] (no libcall).
+/// Removing the call is what lets `normal`/`exp`/`geometric` graphs run multi-stream (the libcall
+/// previously serialized the lanes and pinned them to a single stream — see [`crate::kernel`]).
+fn emit_ln(fb: &mut FunctionBuilder, x: Value) -> Value {
+    use std::f64::consts::{LN_2, SQRT_2};
+    // x = m·2^e: pull the IEEE-754 exponent and mantissa fields out by bit-surgery.
+    let bits = fb.ins().bitcast(types::I64, MemFlags::new(), x);
+    let exp_raw = fb.ins().ushr_imm(bits, 52);
+    let exp_masked = fb.ins().band_imm(exp_raw, 0x7ff);
+    let e0 = fb.ins().iadd_imm(exp_masked, -1023);
+    let mant = fb.ins().band_imm(bits, 0x000f_ffff_ffff_ffff);
+    let mbits = fb.ins().bor_imm(mant, 0x3ff0_0000_0000_0000u64 as i64);
+    let m0 = fb.ins().bitcast(types::F64, MemFlags::new(), mbits); // [1, 2)
+    // Recenter when m0 > √2 (branchless): m = m0/2, e = e0 + 1, so |f| ≤ 0.172.
+    let sqrt2 = fb.ins().f64const(SQRT_2);
+    let big = fb.ins().fcmp(FloatCC::GreaterThan, m0, sqrt2);
+    let half = fb.ins().f64const(0.5);
+    let m0_half = fb.ins().fmul(m0, half);
+    let m = fb.ins().select(big, m0_half, m0);
+    let e0_p1 = fb.ins().iadd_imm(e0, 1);
+    let e = fb.ins().select(big, e0_p1, e0);
+    let ef = fb.ins().fcvt_from_sint(types::F64, e);
+    // f = (m-1)/(m+1); ln(m) = 2·f·Σ cₖf²ᵏ; ln(x) = ln(m) + e·ln2.
+    let one = fb.ins().f64const(1.0);
+    let num = fb.ins().fsub(m, one);
+    let den = fb.ins().fadd(m, one);
+    let f = fb.ins().fdiv(num, den);
+    let f2 = fb.ins().fmul(f, f);
+    let p = emit_horner(fb, f2, &crate::approx::LN_COEFFS);
+    let fp = fb.ins().fmul(f, p);
+    let two = fb.ins().f64const(2.0);
+    let two_fp = fb.ins().fmul(two, fp);
+    let ln2 = fb.ins().f64const(LN_2);
+    let e_ln2 = fb.ins().fmul(ef, ln2);
+    fb.ins().fadd(two_fp, e_ln2)
+}
+
+/// Inlined `cos(x)` (`is_cos`) / `sin(x)` for finite `x` — transcription of
+/// [`crate::approx::cos`]/[`crate::approx::sin`]: Cody–Waite reduce to `[-π/4, π/4]`, evaluate both
+/// reduced kernels, then pick by quadrant. `nearest`/`fcvt_to_sint_sat` are native instructions.
+fn emit_trig(fb: &mut FunctionBuilder, x: Value, is_cos: bool) -> Value {
+    use crate::approx::{COS_COEFFS, PIO2_HI, PIO2_LO, SIN_COEFFS};
+    use std::f64::consts::FRAC_2_PI;
+    // k = round(x·2/π); r = (x - k·π/2_hi) - k·π/2_lo ∈ [-π/4, π/4].
+    let two_pi_inv = fb.ins().f64const(FRAC_2_PI);
+    let scaled = fb.ins().fmul(x, two_pi_inv);
+    let kf = fb.ins().nearest(scaled);
+    let hi = fb.ins().f64const(PIO2_HI);
+    let khi = fb.ins().fmul(kf, hi);
+    let x1 = fb.ins().fsub(x, khi);
+    let lo = fb.ins().f64const(PIO2_LO);
+    let klo = fb.ins().fmul(kf, lo);
+    let r = fb.ins().fsub(x1, klo);
+    let z = fb.ins().fmul(r, r);
+    // sin(r) = r + r·z·P_sin(z)
+    let sp = emit_horner(fb, z, &SIN_COEFFS);
+    let rz = fb.ins().fmul(r, z);
+    let rzsp = fb.ins().fmul(rz, sp);
+    let sin_r = fb.ins().fadd(r, rzsp);
+    // cos(r) = 1 - z/2 + z²·P_cos(z)
+    let cp = emit_horner(fb, z, &COS_COEFFS);
+    let zz = fb.ins().fmul(z, z);
+    let zzcp = fb.ins().fmul(zz, cp);
+    let one = fb.ins().f64const(1.0);
+    let half = fb.ins().f64const(0.5);
+    let halfz = fb.ins().fmul(half, z);
+    let onemhz = fb.ins().fsub(one, halfz);
+    let cos_r = fb.ins().fadd(onemhz, zzcp);
+    // Pick the kernel + sign for quadrant kq = (k as i64) & 3 (saturating cvt = Rust's `as`).
+    let ki = fb.ins().fcvt_to_sint_sat(types::I64, kf);
+    let kq = fb.ins().band_imm(ki, 3);
+    let neg_sin = fb.ins().fneg(sin_r);
+    let neg_cos = fb.ins().fneg(cos_r);
+    let (q0, q1, q2, q3) = if is_cos {
+        (cos_r, neg_sin, neg_cos, sin_r)
+    } else {
+        (sin_r, cos_r, neg_sin, neg_cos)
+    };
+    let c1 = fb.ins().icmp_imm(IntCC::Equal, kq, 1);
+    let r1 = fb.ins().select(c1, q1, q0);
+    let c2 = fb.ins().icmp_imm(IntCC::Equal, kq, 2);
+    let r2 = fb.ins().select(c2, q2, r1);
+    let c3 = fb.ins().icmp_imm(IntCC::Equal, kq, 3);
+    fb.ins().select(c3, q3, r2)
+}
+
 /// `N(mu, sigma^2)` via Box–Muller, **one normal per draw**: draw two uniforms and keep the cosine
 /// arm (the interpreter keeps both arms of a pair; per-draw we discard the sine one). The extra
-/// uniform is cheap and avoids carrying a cross-draw cache. `sqrt` is a native instruction;
-/// `ln`/`cos` are shims.
-fn emit_normal(fb: &mut FunctionBuilder, s: &[Variable; 4], math: &MathRefs, mu: f64, sigma: f64) -> Value {
+/// uniform is cheap and avoids carrying a cross-draw cache. `sqrt` is native; `ln`/`cos` are
+/// inlined polynomials ([`emit_ln`]/[`emit_trig`]).
+fn emit_normal(fb: &mut FunctionBuilder, s: &[Variable; 4], mu: f64, sigma: f64) -> Value {
     use std::f64::consts::TAU;
     let one = fb.ins().f64const(1.0);
     let n1 = emit_next_f64(fb, s);
     let u1 = fb.ins().fsub(one, n1); // (0, 1] keeps ln finite
     let u2 = emit_next_f64(fb, s);
-    let lnv = call1(fb, math.ln, u1);
+    let lnv = emit_ln(fb, u1);
     let neg2 = fb.ins().f64const(-2.0);
     let inner = fb.ins().fmul(neg2, lnv);
     let r = fb.ins().sqrt(inner);
     let tau = fb.ins().f64const(TAU);
     let ang = fb.ins().fmul(tau, u2);
-    let c = call1(fb, math.cos, ang);
+    let c = emit_trig(fb, ang, true);
     let rc = fb.ins().fmul(r, c);
     let sig = fb.ins().f64const(sigma);
     let scaled = fb.ins().fmul(sig, rc);
@@ -515,11 +592,11 @@ fn emit_normal(fb: &mut FunctionBuilder, s: &[Variable; 4], math: &MathRefs, mu:
 }
 
 /// `Exp(rate)` via inverse-CDF `-ln(1 - u) / rate` — mirrors `Rng::fill_exp`.
-fn emit_exp(fb: &mut FunctionBuilder, s: &[Variable; 4], math: &MathRefs, rate: f64) -> Value {
+fn emit_exp(fb: &mut FunctionBuilder, s: &[Variable; 4], rate: f64) -> Value {
     let one = fb.ins().f64const(1.0);
     let u = emit_next_f64(fb, s);
     let om = fb.ins().fsub(one, u); // (0, 1]
-    let lnv = call1(fb, math.ln, om);
+    let lnv = emit_ln(fb, om);
     let neg = fb.ins().fneg(lnv);
     let rate_c = fb.ins().f64const(rate);
     fb.ins().fdiv(neg, rate_c)
@@ -528,12 +605,12 @@ fn emit_exp(fb: &mut FunctionBuilder, s: &[Variable; 4], math: &MathRefs, rate: 
 /// `Geometric(p)` (failures before first success) via `floor(ln(1 - u) / ln(1 - p))` — mirrors
 /// `Rng::fill_geometric`. `ln(1 - p)` is a compile-time constant (folded in Rust); `p == 1` makes
 /// it `-inf`, so every draw floors to `0`, matching the interpreter's point mass.
-fn emit_geometric(fb: &mut FunctionBuilder, s: &[Variable; 4], math: &MathRefs, p: f64) -> Value {
+fn emit_geometric(fb: &mut FunctionBuilder, s: &[Variable; 4], p: f64) -> Value {
     let denom = (1.0 - p).ln();
     let one = fb.ins().f64const(1.0);
     let u = emit_next_f64(fb, s);
     let om = fb.ins().fsub(one, u); // (0, 1]
-    let lnv = call1(fb, math.ln, om);
+    let lnv = emit_ln(fb, om);
     let denom_c = fb.ins().f64const(denom);
     let q = fb.ins().fdiv(lnv, denom_c);
     fb.ins().floor(q)
@@ -560,8 +637,8 @@ fn emit_unary(fb: &mut FunctionBuilder, math: &MathRefs, op: UnOp, a: Value) -> 
             let is_zero = fb.ins().fcmp(FloatCC::Equal, a, zero);
             bool_to_f64(fb, is_zero)
         }
-        UnOp::Sin => call1(fb, math.sin, a),
-        UnOp::Cos => call1(fb, math.cos, a),
+        UnOp::Sin => emit_trig(fb, a, false),
+        UnOp::Cos => emit_trig(fb, a, true),
         UnOp::Atan => call1(fb, math.atan, a),
         UnOp::Round => call1(fb, math.round, a),
         UnOp::Sign => {
@@ -773,6 +850,10 @@ mod tests {
             ("dice_sum", "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B"),
             ("poly_deep", "use rand; X ~ unif(0,1); ((X*X+X)*X - X)*X + X*X - X + 1"),
             ("normal_poly", "use rand; Z ~ normal(0,1); ((Z*Z+Z)*Z - Z)*Z + Z*Z"),
+            // Transcendental-bound now that ln/cos are inlined: the multi-stream win should appear.
+            ("normal_sum", "use rand; X ~ normal(0,1); Y ~ normal(0,1); X + Y"),
+            ("exp_tail", "use rand; X ~ exp(2); X > 1"),
+            ("sin_wave", "use rand; use math; X ~ unif(0,1); sin(6.283*X) + cos(6.283*X)"),
         ];
         let batches = 4000;
         println!("\n  kernel throughput by stream count (single thread, M elem/s):");

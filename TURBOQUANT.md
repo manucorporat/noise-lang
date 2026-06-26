@@ -13,10 +13,20 @@ additive, and — importantly — does **not** require the "dynamics fork" (PLAN
 > [`examples/turboquant.noise`](examples/turboquant.noise) and runs today. It reproduces both the
 > **bias** (`E[est]/true → 2/π ≈ 0.637` for the MSE quantizer vs `→ 1.0` for the QJL fix) **and**
 > the **error reduction** (`E[(est−true)²]` is several times smaller for the unbiased quantizer,
-> because the MSE quantizer's error is dominated by an irreducible bias floor). It uses the
-> Gaussian-projection route (Lemma 4 / QJL identity), so no QR/Beta is needed. The §4 gap table is
-> kept below as a record of what was built. Open perf item (not correctness): paper-scale `d` still
-> needs the native vector-column representation of §6.
+> because the MSE quantizer's error is dominated by an irreducible bias floor).
+>
+> **Update (2026-06-26): the FAITHFUL Algorithm 2, b=1..4.** The example was upgraded from the b=1
+> Gaussian-projection demo to the paper's actual two-stage algorithm. Two new primitives were added:
+> `rotation(d)` (a random orthonormal Π — symbolic Gram–Schmidt of a Gaussian seed, lowered into the
+> RV graph) and `quantize(v, centroids)` (nearest-centroid / Lloyd–Max snap). It now reproduces
+> **Algorithm 1's D_mse table** (`0.36/0.117/0.03/0.009` for `b=1..4`), the `2/π` inner-product
+> **bias**, **Algorithm 2's unbiasedness**, and **its D_prod table** (`~1.57/0.56/0.18/0.047` over
+> `d`). Crucial finding: the distortion win **requires a true orthonormal rotation** — with a
+> Gaussian projection the MSE stage's residual stays large (`E‖r‖² ≈ 0.75` vs `0.36`), so the
+> two-stage scheme is unbiased but does *not* beat plain 1-bit QJL. That's why item 7 below (QR)
+> turned out to be **required**, not optional, for the full Algorithm 2. Open perf item (not
+> correctness): paper-scale `d` still needs the native vector-column representation of §6 (QR is
+> `O(d³)` nodes, so the example runs at `d=20`).
 
 ---
 
@@ -134,7 +144,8 @@ print("prod E[est]/true =", E(dot(y, xhat_p) / dot(y, x)));  # -> ~1.0, unbiased
 | 4 | **Expectation/variance of a numeric RV**: `E(expr)`, `var(expr)` → `Est` | every claim is `E[...]` / `Var[...]`; today only `P` (bool mean) is exposed | **primitive** (surface the existing Rust `moments`) | small |
 | 5 | `sqrt`, `pi` | scaling constants `√(2/(πd))`, `√(π/2)/d` | **primitive** (trivial; `sqrt` ≈ `**0.5`) | trivial |
 | 6 | Linear-algebra **prelude**: `dot`, `norm`, `matvec`, `transpose`, `scale`, `add/sub`, `map`, `sign`, `normalize`, `argmin`, `iota`, `ones` | the quantizer bodies | **in-Noise prelude** (Go-philosophy: small core, library in-language) once 1–3 exist | medium |
-| 7 | `beta(α,β)` and/or QR rotation | *faithful* Algorithm 1 (per-coordinate Beta of Lemma 1; true rotation `Π`) | **primitive** (`beta`) + **prelude** (Gram–Schmidt) | optional |
+| 7 | QR rotation `rotation(d)` — **BUILT** | *faithful* Algorithm 1/2: a true orthonormal `Π` makes the MSE residual small, which the distortion win depends on (a Gaussian projection does not) | **primitive** (symbolic Gram–Schmidt in `eval.rs`, lowered into the RV graph) | **required**, done |
+| 7b | `beta(α,β)` + per-coordinate Beta check (Lemma 1) | confirming the rotated-coordinate law is Beta→Gaussian | **primitive** (`beta`) | optional, not done |
 
 **Not needed:** the dynamics fork / sequential execution mode (Phase 3.5). TurboQuant is
 feed-forward.
@@ -168,10 +179,12 @@ a numeric `E()`, and we need a `normal` distribution."
   is fine (the `2/π` bias converges fast and is essentially d-independent). Reaching paper scale
   needs a **native vector-column representation** (a register holding `[BATCH × d]`, or batching
   over vectors) — a Phase-4-style VM upgrade, not required to demonstrate the claim.
-- **Rotation vs. Gaussian projection.** The faithful Algorithm 1 uses an orthonormal `Π` (QR).
-  The headline bias has a Gaussian-only route (QJL identity, Lemma 4), so QR is optional. QR /
-  the per-coordinate Beta check (Lemma 1) are the parts that would need `beta` and a Gram–Schmidt
-  prelude.
+- **Rotation vs. Gaussian projection (resolved 2026-06-26).** The *headline bias* has a
+  Gaussian-only route (QJL identity, Lemma 4), so the b=1 demo needed no QR. But the *full
+  Algorithm 2* distortion claim does: the two-stage scheme only beats plain QJL because an
+  orthonormal `Π` makes the MSE stage's residual small (`E‖r‖² ≈ 0.36`); a Gaussian projection
+  leaves it at `≈ 0.75` and the scheme wins nothing. So `rotation(d)` was added as a primitive
+  (symbolic Gram–Schmidt). The per-coordinate Beta check (Lemma 1) would still need `beta`.
 - **What this proves.** A Monte Carlo reproduction is empirical evidence (an estimate with error
   bars), not the paper's analytic proof. That is exactly Noise's value proposition — and exactly
   what the paper's own §4.1 "empirical validation" does. Noise would let you write that

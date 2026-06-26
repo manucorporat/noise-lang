@@ -20,6 +20,7 @@ pub enum TokKind {
     Star,
     Slash,
     StarStar, // **
+    At,       // @ — matrix product
     Eq,       // =
     Tilde,    // ~
     EqEq,     // ==
@@ -169,6 +170,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
             ('/', _) => (TokKind::Slash, 1),
             ('=', _) => (TokKind::Eq, 1),
             ('~', _) => (TokKind::Tilde, 1),
+            ('@', _) => (TokKind::At, 1),
             ('<', _) => (TokKind::Lt, 1),
             ('>', _) => (TokKind::Gt, 1),
             ('!', _) => (TokKind::Bang, 1),
@@ -207,11 +209,11 @@ mod tests {
     fn operators_are_matched_greedily() {
         use TokKind::*;
         assert_eq!(
-            kinds("** == != <= >= && || :: .. = ~ < > ! + - * / ( ) { } [ ] , ;"),
+            kinds("** == != <= >= && || :: .. = ~ @ < > ! + - * / ( ) { } [ ] , ;"),
             vec![
                 StarStar, EqEq, BangEq, Le, Ge, AmpAmp, PipePipe, ColonColon, DotDot, Eq, Tilde,
-                Lt, Gt, Bang, Plus, Minus, Star, Slash, LParen, RParen, LBrace, RBrace, LBracket,
-                RBracket, Comma, Semi, Eof,
+                At, Lt, Gt, Bang, Plus, Minus, Star, Slash, LParen, RParen, LBrace, RBrace,
+                LBracket, RBracket, Comma, Semi, Eof,
             ]
         );
     }
@@ -267,8 +269,8 @@ mod tests {
 
     #[test]
     fn unexpected_char_errors_with_a_span() {
-        let err = tokenize("1 @ 2").unwrap_err();
-        assert!(matches!(err.kind, ErrorKind::UnexpectedChar('@')));
+        let err = tokenize("1 ? 2").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedChar('?')));
         assert_eq!(err.span, Span::new(2, 3));
     }
 

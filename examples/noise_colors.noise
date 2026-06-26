@@ -11,12 +11,13 @@
 use math;     # round
 
 n = 256;   # render each lazy noise at the same resolution
+engine::set_max_loops(3000);   # Monte Carlo budget for the E()s inside neighbor_corr — set once, not per query
 
 # Lag-1 autocorrelation of a rendered noise vector, averaged over many realizations. Built from
 # the raw spatial sums so it's E[<x_k x_{k+1}>] / E[<x_k^2>] — a clean ratio of means.
 pair_sum(x) = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i+1] }; acc };
 sq_sum(x)   = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i]   }; acc };
-neighbor_corr(x) = E(pair_sum(x), 3000) / E(sq_sum(x), 3000);
+neighbor_corr(x) = E(pair_sum(x)) / E(sq_sum(x));
 
 # The headline trio: the spectrum reddens, the neighbor correlation climbs toward 1.
 Print("white  (flat 1/f^0):", round(neighbor_corr(signal::sample(signal::noise_white(1), n)), 3), " jagged hiss");

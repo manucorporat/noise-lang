@@ -1,47 +1,95 @@
-# TurboQuant (arXiv:2504.19874) — reproducing its headline result by Monte Carlo.
+# TurboQuant (arXiv:2504.19874) — reproducing the paper's ACTUAL two-stage algorithm by Monte Carlo.
 #
-# To store a vector cheaply you QUANTIZE it: keep just 1 bit per coordinate (the sign), then
-# later DEQUANTIZE to approximate it. You use that approximation to estimate inner products
-# <y, x> — the core operation in similarity search and attention.
+# To store a vector cheaply you QUANTIZE it: replace each coordinate with a few bits, then later
+# DEQUANTIZE to an approximation. You use that approximation to estimate inner products <y, x> —
+# the core operation in similarity search and attention.
 #
-# The paper's finding: a quantizer tuned to minimize RECONSTRUCTION error ||x - xhat||^2 is the
-# wrong tool for inner products — it is BIASED, systematically shrinking every estimate of <y, x>
-# by a factor 2/pi ~ 0.637. Bias is the dangerous kind of error: averaging more samples (or
-# spending more bits) does NOT remove it. The fix ("QJL") rescales the SAME bits to be unbiased,
-# so its error is pure variance, which does shrink away.
+# The paper builds this in two layers, and we reproduce both, live:
 #
-# We measure both, live: the bias E[est]/true, and the actual mean-squared error E[(est-true)^2].
+#   Algorithm 1 (MSE-optimal).  Spin the vector by a random ROTATION so its coordinates spread out
+#   evenly (each becomes ~Normal(0, 1/d)), then snap each coordinate to the nearest entry of a tiny
+#   per-coordinate codebook (the optimal "Lloyd-Max" levels). With b bits you get 2^b levels. This
+#   minimizes the reconstruction error ||x - xhat||^2 — and matches the paper's table exactly.
 #
-# Setup: a fixed unit vector x and query y, and a random d x d Gaussian projection S drawn fresh
-# each sample (the quantizer's randomness). The 1-bit code is q = sign(Sx); we reconstruct with
-# S transpose. Since S is Gaussian (not an exact rotation), (S^T)(S) ~ d*I, hence the 1/d. The
-# ONLY difference between the two reconstructions is the scaling constant:
-#   MSE-optimal codebook  sqrt(2/pi)  -> biased by 2/pi
-#   QJL (unbiased)        sqrt(pi/2)  -> unbiased     (their ratio is exactly 2/pi)
-use rand;   # normal, iidmat
-use math;   # pi, sqrt, sign
+#   The catch.  An MSE-tuned quantizer is the WRONG tool for inner products: it is BIASED, shrinking
+#   every estimate of <y,x> by a factor 2/pi ~ 0.637 at 1 bit. Bias is the dangerous kind of error —
+#   averaging more samples does NOT remove it.
+#
+#   Algorithm 2 (inner-product-optimal, "TurboQuant_prod").  The fix, and the headline result. Run
+#   the MSE quantizer with ONE fewer bit, look at what it got wrong (the residual r = x - xhat_mse),
+#   and spend the spare bit on a 1-bit QJL sketch of that residual. Adding it back is UNBIASED and
+#   has several-times-smaller error than the MSE quantizer — matching the paper's D_prod table.
+#
+# This needs a genuine random rotation (not a Gaussian shortcut): the distortion win only appears
+# because an orthonormal rotation makes the residual small. `rotation(d)` gives a fresh one per
+# sample (Gram-Schmidt of a Gaussian matrix); `quantize` snaps each coordinate to its nearest level.
+#
+# Every E() below is a Monte Carlo average; set the sample budget once for the whole run (instead of
+# threading an `N` through each query). 10k samples is plenty to land near the paper's table values.
+engine::set_max_loops(10000);
+use math;     # pi, sqrt, sign
+use vec;      # normalize, ones, iota, quantize, normsq, norm, transpose
 
-# A fixed unit vector x and unit query y (iota(d) = [0, 1, ..., d-1]); any fixed pair works.
-d = 24;
-x = vec::normalize(vec::ones(d));
-y = vec::normalize(vec::iota(d));
+# A fixed unit vector x and unit query y (any fixed pair works); we estimate <y, x>.
+d = 20;
+x = normalize(ones(d));
+y = normalize(iota(d));
+true_ip = y @ x;          # `@` is the matrix product (here a vector dot)
 
-# Encode x to one bit per coordinate (the sign of a random Gaussian projection), then reconstruct
-# with S^T. Both quantizers share these same sign bits and differ ONLY in the rescaling constant.
-S     = iidmat(normal(0, 1), d, d);   # fresh Gaussian projection per Monte Carlo sample
-q     = sign(vec::matvec(S, x));
-recon = vec::matvec(vec::transpose(S), q);
+# Optimal scalar (Lloyd-Max) codebooks for the rotated coordinates, which are ~Normal(0, 1/d). These
+# are the standard unit-Gaussian quantization levels, rescaled by 1/sqrt(d). b bits -> 2^b levels.
+s  = 1 / sqrt(d);
+L1 = [-0.7979, 0.7979] * s;                                                              # b=1: 2 levels
+L2 = [-1.5104, -0.4528, 0.4528, 1.5104] * s;                                             # b=2: 4 levels
+L3 = [-2.1520, -1.3439, -0.7560, -0.2451, 0.2451, 0.7560, 1.3439, 2.1520] * s;           # b=3: 8 levels
+L4 = [-2.7326, -2.0690, -1.6181, -1.2562, -0.9423, -0.6568, -0.3881, -0.1284,
+       0.1284,  0.3881,  0.6568,  0.9423,  1.2562,  1.6181,  2.0690,  2.7326] * s;        # b=4: 16 levels
 
-# Estimate <y, x> from the reconstruction two ways (scaling is plain broadcast multiplication).
-true_ip  = vec::dot(y, x);
-est_mse  = vec::dot(y, recon * (sqrt(2 / pi) / d));   # MSE-optimal codebook -> biased by 2/pi
-est_prod = vec::dot(y, recon * (sqrt(pi / 2) / d));   # QJL rescaling        -> unbiased
+# === Algorithm 1: the MSE-optimal quantizer. Rotate, snap each coordinate to its nearest level,
+#     rotate back. Distortion D_mse = E||x - xhat||^2 should match the paper's table.
+Pi  ~ rand::rotation(d);                 # fresh random rotation per Monte Carlo sample (a draw)
+rot = Pi @ x;                      # rotated coordinates, each ~ Normal(0, 1/d)  (mat @ vec)
+PiT = transpose(Pi);          # rotate the reconstruction back
+mse1 = PiT @ quantize(rot, L1);   # 1-bit MSE reconstruction
+mse2 = PiT @ quantize(rot, L2);
+mse3 = PiT @ quantize(rot, L3);
+mse4 = PiT @ quantize(rot, L4);
 
-Print("true <y,x>        =", true_ip);
-# The bias: the MSE estimate's average is stuck ~36% low; the fix's average lands on the truth.
-Print("MSE  E[est]       =", E(est_mse, 50000), " (biased by 2/pi =", 2 / pi, ")");
-Print("prod E[est]       =", E(est_prod, 50000), " (unbiased: ~ true)");
-# The payoff: the unbiased quantizer's mean-squared inner-product error is several times smaller,
-# because the MSE quantizer's error is dominated by that irreducible bias.
-Print("MSE  E[(est-t)^2] =", E((est_mse - true_ip) ** 2, 50000));
-Print("prod E[(est-t)^2] =", E((est_prod - true_ip) ** 2, 50000), " <- the fix loses less error")
+Print("D_mse  b=1 =", E(normsq(x - mse1)), " (paper 0.36)");
+Print("D_mse  b=2 =", E(normsq(x - mse2)), " (paper 0.117)");
+Print("D_mse  b=3 =", E(normsq(x - mse3)), " (paper 0.03)");
+Print("D_mse  b=4 =", E(normsq(x - mse4)), " (paper 0.009)");
+
+# === The catch: that 1-bit MSE quantizer is BIASED for inner products by exactly 2/pi.
+Print("MSE b=1  E[est]/true =", E(y @ mse1) / true_ip, " (biased: 2/pi =", 2 / pi, ")");
+
+# === Algorithm 2: TurboQuant_prod. The MSE reconstruction `m` (at b-1 bits) plus a 1-bit QJL sketch
+#     of its residual r = x - m, using an independent Gaussian projection S, rescaled by ||r||.
+#     `tq_ip` returns the resulting estimate of <y, x>; it is provably unbiased (Theorem 2).
+tq_ip(x, y, m, S, dd) =
+    y @ m
+  + sqrt(pi / 2) / dd * norm(x - m)
+    * (y @ (transpose(S) @ sign(S @ (x - m))));
+    
+# Target b spends (b-1) bits on the MSE stage and 1 bit on the QJL residual. Each stage draws its
+# own fresh rotation / projection per sample. (b=1 has a 0-bit MSE stage -> codebook {0} -> plain QJL.)
+S1 ~[d, d] rand::normal(0, 1);
+S2 ~[d, d] rand::normal(0, 1);  R2 ~ rand::rotation(d);
+S3 ~[d, d] rand::normal(0, 1);  R3 ~ rand::rotation(d);
+S4 ~[d, d] rand::normal(0, 1);  R4 ~ rand::rotation(d);
+m1 = zeros(d);                                                             # 0-bit MSE -> just QJL
+m2 = transpose(R2) @ quantize(R2 @ x, L1);    # 1-bit MSE + QJL
+m3 = transpose(R3) @ quantize(R3 @ x, L2);    # 2-bit MSE + QJL
+m4 = transpose(R4) @ quantize(R4 @ x, L3);    # 3-bit MSE + QJL
+prod1 = tq_ip(x, y, m1, S1, d);
+prod2 = tq_ip(x, y, m2, S2, d);
+prod3 = tq_ip(x, y, m3, S3, d);
+prod4 = tq_ip(x, y, m4, S4, d);
+
+# The fix lands on the truth (unbiased), and its inner-product error shrinks with bits, matching the
+# paper's D_prod table (scaled by 1/d) — error a fraction of the biased MSE quantizer's.
+Print("prod b=2 E[est]/true =", E(prod2) / true_ip, " (unbiased: ~1)");
+Print("D_prod b=1 =", E((prod1 - true_ip) ** 2), " (plain QJL; <= bound pi/2/d =", pi / 2 / d, ")");
+Print("D_prod b=2 =", E((prod2 - true_ip) ** 2), " (paper 0.56/d =", 0.56 / d, ")");
+Print("D_prod b=3 =", E((prod3 - true_ip) ** 2), " (paper 0.18/d =", 0.18 / d, ")");
+Print("D_prod b=4 =", E((prod4 - true_ip) ** 2), " (paper 0.047/d =", 0.047 / d, ")")

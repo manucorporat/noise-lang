@@ -4,6 +4,7 @@
 //! The random-variable runtime (bytecode + batched/SIMD sampler) lands in Phase 2; see
 //! PLAN.md. This crate avoids OS/threads so it compiles cleanly to `wasm32`.
 
+pub mod approx;
 pub mod ast;
 pub mod backend;
 pub mod builtins;
@@ -22,6 +23,8 @@ pub mod sampler;
 pub mod signal;
 pub mod simplify;
 pub mod wasm_emit;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_host;
 pub mod value;
 
 pub use dist::RvId;
@@ -442,6 +445,35 @@ mod tests {
             (pi_coarse.parse::<f64>().unwrap() - std::f64::consts::PI).abs() < 0.02,
             "pi_coarse = {pi_coarse}"
         );
+    }
+
+    #[test]
+    fn engine_set_max_loops_sets_the_default_budget() {
+        // `engine::set_max_loops(N)` is the global default for P/E/Var/Q — equivalent to passing N
+        // as the explicit count, but once, up front. At a small budget the standard error is wide,
+        // so the estimate displays to few digits; bumping the budget reveals more.
+        let coarse = display_of("engine::set_max_loops(1000); D ~ unif_int(1,6); P(D == 4)");
+        assert_eq!(coarse, "0.2", "1000 draws justifies one decimal, got {coarse}");
+        let fine = display_of("engine::set_max_loops(100000000); D ~ unif_int(1,6); P(D == 4)");
+        assert!(fine.len() > 5, "1e8 draws should reveal ~4 digits, got {fine}");
+
+        // An explicit per-call count still overrides the engine default (here: tighten back up
+        // despite the coarse global setting).
+        let overridden =
+            display_of("engine::set_max_loops(1000); D ~ unif_int(1,6); P(D == 4, 100000000)");
+        assert!(overridden.len() > 5, "explicit count should override, got {overridden}");
+    }
+
+    #[test]
+    fn engine_module_scoping_and_validation() {
+        // Reachable both as a `mod::name` path and (with `use`) unqualified, like any module.
+        assert!(run_raw("engine::set_max_loops(50); use rand; X ~ unif(0,1); P(X < 0.5)").is_ok());
+        assert!(run_raw("use engine; set_max_loops(50); 1").is_ok());
+        // Out of scope without a `use`/path, with a fix-it message naming the module.
+        let err = run_raw("set_max_loops(50)").unwrap_err().to_string();
+        assert!(err.contains("engine") && err.contains("use"), "{err}");
+        // The budget must draw at least once.
+        assert!(run_raw("engine::set_max_loops(0)").unwrap_err().to_string().contains(">= 1"));
     }
 
     // --- lifted `if` over a random variable (per-lane select) ---
@@ -948,11 +980,48 @@ mod tests {
         assert!(run("[1, 2, 3][5]").is_err()); // out of bounds
         assert!(run("[1, 2, 3][1.5]").is_err()); // non-integer index
         assert!(run("[1, 2, 3][0 - 1]").is_err()); // negative index
-        assert!(run("X ~ unif_int(1, 3); [10, 20, 30][X]").is_err()); // random index forbidden
         assert!(run("5[0]").is_err()); // indexing a non-array
-        // the random-index message is specific (a gather is the dynamics fork)
-        let err = run("X ~ unif_int(1, 3); [10, 20, 30][X]").unwrap_err();
-        assert!(err.to_string().contains("random variable"), "{err}");
+        // A random-variable index is no longer an error — it's a per-lane gather (see
+        // `random_index_is_a_gather`). Gathering a matrix row into one lane is still rejected.
+        assert!(run("X ~ unif_int(0, 1); [[1, 2], [3, 4]][X]").is_err());
+    }
+
+    #[test]
+    fn permutation_is_a_uniform_permutation() {
+        // `permutation(n)` draws a length-n array that is a permutation of 0..n every lane: no
+        // duplicates, the values 0..n-1 (so sum = n(n-1)/2 and max = n-1).
+        assert_eq!(num("deck ~ permutation(5); E(has_duplicate(deck))"), 0.0);
+        assert_eq!(num("deck ~ permutation(5); E(sum(deck))"), 10.0); // 0+1+2+3+4
+        assert_eq!(num("deck ~ permutation(5); E(max(deck))"), 4.0);
+        // uniform: element 0 is equally likely to land in any position (P = 1/5 each).
+        assert!((num("deck ~ permutation(5); P(deck[0] == 0)") - 0.2).abs() < 0.01);
+        // it's a recipe like any distribution: `=` keeps it undrawn, arithmetic on it errors.
+        assert!(run("deck = permutation(4); deck + 1").is_err());
+    }
+
+    #[test]
+    fn random_index_is_a_gather() {
+        // A random index selects a per-lane element. Over a constant array it's a plain lookup:
+        // a uniform index makes the result uniform over the elements.
+        assert!((num("i ~ unif_int(0, 2); E([10, 20, 30][i])") - 20.0).abs() < 0.05);
+        assert!((num("i ~ unif_int(0, 2); P([10, 20, 30][i] == 30)") - 1.0 / 3.0).abs() < 0.01);
+        // Gathering into an array of random variables works too (mean of 0..3).
+        assert!((num("deck ~ permutation(4); i ~ unif_int(0, 3); E(deck[i])") - 1.5).abs() < 0.02);
+    }
+
+    #[test]
+    fn hundred_prisoners_cycle_following() {
+        // The 100 Prisoners Riddle, cycle-following strategy: prisoner i follows the permutation
+        // from drawer i, opening `opens` drawers; everyone wins iff the longest cycle <= opens.
+        // Small instance (n=6, opens=3) with a known analytic value: 1 - (1/4 + 1/5 + 1/6).
+        let p = num(
+            "n = 6; opens = 3; deck ~ permutation(n); all_found = true; \
+             for i in 0..n { cur = i; hit = false; \
+               for s in 0..opens { cur = deck[cur]; hit = hit || (cur == i); }; \
+               all_found = all_found && hit; }; \
+             P(all_found, 200000)",
+        );
+        assert!((p - 0.3833).abs() < 0.01, "got {p}, expected ~0.3833");
     }
 
     #[test]
@@ -1019,6 +1088,27 @@ mod tests {
     }
 
     #[test]
+    fn matmul_operator_dispatches_on_shape() {
+        // `@` is the matrix product, picking the right contraction from the operand shapes.
+        assert_eq!(num("[1, 2] @ [3, 4]"), 11.0); // vec·vec = dot
+        assert_eq!(display_of("[[1, 2], [3, 4]] @ [1, 1]"), "[3, 7]"); // mat·vec = matvec
+        assert_eq!(display_of("[1, 2] @ [[1, 2], [3, 4]]"), "[7, 10]"); // vec·mat
+        assert_eq!(
+            display_of("[[1, 2], [3, 4]] @ [[5, 6], [7, 8]]"),
+            "[[19, 22], [43, 50]]"
+        ); // mat·mat
+        // `@` binds like `*`, so `1 + M @ v` is `1 + (M @ v)`.
+        assert_eq!(display_of("1 + [[1, 2], [3, 4]] @ [1, 1]"), "[4, 8]");
+        // It is NOT elementwise `*`, which broadcasts the row by the scalar lane.
+        assert_eq!(display_of("[[1, 2], [3, 4]] * [1, 1]"), "[[1, 2], [3, 4]]");
+        // It lifts over random variables (each entry is a dot of RV lanes): E([X,1]·[2,3]) = 3.
+        assert!((run_num("X ~ normal(0, 1); E([X, 1] @ [2, 3])") - 3.0).abs() < 0.05);
+        // A scalar operand is an error — `@` is for linear algebra, `*` for scaling.
+        assert!(run("3 @ [1, 2]").is_err());
+        assert!(run("[1, 2] @ 3").is_err());
+    }
+
+    #[test]
     fn log_and_mse_utilities() {
         // math::log (natural) and math::log10
         assert_eq!(num("log10(1000)"), 3.0);
@@ -1033,7 +1123,7 @@ mod tests {
         assert!(run("mse([1, 2], [1, 2, 3])").is_err()); // length mismatch
         // mse equals the noise power of an additive channel: received = signal + noise.
         let p = run_num(
-            "sig = ones(8); noise = iid(normal(0, 2), 8); E(mse(vadd(sig, noise), sig))",
+            "sig = ones(8); noise ~[8] normal(0, 2); E(mse(vadd(sig, noise), sig))",
         );
         assert!((p - 4.0).abs() < 0.1, "additive-noise MSE = {p} (want sigma^2 = 4)");
     }
@@ -1148,7 +1238,7 @@ mod tests {
                    fm_demod(iq, dev) = atan(iq[1] / iq[0]) / dev; \
                    N = 32; dev = 3; sigma = 0.3; \
                    msg = 0.3 * sin(iota(N) * (2 * pi * 2 / N)); \
-                   static = [iid(normal(0, sigma), N), iid(normal(0, sigma), N)]; ";
+                   static = [~[N] normal(0, sigma), ~[N] normal(0, sigma)]; ";
         let am = run_num(&format!(
             "{lib} E(mse(am_demod(am_mod(msg) + static), msg), 30000)"
         ));
@@ -1161,25 +1251,69 @@ mod tests {
     }
 
     #[test]
-    fn turboquant_inner_product_bias() {
-        // The TurboQuant headline (arXiv:2504.19874), by Monte Carlo: the MSE-optimal 1-bit sign
-        // quantizer is BIASED by 2/pi for inner products; the QJL rescaling is unbiased. Same sign
-        // bits `q`, two reconstruction constants — their ratio is exactly 2/pi. (Moderate d so the
-        // bias dominates the error; small N so the test stays quick.)
-        let common = "d = 20; x = normalize(ones(d)); y = normalize(iota(d)); \
-                      S = iidmat(normal(0, 1), d, d); q = sign(matvec(S, x)); \
-                      recon = matvec(transpose(S), q); t = dot(y, x); \
-                      est_mse = dot(y, recon * (sqrt(2 / pi) / d)); \
-                      est_prod = dot(y, recon * (sqrt(pi / 2) / d)); ";
-        // (1) The bias: the MSE estimate averages to (2/pi)*true; the prod estimate to true.
-        let mse_ratio = run_num(&format!("{common} E(est_mse / t, 40000)"));
-        let prod_ratio = run_num(&format!("{common} E(est_prod / t, 40000)"));
-        assert!((mse_ratio - 2.0 / std::f64::consts::PI).abs() < 0.04, "MSE ratio = {mse_ratio}");
+    fn rotation_is_orthonormal() {
+        // `rotation(d)` is a random orthonormal matrix, so every sample preserves length exactly:
+        // ||Pi x|| = ||x|| = 1 (the mean is exactly 1, hence a tight tolerance at tiny N).
+        let nrm =
+            run_num("d = 8; x = normalize(ones(d)); Pi ~ rotation(d); E(normsq(matvec(Pi, x)), 100)");
+        assert!((nrm - 1.0).abs() < 1e-9, "||Pi x||^2 = {nrm}, want exactly 1");
+        // And it round-trips: Pi^T Pi x = x (same Pi reused, so transpose is the inverse).
+        let rt = run_num(
+            "d = 8; Pi ~ rotation(d); x = normalize(iota(d)); \
+             E(normsq(matvec(transpose(Pi), matvec(Pi, x)) - x), 100)",
+        );
+        assert!(rt < 1e-9, "||Pi^T Pi x - x||^2 = {rt}, want ~0");
+    }
+
+    #[test]
+    fn rotation_is_a_recipe_drawn_with_tilde() {
+        // `rotation(d)` is a recipe like any distribution: `~` draws it, `=` keeps it undrawn.
+        // Using an undrawn rotation in arithmetic is the usual "draw it first" error.
+        assert!(run("d = 4; Pi = rotation(d); x = ones(d); matvec(Pi, x)").is_err());
+        // A shaped draw gives k *independent* rotations: stack two and they should differ, so the
+        // squared distance between Pi0 x and Pi1 x is comfortably positive (identical draws → 0).
+        let spread = run_num(
+            "d = 6; x = normalize(ones(d)); Rs ~[2] rotation(d); \
+             E(normsq(matvec(Rs[0], x) - matvec(Rs[1], x)), 2000)",
+        );
+        assert!(spread > 0.1, "two independent rotations should differ, got spread {spread}");
+    }
+
+    #[test]
+    fn quantize_snaps_to_nearest_centroid() {
+        // Each coordinate snaps to its nearest codebook entry; cell boundaries are the midpoints.
+        assert_eq!(display_of("quantize([-2, -0.1, 0.1, 2], [-1, 1])"), "[-1, -1, 1, 1]");
+        assert_eq!(display_of("quantize([0.4, 0.6], [0, 1])"), "[0, 1]"); // midpoint at 0.5
+        assert_eq!(display_of("quantize([5, -5], [0])"), "[0, 0]"); // single-level codebook
+        assert!(run("quantize([1], [])").is_err()); // empty codebook
+    }
+
+    #[test]
+    fn turboquant_algorithm2_unbiased_and_lower_distortion() {
+        // The faithful two-stage TurboQuant (arXiv:2504.19874), by Monte Carlo. Algorithm 1: a
+        // random orthonormal rotation Pi, snap each rotated coordinate to its nearest Lloyd-Max
+        // level, rotate back. At 1 bit this MSE quantizer reconstructs to ~0.36 distortion and is
+        // BIASED by 2/pi for inner products. Algorithm 2: add a 1-bit QJL sketch of the residual
+        // -> unbiased, and far lower inner-product error. (Small d/N so the test stays quick.)
+        let common = "d = 16; x = normalize(ones(d)); y = normalize(iota(d)); t = dot(y, x); \
+                      L1 = [-0.7979, 0.7979] * (1 / sqrt(d)); \
+                      Pi ~ rotation(d); mse = matvec(transpose(Pi), quantize(matvec(Pi, x), L1)); \
+                      S ~[d, d] normal(0, 1); r = x - mse; \
+                      prod = dot(y, mse) \
+                           + sqrt(pi / 2) / d * norm(r) \
+                             * dot(y, matvec(transpose(S), sign(matvec(S, r)))); ";
+        // Algorithm 1's distortion table, b=1 entry: D_mse ~ 0.36.
+        let dmse = run_num(&format!("{common} E(normsq(x - mse), 12000)"));
+        assert!((dmse - 0.36).abs() < 0.05, "D_mse(b=1) = {dmse}, want ~0.36");
+        // The MSE quantizer is biased by 2/pi; the two-stage prod estimate is unbiased.
+        let mse_ratio = run_num(&format!("{common} E(dot(y, mse) / t, 12000)"));
+        let prod_ratio = run_num(&format!("{common} E(prod / t, 12000)"));
+        assert!((mse_ratio - 2.0 / std::f64::consts::PI).abs() < 0.05, "MSE ratio = {mse_ratio}");
         assert!((prod_ratio - 1.0).abs() < 0.05, "prod ratio = {prod_ratio}");
-        // (2) The payoff: the unbiased quantizer has the lower mean-squared inner-product error —
-        // the MSE quantizer's error is dominated by its irreducible bias floor. "Loses less error."
-        let mse_err = run_num(&format!("{common} E((est_mse - t) ** 2, 40000)"));
-        let prod_err = run_num(&format!("{common} E((est_prod - t) ** 2, 40000)"));
+        // The payoff: the unbiased two-stage estimate has far lower mean-squared inner-product error
+        // than the biased MSE quantizer, whose error is dominated by its 2/pi bias floor.
+        let mse_err = run_num(&format!("{common} E((dot(y, mse) - t) ** 2, 12000)"));
+        let prod_err = run_num(&format!("{common} E((prod - t) ** 2, 12000)"));
         assert!(prod_err < mse_err * 0.6, "prod err {prod_err} should be << MSE err {mse_err}");
     }
 
@@ -1200,12 +1334,28 @@ mod tests {
     }
 
     #[test]
-    fn iid_draws_are_independent() {
+    fn shaped_draws_are_independent() {
         // Two iid draws are distinct nodes: P(days[0] == days[1]) = 1/6 for a d6.
-        let p = run_num("days = iid(unif_int(1, 6), 2); P(days[0] == days[1])");
+        let p = run_num("days ~[2] unif_int(1, 6); P(days[0] == days[1])");
         assert!((p - 1.0 / 6.0).abs() < 5e-3, "P(days0==days1) = {p}");
         // Contrast: a single draw reused is perfectly correlated.
         assert_eq!(run_num("X ~ unif_int(1, 6); P(X == X)"), 1.0);
+    }
+
+    #[test]
+    fn shaped_draw_builds_arrays_and_works_inline() {
+        // `~[n]` draws an n-vector: E[sum of 4 uniforms] = 4 * 0.5 = 2.
+        assert!((run_num("xs ~[4] unif(0, 1); E(sum(xs))") - 2.0).abs() < 0.05);
+        // `~[n, m]` draws a matrix: E[sum over all 2x3 entries] = 6 * 0.5 = 3.
+        assert!((run_num("M ~[2, 3] unif(0, 1); E(sum(sum(M)))") - 3.0).abs() < 0.05);
+        // The prefix `~` works in expression position too — this is what retires `iid`.
+        assert!((run_num("E(sum(~[3] unif(0, 1)))") - 1.5).abs() < 0.05);
+        // A bare `~` is a scalar (rank 0); `~[1]` is a length-1 array (rank 1) — NOT equivalent.
+        assert!((run_num("x ~ unif(0, 1); E(x)") - 0.5).abs() < 0.05);
+        assert!((run_num("xs ~[1] unif(0, 1); E(xs[0])") - 0.5).abs() < 0.05); // indexable
+        assert!(run("x ~ unif(0, 1); x[0]").is_err()); // a scalar can't be indexed
+        // `~[]` (empty shape) is rejected at parse time.
+        assert!(run("xs ~[] unif(0, 1)").is_err());
     }
 
     #[test]
@@ -1273,14 +1423,14 @@ mod tests {
     #[test]
     fn birthday_problem_for_23() {
         // The headline win: 23 people, one line. Analytic ≈ 0.5073.
-        let p = run_num("days = iid(unif_int(1, 365), 23); P(has_duplicate(days))");
+        let p = run_num("days ~[23] unif_int(1, 365); P(has_duplicate(days))");
         assert!((p - 0.5073).abs() < 5e-3, "P(shared birthday among 23) = {p}");
     }
 
     #[test]
     fn generalized_clt_agrees_with_native_normal() {
         // sum of n iid uniforms minus n/2 → ~N(0,1) at n=12; its P(Z>1) matches native normal.
-        let clt = run_num("n = 12; clt = sum(iid(unif(0, 1), n)) - n / 2; P(clt > 1)");
+        let clt = run_num("n = 12; clt = sum(~[n] unif(0, 1)) - n / 2; P(clt > 1)");
         let native = run_num("Z ~ normal(0, 1); P(Z > 1)");
         assert!((clt - native).abs() < 5e-3, "CLT {clt} vs native {native}");
         assert!((native - 0.1587).abs() < 3e-3, "native P(Z>1) = {native}");
@@ -1290,11 +1440,11 @@ mod tests {
     fn migrated_one_liners_hit_their_analytic_values() {
         // The §5c table — each was a hand-unrolled example, now one line.
         let cases = [
-            ("P(sum(iid(unif_int(1, 6), 2)) == 7)", 1.0 / 6.0),     // dice_sum
-            ("P(all(iid(bernoulli(0.5), 3)))", 0.125),              // coin_streak
-            ("P(count(iid(bernoulli(0.5), 3)) == 2)", 0.375),       // exactly_two_heads
-            ("P(sum(iid(unif(0, 1), 3)) > 2)", 1.0 / 6.0),         // irwin_hall
-            ("P(any(iid(bernoulli(0.9), 3)))", 0.999),             // reliability
+            ("P(sum(~[2] unif_int(1, 6)) == 7)", 1.0 / 6.0),       // dice_sum
+            ("P(all(~[3] bernoulli(0.5)))", 0.125),                // coin_streak
+            ("P(count(~[3] bernoulli(0.5)) == 2)", 0.375),         // exactly_two_heads
+            ("P(sum(~[3] unif(0, 1)) > 2)", 1.0 / 6.0),            // irwin_hall
+            ("P(any(~[3] bernoulli(0.9)))", 0.999),                // reliability
         ];
         for (src, expected) in cases {
             let p = run_num(src);
@@ -1320,7 +1470,7 @@ mod tests {
         // After `use`, bare names resolve — like Rust.
         assert_eq!(run_raw("use math; sqrt(25)").unwrap(), Value::Num(5.0));
         assert_eq!(run_raw("use vec; sum([10, 20])").unwrap(), Value::Num(30.0));
-        let p = run_raw("use rand; use vec; P(has_duplicate(iid(unif_int(1, 6), 2)))").unwrap();
+        let p = run_raw("use rand; use vec; P(has_duplicate(~[2] unif_int(1, 6)))").unwrap();
         assert!((as_num(p) - 1.0 / 6.0).abs() < 5e-3);
         // `use builtin;` is a harmless no-op (always active anyway).
         assert_eq!(run_raw("use builtin; Len([1, 2])").unwrap().to_string(), "2");
@@ -1365,6 +1515,81 @@ mod tests {
         assert!(run_raw("math::sqrt").is_err());
         // module has no such item
         assert!(run_raw("math::nope()").is_err());
+    }
+
+    /// Throughput of the TurboQuant workload (examples/turboquant.noise) — by far the heaviest
+    /// example in the corpus, and the most interesting one to benchmark. Every Monte Carlo sample
+    /// builds a *fresh* random orthonormal rotation of a d=20 vector (modified Gram–Schmidt over
+    /// d² = 400 Gaussian draws), then quantizes the rotated coordinates and rotates back.
+    ///
+    /// The point this measures: `@`/`rotation`/`matvec` carry no GEMM loop. They expand
+    /// element-by-element into the *same* scalar `RvGraph`, so the whole d×d linear algebra of a
+    /// sample collapses into one straight-line fused kernel (CSE'd, then drawn + reduced across all
+    /// cores like any other query). That is ideal at small d — everything lives in registers, no
+    /// cache traffic, no loop overhead — and is the opposite end of the size spectrum from `pi`'s
+    /// tiny kernel. We print the fused kernel size (`cone_size`) so the expansion is visible.
+    ///
+    /// Ignored; run with:
+    /// `cargo test -p noise-core [--features jit] --release -- --ignored --nocapture bench_turboquant`
+    #[test]
+    #[ignore]
+    fn bench_turboquant() {
+        use std::time::Instant;
+
+        let setup = "use rand; use math; use vec;
+            d = 20;
+            x = vec::normalize(vec::ones(d));
+            y = vec::normalize(vec::iota(d));
+            s = 1 / sqrt(d);
+            L3 = [-2.1520, -1.3439, -0.7560, -0.2451, 0.2451, 0.7560, 1.3439, 2.1520] * s;
+            L4 = [-2.7326, -2.0690, -1.6181, -1.2562, -0.9423, -0.6568, -0.3881, -0.1284,
+                   0.1284,  0.3881,  0.6568,  0.9423,  1.2562,  1.6181,  2.0690,  2.7326] * s;";
+
+        // D_mse b=4: rotate, snap to the 4-bit codebook, rotate back; distortion ||x - xhat||².
+        let d_mse = format!(
+            "{setup}
+             Pi ~ rotation(d); rot = Pi @ x; PiT = vec::transpose(Pi);
+             mse4 = PiT @ vec::quantize(rot, L4);
+             vec::normsq(x - mse4)"
+        );
+        // D_prod b=4: the headline estimator — 3-bit MSE stage + a 1-bit QJL residual sketch,
+        // two independent d×d matrices per sample (a rotation R and a Gaussian projection S).
+        let d_prod = format!(
+            "{setup}
+             true_ip = y @ x;
+             S ~[d, d] normal(0, 1);  R ~ rotation(d);
+             m = vec::transpose(R) @ vec::quantize(R @ x, L3);
+             est = y @ m
+                 + sqrt(pi / 2) / d * vec::norm(x - m)
+                   * (y @ (vec::transpose(S) @ sign(S @ (x - m))));
+             (est - true_ip) ** 2"
+        );
+
+        let n = 1_000_000usize;
+        for (label, src, target) in
+            [("D_mse  b=4", d_mse.as_str(), 0.009), ("D_prod b=4", d_prod.as_str(), 0.047 / 20.0)]
+        {
+            let mut eng = Engine::new();
+            let id = match eng.run_rv(src).unwrap() {
+                Value::Dist(id) => id,
+                other => panic!("expected an RV, got {other:?}"),
+            };
+            let g = eng.graph();
+            let cone = crate::kernel::cone_size(g, id);
+
+            // Warm up (this compiles + JITs the kernel), then time sampling only.
+            let _ = crate::sampler::moments(g, id, 4096, 1);
+            let t = Instant::now();
+            let m = crate::sampler::moments(g, id, n, 0xC0FFEE);
+            let secs = t.elapsed().as_secs_f64();
+            let mps = n as f64 / secs / 1e6;
+            println!(
+                "  {label}: fused kernel {cone:4} nodes ({} total)   {mps:6.2} M samples/s   \
+                 est {:.4} (paper {target:.4})",
+                g.len(),
+                m.mean
+            );
+        }
     }
 
     /// Pull the numeric value out of a `Num`/`Est` (test helper for module assertions).

@@ -1,0 +1,40 @@
+# The 100 Prisoners Riddle — one of the most beautiful results in probability.
+#
+# 100 prisoners are numbered 0..99. A room holds 100 boxes, also numbered, each containing one
+# prisoner's number in a random order. One at a time, each prisoner may open 50 boxes, hoping to
+# find their own number — then leaves the room exactly as they found it, with no way to signal
+# the others. If EVERY prisoner finds their number, all go free; if even one fails, all are lost.
+#
+# Guessing at random, each prisoner finds their number with probability 1/2, so all 100 winning
+# is (1/2)^100 — basically zero. Yet a clever strategy gives them a ~31% chance! The trick: each
+# prisoner opens their OWN numbered box first, then the box matching the number they just found,
+# and so on — following the chain. Everyone wins exactly when the random arrangement has no cycle
+# longer than 50.
+#
+# Analytic answer: 1 - (1/51 + 1/52 + ... + 1/100) ~ 0.3118.
+use rand;   # permutation
+use vec;
+
+engine::set_max_loops(50000);
+
+# The boxes are a uniform random permutation: box k contains the number boxes[k].
+n     = 100;
+opens = 50;
+boxes ~ permutation(n);
+
+# Each prisoner follows their chain for up to `opens` hops; they win if it returns to their own
+# number. `all_win` stays true only while every prisoner so far has succeeded.
+all_win = true;
+for prisoner in 0..n {
+  box   = prisoner;       # start by opening your own numbered box
+  found = false;
+  for hop in 0..opens {
+    box   = boxes[box];                  # open the box the last number pointed to
+    found = found || (box == prisoner);  # did we just uncover our own number?
+  };
+  all_win = all_win && found;
+};
+
+# Heavier than most examples: a random box index is a per-lane gather, which runs on the
+# interpreter, so we use a smaller sample budget here.
+Print("P(all 100 prisoners go free) =", P(all_win), " (analytic ~0.3118)")

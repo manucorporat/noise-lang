@@ -1,0 +1,223 @@
+---
+// The bell curve, two ways — a long scroll-driven story in two acts. Act 1 is a physical Galton
+// board: balls cascade through twelve coin-flip pegs and pile into a Binomial bell. Act 2 lifts the
+// same idea to the central limit theorem: a sum of flat uniforms, standardized, morphs flat →
+// triangle → bell as scrolling raises N, with the true Normal overlaid. Same law, two machines.
+// Replaces the former separate Galton and CLT demos. Engine confirms both answers. No buttons.
+import CodePanel from './CodePanel.astro';
+
+const code = `# 1 — a Galton board: 12 left/right bounces
+rights = vec::count(~[12] rand::bernoulli(0.5))
+P(rights == 6)        # centre bin -> 0.226
+
+# 2 — the same bell, from a sum of uniforms
+sum = vec::sum(~[12] rand::unif(0, 1)) - 6
+P(sum > 1)            # -> 0.159, Normal(0,1)`;
+---
+
+<div class="scrolly bell-demo">
+  <div class="scrolly-grid">
+    <div class="scrolly-stage">
+      <div class="stage-inner glass">
+        <h4 class="stage-title" id="bell-title">The bell curve, two ways</h4>
+        <div class="stage-canvas bell-canvas"><canvas id="bell-canvas" aria-label="A Galton board and a sum of uniforms, both forming a bell curve"></canvas></div>
+        <p class="bell-legend" id="bell-legend"><span class="sw bar"></span> sampled sum &nbsp; <span class="sw line"></span> Normal(N/2, N/12)</p>
+        <CodePanel filename="bell.noise" code={code} class="bell-code" />
+        <div class="stage-foot" id="bell-foot">
+          <span class="stat" data-mode="galton">balls <b id="bell-balls">0</b></span>
+          <span class="stat key" data-mode="galton">P(centre) ≈ <b id="bell-pc">—</b></span>
+          <span class="stat key" data-mode="clt">N = <b id="bell-n">1</b></span>
+          <span class="stat" data-mode="clt">shape <b id="bell-shape">flat</b></span>
+        </div>
+        <p class="stage-engine" id="bell-engine"></p>
+      </div>
+      <figcaption class="figure-caption"><span class="fig-n">Figure 4.</span> the bell curve, two machines — a Galton board and a sum of uniforms, one law.</figcaption>
+    </div>
+    <div class="scrolly-steps" id="bell-steps">
+      <div class="scrolly-step" data-step="0">
+        <h4>Each peg is a coin flip</h4>
+        <p>A ball meets twelve pegs; at each it goes left or right with equal chance. <code class="code-inline">~[12] bernoulli(0.5)</code> is those twelve flips; <code class="code-inline">count</code> tallies how many went right.</p>
+      </div>
+      <div class="scrolly-step" data-step="1">
+        <h4>Where does it land?</h4>
+        <p>The number of rights is the bin. <code class="code-inline">P(rights == 6)</code> asks how often a ball ends dead centre — twelve fair steps landing exactly halfway.</p>
+      </div>
+      <div class="scrolly-step" data-step="2">
+        <h4>Drop the balls</h4>
+        <p>Watch them cascade. Any single ball's path is unpredictable, yet the bins fill into a strikingly regular shape.</p>
+      </div>
+      <div class="scrolly-step" data-step="3">
+        <h4>A bell, from coin flips</h4>
+        <p>The stacks trace the Binomial — a sum of twelve Bernoulli steps. But is the bell really about <em>coins</em>? Let's swap them for something with no bell in it at all.</p>
+      </div>
+      <div class="scrolly-step" data-step="4">
+        <h4>Start over with flat noise</h4>
+        <p><code class="code-inline">unif(0, 1)</code> is equally likely anywhere in [0, 1] — a flat slab, nothing bell-shaped. We'll sum <code class="code-inline">N</code> of them and standardize, starting with just one.</p>
+      </div>
+      <div class="scrolly-step" data-step="5">
+        <h4>Two make a triangle</h4>
+        <p>Sum two independent uniforms and middling totals beat the extremes — a triangle. The parts are still flat; the <em>sum</em> is what bends.</p>
+      </div>
+      <div class="scrolly-step" data-step="6">
+        <h4>A few, and it rounds</h4>
+        <p>By four terms the corners are already softening toward a curve — the very same shape the falling balls drew, with no pegs in sight.</p>
+      </div>
+      <div class="scrolly-step" data-step="7">
+        <h4>Same bell, different machine</h4>
+        <p>Twelve uniforms hug the true Normal (red). That's the central limit theorem: sums drift to a Normal regardless of the parts — coins or flat noise, the bell is the same law underneath.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+  .bell-canvas { height: 250px; }
+  .bell-legend { font-size: 0.76rem; color: var(--ink-dim); margin: -0.3rem 0 0; display: flex; align-items: center; gap: 0.3rem; }
+  .bell-legend .sw { display: inline-block; width: 14px; height: 9px; }
+  .bell-legend .sw.bar { background: #1f6f8b; }
+  .bell-legend .sw.line { height: 0; border-top: 2px solid #8a2d4a; }
+  .bell-legend.hidden { visibility: hidden; }
+  .bell-code { font-size: 0.8rem; }
+  .bell-demo .stat[data-mode] { display: none; }
+</style>
+
+<script>
+  import { runNoise } from '../lib/noise';
+
+  const root = document.querySelector('.bell-demo') as HTMLElement | null;
+  const canvas = document.getElementById('bell-canvas') as HTMLCanvasElement | null;
+  if (root && canvas) {
+    const gl = canvas.getContext('webgl', { antialias: true, alpha: false });
+    const ballsEl = document.getElementById('bell-balls')!, pcEl = document.getElementById('bell-pc')!,
+      nEl = document.getElementById('bell-n')!, shapeEl = document.getElementById('bell-shape')!,
+      titleEl = document.getElementById('bell-title')!, legendEl = document.getElementById('bell-legend')!,
+      engineEl = document.getElementById('bell-engine')!;
+    const codeBody = root.querySelector('.code-body') as HTMLElement | null;
+    const lines = codeBody ? Array.from(codeBody.querySelectorAll<HTMLElement>('.cl')) : [];
+    if (codeBody) codeBody.classList.add('progressive');
+
+    type Mode = 'galton' | 'clt';
+    const STEPS: { mode: Mode; show: number; add: number[]; run?: boolean; n?: number; eng?: 'galton' | 'clt' }[] = [
+      { mode: 'galton', show: 1, add: [1] },
+      { mode: 'galton', show: 2, add: [2] },
+      { mode: 'galton', show: 2, add: [], run: true },
+      { mode: 'galton', show: 2, add: [], run: true, eng: 'galton' },
+      { mode: 'clt', show: 5, add: [4, 5], n: 1 },
+      { mode: 'clt', show: 6, add: [6], n: 2 },
+      { mode: 'clt', show: 6, add: [], n: 4 },
+      { mode: 'clt', show: 6, add: [], n: 12, eng: 'clt' },
+    ];
+    const TITLES: Record<Mode, string> = { galton: 'The Galton board', clt: 'The central limit theorem' };
+
+    let mode: Mode = 'galton', running = false;
+    const engDone = { galton: false, clt: false };
+    let setN = (_n: number) => {};
+    let draw = () => {};
+
+    function setStep(i: number) {
+      const c = STEPS[i];
+      mode = c.mode; running = !!c.run;
+      lines.forEach((el, k) => { el.classList.toggle('shown', k <= c.show); el.classList.toggle('added', c.add.includes(k)); });
+      for (const el of root!.querySelectorAll('.scrolly-step')) el.classList.toggle('active', Number((el as HTMLElement).dataset.step) === i);
+      titleEl.textContent = TITLES[mode];
+      legendEl.classList.toggle('hidden', mode !== 'clt');
+      for (const el of root!.querySelectorAll<HTMLElement>('.stat[data-mode]')) el.style.display = el.dataset.mode === mode ? '' : 'none';
+      if (mode === 'clt') setN(c.n!); else draw();
+      if (c.eng && !engDone[c.eng]) { engDone[c.eng] = true; engineResult(c.eng); }
+    }
+
+    if (gl) {
+      // ---- shared GL: a point program (pegs/balls) and a flat-color triangle program (bars/curves)
+      const ptV = `attribute vec2 p; uniform float u_size; void main(){ gl_Position=vec4(p,0.0,1.0); gl_PointSize=u_size; }`;
+      const ptF = `precision highp float; uniform vec3 u_col; void main(){ vec2 d=gl_PointCoord-0.5; if(dot(d,d)>0.25) discard; gl_FragColor=vec4(u_col,1.0); }`;
+      const trV = `attribute vec2 p; void main(){ gl_Position=vec4(p,0.0,1.0); }`;
+      const trF = `precision highp float; uniform vec3 u_col; void main(){ gl_FragColor=vec4(u_col,1.0); }`;
+      const sh = (t: number, s: string) => { const x = gl.createShader(t)!; gl.shaderSource(x, s); gl.compileShader(x); return x; };
+      const mk = (v: string, f: string) => { const p = gl.createProgram()!; gl.attachShader(p, sh(gl.VERTEX_SHADER, v)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, f)); gl.linkProgram(p); return p; };
+      const ptP = mk(ptV, ptF), trP = mk(trV, trF), ptBuf = gl.createBuffer(), trBuf = gl.createBuffer();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const TEAL = [0.12, 0.43, 0.55], MAROON = [0.54, 0.18, 0.29], PEG = [0.55, 0.52, 0.47], AXIS = [0.5, 0.47, 0.43];
+      const rect = (x0: number, y0: number, x1: number, y1: number) => [x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1];
+      function dPts(v: number[], size: number, c: number[]) { if (!v.length) return; gl.useProgram(ptP); gl.bindBuffer(gl.ARRAY_BUFFER, ptBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.DYNAMIC_DRAW); const a = gl.getAttribLocation(ptP, 'p'); gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0); gl.uniform1f(gl.getUniformLocation(ptP, 'u_size'), size * dpr); gl.uniform3f(gl.getUniformLocation(ptP, 'u_col'), c[0], c[1], c[2]); gl.drawArrays(gl.POINTS, 0, v.length / 2); }
+      function dTris(v: number[], c: number[]) { if (!v.length) return; gl.useProgram(trP); gl.bindBuffer(gl.ARRAY_BUFFER, trBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.DYNAMIC_DRAW); const a = gl.getAttribLocation(trP, 'p'); gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0); gl.uniform3f(gl.getUniformLocation(trP, 'u_col'), c[0], c[1], c[2]); gl.drawArrays(gl.TRIANGLES, 0, v.length / 2); }
+      const resize = () => { const r = canvas.getBoundingClientRect(); canvas.width = Math.floor(r.width * dpr); canvas.height = Math.floor(r.height * dpr); gl.viewport(0, 0, canvas.width, canvas.height); draw(); };
+      new ResizeObserver(resize).observe(canvas);
+
+      // ---- Act 1: Galton board
+      const ROWS = 12, GBINS = ROWS + 1, MAX = 360, SPAWN = 2;
+      const SP = 1.5 / ROWS, Y_TOP = 0.92, DY = 0.066, Y_PEGBOT = Y_TOP - ROWS * DY, Y_BOT = -0.92, Y_STACKTOP = Y_PEGBOT - 0.04;
+      const pegs: number[] = [];
+      for (let r = 0; r < ROWS; r++) { const y = Y_TOP - (r + 0.5) * DY; for (let i = 0; i <= r; i++) pegs.push((i - r / 2) * SP, y); }
+      interface Ball { xs: number[]; row: number; bin: number; }
+      let balls: Ball[] = []; const counts = new Array(GBINS).fill(0); let dropped = 0, frame = 0;
+      function spawn() { const xs = [0]; let x = 0, rights = 0; for (let r = 0; r < ROWS; r++) { const right = Math.random() < 0.5; x += (right ? 0.5 : -0.5) * SP; if (right) rights++; xs.push(x); } balls.push({ xs, row: 0, bin: rights }); }
+      function drawGalton() {
+        const maxC = Math.max(1, ...counts), bw = 1.7 / GBINS, bars: number[] = [];
+        for (let b = 0; b < GBINS; b++) { const cx = (b - ROWS / 2) * SP, h = (counts[b] / maxC) * (Y_STACKTOP - Y_BOT); bars.push(...rect(cx - bw * 0.42, Y_BOT, cx + bw * 0.42, Y_BOT + h)); }
+        dTris(bars, TEAL);
+        dPts(pegs, 3.0, PEG);
+        const bv: number[] = [];
+        for (const ball of balls) { const k = Math.floor(ball.row), frac = ball.row - k, x0 = ball.xs[Math.min(k, ROWS)], x1 = ball.xs[Math.min(k + 1, ROWS)]; bv.push(x0 + (x1 - x0) * frac, Y_TOP - ball.row * DY); }
+        dPts(bv, 6.5, MAROON);
+      }
+
+      // ---- Act 2: CLT histogram + Normal overlay
+      const SAMPLES = 24000, CBINS = 41, BASE = -0.82, TOP = 0.9;
+      let density = new Array(CBINS).fill(0), curve: number[] = [], peak = 1;
+      function sampleN(n: number) {
+        const cnt = new Array(CBINS).fill(0), binW = n / CBINS;
+        for (let s = 0; s < SAMPLES; s++) { let sum = 0; for (let i = 0; i < n; i++) sum += Math.random(); let b = Math.floor((sum / n) * CBINS); if (b < 0) b = 0; if (b >= CBINS) b = CBINS - 1; cnt[b]++; }
+        density = cnt.map((c) => c / SAMPLES / binW);
+        const mu = n / 2, sg = Math.sqrt(n / 12); curve = [];
+        for (let i = 0; i <= 96; i++) { const x = (i / 96) * n; curve.push(Math.exp(-((x - mu) ** 2) / (2 * sg * sg)) / (sg * Math.sqrt(2 * Math.PI))); }
+        peak = Math.max(Math.max(...density), Math.max(...curve), 1e-6);
+      }
+      const yOf = (d: number) => BASE + (d / peak) * (TOP - BASE) * 0.92;
+      function drawClt() {
+        dTris(rect(-0.95, BASE - 0.006, 0.95, BASE + 0.006), AXIS);
+        const bw = 1.8 / CBINS, bars: number[] = [];
+        for (let i = 0; i < CBINS; i++) { const x0 = -0.9 + bw * i; bars.push(...rect(x0 + bw * 0.08, BASE, x0 + bw * 0.92, yOf(density[i]))); }
+        dTris(bars, TEAL);
+        const poly: number[] = [], w = 0.012;
+        for (let i = 0; i < curve.length - 1; i++) { const x0 = -0.9 + (i / (curve.length - 1)) * 1.8, x1 = -0.9 + ((i + 1) / (curve.length - 1)) * 1.8, y0 = yOf(curve[i]), y1 = yOf(curve[i + 1]); poly.push(x0, y0 - w, x1, y1 - w, x1, y1 + w, x0, y0 - w, x1, y1 + w, x0, y0 + w); }
+        dTris(poly, MAROON);
+      }
+
+      draw = () => { gl.clearColor(0.957, 0.945, 0.91, 1); gl.clear(gl.COLOR_BUFFER_BIT); if (mode === 'galton') drawGalton(); else drawClt(); };
+      setN = (n: number) => { sampleN(n); draw(); nEl.textContent = String(n); shapeEl.textContent = n === 1 ? 'flat' : n === 2 ? 'triangular' : n <= 4 ? 'rounding' : 'bell'; };
+
+      let raf = 0, inView = false;
+      function loop() {
+        frame++;
+        if (inView && running && mode === 'galton') {
+          if (dropped < MAX && frame % SPAWN === 0) { spawn(); dropped++; }
+          for (const ball of balls) ball.row += 0.22;
+          for (const b of balls.filter((b) => b.row >= ROWS)) counts[b.bin]++;
+          balls = balls.filter((b) => b.row < ROWS);
+          draw();
+          const tot = counts.reduce((a, b) => a + b, 0);
+          ballsEl.textContent = String(dropped); pcEl.textContent = tot ? (counts[6] / tot).toFixed(4) : '—';
+        }
+        raf = requestAnimationFrame(loop);
+      }
+      new IntersectionObserver((es) => { for (const e of es) inView = e.isIntersecting; }, { threshold: 0.2 }).observe(canvas);
+      resize(); sampleN(1); raf = requestAnimationFrame(loop);
+    }
+
+    async function engineResult(which: 'galton' | 'clt') {
+      const prev = engineEl.innerHTML;
+      const tag = which === 'galton'
+        ? { src: 'rights = vec::count(~[12] rand::bernoulli(0.5)); P(rights == 6)', label: 'Galton P(centre)', exact: 'exact 0.2256' }
+        : { src: 'sum = vec::sum(~[12] rand::unif(0,1)) - 6; P(sum > 1)', label: 'CLT P(sum &gt; 1)', exact: 'Normal 0.159' };
+      engineEl.innerHTML = prev + (prev ? '<br>' : '') + `engine: ${tag.label} = <span class="loading">…</span>`;
+      try {
+        const r = await runNoise(tag.src);
+        engineEl.innerHTML = prev + (prev ? '<br>' : '') + `engine: ${tag.label} = <span class="ok">${r.value ?? r.output.trim()}</span> (${tag.exact})`;
+      } catch { engineEl.innerHTML = prev; }
+    }
+
+    const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting && e.intersectionRatio > 0.5) setStep(Number((e.target as HTMLElement).dataset.step)); }, { threshold: [0.5], rootMargin: '-18% 0px -18% 0px' });
+    for (const el of root.querySelectorAll('.scrolly-step')) io.observe(el);
+    setStep(0);
+  }
+</script>

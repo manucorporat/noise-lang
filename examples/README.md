@@ -13,8 +13,9 @@ P(win by switching) = 0.6668
 Each example ends in `Print(...)`, building a message with string concatenation and `round`.
 All of these exercise the live language: `unif` / `unif_int` / `bernoulli`, `~` random-variable
 bindings, operator lifting (`+ - * / **`, comparisons, `&& || !`), lifted `if`, `P(event)`,
-and `Print` / `round` / string `+`. Several also use **collections** — `iid(d, n)` to draw `n`
-independent variables and reducers like `sum` / `count` / `any` / `all` / `has_duplicate`. Names
+and `Print` / `round` / string `+`. Several also use **collections** — the shaped draw `~[n] d`
+to sample `n` independent variables (`~[n, m] d` for a matrix) and reducers like `sum` / `count` /
+`any` / `all` / `has_duplicate`. Names
 are **module-scoped** (Rust-style): each example opens with `use rand;` / `use math;` / `use vec;`
 to bring the distributions, math, and vector helpers into scope (`P` / `Print` / `Len` and the
 `a..b` range are in the always-on `builtin` module). Sampled values use `P`'s fixed default budget
@@ -36,23 +37,25 @@ and a derived value like `4 * P(C)` or a ratio rounds itself correctly.
 | `exactly_two_heads.noise` | a tiny Binomial built from boolean events | 0.375 | 0.375 |
 | `monty_hall.noise` | Monty Hall reframed: switching wins iff first pick was wrong | 0.66667 | 0.667 |
 | `birthday.noise` | birthday paradox for a group of 5 (one term per pair) | 0.0271 | 0.027 |
+| `prisoners.noise` | **the 100 Prisoners Riddle** — cycle-following strategy; boxes are a `permutation(n)` and a random box index is a per-lane *gather* (`boxes[box]`) | 0.3118 | 0.31 |
 | `reliability.noise` | 3-way parallel redundancy at 0.9 each; `P(any up)` | 0.999 | 0.999 |
 | `conditional_bayes.noise` | conditional probability by hand: `P(D==6 \| D>3)` as a ratio | 0.33333 | 0.334 |
 | `irwin_hall.noise` | `P(sum of three U(0,1) > 2)` | 0.16667 | 0.167 |
 | `clt_normal.noise` | a standard normal built from 12 uniforms (CLT); a tail prob | ~0.159 | 0.16 |
 | `functions.noise` | user functions: `max(a,b)=…` (pure, lifts over RVs) + `roll()~…` (draws per call) | 0.30556 / 0.16667 | 0.306 / 0.166 |
 | `qjl_scalar.noise` | QJL unbiasedness in 1-D (TurboQuant building block): `normal`, `E`/`Var`, `sqrt`, `pi` | 1.0 / 0.5708 | 1 / 0.572 |
-| `turboquant.noise` | **the d-dim capstone** — the MSE 1-bit quantizer is inner-product biased by 2/π *and* carries ~3× the squared error; the QJL rescaling is unbiased (`iidmat`, `matvec`, `transpose`, `vsign`, `E`) | bias 2/π; err ≪ | 0.64× / 1.0×; err 0.11 vs 0.035 |
+| `turboquant.noise` | **the d-dim capstone** — the MSE 1-bit quantizer is inner-product biased by 2/π *and* carries ~3× the squared error; the QJL rescaling is unbiased (`~[d,d]`, `matvec`, `transpose`, `vsign`, `E`) | bias 2/π; err ≪ | 0.64× / 1.0×; err 0.11 vs 0.035 |
 | `am_vs_fm.noise` | telecom, end to end: `mse(demodulate(modulate(msg) + static), msg)` — same static, but FM (message in the angle) recovers cleaner than AM (message in the amplitude). Uses lazy `sine` + `cos`/`sin`/`atan` ufuncs + array broadcasting | FM ≫ AM cleaner | AM 0.087, FM 0.014 (6× cleaner) |
 | `nyquist.noise` | the Nyquist–Shannon theorem by counterexample: a 7-cycle wave sampled below `2·7` aliases into a 3-cycle one (identical samples); above, they separate. Lazy `signal` + `sample(sig, n)` | 0 vs > 0 | 0 (aliased) / 1 (resolved) |
 
 ## What these deliberately show about the design
 
 - **Collections make independence a one-liner.** `birthday`, `dice_sum`, `coin_streak`,
-  `exactly_two_heads`, `irwin_hall`, and `reliability` use `iid(d, n)` to draw `n` *independent*
-  variables at once, then a reducer (`sum`/`count`/`any`/`all`/`has_duplicate`). `birthday` scales
-  to 23 people — 253 pairwise comparisons — that the old hand-unrolled form couldn't express.
-- **The sharing rule still holds underneath.** `iid` produces `n` *distinct* draws (independence);
+  `exactly_two_heads`, `irwin_hall`, and `reliability` use the shaped draw `~[n] d` to sample `n`
+  *independent* variables at once, then a reducer (`sum`/`count`/`any`/`all`/`has_duplicate`).
+  `birthday` scales to 23 people — 253 pairwise comparisons — that the old hand-unrolled form
+  couldn't express.
+- **The sharing rule still holds underneath.** `~[n] d` produces `n` *distinct* draws (independence);
   reusing one name twice would instead reuse one draw (`Dice + Dice` is `2·Dice`). See "Random
   variables and sharing" in `../LANG.md`.
 - **Modeling, not hand-arithmetic.** `coin_streak` and `exactly_two_heads` *model* the events with

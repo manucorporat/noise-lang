@@ -88,7 +88,7 @@ const meta: Omit<Example, 'code' | 'category'>[] = [
     title: 'Two dice',
     blurb: 'Independence is a separate ~ draw, not a repeated name.',
     explanation:
-      'The one rule that surprises everyone: a name bound with ~ is one fixed draw, so Dice + Dice would be 2·Dice (one die doubled), not two dice. Real independence comes from separate draws — here iid(unif_int(1,6), 2) makes two independent dice, and sum(...) adds them. P(sum == 7) ≈ 1/6.',
+      'The one rule that surprises everyone: a name bound with ~ is one fixed draw, so Dice + Dice would be 2·Dice (one die doubled), not two dice. Real independence comes from separate draws — here ~[2] unif_int(1,6) makes two independent dice, and sum(...) adds them. P(sum == 7) ≈ 1/6.',
     analytic: '1/6 ≈ 0.1667',
     tags: ['independence', 'collections'],
   },
@@ -115,7 +115,7 @@ const meta: Omit<Example, 'code' | 'category'>[] = [
     title: 'Birthday paradox',
     blurb: 'How often does a group share a birthday?',
     explanation:
-      'Draw a birthday for each person with iid(unif_int(1,365), n), then has_duplicate(...) checks whether any two match. Even small groups collide more often than intuition suggests — and the whole experiment is one expression that scales to any group size.',
+      'Draw a birthday for each person with ~[n] unif_int(1,365), then has_duplicate(...) checks whether any two match. Even small groups collide more often than intuition suggests — and the whole experiment is one expression that scales to any group size.',
     tags: ['collections', 'classic'],
   },
   {

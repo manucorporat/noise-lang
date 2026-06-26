@@ -9,6 +9,8 @@
 # the same tip-noise barely moves the message — that's the trick: spend bandwidth to buy quiet.
 use math;   # cos, sin, atan, round
 
+engine::set_max_loops(40000);   # Monte Carlo budget for every E() below — set once, not per query
+
 # ---- a little radio library, written in Noise itself ----
 # Modulators: take a message vector m, return the carrier as a phasor [I, Q].
 am_modulate(m)      = [1 + m, 0 * m];                # message in the LENGTH  (I = 1+m, Q = 0)
@@ -34,10 +36,10 @@ static = signal::noise_white(sigma);
 
 # modulate -> add static -> demodulate -> compare to the original.
 # Two different averages live here: `mse` averages the error over the message SAMPLES (space), and
-# because the static is random that per-run mse is itself a random variable, so `E(..., 40000)`
-# averages it over many noise realizations (the ensemble).
-am_err = E(vec::mse(am_demodulate(am_modulate(msg)      + static),      msg), 40000);
-fm_err = E(vec::mse(fm_demodulate(fm_modulate(msg, dev) + static, dev), msg), 40000);
+# because the static is random that per-run mse is itself a random variable, so wrapping it in `E(...)`
+# averages it over many noise realizations (the ensemble — the sample budget set above).
+am_err = E(vec::mse(am_demodulate(am_modulate(msg)      + static),      msg));
+fm_err = E(vec::mse(fm_demodulate(fm_modulate(msg, dev) + static, dev), msg));
 
 Print("AM recovered-message error (MSE) =", am_err);
 Print("FM recovered-message error (MSE) =", fm_err);

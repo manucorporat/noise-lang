@@ -9,14 +9,14 @@ const groups = examplesByCategory();
       <h4 class="cat-title" data-reveal>{group.category}</h4>
       <div class="gallery" data-reveal-group data-reveal-step="45">
         {group.items.map((ex) => (
-          <article class="card glass" data-id={ex.id} data-reveal>
+          <a class="card glass" href={`/play#x=${ex.id}`} data-reveal>
             <header class="card-head">
               <h5>{ex.title}</h5>
               {ex.analytic && <span class="card-analytic">{ex.analytic}</span>}
             </header>
             <p class="card-blurb">{ex.blurb}</p>
-            <button class="card-open" data-id={ex.id} type="button">Open in playground →</button>
-          </article>
+            <span class="card-open">Open in playground →</span>
+          </a>
         ))}
       </div>
     </div>
@@ -41,41 +41,228 @@ const groups = examplesByCategory();
     gap: 0.9rem;
   }
   .card {
-    padding: 0.95rem 1.05rem 0.85rem;
+    position: relative;
+    isolation: isolate;          /* keep the shader canvas (z-index:0) contained behind the text */
+    overflow: hidden;
+    border-radius: 10px;
+    padding: 1rem 1.1rem 0.9rem;
     display: flex;
     flex-direction: column;
     gap: 0.45rem;
-    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    color: inherit;
+    transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
   }
-  .card:hover { border-color: var(--accent); box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06); }
+  .card:hover {
+    transform: translateY(-3px);
+    border-color: rgba(138, 45, 74, 0.30);
+    box-shadow: 0 10px 26px -12px rgba(27, 26, 23, 0.30), 0 2px 6px -3px rgba(27, 26, 23, 0.18);
+    text-decoration: none;
+  }
+
+  /* the shared WebGL noise field (one canvas, reparented into the hovered card) sits behind the
+     text; a thin paper scrim keeps copy readable over the pastel field. */
+  .card :global(.card-shader) {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
+    opacity: 0;
+    transition: opacity 0.4s ease;
+    pointer-events: none;
+  }
+  .card.shaded :global(.card-shader) { opacity: 1; }
+  .card.shaded::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    background: linear-gradient(180deg, rgba(251, 250, 246, 0.10), rgba(251, 250, 246, 0.30));
+    pointer-events: none;
+  }
+  .card-head, .card-blurb, .card-open { position: relative; z-index: 1; }
+
   .card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
   .card-head h5 { margin: 0; font-size: 1.02rem; font-weight: 700; }
   .card-analytic {
     font-family: var(--mono);
-    font-size: 0.76rem;
+    font-size: 0.74rem;
     color: var(--accent);
     white-space: nowrap;
+    padding: 0.08rem 0.4rem;
+    border-radius: 999px;
+    background: rgba(138, 45, 74, 0.07);
   }
   .card-blurb { margin: 0; color: var(--ink-dim); font-size: 0.9rem; flex: 1; line-height: 1.45; }
   .card-open {
     align-self: flex-start;
     margin-top: 0.2rem;
-    background: none;
-    border: none;
     color: var(--link);
-    font: inherit;
     font-size: 0.88rem;
-    cursor: pointer;
-    padding: 0;
+    transition: transform 0.22s ease;
   }
-  .card-open:hover { text-decoration: underline; }
+  .card:hover .card-open { transform: translateX(3px); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .card, .card-open, .card :global(.card-shader) { transition: none; }
+    .card:hover { transform: none; }
+  }
 </style>
 
 <script>
-  for (const el of document.querySelectorAll<HTMLElement>('.card[data-id], .card-open[data-id]')) {
-    el.addEventListener('click', (e) => {
-      const id = (e.currentTarget as HTMLElement).dataset.id;
-      if (id) window.dispatchEvent(new CustomEvent('noise:load-example', { detail: id }));
+  // One shared WebGL canvas running an analog-static shader (TV snow + scanlines + a rolling
+  // tracking band + faint drifting pastel chroma). We can't give 20 cards their own GL context, so a
+  // single canvas reparents into whichever card is hovered. Lazy-initialised on first hover.
+  const canHover = window.matchMedia('(hover: hover)').matches;
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const cards = Array.from(document.querySelectorAll<HTMLElement>('.card'));
+
+  if (canHover && cards.length) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const canvas = document.createElement('canvas');
+    canvas.className = 'card-shader';
+    canvas.setAttribute('aria-hidden', 'true');
+
+    const VERT = `attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }`;
+    const FRAG = `
+      precision highp float;
+      uniform vec2  u_res;
+      uniform float u_time;
+      uniform vec2  u_mouse;
+
+      // cheap hash white-noise — the grain source for the static
+      float hash21(vec2 p){
+        p = fract(p * vec2(123.34, 345.45));
+        p += dot(p, p + 34.345);
+        return fract(p.x * p.y);
+      }
+
+      void main(){
+        vec2 fc = gl_FragCoord.xy;
+        vec2 uv = fc / u_res;
+        float t = u_time;
+        float aspect = u_res.x / u_res.y;
+
+        // quantize time so the snow flickers at a TV-ish cadence, not once per animation frame
+        float tf = floor(t * 22.0);
+
+        // two layers of per-pixel grain + a per-row horizontal jitter (analog instability)
+        float g = hash21(fc + tf * 11.13);
+        g = mix(g, hash21(fc * 1.7 + tf * 3.7), 0.5);
+        float jit = (hash21(vec2(floor(fc.y), tf)) - 0.5);
+        g = mix(g, hash21(fc + vec2(jit * 26.0, 0.0) + tf * 5.1), 0.35);
+
+        // a bright "tracking" band slowly rolling up the screen
+        float roll = fract(uv.y * 1.4 - t * 0.25);
+        float band = smoothstep(0.0, 0.12, roll) * smoothstep(0.35, 0.12, roll);
+
+        // scanlines
+        float scan = 0.5 + 0.5 * sin(fc.y * 2.2 - t * 6.0);
+
+        // monochrome analog snow — white / light-grey, no chroma
+        float v = 0.91;                    // light base, kept whitish for readable text
+        v += (g - 0.5) * 0.48;             // the static speckle (white ↔ light-grey)
+        v += band * 0.06;                  // brighter tracking band
+        v *= (0.93 + 0.07 * scan);         // scanline darkening
+
+        // cursor: the snow boils harder near the pointer
+        vec2 m  = vec2(u_mouse.x * aspect, u_mouse.y);
+        vec2 pp = vec2((uv.x * 2.0 - 1.0) * aspect, uv.y * 2.0 - 1.0);
+        float infl = exp(-dot(pp - m, pp - m) * 2.5);
+        v += (g - 0.5) * 0.45 * infl;
+
+        gl_FragColor = vec4(vec3(clamp(v, 0.0, 1.0)), 1.0);
+      }
+    `;
+
+    let gl: WebGLRenderingContext | null = null;
+    let uRes: WebGLUniformLocation | null = null;
+    let uTime: WebGLUniformLocation | null = null;
+    let uMouse: WebGLUniformLocation | null = null;
+    let raf = 0, startT = 0, hideTimer = 0;
+    let active: HTMLElement | null = null;
+    const target = { x: 0, y: 0 }, mouse = { x: 0, y: 0 };
+
+    const initGL = () => {
+      gl = canvas.getContext('webgl', { antialias: true, alpha: true, premultipliedAlpha: false });
+      if (!gl) return false;
+      const compile = (type: number, src: string) => {
+        const s = gl!.createShader(type)!;
+        gl!.shaderSource(s, src); gl!.compileShader(s);
+        if (!gl!.getShaderParameter(s, gl!.COMPILE_STATUS)) console.error('card-shader:', gl!.getShaderInfoLog(s));
+        return s;
+      };
+      const prog = gl.createProgram()!;
+      gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+      gl.linkProgram(prog); gl.useProgram(prog);
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+      const loc = gl.getAttribLocation(prog, 'p');
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+      uRes = gl.getUniformLocation(prog, 'u_res');
+      uTime = gl.getUniformLocation(prog, 'u_time');
+      uMouse = gl.getUniformLocation(prog, 'u_mouse');
+      return true;
+    };
+
+    const fit = (card: HTMLElement) => {
+      const rect = card.getBoundingClientRect();
+      const w = Math.max(1, Math.floor(rect.width * dpr));
+      const h = Math.max(1, Math.floor(rect.height * dpr));
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+      gl!.viewport(0, 0, canvas.width, canvas.height);
+      gl!.uniform2f(uRes, canvas.width, canvas.height);
+    };
+
+    const frame = (now: number) => {
+      if (!startT) startT = now;
+      const t = reduce ? 6.0 : (now - startT) / 1000;
+      mouse.x += (target.x - mouse.x) * 0.08;
+      mouse.y += (target.y - mouse.y) * 0.08;
+      gl!.uniform1f(uTime, t);
+      gl!.uniform2f(uMouse, mouse.x, mouse.y);
+      gl!.drawArrays(gl!.TRIANGLES, 0, 3);
+      if (!reduce && active) raf = requestAnimationFrame(frame);
+    };
+
+    const enter = (card: HTMLElement) => {
+      window.clearTimeout(hideTimer);
+      if (!gl && !initGL()) return;
+      active = card;
+      if (canvas.parentElement !== card) card.prepend(canvas);
+      fit(card);
+      void canvas.offsetWidth;        // reflow so the opacity transition runs
+      card.classList.add('shaded');
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(frame);
+    };
+
+    const leave = (card: HTMLElement) => {
+      if (active !== card) return;
+      active = null;
+      card.classList.remove('shaded');
+      hideTimer = window.setTimeout(() => {
+        cancelAnimationFrame(raf);
+        if (canvas.parentElement) canvas.parentElement.removeChild(canvas);
+      }, 420);
+    };
+
+    cards.forEach((card) => {
+      card.addEventListener('pointerenter', () => enter(card));
+      card.addEventListener('pointerleave', () => leave(card));
+      card.addEventListener('pointermove', (e) => {
+        const rect = card.getBoundingClientRect();
+        target.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        target.y = (0.5 - (e.clientY - rect.top) / rect.height) * 2;
+      }, { passive: true });
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) cancelAnimationFrame(raf);
+      else if (active && !reduce) raf = requestAnimationFrame(frame);
     });
   }
 </script>

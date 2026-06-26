@@ -1,0 +1,371 @@
+---
+// Demo §6 (the most counter-intuitive): the 100 Prisoners Riddle, scroll-driven in two scenes.
+// Scene A is the box ring: 100 boxes on a circle, with the permutation's hidden loops drawn as
+// chords — first one prisoner walks their own loop, then every loop lights up, coloured by cycle.
+// Scene B is the payoff: a histogram of the LONGEST loop over thousands of random shuffles, split
+// by the magic threshold of 50 — the green mass left of the line IS the ~31% win chance. A short
+// video sets up just how impossible the result feels. Code shown == code run; engine confirms P.
+import CodePanel from './CodePanel.astro';
+
+const code = `n = 100; opens = 50;
+boxes ~ rand::permutation(n);   # box k holds slip boxes[k]
+
+all_win = true;
+for prisoner in 0..n {
+  box = prisoner;               # open your own box first
+  found = false;
+  for hop in 0..opens {
+    box = boxes[box];           # follow the chain
+    found = found || (box == prisoner);
+  };
+  all_win = all_win && found;
+};
+P(all_win)               # ~ 0.3118`;
+---
+
+<div class="scrolly pris-demo">
+  <div class="scrolly-grid">
+    <div class="scrolly-stage">
+      <div class="stage-inner glass">
+        <h4 class="stage-title" id="pris-title">100 boxes, 100 prisoners</h4>
+        <div class="stage-canvas pris-canvas"><canvas id="pris-canvas" aria-label="The 100 prisoners riddle: box loops and the longest-cycle histogram"></canvas></div>
+        <CodePanel filename="prisoners.noise" code={code} class="pris-code" />
+        <div class="stage-foot" id="pris-foot"></div>
+        <p class="stage-engine" id="pris-engine"></p>
+      </div>
+      <figcaption class="figure-caption">
+        <span class="fig-n">Figure 6.</span> the 100 prisoners riddle. Random guessing wins with probability
+        <code class="code-inline">(½)¹⁰⁰</code>; following your own loop wins ~31%, because that succeeds exactly
+        when the random permutation has no cycle longer than half the boxes. Numbers from the real engine.
+      </figcaption>
+    </div>
+    <div class="scrolly-steps" id="pris-steps">
+      <div class="scrolly-step" data-step="0">
+        <h4>A riddle that sounds impossible</h4>
+        <p>100 numbered prisoners, 100 numbered boxes, each box holding one prisoner's number in random order. Each may open <strong>50</strong> boxes hunting for their own number. If <em>everyone</em> finds it, all go free — otherwise all are lost. No signalling.</p>
+        <div class="pris-video">
+          <iframe src="https://www.youtube.com/embed/DCiPrr-dQyw" title="The 100 prisoners riddle" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+        </div>
+      </div>
+      <div class="scrolly-step" data-step="1">
+        <h4>Guessing is hopeless</h4>
+        <p>Open 50 of the 100 boxes at random and you find your own number half the time. Fine for one prisoner — but <em>all 100</em> must succeed at once, so the odds are <code class="code-inline">(½)¹⁰⁰ ≈ 8×10⁻³¹</code>. Astronomically, certainly zero.</p>
+      </div>
+      <div class="scrolly-step" data-step="2">
+        <h4>The trick: open your own box first</h4>
+        <p>Now the clever rule. Prisoner <em>k</em> opens box <em>k</em>. Inside is some number — so go open <em>that</em> box next. The slip there points to the next box, and so on. You are quietly walking a <strong>loop</strong>.</p>
+      </div>
+      <div class="scrolly-step" data-step="3">
+        <h4>Follow the chain home</h4>
+        <p>Because the boxes are a permutation, the chain you follow must eventually loop back to box <em>k</em> — and the slip that closes the loop is your own number. You find it on the very last hop of <em>your</em> cycle… if that cycle is at most 50 long.</p>
+      </div>
+      <div class="scrolly-step" data-step="4">
+        <h4>Every prisoner walks one loop</h4>
+        <p>The whole arrangement splits into a handful of separate loops, and each prisoner is born onto exactly one of them. Everyone on a given loop succeeds or fails <em>together</em>, depending only on that loop's length.</p>
+      </div>
+      <div class="scrolly-step" data-step="5">
+        <h4>One rule decides everything: no loop over 50</h4>
+        <p>So all 100 go free precisely when the <strong>longest loop is ≤ 50</strong>. Watch fresh shuffles roll by — a single long loop (red) dooms everyone on it; keep every loop short (green) and the whole room walks free.</p>
+      </div>
+      <div class="scrolly-step" data-step="6">
+        <h4>How often? About 31%</h4>
+        <p>Over thousands of shuffles, plot the longest loop. A permutation can have at most one loop longer than 50, and the chance it has none works out to <code class="code-inline">1 − (1/51 + … + 1/100) ≈ 0.3118</code>. The green mass left of the line is the answer.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+  .pris-canvas { height: 300px; }
+  .pris-code { font-size: 0.86rem; }
+  :global(.pris-code .code-body) { font-size: 0.86rem; line-height: 1.48; padding: 0.7rem 1rem; }
+  /* the short is vertical (9:16) — cap it so it sits neatly inside the narrow step column */
+  .pris-video { margin-top: 1rem; width: 100%; max-width: 250px; aspect-ratio: 9 / 16; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; background: #000; }
+  .pris-video iframe { width: 100%; height: 100%; display: block; border: 0; }
+  .pris-demo .stage-foot .win { color: #1f6f8b; font-weight: 700; }
+  .pris-demo .stage-foot .lose { color: #8a2d4a; font-weight: 700; }
+</style>
+
+<script>
+  import { runNoise } from '../lib/noise';
+
+  const root = document.querySelector('.pris-demo') as HTMLElement | null;
+  const canvas = document.getElementById('pris-canvas') as HTMLCanvasElement | null;
+  if (root && canvas) {
+    const gl = canvas.getContext('webgl', { antialias: true, alpha: false });
+    const titleEl = document.getElementById('pris-title')!, footEl = document.getElementById('pris-foot')!,
+      engineEl = document.getElementById('pris-engine')!;
+    const codeBody = root.querySelector('.code-body') as HTMLElement | null;
+    const lines = codeBody ? Array.from(codeBody.querySelectorAll<HTMLElement>('.cl')) : [];
+    if (codeBody) codeBody.classList.add('progressive');
+
+    type Mode = 'setup' | 'random' | 'chain' | 'cycles' | 'tally';
+    const STEPS: { mode: Mode; show: number; add: number[]; roll?: boolean; highlight?: boolean; eng?: boolean }[] = [
+      { mode: 'setup', show: 1, add: [0, 1] },
+      { mode: 'random', show: 1, add: [] },
+      { mode: 'chain', show: 6, add: [3, 4, 5, 6] },
+      { mode: 'chain', show: 10, add: [7, 8, 9, 10] },
+      { mode: 'cycles', show: 12, add: [11, 12] },
+      { mode: 'cycles', show: 12, add: [], roll: true, highlight: true },
+      { mode: 'tally', show: 13, add: [13], eng: true },
+    ];
+    const TITLES: Record<Mode, string> = {
+      setup: '100 boxes, 100 prisoners',
+      random: 'Guessing at random',
+      chain: 'Follow your own loop',
+      cycles: 'The hidden loops',
+      tally: 'Longest loop over many shuffles',
+    };
+
+    // --- permutation helpers ---
+    const N = 100, OPENS = 50;
+    function randPerm(n: number): number[] {
+      const a = Array.from({ length: n }, (_, i) => i);
+      for (let i = n - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = a[i]; a[i] = a[j]; a[j] = t; }
+      return a;
+    }
+    interface Decomp { cid: Int32Array; lens: number[]; longest: number; longestId: number; }
+    function decompose(perm: number[]): Decomp {
+      const n = perm.length, cid = new Int32Array(n).fill(-1), lens: number[] = [];
+      let nc = 0;
+      for (let i = 0; i < n; i++) {
+        if (cid[i] >= 0) continue;
+        let j = i, len = 0;
+        while (cid[j] < 0) { cid[j] = nc; j = perm[j]; len++; }
+        lens.push(len); nc++;
+      }
+      let longest = 0, longestId = 0;
+      lens.forEach((L, id) => { if (L > longest) { longest = L; longestId = id; } });
+      return { cid, lens, longest, longestId };
+    }
+
+    let mode: Mode = 'setup', highlight = false, rolling = false;
+    let featurePerm = randPerm(N), decomp = decompose(featurePerm);
+    // tour = the loop one prisoner walks in the 'chain' scene (a medium-length cycle reads best)
+    let tourPath: number[] = [], tourHops = 0;
+    function pickTour() {
+      let pickId = -1, best = 99;
+      decomp.lens.forEach((L, id) => { if (L >= 5 && L <= 18 && Math.abs(L - 11) < best) { best = Math.abs(L - 11); pickId = id; } });
+      if (pickId < 0) pickId = decomp.longestId;
+      let start = 0; for (let i = 0; i < N; i++) if (decomp.cid[i] === pickId) { start = i; break; }
+      tourPath = [start]; let x = featurePerm[start];
+      while (x !== start) { tourPath.push(x); x = featurePerm[x]; }
+      tourHops = 0;
+    }
+    function newFeature() { featurePerm = randPerm(N); decomp = decompose(featurePerm); }
+
+    // random-scene state
+    let rndPerm = randPerm(N), opened = new Set<number>(), rndOwnerBox = 0, rndReveal = 0;
+    function newRandom() {
+      rndPerm = randPerm(N);
+      const order = randPerm(N); opened = new Set(order.slice(0, OPENS));
+      rndOwnerBox = rndPerm.indexOf(0); // the box whose slip is prisoner 0's number
+      rndReveal = 0;
+    }
+
+    function footHTML(html: string) { footEl.innerHTML = html; }
+    function setStep(i: number) {
+      const c = STEPS[i];
+      mode = c.mode; highlight = !!c.highlight; rolling = !!c.roll;
+      lines.forEach((el, k) => { el.classList.toggle('shown', k <= c.show); el.classList.toggle('added', c.add.includes(k)); });
+      for (const el of root!.querySelectorAll('.scrolly-step')) el.classList.toggle('active', Number((el as HTMLElement).dataset.step) === i);
+      titleEl.textContent = TITLES[mode];
+      if (mode === 'random') newRandom();
+      if (mode === 'chain') { newFeature(); pickTour(); }
+      if (mode === 'setup') footHTML('<span class="stat">boxes <b>100</b></span><span class="stat">opens each <b>50</b></span>');
+      else if (mode === 'random') footHTML('<span class="stat">your slip <b id="pf-a">—</b></span><span class="stat key">all 100 at random <b>(½)¹⁰⁰</b></span>');
+      else if (mode === 'chain') footHTML('<span class="stat">hop <b id="pf-a">0</b></span><span class="stat key">your loop length <b id="pf-b">—</b></span>');
+      else if (mode === 'cycles') footHTML('<span class="stat">loops <b id="pf-a">—</b></span><span class="stat key">longest <b id="pf-b">—</b> / 50</span>');
+      else footHTML('<span class="stat">shuffles <b id="pf-a">0</b></span><span class="stat key">P(all free) <b id="pf-b">—</b></span>');
+      if (c.eng && !engDone) { engDone = true; engineResult(); }
+    }
+    let engDone = false;
+
+    if (gl) {
+      const ptV = `attribute vec2 p; uniform float u_size; void main(){ gl_Position=vec4(p,0.0,1.0); gl_PointSize=u_size; }`;
+      const ptF = `precision highp float; uniform vec3 u_col; void main(){ vec2 d=gl_PointCoord-0.5; if(dot(d,d)>0.25) discard; gl_FragColor=vec4(u_col,1.0); }`;
+      const trV = `attribute vec2 p; void main(){ gl_Position=vec4(p,0.0,1.0); }`;
+      const trF = `precision highp float; uniform vec3 u_col; void main(){ gl_FragColor=vec4(u_col,1.0); }`;
+      const sh = (t: number, s: string) => { const x = gl.createShader(t)!; gl.shaderSource(x, s); gl.compileShader(x); return x; };
+      const mk = (v: string, f: string) => { const p = gl.createProgram()!; gl.attachShader(p, sh(gl.VERTEX_SHADER, v)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, f)); gl.linkProgram(p); return p; };
+      const ptP = mk(ptV, ptF), trP = mk(trV, trF), ptBuf = gl.createBuffer(), trBuf = gl.createBuffer();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      let W = 16, H = 9;
+      const resize = () => { const r = canvas.getBoundingClientRect(); W = Math.max(1, Math.floor(r.width * dpr)); H = Math.max(1, Math.floor(r.height * dpr)); canvas.width = W; canvas.height = H; gl.viewport(0, 0, W, H); };
+      new ResizeObserver(resize).observe(canvas);
+      const aspect = () => W / H;
+
+      type Col = [number, number, number];
+      const INK: Col = [0.42, 0.4, 0.36], TEAL: Col = [0.12, 0.43, 0.55], MAROON: Col = [0.66, 0.16, 0.28],
+        GREEN: Col = [0.2, 0.55, 0.36], GOLD: Col = [0.74, 0.56, 0.18], FAINT: Col = [0.82, 0.79, 0.72],
+        GREY: Col = [0.6, 0.57, 0.52], AXIS: Col = [0.5, 0.47, 0.43];
+      const PALETTE: Col[] = [TEAL, GOLD, [0.45, 0.35, 0.6], [0.2, 0.55, 0.5], [0.78, 0.42, 0.2], [0.3, 0.45, 0.7]];
+
+      function dPts(v: number[], size: number, c: Col) { if (!v.length) return; gl.useProgram(ptP); gl.bindBuffer(gl.ARRAY_BUFFER, ptBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.DYNAMIC_DRAW); const a = gl.getAttribLocation(ptP, 'p'); gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0); gl.uniform1f(gl.getUniformLocation(ptP, 'u_size'), size * dpr); gl.uniform3f(gl.getUniformLocation(ptP, 'u_col'), c[0], c[1], c[2]); gl.drawArrays(gl.POINTS, 0, v.length / 2); }
+      function dTris(v: number[], c: Col) { if (!v.length) return; gl.useProgram(trP); gl.bindBuffer(gl.ARRAY_BUFFER, trBuf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.DYNAMIC_DRAW); const a = gl.getAttribLocation(trP, 'p'); gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0); gl.uniform3f(gl.getUniformLocation(trP, 'u_col'), c[0], c[1], c[2]); gl.drawArrays(gl.TRIANGLES, 0, v.length / 2); }
+      const rect = (x0: number, y0: number, x1: number, y1: number) => [x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1];
+      // a thin quad segment with pixel-uniform thickness (normal computed in aspect-normalized space)
+      function addSeg(arr: number[], x0: number, y0: number, x1: number, y1: number, wd: number) {
+        const ax = aspect(); let dx = (x1 - x0) * ax, dy = y1 - y0; const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+        const nx = (-dy * wd) / ax, ny = dx * wd;
+        arr.push(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, x0 + nx, y0 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny);
+      }
+
+      // --- ring geometry: 100 boxes on a circle (box 0 at top, clockwise) ---
+      const CX = 0, CY = 0.08, SC = 0.84;
+      const pos = (i: number): [number, number] => {
+        const a = -Math.PI / 2 + (2 * Math.PI * i) / N;
+        return [CX + (Math.cos(a) * SC) / aspect(), CY + Math.sin(a) * SC];
+      };
+
+      function drawRing() {
+        const cycCol = (cyc: number, isLong: boolean): Col => {
+          if (highlight) return isLong ? (decomp.longest > OPENS ? MAROON : GREEN) : FAINT;
+          return PALETTE[cyc % PALETTE.length];
+        };
+        if (mode === 'setup' || mode === 'random') {
+          // plain boxes; in random, light the 50 opened ones and flag the slip-bearing box
+          const faint: number[] = [], lit: number[] = [], own: number[] = [];
+          for (let i = 0; i < N; i++) {
+            const [x, y] = pos(i);
+            if (mode === 'random' && i === rndOwnerBox && opened.has(i) && rndReveal >= OPENS) own.push(x, y);
+            else if (mode === 'random' && opened.has(i) && [...opened].slice(0, rndReveal).includes(i)) lit.push(x, y);
+            else faint.push(x, y);
+          }
+          dPts(faint, 5.5, mode === 'random' ? [0.78, 0.75, 0.69] : TEAL);
+          dPts(lit, 6.5, TEAL);
+          const foundOwn = opened.has(rndOwnerBox);
+          if (own.length) dPts(own, 11, foundOwn ? GREEN : MAROON);
+          return;
+        }
+        // chain / cycles: draw chords k -> perm[k]
+        const groups = new Map<string, number[]>();
+        const segCol: Col[] = [];
+        const pushSeg = (col: Col, x0: number, y0: number, x1: number, y1: number, wd: number) => {
+          const key = col.join(',');
+          let g = groups.get(key); if (!g) { g = []; groups.set(key, g); segCol[segCol.length] = col; }
+          addSeg(g, x0, y0, x1, y1, wd);
+        };
+        if (mode === 'cycles') {
+          for (let i = 0; i < N; i++) {
+            const isLong = decomp.cid[i] === decomp.longestId;
+            const col = cycCol(decomp.cid[i], isLong);
+            const [x0, y0] = pos(i), [x1, y1] = pos(featurePerm[i]);
+            pushSeg(col, x0, y0, x1, y1, isLong && highlight ? 0.006 : 0.0035);
+          }
+        } else if (mode === 'chain') {
+          // faint full loop, plus the bright walked portion
+          for (let j = 0; j < tourPath.length; j++) {
+            const a = tourPath[j], b = tourPath[(j + 1) % tourPath.length];
+            const [x0, y0] = pos(a), [x1, y1] = pos(b);
+            const walked = j < tourHops;
+            pushSeg(walked ? MAROON : FAINT, x0, y0, x1, y1, walked ? 0.006 : 0.003);
+          }
+        }
+        for (const [key, verts] of groups) { const c = key.split(',').map(Number) as Col; dTris(verts, c); }
+
+        // dots
+        if (mode === 'cycles') {
+          const byCol = new Map<string, number[]>();
+          for (let i = 0; i < N; i++) {
+            const isLong = decomp.cid[i] === decomp.longestId;
+            const c = cycCol(decomp.cid[i], isLong); const [x, y] = pos(i);
+            const k = c.join(','); let g = byCol.get(k); if (!g) { g = []; byCol.set(k, g); }
+            g.push(x, y);
+          }
+          for (const [k, v] of byCol) dPts(v, 5.5, k.split(',').map(Number) as Col);
+        } else {
+          const onTour = new Set(tourPath), faint: number[] = [], lit: number[] = [];
+          for (let i = 0; i < N; i++) { const [x, y] = pos(i); (onTour.has(i) ? lit : faint).push(x, y); }
+          dPts(faint, 4.5, [0.8, 0.77, 0.71]);
+          // walked dots brighter, the start box biggest
+          const walk: number[] = [];
+          for (let j = 0; j <= Math.min(tourHops, tourPath.length - 1); j++) { const [x, y] = pos(tourPath[j]); walk.push(x, y); }
+          dPts(lit, 5.5, GREY); dPts(walk, 7, MAROON);
+          const [sx, sy] = pos(tourPath[0]); dPts([sx, sy], 10, INK);
+        }
+      }
+
+      // --- histogram scene: longest cycle length over many shuffles ---
+      const HBINS = 50; // bins of 2 lengths each across 1..100
+      const hist = new Float64Array(HBINS); let trials = 0, wins = 0;
+      const HL = -0.9, HR = 0.9, HBASE = -0.78, HTOP = 0.82;
+      function tallyStep(k: number) {
+        for (let t = 0; t < k; t++) { const d = decompose(randPerm(N)); const L = d.longest; hist[Math.min(HBINS - 1, (L - 1) >> 1)]++; trials++; if (L <= OPENS) wins++; }
+      }
+      function drawHist() {
+        dTris(rect(HL - 0.02, HBASE - 0.006, HR + 0.02, HBASE + 0.006), AXIS);
+        let peak = 1; for (let i = 0; i < HBINS; i++) peak = Math.max(peak, hist[i]);
+        const bw = (HR - HL) / HBINS;
+        const teal: number[] = [], maroon: number[] = [];
+        for (let i = 0; i < HBINS; i++) {
+          if (hist[i] <= 0) continue;
+          const x0 = HL + i * bw, y1 = HBASE + (hist[i] / peak) * (HTOP - HBASE);
+          const binLongest = (i << 1) + 1; // smallest length landing in this bin
+          (binLongest <= OPENS ? teal : maroon).push(...rect(x0 + bw * 0.1, HBASE, x0 + bw * 0.9, y1));
+        }
+        dTris(teal, GREEN); dTris(maroon, MAROON);
+        // threshold line at length 50 (the boundary between bin 24 and 25)
+        const tx = HL + (OPENS / N) * (HR - HL), dash: number[] = [];
+        for (let y = HBASE; y < HTOP; y += 0.06) dash.push(...rect(tx - 0.0035, y, tx + 0.0035, y + 0.035));
+        dTris(dash, INK);
+      }
+
+      function draw() {
+        gl.clearColor(0.957, 0.945, 0.91, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+        if (mode === 'tally') drawHist(); else drawRing();
+      }
+
+      let frame = 0, inView = false;
+      function loop() {
+        frame++;
+        if (inView) {
+          if (mode === 'random') {
+            if (frame % 3 === 0 && rndReveal < OPENS) rndReveal++;
+            if (rndReveal >= OPENS && frame % 90 === 0) newRandom();
+            const a = document.getElementById('pf-a'); if (a) { a.textContent = opened.has(rndOwnerBox) ? 'found ✓' : 'missed ✗'; a.className = opened.has(rndOwnerBox) ? 'win' : 'lose'; }
+          } else if (mode === 'chain') {
+            if (frame % 9 === 0 && tourHops < tourPath.length) tourHops++;
+            if (tourHops >= tourPath.length && frame % 120 === 0) { newFeature(); pickTour(); }
+            const a = document.getElementById('pf-a'); if (a) a.textContent = String(Math.min(tourHops, tourPath.length));
+            const b = document.getElementById('pf-b'); if (b) b.textContent = String(tourPath.length);
+          } else if (mode === 'cycles') {
+            if (rolling && frame % 110 === 0) newFeature();
+            const a = document.getElementById('pf-a'); if (a) a.textContent = String(decomp.lens.length);
+            const b = document.getElementById('pf-b'); if (b) { b.textContent = String(decomp.longest); b.className = decomp.longest <= OPENS ? 'win' : 'lose'; }
+          } else if (mode === 'tally') {
+            if (trials < 60000) tallyStep(400);
+            const a = document.getElementById('pf-a'); if (a) a.textContent = trials.toLocaleString();
+            const b = document.getElementById('pf-b'); if (b) b.textContent = trials ? (wins / trials).toFixed(4) : '—';
+          }
+          draw();
+        }
+        requestAnimationFrame(loop);
+      }
+      new IntersectionObserver((es) => { for (const e of es) inView = e.isIntersecting; }, { threshold: 0.15 }).observe(canvas);
+      resize(); draw(); requestAnimationFrame(loop);
+    }
+
+    async function engineResult() {
+      engineEl.textContent = 'running the engine (20k shuffles, real gather + loops)…';
+      try {
+        const r = await runNoise(`n = 100; opens = 50;
+boxes ~ rand::permutation(n);
+all_win = true;
+for prisoner in 0..n {
+  box = prisoner;
+  found = false;
+  for hop in 0..opens { box = boxes[box]; found = found || (box == prisoner); };
+  all_win = all_win && found;
+};
+P(all_win, 20000)`);
+        const p = r.value ?? r.output.trim();
+        engineEl.innerHTML = `engine: random <span class="am">(½)¹⁰⁰≈10⁻³⁰</span> · loop strategy P(all free) <span class="ok">${p}</span> (analytic 0.3118)`;
+      } catch { engineEl.textContent = ''; }
+    }
+
+    const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting && e.intersectionRatio > 0.5) setStep(Number((e.target as HTMLElement).dataset.step)); }, { threshold: [0.5], rootMargin: '-18% 0px -18% 0px' });
+    for (const el of root.querySelectorAll('.scrolly-step')) io.observe(el);
+    setStep(0);
+  }
+</script>

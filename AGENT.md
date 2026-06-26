@@ -24,20 +24,29 @@ state is **Phases 0–3 plus core-model-rework Steps 1–4 complete** (see `PLAN
 - **Step 3 — continuous + moments + math:** `normal(μ,σ)`, language-level `E`/`var`, `sqrt`,
   the `pi`/`e` constants.
 - **Step 4 — collections:** `Value::Array`, array literals `[a,b,c]` + indexing `xs[i]`/`M[i][j]`,
-  `for x in xs {…}` (build-time unroll), `true`/`false` literals, and the collections/linear-algebra
-  library (`iid`, `iidmat`, `range`, `push`, `len`, `sum`, `count`, `any`, `all`, `max`, `min`,
-  `mean`, `dot`, `normsq`, `norm`, `scale`, `vadd`, `vsub`, `vsign`, `matvec`, `normalize`,
+  `for x in xs {…}` (build-time unroll), `true`/`false` literals, the shaped draw `~[n]`/`~[n, m]`
+  (independent batches — subsumes the old `iid`/`iidmat`), the matrix-product `@` operator, and the
+  collections/linear-algebra library (`range`, `push`, `len`, `sum`, `count`, `any`, `all`, `max`,
+  `min`, `mean`, `dot`, `normsq`, `norm`, `scale`, `vadd`, `vsub`, `vsign`, `matvec`, `normalize`,
   `has_duplicate`). The birthday problem for 23 and a generalized CLT are now one expression.
-- **Modules (Rust-style scoping):** builtins are namespaced into `rand` (distributions + `iid`),
+- **Modules (Rust-style scoping):** builtins are namespaced into `rand` (distributions + `rotation`),
   `math` (`pi`/`e`/`sqrt`/`round`/`log`/`log10`), `vec` (collections/linear-algebra, incl. `mse`),
   and `builtin` (`P`/`E`/`var`/`print`/`range`/`push`/`len`). `builtin` is active by default; the
   rest are **strict** — a bare name errors until `use <module>;` (or a `mod::name` path).
   `module_of()` in `eval.rs` is the single source of truth for membership; `Engine.used` tracks
   active modules.
-- **Step 5 — TurboQuant capstone:** `transpose`/`ones`/`zeros`/`iota` (`vec` module) +
-  `examples/turboquant.noise`, which reproduces the paper's inner-product bias (arXiv:2504.19874)
-  by Monte Carlo: the MSE 1-bit sign quantizer is biased by `2/π ≈ 0.637`, the QJL rescaling is
-  unbiased (`1.0`). Same sign bits, two reconstruction constants (`√(2/π)` vs `√(π/2)`).
+- **Step 5 — TurboQuant capstone:** `transpose`/`ones`/`zeros`/`iota`, plus `rotation(d)` (random
+  orthonormal matrix, Gram–Schmidt of a Gaussian seed lowered into the RV graph) and
+  `quantize(v, centroids)` (nearest-centroid / Lloyd–Max snap). `examples/turboquant.noise` now
+  reproduces the paper's **actual two-stage algorithm** (arXiv:2504.19874) by Monte Carlo:
+  Algorithm 1's MSE-optimal quantizer (rotate → snap → rotate back) matches the D_mse table
+  (`0.36/0.117/0.03/0.009` for `b=1..4`) and is biased by `2/π ≈ 0.637` for inner products;
+  Algorithm 2 (`TurboQuant_prod` = `(b−1)`-bit MSE stage + 1-bit QJL on the residual) is unbiased
+  and matches the D_prod table (`~1.57/0.56/0.18/0.047` over `d`). The faithful distortion win needs
+  a true orthonormal rotation (a Gaussian projection leaves the residual too large), which is why
+  `rotation` is a built-in rather than the earlier Gaussian shortcut. It is a **recipe** drawn with
+  `~` (`Pi ~ rotation(d)`) like any distribution — a structured multivariate draw whose
+  Gram–Schmidt source nodes are built in `Engine::draw_rotation` (`eval.rs`).
 - **Signal modeling + telecom/DSP examples:** `math::sin`/`cos`/`atan` are **ufuncs** (scalar /
   lifted over RVs / elementwise over arrays — `UnOp::Sin`/`Cos`/`Atan` in the VM), and **arithmetic
   broadcasts over arrays** (`binop_broadcast` in `eval.rs`: array⊕array length-matched, array⊕scalar,
@@ -83,7 +92,7 @@ GOAL.md LANG.md PLAN.md README.md
 | `bytecode.rs` | `compile` (DAG→flat bytecode, CSE via `HashMap<RvId,Reg>`) + the columnar VM `run_batch`; `Inst` (incl. `Normal`, `Select`, And/Or); `BATCH = 1024`. In-module `mod tests`. |
 | `sampler.rs` | Forcing path: `for_each_batch`/`sample_n`/`moments` (streaming Welford). Compiles once, allocs the column file once, seeds once. In-module `mod tests`. |
 | `builtins.rs` | `pub fn call(name, args, graph: &RvGraph, span)` — **pure/scalar** dispatch: `unif`,`unif_int`,`bernoulli`,`normal`,`sqrt`,`round`,`log`,`log10`,`P`,`E`,`var`,`print`, plus the **pure collection** builtins `range`/`push`/`len`/`iota`/`ones`/`zeros`/`transpose` (no graph access). Takes `&RvGraph` (immutable) — cannot build/draw nodes. |
-| `eval.rs` | `Engine { vars, funcs: HashMap<String,Rc<UserFn>>, graph, call_depth }`. `eval`; operator lifting (`lift_binary`/`lift_unary`/`operand_to_rv`); the extracted `binop`/`select`/`indicator` fold helpers; the **collections library** (`lib_call` → `lib_iid`/`lib_sum`/`lib_dot`/… `Engine` methods, which build/draw so they need `&mut self`); the **module system** (`module_of`/`is_module`/`MODULES`, `Engine.used` set, `resolve_call`/`eval_ident` strict-scoping gates, `Expr::Use` arm); `draw(&mut, Recipe)` (only place sources are created); `call_user_fn` (fresh params-only frame, `MAX_CALL_DEPTH` guard; the new eval arms `eval_array`/`eval_index`/`eval_for` are split out to keep `eval`'s stack frame small for the recursion budget); free helpers `forbid_recipe`, `math_const`. Rust sampling API `sample`/`moments`/`run_rv`. |
+| `eval.rs` | `Engine { vars, funcs: HashMap<String,Rc<UserFn>>, graph, call_depth }`. `eval`; operator lifting (`lift_binary`/`lift_unary`/`operand_to_rv`); the extracted `binop`/`select`/`indicator` fold helpers; the shaped-draw `eval_sample`/`draw_shaped` and the matrix-product `eval_matmul`/`matmul`; the **collections library** (`lib_call` → `lib_sum`/`lib_dot`/… `Engine` methods, which build/draw so they need `&mut self`); the **module system** (`module_of`/`is_module`/`MODULES`, `Engine.used` set, `resolve_call`/`eval_ident` strict-scoping gates, `Expr::Use` arm); `draw(&mut, Recipe)` (only place sources are created); `call_user_fn` (fresh params-only frame, `MAX_CALL_DEPTH` guard; the new eval arms `eval_array`/`eval_index`/`eval_for` are split out to keep `eval`'s stack frame small for the recursion budget); free helpers `forbid_recipe`, `math_const`. Rust sampling API `sample`/`moments`/`run_rv`. |
 | `lib.rs` | Re-exports (incl. `RvId`, `Moments`), `run(src)` helper, the golden-test corpus in `#[cfg(test)] mod tests`. |
 
 ## Build & run
@@ -160,6 +169,11 @@ git-ignored.
 
 - **`LANG.md` is the contract.** Any syntax/semantics change updates `LANG.md` *and* the
   golden tests in `lib.rs` in the same change. Don't let them drift.
+- **Keep the agent skill in sync.** `.claude/skills/noise-lang/SKILL.md` is the *authoring*
+  guide agents load to write Noise (and doubles as human-readable docs — linkable from the
+  site). When you add or change a language feature — a new builtin or module, a new
+  distribution, syntax, or a changed default — update it in the **same change** as `LANG.md`
+  and the golden tests. Stale idioms there silently mislead every agent that writes Noise.
 - **Grammar/operator changes** are now plain Rust edits in `lexer.rs` + `parser.rs` (the
   `infix_op` table) — no generated-parser regeneration step anymore.
 - **Keep errors typed.** Return `NoiseError` with a real `Span`; never `panic!`/`unwrap`
@@ -168,8 +182,10 @@ git-ignored.
   is the worked example (recipe → `Engine::draw` → `Source::Normal` → `Inst::Normal` →
   `Rng::fill_normal`). `RvNode`/`Source`/`Recipe` stay `Clone`/`Copy`/`PartialEq`/alloc-free.
 - **Builtin seam:** *pure/scalar* builtins go in `builtins::call` (`&RvGraph`, no node-building).
-  Anything that **builds graph nodes or draws** (the Step-4 reducers, `iid`) must be an `Engine`
-  method dispatched from the `Expr::Call` arm (needs `&mut self`), reusing `lift_binary`.
+  Anything that **builds graph nodes or draws** (the Step-4 reducers; the `~[shape]` and `@` arms)
+  must be an `Engine` method dispatched from `eval`/`Expr::Call` (needs `&mut self`), reusing
+  `lift_binary`. New non-trivial `eval` arms get their own `eval_*` helper (e.g. `eval_sample`,
+  `eval_matmul`) so the big `eval` match's stack frame stays small for the recursion budget.
 - **New builtin → also register its module:** add the name to `module_of()` in `eval.rs` (pick
   `rand`/`math`/`vec`/`builtin`) or it's unreachable under strict scoping. Membership (scoping) is
   independent of where the implementation lives (`builtins::call` vs `lib_call`).
@@ -182,7 +198,7 @@ git-ignored.
 
 - Deterministic core + RV runtime + Phase-3 probability surface + core-model rework Steps 1–4
   (recipes/`~`-drawing, user functions, `normal`/`E`/`var`/`sqrt`/`pi`, **collections**: arrays,
-  indexing, `for`, `true`/`false`, the `iid`/`sum`/`dot`/`has_duplicate`/… library) **plus a
+  indexing, `for`, `true`/`false`, the `~[shape]` draw, the `@` product, the `sum`/`dot`/`has_duplicate`/… library) **plus a
   Rust-style module system** (`rand`/`math`/`vec` strict, `builtin` default; `use mod;` or
   `mod::name` paths) complete and green (**130 tests**, clippy clean). 21 runnable examples in
   `examples/` (each checks an analytic value), all carrying their `use` lines.

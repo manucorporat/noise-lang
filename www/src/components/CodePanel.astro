@@ -3,20 +3,30 @@
 // Lines are individually addressable (`.cl[data-ln]`) so scrollytelling demos can reveal /
 // highlight code progressively. Token colors live in global.css under `.code-body`.
 import { LISTING_LINES } from '../lib/highlight';
+import { encodeCode } from '../lib/share';
 
 interface Props {
   filename: string;
   code: string;
   /** Optional extra class on the root (e.g. for sticky scrolly panels). */
   class?: string;
+  /** Set false to hide the "open in playground" link (defaults to shown). */
+  play?: boolean;
 }
-const { filename, code, class: cls } = Astro.props;
+const { filename, code, class: cls, play = true } = Astro.props;
 const lines = LISTING_LINES(code);
+// Open exactly the code shown in the playground (a `#c=` snapshot of this listing).
+const playHref = `/play#c=${encodeCode(code)}`;
 ---
 
 <div class:list={['code-panel', cls]}>
   <div class="code-head">
     <span class="code-name">{filename}</span>
+    {play && (
+      <a class="code-open" href={playHref} target="_blank" rel="noopener" title="Open this program in the playground">
+        open in playground <span aria-hidden="true">↗</span>
+      </a>
+    )}
   </div>
   <pre class="code-body"><code>{lines.map((l, i) => (
     <span class="cl" data-ln={i} set:html={(l || ' ') } />
@@ -32,20 +42,32 @@ const lines = LISTING_LINES(code);
   }
   .code-head {
     font-family: var(--mono);
-    font-size: 0.76rem;
+    font-size: 0.82rem;
     color: var(--ink-dim);
-    padding: 0.4rem 0.85rem;
+    padding: 0.45rem 0.9rem;
     border-bottom: 1px solid var(--rule);
     background: rgba(0, 0, 0, 0.025);
     display: flex;
     align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
   }
   .code-name::before { content: '›\00a0'; color: var(--accent); }
+  /* "open in playground" sits opposite the filename; quiet until hovered */
+  .code-open {
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--ink-dim);
+    white-space: nowrap;
+    transition: color 0.15s ease;
+  }
+  .code-open:hover { color: var(--accent); text-decoration: none; }
+  .code-open span { font-size: 0.9em; }
   .code-body {
     margin: 0;
-    padding: 0.85rem 1rem;
-    font-size: 0.86rem;
-    line-height: 1.62;
+    padding: 0.9rem 1rem;
+    font-size: 0.98rem;
+    line-height: 1.55;
     overflow-x: auto;
     color: var(--ink);
   }

@@ -1,12 +1,14 @@
 # The St. Petersburg paradox: a game whose FAIR price is infinite — yet nobody would pay much.
 # Flip a coin until it lands heads. If the first head is on flip k, you win 2^k dollars.
-use rand;   # bernoulli, iid
+use rand;   # bernoulli
+
+engine::set_max_loops(1000000);   # Monte Carlo budget for every E() below — set once, not per query
 
 # E[payout] = sum_k 2^k * (1/2)^k = 1 + 1 + 1 + ... = infinity: every round adds another $1 of
 # expected value, forever. We can only ever play finitely many rounds, so capping the game at
 # `rounds` flips makes E[payout] ~ rounds — and watching it climb with no ceiling IS the paradox.
 play(rounds) = {
-  flips  = iid(bernoulli(0.5), rounds);   # `rounds` independent coin flips
+  flips  ~[rounds] bernoulli(0.5);        # `rounds` independent coin flips
   payout = 0;
   live   = true;                          # still playing? (no head has landed yet)
   for k in 0..rounds {
@@ -18,8 +20,8 @@ play(rounds) = {
 };
 
 Print("Expected payout keeps growing as you allow more rounds (E ~ number of rounds):");
-Print("  up to  4 rounds:", E(play(4),  1000000), " (~ 4)");
-Print("  up to  8 rounds:", E(play(8),  1000000), " (~ 8)");
-Print("  up to 12 rounds:", E(play(12), 1000000), " (~ 12)");
+Print("  up to  4 rounds:", E(play(4)),  " (~ 4)");
+Print("  up to  8 rounds:", E(play(8)),  " (~ 8)");
+Print("  up to 12 rounds:", E(play(12)), " (~ 12)");
 Print("Each extra round adds about $1 of expected value forever, so no finite price is fair.");
 Print("(The mean lives in ever-rarer jackpots, so longer games need exponentially more samples.)")

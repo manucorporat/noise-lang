@@ -1,8 +1,9 @@
 ---
 // The interactive playground: a Monaco editor with Noise syntax highlighting, a Run button that
-// executes the program through the WASM engine, an output panel, a category-grouped example
-// picker (scales as examples are added), and a Share button that puts the current program in a
-// URL fragment (#x=<id> for a named example, #c=<encoded> for custom code).
+// executes the program through the WASM engine, an output panel, and a category-grouped example
+// picker (scales as examples are added). The URL fragment is kept live and shareable as you type
+// (#x=<id> for an unmodified example, #c=<encoded> for custom code) — no Share button needed,
+// just copy the address bar.
 ---
 
 <section id="playground" class="playground">
@@ -17,7 +18,6 @@
           <span class="kbd">⌘↵</span>
         </button>
         <button id="pg-reset" class="btn btn-ghost" type="button">Reset</button>
-        <button id="pg-share" class="btn btn-ghost" type="button">Share</button>
         <span id="pg-status" class="pg-status"></span>
       </div>
       <div id="editor" class="pg-editor"></div>
@@ -149,7 +149,7 @@
   import { registerNoise, LANGUAGE_ID, THEME_ID } from '../lib/noise-lang';
   import { runNoise } from '../lib/noise';
   import { examples, defaultExampleId, examplesByCategory } from '../data/examples';
-  import { parseHash, buildShareUrl } from '../lib/share';
+  import { parseHash, encodeCode } from '../lib/share';
 
   // Noise has no language service worker; only the base editor worker is needed.
   (self as any).MonacoEnvironment = { getWorker: () => new EditorWorker() };
@@ -203,10 +203,19 @@
   }
 
   function setHash(value: string) {
+    // replaceState (not location.hash) so live edits don't pollute history or refire a load.
     suppressHash = true;
-    location.hash = value;
-    // release the guard after the hashchange event has fired
+    history.replaceState(null, '', value);
     setTimeout(() => (suppressHash = false), 0);
+  }
+
+  // The shareable fragment for the current state: a clean #x=id when the code is an unmodified
+  // example, otherwise a #c= snapshot of the source. Kept live as the user types.
+  function shareHash(): string {
+    const code = editor.getValue();
+    const ex = currentId ? byId.get(currentId) : undefined;
+    if (ex && ex.code.trim() === code.trim()) return `#x=${currentId}`;
+    return `#c=${encodeCode(code)}`;
   }
 
   function selectExample(id: string, { loadCode = true, updateHash = true } = {}) {
@@ -287,46 +296,22 @@
     return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]!));
   }
 
-  // Share: a clean #x=id link when the code is an unmodified example, else a #c= snapshot.
-  async function share() {
-    const btn = $('pg-share') as HTMLButtonElement;
-    const code = editor.getValue();
-    const ex = currentId ? byId.get(currentId) : undefined;
-    const unmodified = ex && ex.code.trim() === code.trim();
-    const url = buildShareUrl(unmodified ? { exampleId: currentId! } : { code });
-    setHash(url.slice(url.indexOf('#')));
-    const label = btn.textContent;
-    try {
-      await navigator.clipboard.writeText(url);
-      btn.textContent = 'Copied link!';
-    } catch {
-      btn.textContent = 'Link in URL';
-    }
-    btn.style.color = 'var(--accent-2)';
-    setTimeout(() => {
-      btn.textContent = label;
-      btn.style.color = '';
-    }, 1600);
-  }
-
   $('pg-run').addEventListener('click', run);
   $('pg-reset').addEventListener('click', () => {
     if (currentId) selectExample(currentId, { loadCode: true, updateHash: false });
   });
-  $('pg-share').addEventListener('click', share);
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, run);
+
+  // Keep the URL fragment live as the user edits, so the address bar is always a shareable link
+  // (debounced; replaceState keeps it out of history).
+  let hashTimer = 0;
+  editor.onDidChangeModelContent(() => {
+    window.clearTimeout(hashTimer);
+    hashTimer = window.setTimeout(() => setHash(shareHash()), 350);
+  });
 
   // React to back/forward or a pasted link changing the hash (ignore our own writes).
   window.addEventListener('hashchange', () => {
     if (!suppressHash) loadFromHash();
-  });
-
-  // Let gallery cards load an example into the editor.
-  window.addEventListener('noise:load-example', (e) => {
-    const id = (e as CustomEvent<string>).detail;
-    if (byId.has(id)) {
-      selectExample(id);
-      document.getElementById('playground')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
   });
 </script>

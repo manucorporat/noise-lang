@@ -4,11 +4,11 @@
 # Here we add 12 random numbers between 0 and 1. After shifting so the average is 0, the total
 # behaves like a standard bell curve. We check that by computing the same tail probability two
 # ways — from our sum, and from a real bell curve (normal) — and seeing that they agree.
-use rand;   # unif, iid, normal
+use rand;   # unif, normal
 
 # Add n uniforms and recenter to mean 0 — by the CLT its right tail should match a bell curve.
 n     = 12;
-draws = iid(unif(0, 1), n);
+draws ~[n] unif(0, 1);
 clt   = vec::sum(draws) - n / 2;
 Print("CLT (sum of", n, "uniforms) P(Z>1) ~", P(clt > 1));
 

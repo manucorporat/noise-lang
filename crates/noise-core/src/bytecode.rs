@@ -34,12 +34,18 @@ pub enum Inst {
     Bin { dst: Reg, op: BinOp, a: Reg, b: Reg },
     /// Per-lane select: `dst = cond ? a : b` (lifted `if`).
     Select { dst: Reg, cond: Reg, a: Reg, b: Reg },
+    /// Per-lane gather: `dst = table[round(clamp(index))]`. `table` indexes `Program::gathers`
+    /// (the element registers); `index` is the register holding the per-lane index. Kept out of
+    /// `Inst` itself so the enum stays `Copy`.
+    Gather { dst: Reg, table: u32, index: Reg },
 }
 
 pub struct Program {
     pub insts: Vec<Inst>,
     pub n_regs: usize,
     pub root: Reg,
+    /// Element-register tables for `Inst::Gather`, indexed by its `table` field.
+    pub gathers: Vec<Box<[Reg]>>,
 }
 
 /// Lower the transitive cone of `root` to flat bytecode.
@@ -50,11 +56,13 @@ pub struct Program {
 pub fn compile(graph: &RvGraph, root: RvId) -> Program {
     let mut memo: HashMap<RvId, Reg> = HashMap::new();
     let mut insts: Vec<Inst> = Vec::new();
-    let root_reg = lower(graph, root, &mut memo, &mut insts);
+    let mut gathers: Vec<Box<[Reg]>> = Vec::new();
+    let root_reg = lower(graph, root, &mut memo, &mut insts, &mut gathers);
     Program {
         n_regs: insts.len(),
         insts,
         root: root_reg,
+        gathers,
     }
 }
 
@@ -63,6 +71,7 @@ fn lower(
     id: RvId,
     memo: &mut HashMap<RvId, Reg>,
     insts: &mut Vec<Inst>,
+    gathers: &mut Vec<Box<[Reg]>>,
 ) -> Reg {
     if let Some(&reg) = memo.get(&id) {
         return reg;
@@ -111,24 +120,35 @@ fn lower(
             dst
         }
         RvNode::Unary(op, a) => {
-            let ra = lower(graph, a, memo, insts);
+            let ra = lower(graph, a, memo, insts, gathers);
             let dst = insts.len() as Reg;
             insts.push(Inst::Un { dst, op, a: ra });
             dst
         }
         RvNode::Binary(op, a, b) => {
-            let ra = lower(graph, a, memo, insts);
-            let rb = lower(graph, b, memo, insts);
+            let ra = lower(graph, a, memo, insts, gathers);
+            let rb = lower(graph, b, memo, insts, gathers);
             let dst = insts.len() as Reg;
             insts.push(Inst::Bin { dst, op, a: ra, b: rb });
             dst
         }
         RvNode::Select { cond, a, b } => {
-            let rc = lower(graph, cond, memo, insts);
-            let ra = lower(graph, a, memo, insts);
-            let rb = lower(graph, b, memo, insts);
+            let rc = lower(graph, cond, memo, insts, gathers);
+            let ra = lower(graph, a, memo, insts, gathers);
+            let rb = lower(graph, b, memo, insts, gathers);
             let dst = insts.len() as Reg;
             insts.push(Inst::Select { dst, cond: rc, a: ra, b: rb });
+            dst
+        }
+        RvNode::Gather { elems, index } => {
+            // Lower every element register and the index, then record the table for the VM.
+            let table: Vec<Reg> =
+                elems.iter().map(|&e| lower(graph, e, memo, insts, gathers)).collect();
+            let ri = lower(graph, index, memo, insts, gathers);
+            let tbl = gathers.len() as u32;
+            gathers.push(table.into_boxed_slice());
+            let dst = insts.len() as Reg;
+            insts.push(Inst::Gather { dst, table: tbl, index: ri });
             dst
         }
     };
@@ -192,6 +212,27 @@ pub fn run_batch(program: &Program, regs: &mut [Box<[f64]>], rng: &mut crate::rn
                 for k in 0..BATCH {
                     regs[dst][k] = if regs[cond][k] != 0.0 { regs[a][k] } else { regs[b][k] };
                 }
+            }
+            Inst::Gather { dst, table, index } => {
+                // Per lane: round the index, clamp into `0..len`, copy that element's lane value.
+                // Gather to a scratch column first so the immutable element reads don't alias the
+                // mutable `dst` write (one-register-per-node guarantees they're distinct anyway).
+                let tbl = &program.gathers[table as usize];
+                let last = tbl.len() - 1; // `gathers` never holds an empty table (eval rejects it)
+                let index = index as usize;
+                let mut scratch = [0.0f64; BATCH];
+                for k in 0..BATCH {
+                    let raw = regs[index][k].round();
+                    let i = if raw <= 0.0 {
+                        0
+                    } else if raw as usize >= last {
+                        last
+                    } else {
+                        raw as usize
+                    };
+                    scratch[k] = regs[tbl[i] as usize][k];
+                }
+                regs[dst as usize].copy_from_slice(&scratch);
             }
         }
     }

@@ -23,9 +23,14 @@ pub trait Backend {
     fn compile(&self, graph: &RvGraph, root: RvId) -> Box<dyn Program>;
 }
 
-/// The default forcing path: compile `root` with the best available backend. With the `jit`
-/// feature on a native target, this is the Cranelift JIT — which itself falls back to the
-/// interpreter for any graph it cannot profitably emit. Otherwise it is the columnar interpreter.
+/// The default forcing path: compile `root` with the best available backend. Three mutually
+/// exclusive targets sit behind this one seam, each lowering the same simplified `RvGraph`:
+///   * native + `jit` → the Cranelift JIT (machine code),
+///   * `wasm32` → the WASM-emitter host backend (an emitted wasm kernel driven by the JS host),
+///   * otherwise → the columnar interpreter.
+///
+/// Each codegen path falls back to the interpreter for any graph it can't profitably emit, so the
+/// choice only ever affects speed, never results.
 pub fn compile_root(graph: &RvGraph, root: RvId) -> Box<dyn Program> {
     // Simplify once (fold constants, apply identities, CSE) so the backend lowers a smaller DAG.
     // The rewritten graph is local — backends copy what they need, retaining no reference to it.
@@ -34,7 +39,11 @@ pub fn compile_root(graph: &RvGraph, root: RvId) -> Box<dyn Program> {
     {
         crate::jit::JitBackend::new().compile(&graph, root)
     }
-    #[cfg(not(feature = "jit"))]
+    #[cfg(all(not(feature = "jit"), target_arch = "wasm32"))]
+    {
+        crate::wasm_host::WasmHostBackend::new().compile(&graph, root)
+    }
+    #[cfg(all(not(feature = "jit"), not(target_arch = "wasm32")))]
     {
         InterpBackend.compile(&graph, root)
     }

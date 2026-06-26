@@ -71,13 +71,19 @@ a ~ Die               # draw one
 b ~ Die               # draw another, independent
 ```
 
-For N independent draws, use `iid` (each element is a fresh `~`):
+For N independent draws, give `~` a **shape**: `~[n] dist` draws an `n`-vector, `~[n, m] dist` a
+matrix — each leaf a fresh `~`, so the whole batch is iid. (`~` is still the only thing that draws;
+the shape just says how many.)
 
 ```
 Bday = unif_int(1, 365)
-days = iid(Bday, 23)       # 23 independent draws, one fresh node each
+days ~[23] Bday            # 23 independent draws, one fresh node each
 P(has_duplicate(days))
 ```
+
+A bare `~` is a scalar (rank 0); `~[1] dist` is a length-1 *array* — same draw, different shape,
+exactly like NumPy `size=()` vs `size=(1,)`. The prefix `~` is an ordinary expression, so it works
+inline too: `sum(~[3] unif(0, 1))`.
 
 ### 4. Functions
 
@@ -124,12 +130,13 @@ symbolic (a distribution) until then.
 ### Tokens
 
 ```
-+  -  *  /  **            arithmetic
++  -  *  /  **            arithmetic  (`*` is elementwise / broadcast)
+@                         matrix product  (dot / matvec / matmul by shape)
 == != < > <= >=           comparison
 && ||                     logical and / or
 !                         logical not (prefix)
 =                         assignment bind
-~                         sample / distribution bind
+~  ~[n]  ~[n, m]          sample / distribution bind (optional draw shape)
 ( ) { }                   grouping, blocks
 [ ]                       array literal / indexing
 ..                        half-open integer range (0..n)
@@ -179,9 +186,9 @@ binding, which are right-associative. Prefix `-`/`!` bind tighter than everythin
 | 4     | `&&`                 | left   |
 | 5     | `== != < > <= >=`    | left   |
 | 6     | `+ -`                | left   |
-| 7     | `* /`                | left   |
+| 7     | `* / @`              | left   |
 | 8     | `**`                 | right  |
-| 9     | prefix `- !`         | —      |
+| 9     | prefix `- ! ~`       | —      |
 | 10    | postfix `[index]`    | —      |
 | 11    | call, grouping       | —      |
 
@@ -285,11 +292,13 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
   and **variance** of a *numeric* quantity (a number or a numeric/bool RV), the companions to
   `P` for non-events. Both return an `estimate`: `E` carries the standard error of the mean
   (`sqrt(Var/n)`), `Var` an asymptotic `var·sqrt(2/n)`; a deterministic value is exact
-  (`E(5) = 5 ± 0`). `E` of a bool-RV equals `P`. Default `n = 1e6`, fixed seed.
+  (`E(5) = 5 ± 0`). `E` of a bool-RV equals `P`. Default `n = 1e6` (set per-run with
+  `engine::set_max_loops`), fixed seed.
 - **`Q(x, q)`** / **`Q(x, q, n)`** — the **quantile** (inverse CDF) of a *numeric* quantity at
   level `q ∈ [0, 1]`: `Q(X, 0.5)` is the median, `Q(X, 0.95)` the 95th percentile, and
   `Q(X, 0)`/`Q(X, 1)` the min/max draw. The companion to `E`/`Var` for tail/spread questions.
-  Estimated by Monte Carlo — draw `n` samples (default `1e6`, fixed seed), sort, and linearly
+  Estimated by Monte Carlo — draw `n` samples (default `1e6`, or `engine::set_max_loops`; fixed
+  seed), sort, and linearly
   interpolate between the bracketing order statistics. Returns a plain `number` (unlike `P`/`E`,
   it does *not* auto-round to a confidence precision: a sample quantile's error depends on the
   density there). A deterministic value is its own quantile at every level.
@@ -299,7 +308,8 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
 - **`P(event)`** / **`P(event, n)`** — the probability that a bool-RV (or deterministic bool)
   is true, returned as a plain `number` in `[0,1]` so it composes in arithmetic (`4 * P(C)`).
   `P` of a numeric (non-event) value is an error. Estimated by Monte Carlo over `n` samples
-  (default `1e6`) under a fixed seed, so a run is reproducible.
+  (default `1e6`, or set per-run with `engine::set_max_loops`) under a fixed seed, so a run is
+  reproducible.
   - **`P` returns an *estimate*** — a number that carries its standard error
     `se = sqrt(p(1-p)/n)` (a *deterministic* event is exact, `se = 0`). The value keeps full
     precision; it **displays rounded to the digits the error justifies** (`floor(-log10(se))`
@@ -350,24 +360,33 @@ qualified **path** (`rand::unif(0, 1)`, `math::pi`) — which always works — o
 `use` brings its module into scope:
 
 ```
-use rand;            # now `unif`, `unif_int`, `iid`, … are available unqualified
+use rand;            # now `unif`, `unif_int`, `normal`, … are available unqualified
 X ~ unif(0, 1);
 math::sqrt(2)        # or reach a single item by its full path, no `use` needed
 ```
 
-The four modules:
+The modules:
 
 | Module    | Items | Default? |
 |-----------|-------|----------|
 | `builtin` | `P`, `Q`, `E`, `Var`, `Print`, `Len` (capital-only) | **always active** (no `use`) |
-| `rand`    | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `exp`, `exp_int`, `poisson`, `geometric`, `iid`, `iidmat` | needs `use rand;` |
+| `rand`    | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `exp`, `exp_int`, `poisson`, `geometric`, `rotation` (batched sampling is the `~[shape]` operator, not a builtin) | needs `use rand;` |
 | `math`    | `pi`, `e`, `sqrt`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign` | needs `use math;` |
-| `vec`     | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `normsq`, `norm`, `vadd`, `vsub`, `matvec`, `transpose`, `normalize`, `has_duplicate`, `mse`, `ones`, `zeros`, `iota` | needs `use vec;` |
+| `vec`     | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `normsq`, `norm`, `vadd`, `vsub`, `matvec`, `transpose`, `normalize`, `quantize`, `has_duplicate`, `mse`, `ones`, `zeros`, `iota` | needs `use vec;` |
 | `signal`  | `sine`, `cosine` (lazy waveforms), `noise_white` (lazy white noise), `sample` | needs `use signal;` |
+| `engine`  | `set_max_loops` (run-time evaluator knobs) | needs `use engine;` |
+
+**`engine::set_max_loops(N)`** sets the default Monte Carlo budget — the sample count `P`/`E`/
+`Var`/`Q` use when called *without* an explicit count — to `N` (an integer `>= 1`) for the rest of
+the run. It's the one-place alternative to threading `n` through every query when you want to trade
+accuracy for speed (or buy more digits): `engine::set_max_loops(20000);` then a bare `P(C)` draws
+20 000 samples instead of the `1e6` default. An explicit per-call count (`P(C, n)`) still overrides
+it. Returns `unit` — it's a setting, not a value.
 
 Rules:
-- **`builtin` is active by default**; `rand`/`math`/`vec` are **strict** — a bare name in one of
-  them is an error until you `use` the module (or write the path). The error tells you the fix:
+- **`builtin` is active by default**; `rand`/`math`/`vec`/`signal`/`engine` are **strict** — a
+  bare name in one of them is an error until you `use` the module (or write the path). The error
+  tells you the fix:
   `'unif' is in module 'rand' — add `use rand;` or write `rand::unif``.
 - **`use module;`** activates a module for the rest of the program (in the REPL, the rest of the
   session). `use builtin;` is a harmless no-op. An unknown module is an error.
@@ -384,9 +403,9 @@ Rules:
 
 ## Collections (Step 4)
 
-The library below lives in the `vec` module (reducers/linear algebra) and `rand` (`iid`/`iidmat`);
-`Len` is in the always-on `builtin`, and the half-open range is the `a..b` operator (below). Add
-`use vec;` / `use rand;` (or use paths).
+The library below lives in the `vec` module (reducers/linear algebra); `Len` is in the always-on
+`builtin`, the half-open range is the `a..b` operator (below), and a **batch of independent draws**
+is the `~[shape]` operator (a shaped form of `~`, see §2). Add `use vec;` / `use rand;` (or paths).
 
 Arrays are **fixed-length** sequences whose length is known when the graph is built (everything
 but a `~` draw is deterministic at build time). Elements are arbitrary values — `number`, `bool`,
@@ -420,23 +439,31 @@ identically (e.g. `sum` over `dist` elements lifts to an Add-chain RV).
   `n` elements `0 … n-1`, `a >= b` is empty. The bounds are full expressions (`i + 1 .. Len(xs)`)
   and must be deterministic integers. This replaces the old `range` builtin — `for i in 0..n { … }`.
 - **Length:** `Len(xs)` — the element count (a build-time constant; capital-only `builtin`).
-- **Construction:** `iid(d, n)` (an array of `n` independent draws of recipe `d`),
-  `iidmat(d, n, m)` (an `n`×`m` matrix of independent draws). Arrays are fixed-size — there is no
-  append/`push`; build them with literals, `a..b`, `iid`, or the `vec` constructors below.
+- **Construction:** `~[n] d` (an array of `n` independent draws of recipe `d`), `~[n, m] d` (an
+  `n`×`m` matrix of independent draws) — the shaped draw operator (§2); and `rotation(d)`, a
+  **recipe** for a fresh random `d`×`d` **orthonormal** matrix (a Haar rotation, built by
+  Gram–Schmidt of a Gaussian seed). Like any distribution it is drawn with `~` — `Pi ~ rotation(d)`
+  gives a fresh rotation per sample, and `~[k] rotation(d)` an array of `k` independent ones. Arrays
+  are fixed-size — there is no append/`push`; build them with literals, `a..b`, `~[shape]`, or the
+  `vec` constructors below.
 - **Reducers:** `sum`, `mean`, `count` (number of true elements), `any` (`||`), `all` (`&&`),
   `max`, `min`.
-- **Linear algebra:** `dot`, `normsq`, `norm`, `scale(v, c)`, `vadd`, `vsub`, `vsign` (elementwise
-  ±1), `matvec(M, v)`, `transpose(M)`, `normalize`, the constructors `ones(n)`/`zeros(n)`/`iota(n)`,
-  `mse(a, b)` (mean squared error between two equal-length signals), plus `has_duplicate(xs)` (true
-  iff some pair is equal — the birthday predicate). `dot`/`vadd`/`vsub`/`mse` require equal-length
-  vectors; `transpose` a rectangular matrix (array of equal-length rows).
+- **Linear algebra:** the `@` operator is the **matrix product** — `v @ w` (dot), `M @ v` (matvec),
+  `M @ N` (matmul), dispatched by shape; `*` stays elementwise/broadcast. Also `dot`, `normsq`,
+  `norm`, `scale(v, c)`, `vadd`, `vsub`, `vsign` (elementwise ±1), `matvec(M, v)`, `transpose(M)`,
+  `normalize`, the constructors `ones(n)`/`zeros(n)`/`iota(n)`,
+  `mse(a, b)` (mean squared error between two equal-length signals), `quantize(v, centroids)` (snap
+  each coordinate of `v` to its nearest value in a constant codebook — the optimal scalar/Lloyd–Max
+  quantizer), plus `has_duplicate(xs)` (true iff some pair is equal — the birthday predicate).
+  `dot`/`vadd`/`vsub`/`mse` require equal-length vectors; `transpose` a rectangular matrix (array of
+  equal-length rows).
 
 ```
 use rand; use vec;
-days  = iid(unif_int(1, 365), 23);   # 23 independent birthdays
+days ~[23] unif_int(1, 365);         # 23 independent birthdays
 P(has_duplicate(days))               # ≈ 0.507 — the birthday paradox in one expression
 
-clt = sum(iid(unif(0, 1), 12)) - 6;  # sum of 12 uniforms, centered → ~ N(0, 1)
+clt = sum(~[12] unif(0, 1)) - 6;     # sum of 12 uniforms, centered → ~ N(0, 1)
 P(clt > 1)                           # ≈ 0.159, agreeing with normal(0, 1)
 ```
 
@@ -457,8 +484,8 @@ stays a generator), and it **materializes** to a concrete array only when:
 - you call `signal::sample(sig, n)` to take `n` samples explicitly.
 
 **`signal::noise_white(sigma)`** is a lazy generator too, but **random**: zero-mean white noise
-with no length yet. Unlike the deterministic waveforms it materializes into fresh
-`iid(normal(0, sigma), n)` **random variables** (so `E`/`P`/`Var` average over realizations), one
+with no length yet. Unlike the deterministic waveforms it materializes into `n` fresh
+iid `normal(0, sigma)` **random variables** (so `E`/`P`/`Var` average over realizations), one
 independent draw per leaf-vector lane — so adding it to an `[I, Q]` carrier gives I and Q *distinct*
 noise. It pins its length the same way: meeting a sized array, or `sample(noise_white(s), n)`.
 

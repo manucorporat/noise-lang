@@ -346,4 +346,36 @@ mod tests {
         assert_eq!(a.mean.to_bits(), b.mean.to_bits());
         assert_eq!(a.variance.to_bits(), b.variance.to_bits());
     }
+
+    /// End-to-end multicore scaling: time a full `moments` workload (generate + reduce) at 1 thread
+    /// vs all cores, at a sample count large enough to amortize thread-spawn overhead. This is the
+    /// "the simplest program uses every core for free" number. Ignored; run with:
+    /// `cargo test -p noise-core [--features jit] --release -- --ignored --nocapture bench_parallel_scaling`
+    #[test]
+    #[ignore]
+    fn bench_parallel_scaling() {
+        use std::time::Instant;
+
+        let (eng, id) = pi_graph();
+        let g = eng.graph();
+        let n = 64_000_000usize; // big enough that per-call thread spawn is negligible
+        let seed = 0xC0FFEE;
+        let n_chunks = n.div_ceil(CHUNK_SAMPLES);
+        let r = MomentsReducer;
+        let program = compile_root(g, id); // compile ONCE, shared across thread counts
+
+        let drive = |threads: usize| {
+            run_parallel(&*program, n, seed, &r, n_chunks, threads); // warm up
+            let t = Instant::now();
+            let m = run_parallel(&*program, n, seed, &r, n_chunks, threads);
+            std::hint::black_box(m);
+            n as f64 / t.elapsed().as_secs_f64() / 1e6
+        };
+
+        let cores = std::thread::available_parallelism().map(|c| c.get()).unwrap_or(1);
+        let one = drive(1);
+        let all = drive(cores);
+        println!("\n  moments(pi) end-to-end (generate + reduce), M samples/s:");
+        println!("    1 thread {one:8.0}   {cores} threads {all:8.0}   scaling {:.1}x", all / one);
+    }
 }

@@ -14,10 +14,13 @@ use crate::sampler;
 use crate::signal::{SignalSpec, Wave};
 use crate::value::Value;
 
-/// Default Monte Carlo budget for a language-surface `P(...)`. Large enough that the
-/// estimate's standard error (`sqrt(p(1-p)/N) ≈ 5e-4`) is tight. A fixed seed keeps a run
-/// reproducible; threading an explicit seed/N through `P` is a later refinement.
-const P_DEFAULT_N: usize = 1_000_000;
+/// Default Monte Carlo budget for a language-surface `P`/`E`/`Var`/`Q` when the call carries no
+/// explicit sample count. Large enough that a probability estimate's standard error
+/// (`sqrt(p(1-p)/N) ≈ 5e-4`) is tight. A program can lower (or raise) this for the whole run with
+/// `engine::set_max_loops(N)`; an explicit per-call count (`P(event, n)`) still overrides both.
+pub const P_DEFAULT_N: usize = 1_000_000;
+/// A fixed seed keeps a run reproducible; threading an explicit seed through `P` is a later
+/// refinement.
 const P_DEFAULT_SEED: u64 = 0;
 
 /// Called from `eval.rs`'s `Expr::Call` arm.
@@ -25,7 +28,17 @@ const P_DEFAULT_SEED: u64 = 0;
 /// Distribution constructors (`unif`, `unif_int`, `bernoulli`) return a **recipe** — an undrawn
 /// `Value::Recipe`, *not* a graph node. They never touch the graph: drawing is `~`'s job (see
 /// `Engine::draw`). `P` reads the graph to estimate a probability.
-pub fn call(name: &str, arg_vals: &[Value], graph: &RvGraph, span: Span) -> Result<Value> {
+///
+/// `default_n` is the Monte Carlo budget the sampling builtins (`P`/`E`/`Var`/`Q`) use when the
+/// call carries no explicit sample count — the engine threads its current setting (default
+/// [`P_DEFAULT_N`], adjustable via `engine::set_max_loops`) through here.
+pub fn call(
+    name: &str,
+    arg_vals: &[Value],
+    graph: &RvGraph,
+    default_n: usize,
+    span: Span,
+) -> Result<Value> {
     match name {
         "unif" => {
             let [lo, hi] = two_nums(name, arg_vals, span)?;
@@ -100,6 +113,32 @@ pub fn call(name: &str, arg_vals: &[Value], graph: &RvGraph, span: Span) -> Resu
             }
             Ok(Value::Recipe(Recipe::Geometric { p }))
         }
+        "rotation" => {
+            // A random d×d orthonormal matrix — a *recipe* like any other distribution, drawn with
+            // `~` (the actual Gram–Schmidt source draws happen in `Engine::draw_rotation`). `d` must
+            // be a non-negative integer (the matrix dimension).
+            let d = one_num(name, arg_vals, span)?;
+            if d.fract() != 0.0 || d < 0.0 || !d.is_finite() {
+                return Err(NoiseError::runtime(
+                    format!("rotation(d) needs a non-negative integer dimension, got {d}"),
+                    span,
+                ));
+            }
+            Ok(Value::Recipe(Recipe::Rotation { d: d as usize }))
+        }
+        "permutation" => {
+            // A uniform random permutation of `0..n` — a *recipe* drawn with `~` (the iid uniform
+            // key draws and their argsort happen in `Engine::draw_permutation`). `n` must be a
+            // non-negative integer (the permutation length).
+            let n = one_num(name, arg_vals, span)?;
+            if n.fract() != 0.0 || n < 0.0 || !n.is_finite() {
+                return Err(NoiseError::runtime(
+                    format!("permutation(n) needs a non-negative integer length, got {n}"),
+                    span,
+                ));
+            }
+            Ok(Value::Recipe(Recipe::Permutation { n: n as usize }))
+        }
         "sqrt" => {
             let x = one_num(name, arg_vals, span)?;
             if x < 0.0 {
@@ -115,15 +154,15 @@ pub fn call(name: &str, arg_vals: &[Value], graph: &RvGraph, span: Span) -> Resu
             }
             Ok(Value::Num(if name == "log" { x.ln() } else { x.log10() }))
         }
-        "E" | "Var" => moment(name, arg_vals, graph, span),
+        "E" | "Var" => moment(name, arg_vals, graph, default_n, span),
         "round" => {
             // round(x, digits) — round x to `digits` decimal places. Handy for messages.
             let [x, digits] = two_nums(name, arg_vals, span)?;
             let factor = 10f64.powi(digits as i32);
             Ok(Value::Num((x * factor).round() / factor))
         }
-        "P" => prob(arg_vals, graph, span),
-        "Q" => quantile(arg_vals, graph, span),
+        "P" => prob(arg_vals, graph, default_n, span),
+        "Q" => quantile(arg_vals, graph, default_n, span),
         // --- pure collection builtins (no graph access; PLAN-COLLECTIONS §3) ---
         "Len" => len(name, arg_vals, span),
         // pure vector constructors / rearrangers (graph-free; just move `Value`s around)
@@ -152,7 +191,7 @@ pub fn call(name: &str, arg_vals: &[Value], graph: &RvGraph, span: Span) -> Resu
 /// The estimate is **auto-rounded to its confidence precision**: a Monte Carlo estimate from
 /// `n` samples has standard error `sqrt(p(1-p)/n)`, so only the digits above that error are
 /// meaningful. More samples → smaller error → more digits, with no manual `round`.
-fn prob(arg_vals: &[Value], graph: &RvGraph, span: Span) -> Result<Value> {
+fn prob(arg_vals: &[Value], graph: &RvGraph, default_n: usize, span: Span) -> Result<Value> {
     if arg_vals.is_empty() || arg_vals.len() > 2 {
         return Err(NoiseError::runtime(
             format!(
@@ -173,7 +212,7 @@ fn prob(arg_vals: &[Value], graph: &RvGraph, span: Span) -> Result<Value> {
             }
             n as usize
         }
-        None => P_DEFAULT_N,
+        None => default_n,
     };
     match &arg_vals[0] {
         // A deterministic event is exact — no sampling, no error.
@@ -204,7 +243,7 @@ fn prob(arg_vals: &[Value], graph: &RvGraph, span: Span) -> Result<Value> {
 /// standard error (`E` ↔ mean, `Var` ↔ population variance). `P` is the special case for
 /// events; `E`/`Var` are total over any number or numeric RV (a bool RV works too — its mean is
 /// `P`). A deterministic number is exact: `E(5) = 5 ± 0`, `Var(5) = 0 ± 0`.
-fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, span: Span) -> Result<Value> {
+fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, default_n: usize, span: Span) -> Result<Value> {
     if arg_vals.is_empty() || arg_vals.len() > 2 {
         return Err(NoiseError::runtime(
             format!("{name} expects 1 or 2 arguments (quantity, optional sample count), got {}", arg_vals.len()),
@@ -222,7 +261,7 @@ fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, span: Span) -> Result
             }
             n as usize
         }
-        None => P_DEFAULT_N,
+        None => default_n,
     };
     let want_var = name == "Var";
     match &arg_vals[0] {
@@ -260,7 +299,7 @@ fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, span: Span) -> Result
 ///
 /// Returns a plain `Num` (not an `Est`): a sample quantile's standard error depends on the density
 /// at that point, so we don't claim auto-rounded precision the way `P`/`E` do.
-fn quantile(arg_vals: &[Value], graph: &RvGraph, span: Span) -> Result<Value> {
+fn quantile(arg_vals: &[Value], graph: &RvGraph, default_n: usize, span: Span) -> Result<Value> {
     if arg_vals.len() < 2 || arg_vals.len() > 3 {
         return Err(NoiseError::runtime(
             format!(
@@ -288,7 +327,7 @@ fn quantile(arg_vals: &[Value], graph: &RvGraph, span: Span) -> Result<Value> {
             }
             n as usize
         }
-        None => P_DEFAULT_N,
+        None => default_n,
     };
     match &arg_vals[0] {
         // A deterministic value is a point mass: its quantile is itself at every level.

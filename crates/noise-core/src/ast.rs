@@ -54,6 +54,15 @@ pub enum Expr {
     Binary(BinOp, Box<Spanned>, Box<Spanned>),
     /// `name <bind> value` — an assignment/sample binding, itself an expression.
     Bind(BindKind, String, Box<Spanned>),
+    /// `~expr` / `~[n, m, …] expr` — the prefix **draw** operator (LANG.md §2: `~` is the only
+    /// thing that draws). With an empty shape it draws a single sample of the recipe `expr`; with
+    /// a shape it builds a nested array of that shape, each leaf an *independent* draw. A
+    /// non-recipe operand is repeated as-is. The statement form `x ~ rhs` is sugar for
+    /// `x = ~rhs`; `x ~[8] rhs` for `x = ~[8] rhs`.
+    Sample {
+        shape: Vec<Spanned>,
+        body: Box<Spanned>,
+    },
     /// `f(params) = body` (deterministic) or `f(params) ~ body` (stochastic — each call draws).
     /// Defines a user function; evaluates to `unit`. See LANG.md core model §4.
     FnDef {
@@ -70,6 +79,11 @@ pub enum Expr {
     If(Box<Spanned>, Box<Spanned>, Option<Box<Spanned>>),
     /// `[a, b, c]` — an array literal (fixed length, known at build time). See PLAN-COLLECTIONS.
     Array(Vec<Spanned>),
+    /// `a @ b` — the **matrix product** (Python/NumPy `@`). Dispatches on operand shape at build
+    /// time: vector·vector → scalar dot, matrix·vector → matrix–vector product, matrix·matrix →
+    /// matrix–matrix product. Lowers to sums of `*` (so it lifts over random variables like any
+    /// arithmetic). Distinct from `*`, which stays elementwise/broadcast.
+    MatMul(Box<Spanned>, Box<Spanned>),
     /// `a..b` — a half-open integer range (Rust-style): the array `[a, a+1, …, b-1]`. Bounds must
     /// be deterministic integers; `a >= b` is the empty array. Replaces the old `range` builtin.
     Range(Box<Spanned>, Box<Spanned>),

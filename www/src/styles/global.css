@@ -1,5 +1,6 @@
-/* Computer Modern (LaTeX) web fonts — falls back to a clean serif stack if the CDN is unavailable. */
+/* Computer Modern (LaTeX) serif for prose; JetBrains Mono for code (clean glyphs, sane tilde). */
 @import url('https://cdn.jsdelivr.net/gh/aaaakshat/cm-web-fonts@latest/fonts.css');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
 
 :root {
   --paper: #fbfaf6;
@@ -14,7 +15,7 @@
 
   --serif: "Computer Modern Serif", "Latin Modern Roman", Georgia, "Times New Roman", Times, serif;
   --sans: "Computer Modern Sans", "Latin Modern Sans", ui-sans-serif, system-ui, sans-serif;
-  --mono: "Computer Modern Typewriter", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 
   --measure: 720px; /* prose reading column */
   --wide: 1080px; /* interactive / figure column */
@@ -96,6 +97,7 @@ code, pre { font-family: var(--mono); }
 .code-body .q { color: #b5651d; font-weight: 700; }
 .code-body .o { color: #a23e6a; }
 .code-body .c { color: #8a8473; font-style: italic; }
+.code-body .n { color: #6a6356; font-style: italic; }
 /* scrollytelling line states: not-yet-revealed lines dim; newly-added lines get an accent rule */
 .code-body .cl { transition: opacity 0.35s ease, background 0.35s ease; }
 .code-body.progressive .cl { opacity: 0.18; }
@@ -162,10 +164,12 @@ code, pre { font-family: var(--mono); }
   flex-direction: column;
   gap: 0.6rem;
   padding: 0.85rem;
-  max-height: 100%;
-  overflow: auto;
+  /* no inner scrolling — the full code is always shown (panels are sized to fit) */
 }
 .stage-title { margin: 0; font-size: 1.12rem; font-weight: 700; color: var(--ink); }
+/* a demo's figure caption now lives inside the sticky stage column, directly under the figure card,
+   so "Figure N" stays glued to what it describes instead of trailing the tall scroll runway */
+.scrolly-stage > .figure-caption { margin-top: 0.5rem; font-size: 0.82rem; line-height: 1.45; flex: 0 0 auto; }
 @media (max-width: 860px) {
   /* on a single column, let the stage flow normally instead of sticking */
   .scrolly-stage { position: static; height: auto; display: block; }
@@ -197,11 +201,17 @@ code, pre { font-family: var(--mono); }
   transition: opacity 0.4s ease;
 }
 .scrolly-step:first-child { padding-top: 8vh; }
-.scrolly-step:last-child { min-height: 60vh; }
+/* Trailing runway so the sticky stage stays pinned while the final step is read, instead of
+   sliding up the moment the last text is centered. */
+.scrolly-step:last-child { min-height: 68vh; padding-bottom: 40vh; }
 .scrolly-step.active { opacity: 1; }
 .scrolly-step h4 { margin: 0 0 0.55rem; font-size: 1.2rem; color: var(--accent); }
 .scrolly-step p { margin: 0; font-size: 1.04rem; color: var(--ink); }
-@media (max-width: 860px) { .scrolly-step { min-height: 52vh; } }
+@media (max-width: 860px) {
+  .scrolly-step { min-height: 52vh; }
+  /* stage flows normally on mobile, so the desktop sticky runway is just dead space */
+  .scrolly-step:last-child { min-height: 52vh; padding-bottom: 0; }
+}
 
 /* a demo's heading + optional caption, story-style (no section numbering) */
 .demo-title { font-size: clamp(1.4rem, 2.6vw, 1.9rem); margin: 0 0 0.3rem; }

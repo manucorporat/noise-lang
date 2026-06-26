@@ -6,113 +6,72 @@
 // confirms the MSE at the end. Code shown == code run.
 import CodePanel from './CodePanel.astro';
 
-const code = `use math; use vec; use signal;
-
-msg = sample(0.3 * sine(3), 64);
+const code = `msg = signal::sample(0.3 * signal::sine(3), 64);
 
 am = [1 + msg, 0 * msg];
-fm = [cos(3 * msg), sin(3 * msg)];
+fm = [math::cos(3 * msg), math::sin(3 * msg)];
 
-static = noise_white(0.3);
+static = signal::noise_white(0.3);
 rx_am = am + static;
 rx_fm = fm + static;
 
 rec_am = (rx_am[0]**2 + rx_am[1]**2)**0.5 - 1;
-rec_fm = atan(rx_fm[1] / rx_fm[0]) / 3;
+rec_fm = math::atan(rx_fm[1] / rx_fm[0]) / 3;
 
-Print("AM error", E(mse(rec_am, msg), 40000));
-Print("FM error", E(mse(rec_fm, msg), 40000));`;
+Print("AM error", E(vec::mse(rec_am, msg), 40000));
+Print("FM error", E(vec::mse(rec_fm, msg), 40000));`;
 ---
 
-<div class="amfm">
-  <div class="amfm-grid">
-    <div class="amfm-stage">
-      <div class="amfm-inner glass">
+<div class="amfm scrolly">
+  <div class="scrolly-grid">
+    <div class="scrolly-stage">
+      <div class="stage-inner glass">
         <h4 class="stage-title">AM vs FM</h4>
         <div class="amfm-canvas-wrap"><canvas id="amfm-canvas" aria-label="AM vs FM phasor visualization"></canvas></div>
         <CodePanel filename="am_fm.noise" code={code} class="amfm-code" />
         <p class="amfm-engine" id="amfm-engine">scroll through the steps →</p>
       </div>
+      <figcaption class="figure-caption">
+        <span class="fig-n">Figure 5.</span> AM vs FM, end to end. The carrier is a phasor; AM rides its
+        length, FM its angle. The same static corrupts the length but spares the angle — which is why FM
+        shrugs off noise. Numbers from the real engine.
+      </figcaption>
     </div>
-    <div class="amfm-steps" id="amfm-steps">
-      <div class="amfm-step" data-step="0">
-        <h4>1 · The message</h4>
+    <div class="scrolly-steps" id="amfm-steps">
+      <div class="scrolly-step" data-step="0">
+        <h4>The message</h4>
         <p>A gentle tone — 64 samples of a slow sine. This is what we want to send through a noisy channel and get back intact.</p>
       </div>
-      <div class="amfm-step" data-step="1">
-        <h4>2 · AM — message in the amplitude</h4>
-        <p>Write the carrier as a phasor <code class="code-inline">[I, Q]</code> — a spinning arrow. <strong>AM</strong> puts the message in its <em>length</em>: <code class="code-inline">I = 1 + m</code>. The tip slides in and out along one axis.</p>
+      <div class="scrolly-step" data-step="1">
+        <h4>AM — message in the amplitude</h4>
+        <p>Write the carrier as a phasor <code class="code-inline">[I, Q]</code> — a spinning arrow. <strong>AM</strong> puts the message in its <em>length</em>: the tip slides in and out, crossing the unit circle as the message rises and falls.</p>
       </div>
-      <div class="amfm-step" data-step="2">
-        <h4>3 · FM — message in the angle</h4>
+      <div class="scrolly-step" data-step="2">
+        <h4>FM — message in the angle</h4>
         <p><strong>FM</strong> instead puts the message in the <em>angle</em>: the tip rides the unit circle while its length stays fixed. Same information, encoded in rotation rather than reach.</p>
       </div>
-      <div class="amfm-step" data-step="3">
-        <h4>4 · Add the same static</h4>
+      <div class="scrolly-step" data-step="3">
+        <h4>Add the same static</h4>
         <p>Identical noise hits both tips. It smears AM along the <em>radius</em> it reads from — but only nudges FM <em>around</em> the circle, barely changing the angle. Watch the clouds.</p>
       </div>
-      <div class="amfm-step" data-step="4">
-        <h4>5 · Recover &amp; compare</h4>
+      <div class="scrolly-step" data-step="4">
+        <h4>Recover &amp; compare</h4>
         <p>Read the length back for AM, the angle for FM, and compare to the original. FM returns far cleaner for the very same static — the payoff of spending bandwidth on the angle.</p>
       </div>
     </div>
   </div>
-  <figcaption class="figure-caption">
-    <span class="fig-n">Figure 6.</span> AM vs FM, end to end. The carrier is a phasor; AM rides its
-    length, FM its angle. The same static corrupts the length but spares the angle — which is why FM
-    shrugs off noise. Numbers from the real engine.
-  </figcaption>
 </div>
 
 <style>
-  .amfm { margin-top: 1.75rem; }
-  .amfm-grid { display: grid; grid-template-columns: 1fr 0.62fr; gap: 2rem; align-items: start; }
-  @media (max-width: 820px) { .amfm-grid { grid-template-columns: 1fr; gap: 0; } }
-
-  .amfm-stage {
-    position: sticky;
-    top: 56px;
-    height: calc(100vh - 56px);
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-  }
-  .amfm-inner {
-    display: flex;
-    flex-direction: column;
-    gap: 0.55rem;
-    padding: 0.85rem;
-    max-height: 100%;
-    overflow: auto;
-  }
-  @media (max-width: 820px) {
-    .amfm-stage { position: static; height: auto; display: block; }
-    .amfm-inner { max-height: none; overflow: visible; }
-  }
-  .amfm-canvas-wrap { width: 100%; height: 30vh; max-height: 250px; background: #f4f1e8; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  /* layout is the shared .scrolly-* scaffold; only the canvas + code chrome are demo-specific */
+  .amfm-canvas-wrap { width: 100%; height: 150px; background: #f4f1e8; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
   #amfm-canvas { width: 100%; height: 100%; display: block; }
-  .amfm-code { font-size: 0.8rem; min-height: 0; }
-  /* the code body lives in CodePanel (separate component) — scope-pierce to cap its height */
-  :global(.amfm-code .code-body) { max-height: 24vh; overflow: auto; }
-  .amfm-engine { margin: 0; font-size: 0.85rem; color: var(--ink-dim); min-height: 1.2em; font-family: var(--mono); }
+  /* this demo's program is the longest (14 lines), so nudge its code a touch smaller + tighter
+     to fit without an inner scrollbar */
+  :global(.amfm-code .code-body) { font-size: 0.9rem; line-height: 1.45; padding: 0.7rem 1rem; }
+  .amfm-engine { margin: 0; font-size: 0.84rem; color: var(--ink-dim); min-height: 1.2em; font-family: var(--mono); }
   .amfm-engine .ok { color: #1f6f8b; font-weight: 700; }
   .amfm-engine .am { color: #8a2d4a; font-weight: 700; }
-
-  .amfm-steps { display: flex; flex-direction: column; }
-  .amfm-step {
-    min-height: 72vh;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    opacity: 0.32;
-    transition: opacity 0.4s ease;
-  }
-  .amfm-step.active { opacity: 1; }
-  .amfm-step h4 { margin: 0 0 0.6rem; font-size: 1.2rem; color: var(--accent); }
-  .amfm-step p { margin: 0; color: var(--ink); font-size: 1.02rem; }
-  @media (max-width: 820px) {
-    .amfm-step { min-height: 56vh; }
-  }
 </style>
 
 <script>
@@ -124,11 +83,11 @@ Print("FM error", E(mse(rec_fm, msg), 40000));`;
   const codeBody = document.querySelector('.amfm .code-body') as HTMLElement | null;
 
   const STEPS = [
-    { show: 2, add: [2], mode: 'msg' },
-    { show: 4, add: [4], mode: 'am' },
-    { show: 5, add: [5], mode: 'fm' },
-    { show: 9, add: [7, 8, 9], mode: 'noise' },
-    { show: 15, add: [11, 12, 14, 15], mode: 'compare' },
+    { show: 0, add: [0], mode: 'msg' },
+    { show: 2, add: [2], mode: 'am' },
+    { show: 3, add: [3], mode: 'fm' },
+    { show: 7, add: [5, 6, 7], mode: 'noise' },
+    { show: 13, add: [9, 10, 12, 13], mode: 'compare' },
   ];
 
   // --- progressive code reveal ---
@@ -150,7 +109,7 @@ Print("FM error", E(mse(rec_fm, msg), 40000));`;
   function setStep(step: number) {
     mode = STEPS[step].mode;
     (window as any).__amfmReveal?.(step);
-    for (const el of stepsEl?.querySelectorAll('.amfm-step') ?? [])
+    for (const el of stepsEl?.querySelectorAll('.scrolly-step') ?? [])
       el.classList.toggle('active', Number((el as HTMLElement).dataset.step) === step);
     if (step === STEPS.length - 1 && !engineDone) { engineDone = true; engineResult(); }
   }
@@ -210,13 +169,16 @@ Print("FM error", E(mse(rec_fm, msg), 40000));`;
         gl.uniform3f(gl.getUniformLocation(ptP, 'u_col'), col[0], col[1], col[2]);
         gl.drawArrays(gl.POINTS, 0, verts.length / 2);
       }
-      // thick polyline from [x,y,...] pairs
+      // thin polyline from [x,y,...] pairs. `wd` is the half-thickness in clip-Y units; the
+      // normal is computed in aspect-normalized space so the thickness is uniform in pixels
+      // regardless of segment slope (otherwise steep/jagged segments balloon on a wide canvas).
       function line(pairs: number[][], wd: number, col: [number, number, number]) {
+        const ax = aspect();
         const v: number[] = [];
         for (let i = 0; i < pairs.length - 1; i++) {
           const [x0, y0] = pairs[i], [x1, y1] = pairs[i + 1];
-          let dx = x1 - x0, dy = y1 - y0; const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
-          const nx = -dy * wd, ny = dx * wd;
+          let dx = (x1 - x0) * ax, dy = y1 - y0; const L = Math.hypot(dx, dy) || 1; dx /= L; dy /= L;
+          const nx = (-dy * wd) / ax, ny = dx * wd;
           v.push(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, x0 + nx, y0 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny);
         }
         tris(v, col);
@@ -243,34 +205,32 @@ Print("FM error", E(mse(rec_fm, msg), 40000));`;
 
       let phase = 0, frame = 0;
 
-      function drawPlane(cx: number, kind: 'am' | 'fm', active: boolean, noisy: boolean) {
-        const s = 0.62;
+      const tipIQ = (kind: 'am' | 'fm', m: number): [number, number] =>
+        kind === 'am' ? [1 + m, 0] : [Math.cos(DEV * m), Math.sin(DEV * m)];
+
+      function drawPlane(cx: number, kind: 'am' | 'fm', noisy: boolean) {
+        const s = 0.6;
         axes(cx, 0, s);
-        if (kind === 'fm') ring(cx, 0, s, active ? FAINT : [0.85, 0.83, 0.78]);
-        const col = active ? (kind === 'am' ? MAROON : TEAL) : FAINT;
-        // locus tips
-        const tip: number[] = [];
-        for (let k = 0; k < N; k++) {
-          const I = kind === 'am' ? 1 + msg[k] : Math.cos(DEV * msg[k]);
-          const Q = kind === 'am' ? 0 : Math.sin(DEV * msg[k]);
-          const p = P(cx, 0, s, I, Q); tip.push(p[0], p[1]);
-        }
-        pts(tip, 2.6, col);
-        // noisy cloud
+        // faint reference unit circle for BOTH planes, so AM's changing length reads against it
+        ring(cx, 0, s, [0.86, 0.84, 0.79]);
+        const col = kind === 'am' ? MAROON : TEAL;
+        const faint: [number, number, number] = kind === 'am' ? [0.82, 0.66, 0.71] : [0.62, 0.79, 0.84];
+        // faint locus = the whole path the tip travels (a segment for AM, an arc for FM)
+        const locus: number[][] = [];
+        for (let k = 0; k < N; k++) { const [I, Q] = tipIQ(kind, msg[k]); locus.push(P(cx, 0, s, I, Q)); }
+        line(locus, 0.005, faint);
         if (noisy) {
           const cloud: number[] = [];
-          for (let k = 0; k < N; k++) {
-            const I0 = kind === 'am' ? 1 + msg[k] : Math.cos(DEV * msg[k]);
-            const Q0 = kind === 'am' ? 0 : Math.sin(DEV * msg[k]);
-            const p = P(cx, 0, s, I0 + n1[k], Q0 + n2[k]); cloud.push(p[0], p[1]);
-          }
-          pts(cloud, 3.0, kind === 'am' ? MAROON : TEAL);
+          for (let k = 0; k < N; k++) { const [I0, Q0] = tipIQ(kind, msg[k]); const p = P(cx, 0, s, I0 + n1[k], Q0 + n2[k]); cloud.push(p[0], p[1]); }
+          pts(cloud, 3.0, col);
         }
-        // swept arrow to current sample
-        const k = Math.floor(phase) % N;
-        const I = kind === 'am' ? 1 + msg[k] : Math.cos(DEV * msg[k]);
-        const Q = kind === 'am' ? 0 : Math.sin(DEV * msg[k]);
-        line([P(cx, 0, s, 0, 0), P(cx, 0, s, I, Q)], 0.006, col);
+        // a single prominent tip that sweeps smoothly through the samples — the visible motion
+        const t = phase % N, k = Math.floor(t), f = t - k;
+        const m = msg[k] + (msg[(k + 1) % N] - msg[k]) * f;
+        const [I, Q] = tipIQ(kind, m);
+        line([P(cx, 0, s, 0, 0), P(cx, 0, s, I, Q)], 0.008, col); // arrow
+        const tp = P(cx, 0, s, I, Q);
+        pts([tp[0], tp[1]], 10, col); // moving tip dot
       }
 
       function waveform(values: number[], yc: number, ys: number, col: [number, number, number], wd: number) {
@@ -285,22 +245,22 @@ Print("FM error", E(mse(rec_fm, msg), 40000));`;
       function draw() {
         gl.clearColor(0.957, 0.945, 0.91, 1); gl.clear(gl.COLOR_BUFFER_BIT);
         if (mode === 'msg') {
-          line([[-0.92, 0], [0.92, 0]], 0.003, FAINT);
-          waveform(msg, 0, 2.4, INK, 0.01);
+          line([[-0.92, 0], [0.92, 0]], 0.002, FAINT);
+          waveform(msg, 0, 2.4, INK, 0.005);
         } else if (mode === 'am') {
-          drawPlane(0, 'am', true, false);
+          drawPlane(0, 'am', false);
         } else if (mode === 'fm') {
-          drawPlane(0, 'fm', true, false);
+          drawPlane(0, 'fm', false);
         } else if (mode === 'noise') {
-          drawPlane(-0.5, 'am', true, true);
-          drawPlane(0.5, 'fm', true, true);
+          drawPlane(-0.5, 'am', true);
+          drawPlane(0.5, 'fm', true);
         } else if (mode === 'compare') {
           const recAm = msg.map((m, k) => Math.sqrt((1 + m + n1[k]) ** 2 + n2[k] ** 2) - 1);
           const recFm = msg.map((m, k) => Math.atan((Math.sin(DEV * m) + n2[k]) / (Math.cos(DEV * m) + n1[k])) / DEV);
-          line([[-0.92, 0], [0.92, 0]], 0.003, FAINT);
-          waveform(msg, 0, 2.4, INK, 0.012);       // original
-          waveform(recAm, 0, 2.4, MAROON, 0.008);  // AM (noisy)
-          waveform(recFm, 0, 2.4, TEAL, 0.008);    // FM (clean)
+          line([[-0.92, 0], [0.92, 0]], 0.002, FAINT);
+          waveform(recAm, 0, 2.4, MAROON, 0.0035); // AM (noisy)
+          waveform(recFm, 0, 2.4, TEAL, 0.0035);   // FM (clean)
+          waveform(msg, 0, 2.4, INK, 0.006);       // original on top
         }
       }
 
@@ -319,7 +279,7 @@ Print("FM error", E(mse(rec_fm, msg), 40000));`;
           if (e.isIntersecting && e.intersectionRatio > 0.5) setStep(Number((e.target as HTMLElement).dataset.step));
         }
       }, { threshold: [0.5, 0.75], rootMargin: '-20% 0px -20% 0px' });
-      for (const el of stepsEl.querySelectorAll('.amfm-step')) io.observe(el);
+      for (const el of stepsEl.querySelectorAll('.scrolly-step')) io.observe(el);
 
       setStep(0);
     }
@@ -328,17 +288,16 @@ Print("FM error", E(mse(rec_fm, msg), 40000));`;
   async function engineResult() {
     engineEl.textContent = 'running the engine (40k noise realizations)…';
     try {
-      const src = `use math; use vec; use signal;
-msg = sample(0.3 * sine(3), 64);
+      const src = `msg = signal::sample(0.3 * signal::sine(3), 64);
 am = [1 + msg, 0 * msg];
-fm = [cos(3 * msg), sin(3 * msg)];
-static = noise_white(0.3);
+fm = [math::cos(3 * msg), math::sin(3 * msg)];
+static = signal::noise_white(0.3);
 rx_am = am + static;
 rx_fm = fm + static;
 rec_am = (rx_am[0]**2 + rx_am[1]**2)**0.5 - 1;
-rec_fm = atan(rx_fm[1] / rx_fm[0]) / 3;
-Print("AM", E(mse(rec_am, msg), 40000));
-Print("FM", E(mse(rec_fm, msg), 40000));`;
+rec_fm = math::atan(rx_fm[1] / rx_fm[0]) / 3;
+Print("AM", E(vec::mse(rec_am, msg), 40000));
+Print("FM", E(vec::mse(rec_fm, msg), 40000));`;
       const res = await runNoise(src);
       const out = res.output.trim().split('\n');
       const am = (out.find((l) => l.startsWith('AM')) ?? '').replace('AM', '').trim();

@@ -1,13 +1,12 @@
 ---
 import Layout from '../layouts/Layout.astro';
-import Playground from '../components/Playground.astro';
 import Gallery from '../components/Gallery.astro';
 import ShaderFigure from '../components/ShaderFigure.astro';
 import CircleDemo from '../components/CircleDemo.astro';
-import DiceDemo from '../components/DiceDemo.astro';
-import CltDemo from '../components/CltDemo.astro';
-import GaltonDemo from '../components/GaltonDemo.astro';
+import BirthdayDemo from '../components/BirthdayDemo.astro';
+import BellDemo from '../components/BellDemo.astro';
 import AmFmDemo from '../components/AmFmDemo.astro';
+import PrisonersDemo from '../components/PrisonersDemo.astro';
 
 const ideas = [
   {
@@ -25,19 +24,29 @@ const ideas = [
     d: 'Nothing is sampled until you ask. A query runs a fast columnar Monte-Carlo pass and reports an honest estimate — the printed digits reflect the standard error, and that error propagates through arithmetic, so 4·P(C) rounds itself correctly.',
     code: 'C = X**2 + Y**2 < 1\n4 * P(C)   # ≈ 3.14',
   },
+  {
+    k: 'Independence is a shape',
+    d: 'Put a shape on the tilde to draw a whole batch at once: ~[n] is an iid vector, ~[n, m] a matrix. A reducer collapses it back to one number — so the birthday paradox over 23 people, all 253 pairwise comparisons, is a single expression.',
+    code: 'days ~[23] unif_int(1, 365)\nP(has_duplicate(days))   # ≈ 0.51',
+  },
+  {
+    k: 'if is a value, not a branch',
+    d: 'When the condition is random, if c { a } else { b } does not take a path — it builds a new random variable, choosing a or b per sample. That single rule hands you max, min, abs, clamps and payoffs over distributions for free.',
+    code: 'higher = if A > B { A } else { B }   # the larger of two dice',
+  },
 ];
 ---
 
 <Layout>
   <header class="topbar">
     <div class="wide topbar-inner">
-      <a class="brand" href="/">noise<span class="brand-dim">-lang</span></a>
+      <a class="brand" href="/">noise<span class="brand-tilde">~</span><span class="brand-dim">lang</span></a>
       <nav class="topbar-links">
-        <a href="#tour">Tour</a>
-        <a href="#playground-section">Playground</a>
-        <a href="#examples">Examples</a>
         <a href="#ideas">How it works</a>
-        <a href="https://github.com/">GitHub</a>
+        <a href="#performance">Performance</a>
+        <a href="/play">Playground</a>
+        <a href="/skill">Skills</a>
+        <a href="https://github.com/manucorporat/noise-lang">GitHub</a>
       </nav>
     </div>
   </header>
@@ -76,24 +85,10 @@ const ideas = [
       </div>
 
       <div class="tour-item"><div class="wide"><CircleDemo /></div></div>
-      <div class="tour-item"><div class="wide"><DiceDemo /></div></div>
-      <div class="tour-item"><div class="wide"><CltDemo /></div></div>
-      <div class="tour-item"><div class="wide"><GaltonDemo /></div></div>
-      <div class="tour-item"><AmFmDemo /></div>
-    </section>
-
-    <section id="playground-section" class="section">
-      <div class="measure">
-        <h2 class="sec" data-reveal>The playground</h2>
-        <p data-reveal>
-          Now the full editor — the real Noise compiler, built to WebAssembly. Choose an example from
-          the menu or write your own, then press <span class="code-inline">⌘/Ctrl + Enter</span>.
-          Programs are shareable — the <em>Share</em> button puts the current program in the URL.
-        </p>
-      </div>
-      <div class="wide playground-host" data-reveal>
-        <Playground />
-      </div>
+      <div class="tour-item"><div class="wide"><BirthdayDemo /></div></div>
+      <div class="tour-item"><div class="wide"><BellDemo /></div></div>
+      <div class="tour-item"><div class="wide"><AmFmDemo /></div></div>
+      <div class="tour-item"><div class="wide"><PrisonersDemo /></div></div>
     </section>
 
     <section id="examples" class="section">
@@ -101,7 +96,9 @@ const ideas = [
         <h2 class="sec" data-reveal>Examples</h2>
         <p data-reveal>
           A catalogue of short programs, each a Monte-Carlo experiment with a known closed form, so
-          the printed answer can be checked. Open any one to run and edit it.
+          the printed answer can be checked. Open any one in the
+          <a href="/play">playground</a> to run and edit it — the real Noise compiler, built to
+          WebAssembly and running in your browser. Each program gets its own shareable link.
         </p>
       </div>
       <div class="wide" data-reveal>
@@ -113,7 +110,7 @@ const ideas = [
       <div class="measure">
         <h2 class="sec" data-reveal>How it works</h2>
         <p data-reveal>
-          Noise is small by design. Everything above is built from three ideas.
+          Noise is small by design. Everything above is built from a handful of ideas.
         </p>
 
         {ideas.map((i) => (
@@ -126,9 +123,92 @@ const ideas = [
       </div>
     </section>
 
+    <section id="performance" class="section">
+      <div class="measure">
+        <h2 class="sec" data-reveal>Performance</h2>
+        <p data-reveal>
+          Almost every Noise program ends in “evaluate this expression over a few million random
+          draws.” That loop is compiled, not interpreted. <code class="code-inline">~</code> and the
+          distribution constructors build a graph IR that lowers three ways — a portable columnar
+          interpreter, a native JIT via <a href="https://cranelift.dev/">Cranelift</a>, and a
+          WebAssembly emitter for the browser — all sharing one cost model, so the backend only ever
+          changes speed, never results (bit-identical across core counts).
+        </p>
+        <p data-reveal>
+          You write a one-line <code class="code-inline">P(...)</code> and get an expert kernel for
+          free. It is built from a stack of techniques, each with its own measured win:
+        </p>
+        <ul class="perf-techniques" data-reveal>
+          <li>
+            <b>Kernel fusion</b> — the codegen backends emit one loop that draws its sources, computes
+            the whole expression in registers, and stores only the result, erasing the interpreter's
+            intermediate memory traffic.
+          </li>
+          <li>
+            <b>Graph simplification</b> — constant folding, finite-safe algebraic identities, and
+            common-subexpression elimination shrink the DAG before any code is generated (so
+            <code class="code-inline">X + X</code> is one draw, not two).
+          </li>
+          <li>
+            <b>Inlined xoshiro256++ PRNG</b> — the generator is emitted straight into the kernel as a
+            handful of shifts/xors/rotates, with zero call overhead on native and in WASM alike.
+          </li>
+          <li>
+            <b>Inlined transcendentals</b> — <code class="code-inline">ln</code>/<code class="code-inline">sin</code>/<code class="code-inline">cos</code>
+            (the heart of <code class="code-inline">normal</code>, <code class="code-inline">exp</code>,
+            and signals) become straight-line polynomial approximations (~1e-9 vs libm), roughly
+            doubling transcendental-bound kernels and skipping a per-draw crossing of the JS boundary
+            in the browser.
+          </li>
+          <li>
+            <b>Multi-stream RNG</b> — four independent xoshiro streams run at once to hide the
+            generator's serial-dependency latency (the scalar form of SIMD), switched on only where
+            the graph is latency-bound.
+          </li>
+          <li>
+            <b>Columnar batches</b> — the interpreter runs 1024 lanes through one instruction at a
+            time: a tight, cache-friendly, auto-vectorizing pass over contiguous <code class="code-inline">f64</code>s.
+          </li>
+          <li>
+            <b>Vectorized power-sum reduction</b> — moments accumulate as raw power sums across eight
+            unrolled lanes with no per-element divide: ~9.5× faster than a streaming Welford update,
+            turning the reduction from the ceiling into a rounding error.
+          </li>
+          <li>
+            <b>Deterministic multicore</b> — sampling fans out with a work-stealing loop whose
+            per-chunk accumulators merge as an exactly-associative monoid, so the answer is
+            bit-identical regardless of thread count, and reproducible from a seed.
+          </li>
+          <li>
+            <b>Profitability gate</b> — a cost model emits a fused kernel only where it beats the
+            vectorized interpreter, so codegen can change the speed but never lose.
+          </li>
+        </ul>
+        <p data-reveal>The payoff, measured on a 14-core M4 Pro:</p>
+        <ul class="perf-stats" data-reveal>
+          <li>
+            <b>~5.8 billion</b> samples/sec (π Monte&nbsp;Carlo, generate + reduce, all cores),
+            scaling <b>~9.6×</b> from one core to all of them.
+          </li>
+          <li>
+            Within <b>~1.15×</b> of hand-written, LLVM-compiled Rust per core — and faster end to end,
+            because the one-liner fuses and fans out across every core with no flags or annotations.
+          </li>
+          <li>
+            In the browser the emitted WASM kernel runs the same fused loop at <b>~0.5–0.75×</b> of
+            native codegen — hundreds of millions of samples/sec, client-side.
+          </li>
+        </ul>
+        <p data-reveal>
+          The full write-up, with the benchmark tables behind each number, is in
+          <a href="https://github.com/manucorporat/noise-lang/blob/master/PERF.md">PERF.md</a>.
+        </p>
+      </div>
+    </section>
+
     <footer class="doc-footer measure">
       <hr />
-      <p class="muted" id="footer-version">noise-lang — running on WebAssembly.</p>
+      <p class="muted" id="footer-version">noise~lang — running on WebAssembly.</p>
     </footer>
   </article>
 </Layout>
@@ -150,6 +230,16 @@ const ideas = [
   .brand { font-family: var(--serif); font-weight: 700; font-size: 1.1rem; color: var(--ink); }
   .brand:hover { text-decoration: none; }
   .brand-dim { color: var(--ink-dim); }
+  /* the serif tilde sits high and tiny; typeset it in mono, baseline-aligned, as the draw operator */
+  .brand-tilde {
+    font-family: var(--mono);
+    font-weight: 500;
+    color: var(--accent);
+    margin: 0 0.04em;
+    vertical-align: baseline;
+    position: relative;
+    top: 0.02em;
+  }
   .topbar-links { display: flex; gap: 1.3rem; }
   .topbar-links a { color: var(--ink-dim); font-size: 0.92rem; }
   .topbar-links a:hover { color: var(--ink); text-decoration: none; }
@@ -186,7 +276,14 @@ const ideas = [
   .subsec-block { margin-top: 2rem; }
   .subsec { font-size: 1.25rem; margin: 0 0 0.5rem; }
 
-  .playground-host { margin-top: 1.5rem; }
+  /* performance: techniques (named) + headline stats (numeric) */
+  .perf-techniques { margin: 1.3rem 0; padding-left: 1.1rem; }
+  .perf-techniques li { margin: 0.6rem 0; line-height: 1.62; }
+  .perf-techniques b { font-weight: 700; color: var(--ink); }
+
+  .perf-stats { margin: 1.3rem 0; padding-left: 1.1rem; }
+  .perf-stats li { margin: 0.5rem 0; line-height: 1.6; }
+  .perf-stats b { font-family: var(--mono); font-weight: 700; color: var(--accent); }
 
   /* code listing on the page */
   .listing {
@@ -211,7 +308,7 @@ const ideas = [
   noiseVersion()
     .then((v) => {
       const el = document.getElementById('footer-version');
-      if (el) el.textContent = `noise-lang v${v} — running on WebAssembly.`;
+      if (el) el.textContent = `noise~lang v${v} — running on WebAssembly.`;
     })
     .catch(() => {});
 </script>

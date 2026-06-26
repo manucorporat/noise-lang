@@ -398,9 +398,24 @@ the reduction rewrite captured the real SIMD win.)
   (dev-dep) and checked for distribution parity with the columnar oracle — uniform/arith, dice +
   indicator, normal/exp/geometric, ufuncs + non-const `pow`, shared-draw CSE (`X-X≡0`), and the
   multi-stream/single-stream split all match. The crate still compiles clean to
-  `wasm32-unknown-unknown`, so the emitter ships in the browser bundle. **Remaining**: the host seam
-  — a JS host that `instantiate`s the emitted module and drives it through `Backend`/`Program`/
-  `Runner` (browser-side), so the playground actually runs emitted kernels instead of the interpreter.
+  `wasm32-unknown-unknown`, so the emitter ships in the browser bundle.
+- **Browser host seam (`wasm_host`). ✅** The wasm32-only backend that actually *runs* emitted
+  kernels in the browser, plugged into the same `Backend`/`Program`/`Runner` seam: on `wasm32`,
+  `compile_root` routes to `WasmHostBackend`, which `emit_for`s the kernel and hands the bytes to a
+  JS host (wasm-bindgen `inline_js`) that `WebAssembly.instantiate`s it. The xoshiro state lives in
+  the child instance's own memory (single-runner on wasm32 — the threaded reducer is
+  `cfg(not(wasm32))`), so only the output column crosses the boundary per batch; `reseed` writes the
+  SplitMix64 state once. The host is **content-addressed with an LRU cap** (re-running a program
+  reuses its instance — no recompile, bounded registry — instead of leaking via an FFI `Drop` that
+  gets DCE'd). Falls back to the interpreter when `emit_for` declines or instantiation throws (e.g.
+  the main-thread <4 KB sync-compile limit). wasm-bindgen is a **wasm32-gated** dependency, so the
+  native crate stays wasm-bindgen-free. **Validated end-to-end in V8** (Node, same `WebAssembly` +
+  typed-array APIs as the browser): a real emitted dice-sum kernel, seeded and driven through the
+  exact host protocol, gives mean ≈ 7 over 262 k samples with correct integer support. `wasm-pack
+  build` regenerates the bundle (the host glue lands as a `pkg/snippets/.../inline0.js`), and
+  `astro build` bundles it clean — so the existing demos/playground transparently sample via emitted
+  kernels (no component changes). **Remaining**: nothing functional; optional polish is throughput
+  profiling in-browser and a worker-thread path (sync-compile has no size limit off the main thread).
 
 ### Phase 5 — Browser playground
 - Real web UI on the `noise-wasm` build: code editor, run button, distribution/plot

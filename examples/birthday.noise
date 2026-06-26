@@ -3,11 +3,11 @@
 # Here we give 23 people a random birthday each and ask how often two of them match.
 #
 # Change n to see it move: 5 people -> 0.027, 23 -> 0.507, 50 -> 0.970.
-use rand;   # unif_int, iid
+use rand;   # unif_int
 
 # Give each of the n people a random day of the year, then ask whether any two collide.
 n     = 23;
 bday  = unif_int(1, 365);
-days  = iid(bday, n);
+days  ~[n] bday;
 match = vec::has_duplicate(days);
 Print("P(shared birthday among", n, ") =", P(match))

@@ -74,6 +74,14 @@ impl Builder {
                 let b = self.rewrite(g, *b);
                 self.select(cond, a, b, kind)
             }
+            // Gather: rebuild over the simplified operands. Not interned — distinct gathers (each
+            // hop indexes by a different RV) rarely coincide, and a wrong merge would corrupt the
+            // per-lane selection, so we copy it 1:1 like a source.
+            RvNode::Gather { elems, index } => {
+                let elems: Vec<RvId> = elems.iter().map(|&e| self.rewrite(g, e)).collect();
+                let index = self.rewrite(g, *index);
+                self.out.push(RvNode::Gather { elems: elems.into_boxed_slice(), index }, kind)
+            }
         };
         self.done.insert(id, new);
         new
