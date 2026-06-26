@@ -10,7 +10,7 @@ import { Content, frontmatter } from '../../../.claude/skills/noise-lang/SKILL.m
 <Layout title="Noise skill — the language guide" description={frontmatter.description}>
   <header class="topbar">
     <div class="wide topbar-inner">
-      <a class="brand" href="/">noise<span class="brand-tilde">~</span><span class="brand-dim">lang</span></a>
+      <a class="brand" href="/"><img class="brand-mark" src="/favicon.svg" alt="" width="24" height="24" />noise<span class="brand-tilde">~</span><span class="brand-dim">lang</span></a>
       <nav class="topbar-links">
         <a href="/#ideas">How it works</a>
         <a href="/#performance">Performance</a>
@@ -26,9 +26,9 @@ import { Content, frontmatter } from '../../../.claude/skills/noise-lang/SKILL.m
 
     <div class="skill-install">
       <ShaderFigure
-        n={1}
+        n={0}
         install="npx skills add manucorporat/noise-lang"
-        caption="the language guide below is also a portable skill — install it into your coding agent (Claude Code, Cursor, Codex, Copilot, Windsurf…) with the command above. Click to copy."
+        caption="This page is a skill — install it into your coding agent (Claude Code, Cursor, Codex, Copilot, Windsurf…) with one command. Click to copy."
       />
     </div>
 
@@ -60,12 +60,18 @@ import { Content, frontmatter } from '../../../.claude/skills/noise-lang/SKILL.m
     display: flex; align-items: baseline; justify-content: space-between;
     padding-top: 0.7rem; padding-bottom: 0.7rem;
   }
-  .brand { font-family: var(--serif); font-weight: 700; font-size: 1.1rem; color: var(--ink); }
+  .brand { display: inline-flex; align-items: center; font-family: var(--serif); font-weight: 700; font-size: 1.1rem; color: var(--ink); }
   .brand:hover { text-decoration: none; }
+  .brand-mark { display: block; width: 1.4em; height: 1.4em; margin-right: 0.5rem; }
   .brand-dim { color: var(--ink-dim); }
   .brand-tilde {
-    font-family: var(--mono); font-weight: 500; color: var(--accent);
-    margin: 0 0.04em; vertical-align: baseline; position: relative; top: 0.02em;
+    font-family: var(--mono);
+    font-weight: 500;
+    color: var(--accent);
+    margin: 0 0.04em;
+    vertical-align: baseline;
+    position: relative;
+    top: 0.02em;
   }
   .topbar-links { display: flex; gap: 1.3rem; }
   .topbar-links a { color: var(--ink-dim); font-size: 0.92rem; }

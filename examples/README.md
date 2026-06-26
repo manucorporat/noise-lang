@@ -44,7 +44,7 @@ and a derived value like `4 * P(C)` or a ratio rounds itself correctly.
 | `clt_normal.noise` | a standard normal built from 12 uniforms (CLT); a tail prob | ~0.159 | 0.16 |
 | `functions.noise` | user functions: `max(a,b)=…` (pure, lifts over RVs) + `roll()~…` (draws per call) | 0.30556 / 0.16667 | 0.306 / 0.166 |
 | `qjl_scalar.noise` | QJL unbiasedness in 1-D (TurboQuant building block): `normal`, `E`/`Var`, `sqrt`, `pi` | 1.0 / 0.5708 | 1 / 0.572 |
-| `turboquant.noise` | **the d-dim capstone** — the MSE 1-bit quantizer is inner-product biased by 2/π *and* carries ~3× the squared error; the QJL rescaling is unbiased (`~[d,d]`, `matvec`, `transpose`, `vsign`, `E`) | bias 2/π; err ≪ | 0.64× / 1.0×; err 0.11 vs 0.035 |
+| `turboquant.noise` | **the d-dim capstone** — the MSE 1-bit quantizer is inner-product biased by 2/π *and* carries ~3× the squared error; the QJL rescaling is unbiased (`~[d,d]`, `@`, `transpose`, `sign`, `E`) | bias 2/π; err ≪ | 0.64× / 1.0×; err 0.11 vs 0.035 |
 | `am_vs_fm.noise` | telecom, end to end: `mse(demodulate(modulate(msg) + static), msg)` — same static, but FM (message in the angle) recovers cleaner than AM (message in the amplitude). Uses lazy `sine` + `cos`/`sin`/`atan` ufuncs + array broadcasting | FM ≫ AM cleaner | AM 0.087, FM 0.014 (6× cleaner) |
 | `nyquist.noise` | the Nyquist–Shannon theorem by counterexample: a 7-cycle wave sampled below `2·7` aliases into a 3-cycle one (identical samples); above, they separate. Lazy `signal` + `sample(sig, n)` | 0 vs > 0 | 0 (aliased) / 1 (resolved) |
 

@@ -26,7 +26,7 @@
 #
 # Every E() below is a Monte Carlo average; set the sample budget once for the whole run (instead of
 # threading an `N` through each query). 10k samples is plenty to land near the paper's table values.
-engine::set_max_loops(10000);
+engine::set_max_samples(10000);
 use math;     # pi, sqrt, sign
 use vec;      # normalize, ones, iota, quantize, normsq, norm, transpose
 

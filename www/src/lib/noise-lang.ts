@@ -15,7 +15,7 @@ const BUILTINS = [
   'Print', 'Len',
   'sqrt', 'round', 'log', 'log10', 'sin', 'cos', 'atan', 'sign',
   'sum', 'count', 'any', 'all', 'max', 'min', 'mean', 'dot', 'normsq', 'norm',
-  'vadd', 'vsub', 'matvec', 'transpose', 'normalize', 'quantize', 'has_duplicate', 'mse',
+  'transpose', 'normalize', 'quantize', 'has_duplicate', 'mse',
   'ones', 'zeros', 'iota', 'vsign', 'scale',
   'sine', 'cosine', 'noise_white', 'sample',
 ];

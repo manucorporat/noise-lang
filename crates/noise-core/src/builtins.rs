@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use crate::dist::{Recipe, RvGraph, RvKind};
+use crate::dist::{Recipe, RvGraph, RvId, RvKind};
 use crate::error::{NoiseError, Result, Span};
 use crate::sampler;
 use crate::signal::{SignalSpec, Wave};
@@ -17,8 +17,15 @@ use crate::value::Value;
 /// Default Monte Carlo budget for a language-surface `P`/`E`/`Var`/`Q` when the call carries no
 /// explicit sample count. Large enough that a probability estimate's standard error
 /// (`sqrt(p(1-p)/N) ≈ 5e-4`) is tight. A program can lower (or raise) this for the whole run with
-/// `engine::set_max_loops(N)`; an explicit per-call count (`P(event, n)`) still overrides both.
+/// `engine::set_max_samples(N)`; an explicit per-call count (`P(event, n)`) still overrides both.
 pub const P_DEFAULT_N: usize = 1_000_000;
+/// Default per-query **operation** ceiling (`engine::set_max_opts`): a built-in cap so no single
+/// `P`/`E`/`Var`/`Q` spends more than ~1e9 per-lane ops, keeping worst-case runtime bounded out of
+/// the box. A query over a cone of `C` distinct nodes auto-clamps to `1e9 / C` draws, so the cap
+/// only bites for `C > 1000` (with the default `P_DEFAULT_N` draws) — ordinary small-cone queries,
+/// even at millions of draws, are never clamped; only genuinely large models are. A program raises
+/// it with `engine::set_max_samples`'s sibling `engine::set_max_opts(N)`.
+pub const MAX_OPS_DEFAULT: u64 = 1_000_000_000;
 /// A fixed seed keeps a run reproducible; threading an explicit seed through `P` is a later
 /// refinement.
 const P_DEFAULT_SEED: u64 = 0;
@@ -31,12 +38,15 @@ const P_DEFAULT_SEED: u64 = 0;
 ///
 /// `default_n` is the Monte Carlo budget the sampling builtins (`P`/`E`/`Var`/`Q`) use when the
 /// call carries no explicit sample count — the engine threads its current setting (default
-/// [`P_DEFAULT_N`], adjustable via `engine::set_max_loops`) through here.
+/// [`P_DEFAULT_N`], adjustable via `engine::set_max_samples`) through here. `max_opts` is the
+/// optional per-query operation budget (`engine::set_max_opts`, `0` = unlimited): each query
+/// auto-clamps its draw count so `draws × cone-node-count ≤ max_opts` (see [`clamp_to_op_budget`]).
 pub fn call(
     name: &str,
     arg_vals: &[Value],
     graph: &RvGraph,
     default_n: usize,
+    max_opts: u64,
     span: Span,
 ) -> Result<Value> {
     match name {
@@ -154,15 +164,15 @@ pub fn call(
             }
             Ok(Value::Num(if name == "log" { x.ln() } else { x.log10() }))
         }
-        "E" | "Var" => moment(name, arg_vals, graph, default_n, span),
+        "E" | "Var" => moment(name, arg_vals, graph, default_n, max_opts, span),
         "round" => {
             // round(x, digits) — round x to `digits` decimal places. Handy for messages.
             let [x, digits] = two_nums(name, arg_vals, span)?;
             let factor = 10f64.powi(digits as i32);
             Ok(Value::Num((x * factor).round() / factor))
         }
-        "P" => prob(arg_vals, graph, default_n, span),
-        "Q" => quantile(arg_vals, graph, default_n, span),
+        "P" => prob(arg_vals, graph, default_n, max_opts, span),
+        "Q" => quantile(arg_vals, graph, default_n, max_opts, span),
         // --- pure collection builtins (no graph access; PLAN-COLLECTIONS §3) ---
         "Len" => len(name, arg_vals, span),
         // pure vector constructors / rearrangers (graph-free; just move `Value`s around)
@@ -191,7 +201,23 @@ pub fn call(
 /// The estimate is **auto-rounded to its confidence precision**: a Monte Carlo estimate from
 /// `n` samples has standard error `sqrt(p(1-p)/n)`, so only the digits above that error are
 /// meaningful. More samples → smaller error → more digits, with no manual `round`.
-fn prob(arg_vals: &[Value], graph: &RvGraph, default_n: usize, span: Span) -> Result<Value> {
+/// Auto-clamp a query's draw count to the per-query operation budget (`engine::set_max_opts`).
+/// A forcing over `root`'s cone costs `n × C` per-lane ops, where `C` is the cone's distinct-node
+/// count ([`crate::kernel::cost`]). With a budget `max_opts > 0`, cap `n` at `max_opts / C` so the
+/// query never spends more than the budget — but never below 1 (a query always draws at least once,
+/// even if a single draw already exceeds the budget). `max_opts == 0` means unlimited (no clamp).
+/// This makes each query's complexity deterministic in the model size: a heavier cone simply draws
+/// fewer samples (a looser estimate) instead of doing unbounded work.
+fn clamp_to_op_budget(n: usize, graph: &RvGraph, root: RvId, max_opts: u64) -> usize {
+    if max_opts == 0 {
+        return n;
+    }
+    let cone = crate::kernel::cost(graph, root).ops.max(1);
+    let cap = (max_opts / cone).max(1) as usize;
+    n.min(cap)
+}
+
+fn prob(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, span: Span) -> Result<Value> {
     if arg_vals.is_empty() || arg_vals.len() > 2 {
         return Err(NoiseError::runtime(
             format!(
@@ -218,6 +244,7 @@ fn prob(arg_vals: &[Value], graph: &RvGraph, default_n: usize, span: Span) -> Re
         // A deterministic event is exact — no sampling, no error.
         Value::Bool(b) => Ok(Value::Est { val: if *b { 1.0 } else { 0.0 }, se: 0.0 }),
         Value::Dist(id) if graph.kind(*id) == RvKind::Bool => {
+            let n = clamp_to_op_budget(n, graph, *id, max_opts);
             let p_hat = sampler::moments(graph, *id, n, P_DEFAULT_SEED).mean;
             // Standard error of a Monte Carlo probability estimate; rule-of-three floor keeps
             // it finite when p_hat is 0 or 1. Display rounds to the digits this justifies.
@@ -243,7 +270,7 @@ fn prob(arg_vals: &[Value], graph: &RvGraph, default_n: usize, span: Span) -> Re
 /// standard error (`E` ↔ mean, `Var` ↔ population variance). `P` is the special case for
 /// events; `E`/`Var` are total over any number or numeric RV (a bool RV works too — its mean is
 /// `P`). A deterministic number is exact: `E(5) = 5 ± 0`, `Var(5) = 0 ± 0`.
-fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, default_n: usize, span: Span) -> Result<Value> {
+fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, span: Span) -> Result<Value> {
     if arg_vals.is_empty() || arg_vals.len() > 2 {
         return Err(NoiseError::runtime(
             format!("{name} expects 1 or 2 arguments (quantity, optional sample count), got {}", arg_vals.len()),
@@ -274,6 +301,7 @@ fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, default_n: usize, spa
             Ok(Value::Est { val: if want_var { 0.0 } else { f64::from(*b) }, se: 0.0 })
         }
         Value::Dist(id) => {
+            let n = clamp_to_op_budget(n, graph, *id, max_opts);
             let m = sampler::moments(graph, *id, n, P_DEFAULT_SEED);
             let nf = n as f64;
             if want_var {
@@ -299,7 +327,7 @@ fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, default_n: usize, spa
 ///
 /// Returns a plain `Num` (not an `Est`): a sample quantile's standard error depends on the density
 /// at that point, so we don't claim auto-rounded precision the way `P`/`E` do.
-fn quantile(arg_vals: &[Value], graph: &RvGraph, default_n: usize, span: Span) -> Result<Value> {
+fn quantile(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, span: Span) -> Result<Value> {
     if arg_vals.len() < 2 || arg_vals.len() > 3 {
         return Err(NoiseError::runtime(
             format!(
@@ -335,6 +363,7 @@ fn quantile(arg_vals: &[Value], graph: &RvGraph, default_n: usize, span: Span) -
         Value::Est { val, .. } => Ok(Value::Num(*val)),
         Value::Bool(b) => Ok(Value::Num(f64::from(*b))),
         Value::Dist(id) => {
+            let n = clamp_to_op_budget(n, graph, *id, max_opts);
             let mut draws = sampler::sample_n(graph, *id, n, P_DEFAULT_SEED);
             draws.sort_by(f64::total_cmp);
             Ok(Value::Num(empirical_quantile(&draws, q)))

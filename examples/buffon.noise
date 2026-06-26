@@ -3,7 +3,7 @@
 use rand;   # unif
 use math;   # pi, sin
 
-engine::set_max_loops(4000000);   # Monte Carlo budget for the P() below — set once, not per query
+engine::set_max_samples(4000000);   # Monte Carlo budget for the P() below — set once, not per query
 
 # Floorboards spaced 1 apart, needle of length 1. When it lands, its center sits a random
 # distance `d` from the nearest line, tilted at a random `angle`. It crosses iff the needle's

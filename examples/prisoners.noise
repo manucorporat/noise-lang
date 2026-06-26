@@ -15,7 +15,7 @@
 use rand;   # permutation
 use vec;
 
-engine::set_max_loops(50000);
+engine::set_max_samples(50000);
 
 # The boxes are a uniform random permutation: box k contains the number boxes[k].
 n     = 100;

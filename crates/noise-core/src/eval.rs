@@ -52,8 +52,14 @@ pub struct Engine {
     output: String,
     /// Default Monte Carlo budget for `P`/`E`/`Var`/`Q` when a call carries no explicit sample
     /// count. Starts at [`builtins::P_DEFAULT_N`]; a program tunes it for the whole run with
-    /// `engine::set_max_loops(N)`. An explicit per-call count (`P(event, n)`) still wins over this.
-    max_loops: usize,
+    /// `engine::set_max_samples(N)`. An explicit per-call count (`P(event, n)`) still wins over this.
+    max_samples: usize,
+    /// Per-query operation budget (`engine::set_max_opts(N)`; `0` = unlimited). A forcing over a
+    /// cone of `C` distinct nodes costs `n×C` per-lane ops, so each `P`/`E`/`Var`/`Q` query
+    /// auto-clamps its draw count to `N/C` (never below 1). Bounds each query's work so a program's
+    /// worst-case complexity stays deterministic regardless of cone size — without ever erroring.
+    /// Defaults to [`builtins::MAX_OPS_DEFAULT`] (a built-in safety ceiling), not unlimited.
+    max_opts: u64,
 }
 
 impl Default for Engine {
@@ -71,7 +77,8 @@ impl Engine {
             call_depth: 0,
             used: HashSet::new(),
             output: String::new(),
-            max_loops: builtins::P_DEFAULT_N,
+            max_samples: builtins::P_DEFAULT_N,
+            max_opts: builtins::MAX_OPS_DEFAULT,
         }
     }
 
@@ -225,7 +232,7 @@ impl Engine {
                     self.output.push('\n');
                     Ok(Value::Unit)
                 } else {
-                    builtins::call(base, &arg_vals, &self.graph, self.max_loops, node.span)
+                    builtins::call(base, &arg_vals, &self.graph, self.max_samples, self.max_opts, node.span)
                 }
             }
             // Extracted into methods to keep `eval`'s stack frame small (recursion-depth budget).
@@ -1023,21 +1030,42 @@ impl Engine {
         Ok(n as usize)
     }
 
-    /// `engine::set_max_loops(N)` — set the default Monte Carlo budget (the sample count `P`/`E`/
+    /// `engine::set_max_samples(N)` — set the default Monte Carlo budget (the sample count `P`/`E`/
     /// `Var`/`Q` use when called without an explicit count) for the rest of the run. Lets a program
     /// trade accuracy for speed once, up front, instead of threading `n` through every query; an
     /// explicit per-call count still overrides it. Returns unit (it's a setting, not a value).
-    fn lib_set_max_loops(&mut self, args: &[Value], span: Span) -> Result<Value> {
-        let [n] = arity1("set_max_loops", args, span)?;
-        let n = self.count_arg("set_max_loops", n, span)?;
+    fn lib_set_max_samples(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [n] = arity1("set_max_samples", args, span)?;
+        let n = self.count_arg("set_max_samples", n, span)?;
         if n < 1 {
             return Err(NoiseError::runtime(
-                "set_max_loops(N) needs N >= 1 (the Monte Carlo budget must draw at least once)"
+                "set_max_samples(N) needs N >= 1 (the Monte Carlo budget must draw at least once)"
                     .to_string(),
                 span,
             ));
         }
-        self.max_loops = n;
+        self.max_samples = n;
+        Ok(Value::Unit)
+    }
+
+    /// `engine::set_max_opts(N)` — cap the *operations* each `P`/`E`/`Var`/`Q` query may spend for
+    /// the rest of the run. A forcing over a cone of `C` distinct nodes costs `n×C` per-lane ops, so
+    /// the query auto-clamps its draw count to `N/C` (never below 1): a heavy cone simply draws
+    /// fewer samples (looser estimate) instead of doing unbounded work. This bounds each query's
+    /// complexity *deterministically*, independent of the model's size — a budget, not an error.
+    /// Pairs with `set_max_samples`, which caps draws; the query uses the smaller of the two.
+    /// Returns unit (it's a setting, not a value).
+    fn lib_set_max_opts(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [n] = arity1("set_max_opts", args, span)?;
+        let n = self.count_arg("set_max_opts", n, span)?;
+        if n < 1 {
+            return Err(NoiseError::runtime(
+                "set_max_opts(N) needs N >= 1 (the operation budget must allow at least one op)"
+                    .to_string(),
+                span,
+            ));
+        }
+        self.max_opts = n as u64;
         Ok(Value::Unit)
     }
 
@@ -1054,7 +1082,8 @@ impl Engine {
             };
         }
         let r = match name {
-            "set_max_loops" => self.lib_set_max_loops(args, span),
+            "set_max_samples" => self.lib_set_max_samples(args, span),
+            "set_max_opts" => self.lib_set_max_opts(args, span),
             "quantize" => self.lib_quantize(args, span),
             "sum" => self.lib_sum(args, span),
             "count" => self.lib_count(args, span),
@@ -1066,9 +1095,6 @@ impl Engine {
             "dot" => self.lib_dot(args, span),
             "normsq" => self.lib_normsq(args, span),
             "norm" => self.lib_norm(args, span),
-            "vadd" => self.lib_vadd(args, span),
-            "vsub" => self.lib_vsub(args, span),
-            "matvec" => self.lib_matvec(args, span),
             "normalize" => self.lib_normalize(args, span),
             "has_duplicates" => self.lib_has_duplicates(args, span),
             "count_duplicates" => self.lib_count_duplicates(args, span),
@@ -1222,7 +1248,7 @@ impl Engine {
     /// sample (a Haar rotation: the random rotation `Π` of TurboQuant Algorithm 1, so `Π·x` is
     /// uniform on the unit sphere and each coordinate is `≈ N(0, 1/d)`). Built by drawing a Gaussian
     /// seed matrix and orthonormalizing its rows with (modified) Gram–Schmidt, lowered into the RV
-    /// graph — it reuses `dot`/`vsub`/`normalize`, so every entry is an ordinary RV node sampled per
+    /// graph — it reuses `dot`/`-`/`normalize`, so every entry is an ordinary RV node sampled per
     /// lane. The cost is `O(d³)` graph nodes, so keep `d` modest (≤ ~32 for interactive runs). The
     /// inner reducers can't actually fail here (we control the shapes), so the span is synthetic.
     fn draw_rotation(&mut self, d: usize) -> Result<Value> {
@@ -1245,7 +1271,7 @@ impl Engine {
             for qj in q.iter() {
                 let coeff = self.lib_dot(&[u.clone(), qj.clone()], span)?;
                 let proj = self.binop(BinOp::Mul, qj.clone(), coeff, span)?;
-                u = self.lib_vsub(&[u, proj], span)?;
+                u = self.binop(BinOp::Sub, u, proj, span)?;
             }
             q.push(self.lib_normalize(&[u], span)?);
         }
@@ -1429,31 +1455,11 @@ impl Engine {
         self.binop(BinOp::Pow, ns, Value::Num(0.5), span)
     }
 
-    /// `vadd(a, b)` / `vsub(a, b)` — elementwise add/sub of equal-length vectors.
-    fn lib_vadd(&mut self, args: &[Value], span: Span) -> Result<Value> {
-        self.elementwise("vadd", BinOp::Add, args, span)
-    }
-    fn lib_vsub(&mut self, args: &[Value], span: Span) -> Result<Value> {
-        self.elementwise("vsub", BinOp::Sub, args, span)
-    }
-    fn elementwise(&mut self, name: &str, op: BinOp, args: &[Value], span: Span) -> Result<Value> {
-        let [a, b] = arity2(name, args, span)?;
-        let a = self.expect_array(name, a, span)?;
-        let b = self.expect_array(name, b, span)?;
-        if a.len() != b.len() {
-            return Err(length_mismatch(name, a.len(), b.len(), span));
-        }
-        let mut out = Vec::with_capacity(a.len());
-        for (ai, bi) in a.iter().zip(b.iter()) {
-            out.push(self.binop(op, ai.clone(), bi.clone(), span)?);
-        }
-        Ok(Value::Array(Rc::new(out)))
-    }
-
-    /// `matvec(M, v)` — matrix-vector product (`out[i] = dot(M[i], v)`).
+    /// `mat @ vec` — matrix-vector product (`out[i] = dot(M[i], v)`). Private helper for the `@`
+    /// operator's `(mat, vec)` case; there is no standalone builtin (use `@`).
     fn lib_matvec(&mut self, args: &[Value], span: Span) -> Result<Value> {
-        let [m, v] = arity2("matvec", args, span)?;
-        let rows = self.expect_array("matvec", m, span)?;
+        let [m, v] = arity2("@", args, span)?;
+        let rows = self.expect_array("@", m, span)?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows.iter() {
             out.push(self.lib_dot(&[row.clone(), v.clone()], span)?);
@@ -1644,37 +1650,30 @@ fn is_module(m: &str) -> bool {
 /// The module each builtin / constant belongs to — the single source of truth for scoping. The
 /// *implementation* (lib_call vs builtins::call) is orthogonal; this only governs name access.
 ///
-/// Builtins are written **Capitalized** by convention (`Print`, `Sum`, `Mse`). The always-on
-/// core (`P`, `E`, `Var`, `Print`, `Push`, `Len`) is **capital-only**; the module builtins also
-/// accept their lowercase spelling as a back-compat alias. The two math **constants** `pi`/`e`
-/// stay lowercase — note that `E` (capital) is the expectation builtin while `e` (lowercase) is
-/// Euler's number, so these two are intentionally distinct and never aliased to each other.
+/// Module builtins are **lowercase** (`sum`, `mse`, `normal`). The always-on core (`P`, `Q`, `E`,
+/// `Var`, `Print`, `Len`) is the lone exception — it is **capital-only**. The two math
+/// **constants** `pi`/`e` are lowercase — note that `E` (capital) is the expectation builtin while
+/// `e` (lowercase) is Euler's number, so these two are intentionally distinct and never aliased.
 fn module_of(name: &str) -> Option<&'static str> {
     Some(match name {
         // distribution constructors, including `rotation` (a recipe for a random orthonormal matrix,
         // drawn with `~` like any distribution). Batched sampling is the prefix `~[shape]` operator,
         // not a builtin — see the `Sample` AST node.
-        "Unif" | "unif" | "Unif_int" | "unif_int" | "Bernoulli" | "bernoulli" | "Normal"
-        | "normal" | "Normal_int" | "normal_int" | "Exp" | "exp" | "Exp_int" | "exp_int"
-        | "Poisson" | "poisson" | "Geometric" | "geometric" | "rotation" | "permutation" => "rand",
+        "unif" | "unif_int" | "bernoulli" | "normal" | "normal_int" | "exp" | "exp_int"
+        | "poisson" | "geometric" | "rotation" | "permutation" => "rand",
         // math constants (lowercase only) + scalar math (sin/cos/atan/sign ufuncs lift/map)
         "pi" | "e" => "math",
-        "Sqrt" | "sqrt" | "Round" | "round" | "Log" | "log" | "Log10" | "log10" | "Sin" | "sin"
-        | "Cos" | "cos" | "Atan" | "atan" | "Sign" | "sign" => "math",
-        // collections / linear algebra
-        "Sum" | "sum" | "Count" | "count" | "Any" | "any" | "All" | "all" | "Max" | "max"
-        | "Min" | "min" | "Mean" | "mean" | "Dot" | "dot" | "Normsq" | "normsq" | "Norm"
-        | "norm" | "Vadd" | "vadd" | "Vsub" | "vsub"
-        | "Matvec" | "matvec" | "Transpose" | "transpose" | "Normalize" | "normalize"
-        | "Has_duplicates" | "has_duplicates" | "Count_duplicates" | "count_duplicates"
-        | "Mse" | "mse" | "Ones" | "ones" | "Zeros"
-        | "zeros" | "Iota" | "iota" | "quantize" => "vec",
+        "sqrt" | "round" | "log" | "log10" | "sin" | "cos" | "atan" | "sign" => "math",
+        // collections / linear algebra (vector add/sub/matvec are the `+`/`-`/`@` operators)
+        "sum" | "count" | "any" | "all" | "max" | "min" | "mean" | "dot" | "normsq" | "norm"
+        | "transpose" | "normalize" | "has_duplicates" | "count_duplicates"
+        | "mse" | "ones" | "zeros" | "iota" | "quantize" => "vec",
         // signal generation (DSP waveforms) + colored noise + materialization
-        "Sine" | "sine" | "Cosine" | "cosine" | "Sample" | "sample" | "noise_white"
+        "sine" | "cosine" | "sample" | "noise_white"
         | "noise_brown" | "noise_pink" | "noise_ou" => "signal",
         // run-time knobs: tune the evaluator itself (e.g. the Monte Carlo budget). Capital-only,
         // no lowercase alias — these are imperative settings, not value-producing builtins.
-        "set_max_loops" => "engine",
+        "set_max_samples" | "set_max_opts" => "engine",
         // always-on core: probability/expectation, IO, array length. These are **capital-only** (no
         // lowercase alias). Arrays are fixed-size: the half-open range has dedicated `a..b` syntax
         // (not a `range` builtin), and there is no `Push` (arrays are never grown).
@@ -1781,7 +1780,7 @@ fn arity_err(name: &str, want: usize, got: usize, span: Span) -> NoiseError {
     NoiseError::runtime(format!("{name} expects {want} argument(s), got {got}"), span)
 }
 
-/// Spanned vector-length mismatch shared by `dot`/`vadd`/`vsub`.
+/// Spanned vector-length mismatch shared by `dot` and elementwise broadcast.
 fn length_mismatch(name: &str, a: usize, b: usize, span: Span) -> NoiseError {
     NoiseError::runtime(format!("{name} needs equal-length vectors, got {a} and {b}"), span)
 }

@@ -135,7 +135,7 @@ symbolic (a distribution) until then.
 
 ```
 +  -  *  /  **            arithmetic  (`*` is elementwise / broadcast)
-@                         matrix product  (dot / matvec / matmul by shape)
+@                         matrix product  (dot / mat·vec / matmul by shape)
 == != < > <= >=           comparison
 && ||                     logical and / or
 !                         logical not (prefix)
@@ -298,11 +298,11 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
   `P` for non-events. Both return an `estimate`: `E` carries the standard error of the mean
   (`sqrt(Var/n)`), `Var` an asymptotic `var·sqrt(2/n)`; a deterministic value is exact
   (`E(5) = 5 ± 0`). `E` of a bool-RV equals `P`. Default `n = 1e6` (set per-run with
-  `engine::set_max_loops`), fixed seed.
+  `engine::set_max_samples`), fixed seed.
 - **`Q(x, q)`** / **`Q(x, q, n)`** — the **quantile** (inverse CDF) of a *numeric* quantity at
   level `q ∈ [0, 1]`: `Q(X, 0.5)` is the median, `Q(X, 0.95)` the 95th percentile, and
   `Q(X, 0)`/`Q(X, 1)` the min/max draw. The companion to `E`/`Var` for tail/spread questions.
-  Estimated by Monte Carlo — draw `n` samples (default `1e6`, or `engine::set_max_loops`; fixed
+  Estimated by Monte Carlo — draw `n` samples (default `1e6`, or `engine::set_max_samples`; fixed
   seed), sort, and linearly
   interpolate between the bracketing order statistics. Returns a plain `number` (unlike `P`/`E`,
   it does *not* auto-round to a confidence precision: a sample quantile's error depends on the
@@ -313,7 +313,7 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
 - **`P(event)`** / **`P(event, n)`** — the probability that a bool-RV (or deterministic bool)
   is true, returned as a plain `number` in `[0,1]` so it composes in arithmetic (`4 * P(C)`).
   `P` of a numeric (non-event) value is an error. Estimated by Monte Carlo over `n` samples
-  (default `1e6`, or set per-run with `engine::set_max_loops`) under a fixed seed, so a run is
+  (default `1e6`, or set per-run with `engine::set_max_samples`) under a fixed seed, so a run is
   reproducible.
   - **`P` returns an *estimate*** — a number that carries its standard error
     `se = sqrt(p(1-p)/n)` (a *deterministic* event is exact, `se = 0`). The value keeps full
@@ -377,16 +377,27 @@ The modules:
 | `builtin` | `P`, `Q`, `E`, `Var`, `Print`, `Len` (capital-only) | **always active** (no `use`) |
 | `rand`    | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `exp`, `exp_int`, `poisson`, `geometric`, `rotation` (batched sampling is the `~[shape]` operator, not a builtin) | needs `use rand;` |
 | `math`    | `pi`, `e`, `sqrt`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign` | needs `use math;` |
-| `vec`     | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `normsq`, `norm`, `vadd`, `vsub`, `matvec`, `transpose`, `normalize`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` | needs `use vec;` |
+| `vec`     | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `normsq`, `norm`, `transpose`, `normalize`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` (vector `+`/`-` and `@` cover add/sub/matvec) | needs `use vec;` |
 | `signal`  | `sine`, `cosine` (lazy waveforms), `noise_white` (lazy white noise), `sample` | needs `use signal;` |
-| `engine`  | `set_max_loops` (run-time evaluator knobs) | needs `use engine;` |
+| `engine`  | `set_max_samples`, `set_max_opts` (run-time evaluator knobs) | needs `use engine;` |
 
-**`engine::set_max_loops(N)`** sets the default Monte Carlo budget — the sample count `P`/`E`/
+**`engine::set_max_samples(N)`** sets the default Monte Carlo budget — the sample count `P`/`E`/
 `Var`/`Q` use when called *without* an explicit count — to `N` (an integer `>= 1`) for the rest of
 the run. It's the one-place alternative to threading `n` through every query when you want to trade
-accuracy for speed (or buy more digits): `engine::set_max_loops(20000);` then a bare `P(C)` draws
+accuracy for speed (or buy more digits): `engine::set_max_samples(20000);` then a bare `P(C)` draws
 20 000 samples instead of the `1e6` default. An explicit per-call count (`P(C, n)`) still overrides
 it. Returns `unit` — it's a setting, not a value.
+
+**`engine::set_max_opts(N)`** caps the *operations* each `P`/`E`/`Var`/`Q` query may spend (`N` an
+integer `>= 1`), bounding complexity by the model's size rather than by a fixed draw count. A query
+over a cone of `C` distinct nodes costs `draws × C` per-lane operations, so it auto-clamps its draws
+to `N / C` (never below 1) — a heavier model simply draws *fewer* samples (a looser estimate)
+instead of doing unbounded work. Unlike `set_max_samples` it never errors and never changes a result
+exactly: it makes each query's worst-case cost **deterministic in the model size**. The query draws
+the smaller of the two budgets, so `set_max_samples` still bounds light cones and `set_max_opts`
+bounds heavy ones. Defaults to a built-in ceiling of `1e9` ops per query — high enough that ordinary
+small-cone queries (even at millions of draws) are never clamped, so only very large models feel it.
+Returns `unit` — it's a setting, not a value.
 
 Rules:
 - **`builtin` is active by default**; `rand`/`math`/`vec`/`signal`/`engine` are **strict** — a
@@ -453,15 +464,16 @@ identically (e.g. `sum` over `dist` elements lifts to an Add-chain RV).
   `vec` constructors below.
 - **Reducers:** `sum`, `mean`, `count` (number of true elements), `any` (`||`), `all` (`&&`),
   `max`, `min`.
-- **Linear algebra:** the `@` operator is the **matrix product** — `v @ w` (dot), `M @ v` (matvec),
-  `M @ N` (matmul), dispatched by shape; `*` stays elementwise/broadcast. Also `dot`, `normsq`,
-  `norm`, `scale(v, c)`, `vadd`, `vsub`, `vsign` (elementwise ±1), `matvec(M, v)`, `transpose(M)`,
+- **Linear algebra:** the `@` operator is the **matrix product** — `v @ w` (dot), `M @ v` (mat·vec),
+  `M @ N` (matmul), dispatched by shape; `*` stays elementwise/broadcast, and vector `+`/`-` are
+  elementwise add/sub. Also `dot`, `normsq`,
+  `norm`, `scale(v, c)`, `vsign` (elementwise ±1), `transpose(M)`,
   `normalize`, the constructors `ones(n)`/`zeros(n)`/`iota(n)`,
   `mse(a, b)` (mean squared error between two equal-length signals), `quantize(v, centroids)` (snap
   each coordinate of `v` to its nearest value in a constant codebook — the optimal scalar/Lloyd–Max
   quantizer), plus `has_duplicates(xs)` (true iff some pair is equal — the birthday predicate) and
   `count_duplicates(xs)` (how many pairs `i<j` are equal — the number of birthday collisions, of which
-  `has_duplicates` is just the `> 0` case). `dot`/`vadd`/`vsub`/`mse` require equal-length vectors; `transpose` a rectangular matrix (array of
+  `has_duplicates` is just the `> 0` case). `dot`/`mse` and vector `+`/`-` require equal-length vectors; `transpose` a rectangular matrix (array of
   equal-length rows).
 
 ```
@@ -475,7 +487,7 @@ P(clt > 1)                           # ≈ 0.159, agreeing with normal(0, 1)
 
 > **Status: implemented.** A user definition shadows a library name (your `sum` wins). Deferred:
 > first-class functions / `map` (element-wise ops are explicit loops/builtins for now), random
-> indexing / random-length loops, and a native columnar vector representation (so a `d×d` matvec
+> indexing / random-length loops, and a native columnar vector representation (so a `d×d` mat·vec
 > builds `O(d²)` nodes — fine for `d ≤ ~64`). See `PLAN-COLLECTIONS.md` §1.
 
 ### Signals (lazy waveforms)

@@ -338,7 +338,9 @@ P(all_win)               # ~ 0.3118`;
         }
         requestAnimationFrame(loop);
       }
-      new IntersectionObserver((es) => { for (const e of es) inView = e.isIntersecting; }, { threshold: 0.15 }).observe(canvas);
+      // clear the longest-loop tally when the stage leaves view, so scrolling back up re-rolls it
+      function resetReplay() { hist.fill(0); trials = 0; wins = 0; frame = 0; setStep(0); }
+      new IntersectionObserver((es) => { for (const e of es) { inView = e.isIntersecting; if (!inView) resetReplay(); } }, { threshold: 0.15 }).observe(canvas);
       resize(); draw(); requestAnimationFrame(loop);
     }
 

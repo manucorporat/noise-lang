@@ -130,8 +130,10 @@ C = X**2 + Y**2 < 1
         }
         raf = requestAnimationFrame(loop);
       }
-      // auto-start when the stage scrolls into view
-      new IntersectionObserver((es) => { for (const e of es) inView = e.isIntersecting; }, { threshold: 0.2 }).observe(canvas);
+      // auto-start when the stage scrolls into view; clear the darts when it leaves, so scrolling
+      // back up replays the rain from scratch instead of showing the finished cloud
+      function resetReplay() { count = 0; inside = 0; nEl.textContent = '0'; inEl.textContent = '0'; piEl.textContent = '—'; draw(); setStep(0); }
+      new IntersectionObserver((es) => { for (const e of es) { inView = e.isIntersecting; if (!inView) resetReplay(); } }, { threshold: 0.2 }).observe(canvas);
       resize(); raf = requestAnimationFrame(loop);
     }
 

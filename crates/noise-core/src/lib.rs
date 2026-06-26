@@ -450,32 +450,57 @@ mod tests {
     }
 
     #[test]
-    fn engine_set_max_loops_sets_the_default_budget() {
-        // `engine::set_max_loops(N)` is the global default for P/E/Var/Q — equivalent to passing N
+    fn engine_set_max_samples_sets_the_default_budget() {
+        // `engine::set_max_samples(N)` is the global default for P/E/Var/Q — equivalent to passing N
         // as the explicit count, but once, up front. At a small budget the standard error is wide,
         // so the estimate displays to few digits; bumping the budget reveals more.
-        let coarse = display_of("engine::set_max_loops(1000); D ~ unif_int(1,6); P(D == 4)");
+        let coarse = display_of("engine::set_max_samples(1000); D ~ unif_int(1,6); P(D == 4)");
         assert_eq!(coarse, "0.2", "1000 draws justifies one decimal, got {coarse}");
-        let fine = display_of("engine::set_max_loops(100000000); D ~ unif_int(1,6); P(D == 4)");
+        let fine = display_of("engine::set_max_samples(100000000); D ~ unif_int(1,6); P(D == 4)");
         assert!(fine.len() > 5, "1e8 draws should reveal ~4 digits, got {fine}");
 
         // An explicit per-call count still overrides the engine default (here: tighten back up
         // despite the coarse global setting).
         let overridden =
-            display_of("engine::set_max_loops(1000); D ~ unif_int(1,6); P(D == 4, 100000000)");
+            display_of("engine::set_max_samples(1000); D ~ unif_int(1,6); P(D == 4, 100000000)");
         assert!(overridden.len() > 5, "explicit count should override, got {overridden}");
+    }
+
+    #[test]
+    fn engine_set_max_opts_clamps_query_cost_without_erroring() {
+        // `engine::set_max_opts(N)` caps `draws × cone-ops` per query: a tight budget forces few
+        // draws, so the estimate displays to fewer digits than the unclamped default. It degrades
+        // accuracy gracefully — it never errors, not even when a single draw already exceeds the
+        // budget (it floors at one draw).
+        let baseline = display_of("D ~ unif_int(1,6); P(D == 4)");
+        let clamped = display_of("engine::set_max_opts(10); D ~ unif_int(1,6); P(D == 4)");
+        assert!(
+            clamped.len() < baseline.len(),
+            "a tight op budget should give a coarser estimate: clamped={clamped} baseline={baseline}"
+        );
+        // Never errors, even at a budget below a single draw's cost (clamps down to one draw).
+        assert!(run_raw("use rand; engine::set_max_opts(1); X ~ unif(0,1); P(X < 0.5)").is_ok());
+        // Composes with set_max_samples — the query draws the smaller of the two budgets.
+        assert!(run_raw(
+            "use rand; engine::set_max_samples(100000); engine::set_max_opts(5); X ~ unif(0,1); E(X)"
+        )
+        .is_ok());
     }
 
     #[test]
     fn engine_module_scoping_and_validation() {
         // Reachable both as a `mod::name` path and (with `use`) unqualified, like any module.
-        assert!(run_raw("engine::set_max_loops(50); use rand; X ~ unif(0,1); P(X < 0.5)").is_ok());
-        assert!(run_raw("use engine; set_max_loops(50); 1").is_ok());
+        assert!(run_raw("engine::set_max_samples(50); use rand; X ~ unif(0,1); P(X < 0.5)").is_ok());
+        assert!(run_raw("use engine; set_max_samples(50); 1").is_ok());
+        assert!(run_raw("use engine; set_max_opts(50); 1").is_ok());
         // Out of scope without a `use`/path, with a fix-it message naming the module.
-        let err = run_raw("set_max_loops(50)").unwrap_err().to_string();
+        let err = run_raw("set_max_samples(50)").unwrap_err().to_string();
         assert!(err.contains("engine") && err.contains("use"), "{err}");
-        // The budget must draw at least once.
-        assert!(run_raw("engine::set_max_loops(0)").unwrap_err().to_string().contains(">= 1"));
+        let err_opts = run_raw("set_max_opts(50)").unwrap_err().to_string();
+        assert!(err_opts.contains("engine") && err_opts.contains("use"), "{err_opts}");
+        // Both budgets must be at least 1.
+        assert!(run_raw("engine::set_max_samples(0)").unwrap_err().to_string().contains(">= 1"));
+        assert!(run_raw("engine::set_max_opts(0)").unwrap_err().to_string().contains(">= 1"));
     }
 
     // --- lifted `if` over a random variable (per-lane select) ---
@@ -1061,12 +1086,13 @@ mod tests {
         assert_eq!(num("norm([3, 4])"), 5.0); // 3-4-5 triangle
         // scaling a vector is just broadcast multiplication (no `scale` builtin needed)
         assert_eq!(display_of("[1, 2, 3] * 2"), "[2, 4, 6]");
-        assert_eq!(display_of("vadd([1, 2], [3, 4])"), "[4, 6]");
-        assert_eq!(display_of("vsub([5, 7], [1, 2])"), "[4, 5]");
+        // vector add/sub are the elementwise `+`/`-` operators
+        assert_eq!(display_of("[1, 2] + [3, 4]"), "[4, 6]");
+        assert_eq!(display_of("[5, 7] - [1, 2]"), "[4, 5]");
         // `sign` is a math ufunc that maps over arrays (-1 / 0 / +1)
         assert_eq!(display_of("sign([3, 0 - 2, 5, 0])"), "[1, -1, 1, 0]");
-        // matvec: [[1,2],[3,4]] * [1,1] = [3, 7].
-        assert_eq!(display_of("matvec([[1, 2], [3, 4]], [1, 1])"), "[3, 7]");
+        // matrix·vector is the `@` operator: [[1,2],[3,4]] @ [1,1] = [3, 7].
+        assert_eq!(display_of("[[1, 2], [3, 4]] @ [1, 1]"), "[3, 7]");
         // normalize yields a unit vector: norm(normalize([3,4])) == 1.
         assert!((num("norm(normalize([3, 4]))") - 1.0).abs() < 1e-12);
     }
@@ -1093,7 +1119,7 @@ mod tests {
     fn matmul_operator_dispatches_on_shape() {
         // `@` is the matrix product, picking the right contraction from the operand shapes.
         assert_eq!(num("[1, 2] @ [3, 4]"), 11.0); // vec·vec = dot
-        assert_eq!(display_of("[[1, 2], [3, 4]] @ [1, 1]"), "[3, 7]"); // mat·vec = matvec
+        assert_eq!(display_of("[[1, 2], [3, 4]] @ [1, 1]"), "[3, 7]"); // mat·vec
         assert_eq!(display_of("[1, 2] @ [[1, 2], [3, 4]]"), "[7, 10]"); // vec·mat
         assert_eq!(
             display_of("[[1, 2], [3, 4]] @ [[5, 6], [7, 8]]"),
@@ -1125,7 +1151,7 @@ mod tests {
         assert!(run("mse([1, 2], [1, 2, 3])").is_err()); // length mismatch
         // mse equals the noise power of an additive channel: received = signal + noise.
         let p = run_num(
-            "sig = ones(8); noise ~[8] normal(0, 2); E(mse(vadd(sig, noise), sig))",
+            "sig = ones(8); noise ~[8] normal(0, 2); E(mse(sig + noise, sig))",
         );
         assert!((p - 4.0).abs() < 0.1, "additive-noise MSE = {p} (want sigma^2 = 4)");
     }
@@ -1257,12 +1283,12 @@ mod tests {
         // `rotation(d)` is a random orthonormal matrix, so every sample preserves length exactly:
         // ||Pi x|| = ||x|| = 1 (the mean is exactly 1, hence a tight tolerance at tiny N).
         let nrm =
-            run_num("d = 8; x = normalize(ones(d)); Pi ~ rotation(d); E(normsq(matvec(Pi, x)), 100)");
+            run_num("d = 8; x = normalize(ones(d)); Pi ~ rotation(d); E(normsq(Pi @ x), 100)");
         assert!((nrm - 1.0).abs() < 1e-9, "||Pi x||^2 = {nrm}, want exactly 1");
         // And it round-trips: Pi^T Pi x = x (same Pi reused, so transpose is the inverse).
         let rt = run_num(
             "d = 8; Pi ~ rotation(d); x = normalize(iota(d)); \
-             E(normsq(matvec(transpose(Pi), matvec(Pi, x)) - x), 100)",
+             E(normsq(transpose(Pi) @ (Pi @ x) - x), 100)",
         );
         assert!(rt < 1e-9, "||Pi^T Pi x - x||^2 = {rt}, want ~0");
     }
@@ -1271,12 +1297,12 @@ mod tests {
     fn rotation_is_a_recipe_drawn_with_tilde() {
         // `rotation(d)` is a recipe like any distribution: `~` draws it, `=` keeps it undrawn.
         // Using an undrawn rotation in arithmetic is the usual "draw it first" error.
-        assert!(run("d = 4; Pi = rotation(d); x = ones(d); matvec(Pi, x)").is_err());
+        assert!(run("d = 4; Pi = rotation(d); x = ones(d); Pi @ x").is_err());
         // A shaped draw gives k *independent* rotations: stack two and they should differ, so the
         // squared distance between Pi0 x and Pi1 x is comfortably positive (identical draws → 0).
         let spread = run_num(
             "d = 6; x = normalize(ones(d)); Rs ~[2] rotation(d); \
-             E(normsq(matvec(Rs[0], x) - matvec(Rs[1], x)), 2000)",
+             E(normsq(Rs[0] @ x - Rs[1] @ x), 2000)",
         );
         assert!(spread > 0.1, "two independent rotations should differ, got spread {spread}");
     }
@@ -1299,11 +1325,11 @@ mod tests {
         // -> unbiased, and far lower inner-product error. (Small d/N so the test stays quick.)
         let common = "d = 16; x = normalize(ones(d)); y = normalize(iota(d)); t = dot(y, x); \
                       L1 = [-0.7979, 0.7979] * (1 / sqrt(d)); \
-                      Pi ~ rotation(d); mse = matvec(transpose(Pi), quantize(matvec(Pi, x), L1)); \
+                      Pi ~ rotation(d); mse = transpose(Pi) @ quantize(Pi @ x, L1); \
                       S ~[d, d] normal(0, 1); r = x - mse; \
                       prod = dot(y, mse) \
                            + sqrt(pi / 2) / d * norm(r) \
-                             * dot(y, matvec(transpose(S), sign(matvec(S, r)))); ";
+                             * dot(y, transpose(S) @ sign(S @ r)); ";
         // Algorithm 1's distortion table, b=1 entry: D_mse ~ 0.36.
         let dmse = run_num(&format!("{common} E(normsq(x - mse), 12000)"));
         assert!((dmse - 0.36).abs() < 0.05, "D_mse(b=1) = {dmse}, want ~0.36");
@@ -1322,8 +1348,8 @@ mod tests {
     #[test]
     fn linear_algebra_length_mismatches_error() {
         assert!(run("dot([1, 2], [1, 2, 3])").is_err());
-        assert!(run("vadd([1], [1, 2])").is_err());
-        assert!(run("vsub([1, 2, 3], [1, 2])").is_err());
+        assert!(run("[1] + [1, 2]").is_err());
+        assert!(run("[1, 2, 3] - [1, 2]").is_err());
         assert!(run("dot(5, [1, 2])").is_err()); // non-array operand
     }
 
@@ -1534,7 +1560,7 @@ mod tests {
     /// builds a *fresh* random orthonormal rotation of a d=20 vector (modified Gram–Schmidt over
     /// d² = 400 Gaussian draws), then quantizes the rotated coordinates and rotates back.
     ///
-    /// The point this measures: `@`/`rotation`/`matvec` carry no GEMM loop. They expand
+    /// The point this measures: `@`/`rotation` carry no GEMM loop. They expand
     /// element-by-element into the *same* scalar `RvGraph`, so the whole d×d linear algebra of a
     /// sample collapses into one straight-line fused kernel (CSE'd, then drawn + reduced across all
     /// cores like any other query). That is ideal at small d — everything lives in registers, no

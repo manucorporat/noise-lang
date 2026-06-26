@@ -7,7 +7,7 @@ import CodePanel from './CodePanel.astro';
 
 const code = `days ~[23] rand::unif_int(1, 365)
 
-match = vec::has_duplicate(days)
+match = vec::has_duplicates(days)
 
 P(match)`;
 ---
@@ -163,13 +163,15 @@ P(match)`;
         }
         raf = requestAnimationFrame(loop);
       }
-      new IntersectionObserver((es) => { for (const e of es) inView = e.isIntersecting; }, { threshold: 0.2 }).observe(canvas);
+      // clear the curve when the stage leaves view, so scrolling back up rebuilds it from one person
+      function resetReplay() { curN = 1; accHits = 0; accTrials = 0; curP = 0; PROB.fill(0); lastDays.length = 0; dupSet.clear(); nEl.textContent = '0'; pEl.textContent = '—'; kEl.textContent = '—'; draw(); setStep(0); }
+      new IntersectionObserver((es) => { for (const e of es) { inView = e.isIntersecting; if (!inView) resetReplay(); } }, { threshold: 0.2 }).observe(canvas);
       resize(); raf = requestAnimationFrame(loop);
     }
 
     async function engineResult() {
       engineEl.textContent = 'engine (10⁶ samples)…';
-      try { const r = await runNoise('days ~[23] rand::unif_int(1,365); P(vec::has_duplicate(days))'); engineEl.innerHTML = `engine, 23 people: <span class="ok">${r.value ?? r.output.trim()}</span> — ${engineMetrics(r)}`; } catch { engineEl.textContent = ''; }
+      try { const r = await runNoise('days ~[23] rand::unif_int(1,365); P(vec::has_duplicates(days))'); engineEl.innerHTML = `engine, 23 people: <span class="ok">${r.value ?? r.output.trim()}</span> — ${engineMetrics(r)}`; } catch { engineEl.textContent = ''; }
     }
 
     const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting && e.intersectionRatio > 0.5) setStep(Number((e.target as HTMLElement).dataset.step)); }, { threshold: [0.5], rootMargin: '-18% 0px -18% 0px' });

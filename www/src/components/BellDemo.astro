@@ -200,7 +200,9 @@ P(sum > 1)            # -> 0.159, Normal(0,1)`;
         }
         raf = requestAnimationFrame(loop);
       }
-      new IntersectionObserver((es) => { for (const e of es) inView = e.isIntersecting; }, { threshold: 0.2 }).observe(canvas);
+      // clear the Galton pile when the stage leaves view, so scrolling back up drops the balls afresh
+      function resetReplay() { balls = []; counts.fill(0); dropped = 0; frame = 0; ballsEl.textContent = '0'; pcEl.textContent = '—'; setStep(0); }
+      new IntersectionObserver((es) => { for (const e of es) { inView = e.isIntersecting; if (!inView) resetReplay(); } }, { threshold: 0.2 }).observe(canvas);
       resize(); sampleN(1); raf = requestAnimationFrame(loop);
     }
 
