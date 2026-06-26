@@ -16,14 +16,30 @@ use crate::lexer::{tokenize, TokKind, Token};
 
 pub fn parse(src: &str) -> Result<Program> {
     let tokens = tokenize(src)?;
-    let mut p = Parser { tokens, pos: 0 };
+    let newlines = newline_flags(src, &tokens);
+    let mut p = Parser { tokens, newlines, pos: 0 };
     let stmts = p.parse_stmts(&[TokKind::Eof])?;
     p.expect(TokKind::Eof)?;
     Ok(Program { stmts })
 }
 
+/// `flags[i]` is true when a line break appears in the source between token `i-1` and token
+/// `i`. The Pratt parser ignores these entirely; `parse_stmts` consults them so a newline can
+/// act as an implicit statement separator (making `;` optional). Computed from token spans so
+/// it costs nothing in the hot path and needs no extra token kind.
+fn newline_flags(src: &str, tokens: &[Token]) -> Vec<bool> {
+    let mut flags = vec![false; tokens.len()];
+    for i in 1..tokens.len() {
+        let gap = &src[tokens[i - 1].span.end..tokens[i].span.start];
+        flags[i] = gap.contains('\n');
+    }
+    flags
+}
+
 struct Parser {
     tokens: Vec<Token>,
+    /// Per-token "is preceded by a line break" flags; see `newline_flags`.
+    newlines: Vec<bool>,
     pos: usize,
 }
 
@@ -37,6 +53,11 @@ impl Parser {
     }
     fn span(&self) -> Span {
         self.tokens[self.pos].span
+    }
+    /// Is the current token the start of a new source line? Used to treat a line break as an
+    /// implicit statement separator.
+    fn newline_before(&self) -> bool {
+        self.newlines[self.pos]
     }
     fn bump(&mut self) -> Token {
         let t = self.tokens[self.pos].clone();
@@ -64,8 +85,14 @@ impl Parser {
         }
     }
 
-    /// Parse statements until one of `terminators` is the next token. Statements are
-    /// separated/terminated by `;`; a trailing `;` is optional (unlike the legacy grammar).
+    /// Parse statements until one of `terminators` is the next token. Statements are separated by
+    /// `;` *or* a line break — whichever comes first — so `;` is only needed to put several
+    /// statements on one line. A trailing separator is optional.
+    ///
+    /// The line break is detected *after* a complete expression: the Pratt parser ignores newlines
+    /// while it is mid-expression, so an expression that genuinely continues onto the next line
+    /// (e.g. a binary operator leading the line, as in `examples/turboquant.noise`) is still parsed
+    /// as one statement before we reach this check.
     fn parse_stmts(&mut self, terminators: &[TokKind]) -> Result<Vec<Spanned>> {
         let mut stmts = Vec::new();
         loop {
@@ -77,14 +104,15 @@ impl Parser {
             }
             let s = self.parse_expr()?;
             stmts.push(s);
-            // consume separators (or stop at a terminator)
+            // A statement ends at `;`, a line break, or a terminator. Consume any explicit `;`;
+            // a line break (or terminator) is an implicit separator and needs nothing consumed.
             if *self.peek() == TokKind::Semi {
                 while *self.peek() == TokKind::Semi {
                     self.bump();
                 }
-            } else if !terminators.contains(self.peek()) {
+            } else if !terminators.contains(self.peek()) && !self.newline_before() {
                 return Err(NoiseError::parse(
-                    format!("expected ';' or end of block, found {:?}", self.peek()),
+                    format!("expected `;`, a line break, or end of block, found {:?}", self.peek()),
                     self.span(),
                 ));
             }
