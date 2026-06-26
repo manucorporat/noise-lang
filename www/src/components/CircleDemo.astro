@@ -56,7 +56,7 @@ C = X**2 + Y**2 < 1
 </style>
 
 <script>
-  import { runNoise } from '../lib/noise';
+  import { runNoise, engineMetrics } from '../lib/noise';
 
   const root = document.querySelector('.pi-demo') as HTMLElement | null;
   const canvas = document.getElementById('pi-canvas') as HTMLCanvasElement | null;
@@ -134,7 +134,7 @@ C = X**2 + Y**2 < 1
 
     async function engineResult() {
       engineEl.textContent = 'engine (10⁶ samples)…';
-      try { const r = await runNoise('X ~ rand::unif(-1,1); Y ~ rand::unif(-1,1); 4 * P(X**2 + Y**2 < 1)'); engineEl.innerHTML = `engine, 10⁶ samples: <span class="ok">${r.value ?? r.output.trim()}</span>`; } catch { engineEl.textContent = ''; }
+      try { const r = await runNoise('X ~ rand::unif(-1,1); Y ~ rand::unif(-1,1); 4 * P(X**2 + Y**2 < 1)'); engineEl.innerHTML = `engine: π ≈ <span class="ok">${r.value ?? r.output.trim()}</span> — ${engineMetrics(r)}`; } catch { engineEl.textContent = ''; }
     }
 
     const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting && e.intersectionRatio > 0.5) setStep(Number((e.target as HTMLElement).dataset.step)); }, { threshold: [0.5], rootMargin: '-18% 0px -18% 0px' });

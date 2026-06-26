@@ -1,0 +1,246 @@
+---
+// The conceptual primer, as a scroll-driven story: every value in Noise is a probability
+// distribution. A number is the degenerate case — a Dirac spike. The tilde spreads it into a real
+// distribution (a fair die is uniform); joining two independent draws convolves their shapes, and
+// the flat die already curls toward a bell — the central limit theorem you get for free. A query
+// collapses millions of hidden draws back into one number, confirmed by the real engine. No
+// buttons — a live histogram morphs through each idea as the steps scroll past.
+import CodePanel from './CodePanel.astro';
+
+const code = `A = 5
+D1 ~ rand::unif_int(1, 6)
+D2 ~ rand::unif_int(1, 6)
+S  = A + D1 + D2
+E(S)`;
+---
+
+<div class="scrolly concept-demo">
+  <div class="scrolly-grid">
+    <div class="scrolly-stage">
+      <div class="stage-inner glass">
+        <h4 class="stage-title">Every value is a distribution</h4>
+        <div class="stage-canvas concept-canvas"><canvas id="concept-canvas" aria-label="A histogram morphing from a single spike, to a flat die, to a bell-shaped sum of two dice"></canvas></div>
+        <CodePanel filename="concept.noise" code={code} class="concept-code" />
+        <div class="stage-foot">
+          <span class="stat">draws <b id="cd-n">0</b></span>
+          <span class="stat key"><b id="cd-label">A</b> ≈ <b id="cd-mean">—</b></span>
+        </div>
+        <p class="stage-engine" id="cd-engine"></p>
+      </div>
+      <figcaption class="figure-caption">
+        <span class="fig-n">Figure 1.</span> One histogram, four ideas. A number is a spike; the
+        tilde spreads it into a die; a constant and two dice joined make a bell; a query reads the result.
+      </figcaption>
+    </div>
+    <div class="scrolly-steps" id="concept-steps">
+      <div class="scrolly-step" data-step="0">
+        <h4>A number is a distribution</h4>
+        <p><code class="code-inline">A = 5</code> looks like a plain constant — and it is, but Noise
+        sees it as a <a class="ref" href="https://en.wikipedia.org/wiki/Probability_distribution" target="_blank" rel="noopener">probability distribution</a>
+        whose every draw lands on 5. A single infinitely-thin spike: the
+        <a class="ref" href="https://en.wikipedia.org/wiki/Dirac_delta_function" target="_blank" rel="noopener">Dirac delta</a>,
+        the <a class="ref" href="https://en.wikipedia.org/wiki/Degenerate_distribution" target="_blank" rel="noopener">degenerate case</a>
+        every other value generalizes.</p>
+      </div>
+      <div class="scrolly-step" data-step="1">
+        <h4>The tilde spreads it out</h4>
+        <p><code class="code-inline">D1 ~ rand::unif_int(1, 6)</code> binds a fair die — a
+        <a class="ref" href="https://en.wikipedia.org/wiki/Discrete_uniform_distribution" target="_blank" rel="noopener">discrete uniform</a>
+        spread, all six faces equally likely. The spike fans out into six flat bars.
+        <code class="code-inline">D1</code> is now genuinely uncertain, yet you write it like any
+        other variable.</p>
+      </div>
+      <div class="scrolly-step" data-step="2">
+        <h4>Join them — a bell appears</h4>
+        <p>Now add the constant and two <a class="ref" href="https://en.wikipedia.org/wiki/Independence_(probability_theory)" target="_blank" rel="noopener">independent</a>
+        dice together: <code class="code-inline">S = A + D1 + D2</code> — five, plus a roll, plus a
+        roll. The flat shapes <a class="ref" href="https://en.wikipedia.org/wiki/Convolution_of_probability_distributions" target="_blank" rel="noopener">convolve</a>
+        into a triangle peaked at 12 — already curving toward a
+        <a class="ref" href="https://en.wikipedia.org/wiki/Normal_distribution" target="_blank" rel="noopener">bell</a>.
+        Join a few more and it sharpens into a true Gaussian: the
+        <a class="ref" href="https://en.wikipedia.org/wiki/Central_limit_theorem" target="_blank" rel="noopener">central limit theorem</a>,
+        for free. (Noise also ships <code class="code-inline">normal</code>,
+        <a class="ref" href="https://en.wikipedia.org/wiki/Poisson_distribution" target="_blank" rel="noopener">poisson</a>,
+        <a class="ref" href="https://en.wikipedia.org/wiki/Bernoulli_distribution" target="_blank" rel="noopener">bernoulli</a>
+        and more for the same <code class="code-inline">~</code> slot.)</p>
+      </div>
+      <div class="scrolly-step" data-step="3">
+        <h4>A query collapses millions of draws</h4>
+        <p>Nothing actually runs until you ask. <code class="code-inline">E(S)</code> — the
+        <a class="ref" href="https://en.wikipedia.org/wiki/Expected_value" target="_blank" rel="noopener">expected value</a>
+        — fires a <a class="ref" href="https://en.wikipedia.org/wiki/Monte_Carlo_method" target="_blank" rel="noopener">Monte-Carlo</a>
+        pass: <b>millions</b> of rolls of both dice, averaged into one honest number. By the
+        <a class="ref" href="https://en.wikipedia.org/wiki/Law_of_large_numbers" target="_blank" rel="noopener">law of large numbers</a>
+        the running mean settles on <code class="code-inline">12</code>. Two lines of math; an expert
+        kernel underneath.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+  .concept-canvas { aspect-ratio: 5 / 2; max-width: 520px; margin: 0 auto; }
+  .concept-code { font-size: 0.84rem; }
+  /* quiet inline links to reference material, in the narrative steps */
+  .scrolly-step a.ref { color: var(--link); text-decoration: none; border-bottom: 1px solid var(--rule); }
+  .scrolly-step a.ref:hover { color: var(--link-hover); border-bottom-color: currentColor; }
+</style>
+
+<script>
+  import { runNoise, engineMetrics } from '../lib/noise';
+
+  const root = document.querySelector('.concept-demo') as HTMLElement | null;
+  const canvas = document.getElementById('concept-canvas') as HTMLCanvasElement | null;
+  if (root && canvas) {
+    const ctx = canvas.getContext('2d')!;
+    const nEl = document.getElementById('cd-n')!, meanEl = document.getElementById('cd-mean')!,
+      labelEl = document.getElementById('cd-label')!, engineEl = document.getElementById('cd-engine')!;
+    const codeBody = root.querySelector('.code-body') as HTMLElement | null;
+    const lines = codeBody ? Array.from(codeBody.querySelectorAll<HTMLElement>('.cl')) : [];
+    if (codeBody) codeBody.classList.add('progressive');
+
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const die = () => 1 + ((Math.random() * 6) | 0);
+
+    // discrete integer domain — bars sit on whole numbers, so the die and its sum read crisply
+    // (spike at 5, die 1–6, and the sum 5 + D1 + D2 spanning 7–17 all fit in [0, 18])
+    const VMIN = 0, VMAX = 18, SLOTS = VMAX - VMIN + 1;
+    let counts = new Float64Array(SLOTS), n = 0, sumV = 0, maxC = 1;
+
+    // each step: a sampler, a readout label, and how much of the code is revealed
+    type Step = { sampler: () => number; label: string; show: number; add: number[]; query: boolean };
+    const STEPS: Step[] = [
+      { sampler: () => 5,                  label: 'A',    show: 0, add: [0],    query: false },
+      { sampler: die,                      label: 'D1',   show: 1, add: [1],    query: false },
+      { sampler: () => 5 + die() + die(),  label: 'S',    show: 3, add: [2, 3], query: false },
+      { sampler: () => 5 + die() + die(),  label: 'E(S)', show: 4, add: [4],    query: true },
+    ];
+    let cur = STEPS[0], inView = false, engineDone = false;
+
+    type Dot = { x: number; y: number; vy: number; ty: number };
+    let dots: Dot[] = [];
+    const TEAL = '31,111,139', MAROON = '138,45,74', INK = '27,26,23', RULE = '221,215,199';
+
+    function reset(s: Step) {
+      counts = new Float64Array(SLOTS); n = 0; sumV = 0; maxC = 1; dots = [];
+      cur = s;
+      labelEl.textContent = s.label;
+      meanEl.textContent = '—';
+      nEl.textContent = '0';
+      if (reduce) { for (let i = 0; i < 200000; i++) addSample(); }
+    }
+
+    function addSample() {
+      const v = cur.sampler();
+      sumV += v; n++;
+      const b = Math.min(SLOTS - 1, Math.max(0, Math.round(v) - VMIN));
+      counts[b] += 1;
+      if (counts[b] > maxC) maxC = counts[b];
+    }
+
+    function setStep(i: number) {
+      const s = STEPS[i];
+      lines.forEach((el, k) => { el.classList.toggle('shown', k <= s.show); el.classList.toggle('added', s.add.includes(k)); });
+      for (const el of root!.querySelectorAll('.scrolly-step')) el.classList.toggle('active', Number((el as HTMLElement).dataset.step) === i);
+      reset(s);
+      if (i === STEPS.length - 1 && !engineDone) { engineDone = true; engineResult(); }
+    }
+
+    // ---- rendering ----
+    let W = 0, H = 0;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    function resize() {
+      const r = canvas.getBoundingClientRect();
+      W = Math.max(1, Math.floor(r.width)); H = Math.max(1, Math.floor(r.height));
+      canvas.width = Math.floor(W * dpr); canvas.height = Math.floor(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      draw();
+    }
+    new ResizeObserver(resize).observe(canvas);
+
+    const padL = 12, padR = 12, padT = 18, padB = 22;
+    const plotW = () => W - padL - padR;
+    const baseY = () => H - padB;
+    const topY = () => padT;
+    // center of the integer slot for value v
+    const mapX = (v: number) => padL + ((v - VMIN + 0.5) / SLOTS) * plotW();
+
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#f4f1e8'; ctx.fillRect(0, 0, W, H);
+
+      // integer ticks
+      ctx.font = '11px ui-monospace, monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      for (let t = 3; t <= 18; t += 3) {
+        const x = mapX(t);
+        ctx.strokeStyle = `rgba(${RULE},1)`; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x, baseY()); ctx.lineTo(x, baseY() + 4); ctx.stroke();
+        ctx.fillStyle = 'rgba(138,132,115,0.9)'; ctx.fillText(String(t), x, baseY() + 6);
+      }
+      ctx.strokeStyle = `rgba(${INK},0.5)`; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(padL, baseY() + 0.5); ctx.lineTo(W - padR, baseY() + 0.5); ctx.stroke();
+
+      // bars (one per integer value)
+      const usableH = baseY() - topY();
+      const slotW = plotW() / SLOTS;
+      const bw = slotW * 0.72;
+      for (let i = 0; i < SLOTS; i++) {
+        const h = (counts[i] / maxC) * usableH;
+        if (h < 0.5) continue;
+        const x = mapX(VMIN + i) - bw / 2;
+        ctx.fillStyle = `rgba(${TEAL},0.85)`;
+        ctx.fillRect(x, baseY() - h, bw, h);
+      }
+
+      // falling sample dots (the "rain" of draws)
+      ctx.fillStyle = `rgba(${TEAL},0.9)`;
+      for (const d of dots) { ctx.beginPath(); ctx.arc(d.x, d.y, 1.8, 0, 6.2832); ctx.fill(); }
+
+      // query: a running-mean marker converging on the answer
+      if (cur.query && n > 0) {
+        const mx = mapX(sumV / n);
+        ctx.strokeStyle = `rgba(${MAROON},0.95)`; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(mx, topY() - 6); ctx.lineTo(mx, baseY()); ctx.stroke();
+        ctx.fillStyle = `rgba(${MAROON},1)`; ctx.font = '600 12px ui-monospace, monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+        ctx.fillText('E ' + (sumV / n).toFixed(2), mx, topY() - 7);
+      }
+    }
+
+    const fmt = (k: number) => k >= 1e6 ? (k / 1e6).toFixed(1) + 'M' : k.toLocaleString();
+
+    function loop() {
+      if (inView && !reduce && n < 3_000_000) {
+        const BULK = n < 3000 ? 22 : 1500;
+        for (let i = 0; i < BULK; i++) addSample();
+        if (dots.length < 36) for (let s = 0; s < 3; s++) {
+          const v = cur.sampler();
+          dots.push({ x: mapX(v), y: topY() - 6, vy: 0, ty: baseY() - 6 });
+        }
+        for (const d of dots) { d.vy += 0.9; d.y += d.vy; }
+        dots = dots.filter((d) => d.y < d.ty);
+        nEl.textContent = fmt(n);
+        meanEl.textContent = (sumV / n).toFixed(cur.query ? 3 : 2);
+        draw();
+      }
+      requestAnimationFrame(loop);
+    }
+
+    new IntersectionObserver((es) => { for (const e of es) inView = e.isIntersecting; }, { threshold: 0.2 }).observe(canvas);
+    resize();
+    requestAnimationFrame(loop);
+
+    async function engineResult() {
+      engineEl.textContent = 'engine (10⁶ samples)…';
+      try {
+        const r = await runNoise('A = 5; D1 ~ rand::unif_int(1, 6); D2 ~ rand::unif_int(1, 6); S = A + D1 + D2; E(S)');
+        engineEl.innerHTML = `engine: E(S) = <span class="ok">${r.value ?? r.output.trim()}</span> — ${engineMetrics(r)}`;
+      } catch { engineEl.textContent = ''; }
+    }
+
+    const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting && e.intersectionRatio > 0.5) setStep(Number((e.target as HTMLElement).dataset.step)); }, { threshold: [0.5], rootMargin: '-18% 0px -18% 0px' });
+    for (const el of root.querySelectorAll('.scrolly-step')) io.observe(el);
+    setStep(0);
+  }
+</script>

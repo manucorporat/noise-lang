@@ -57,7 +57,7 @@ P(match)`;
 </style>
 
 <script>
-  import { runNoise } from '../lib/noise';
+  import { runNoise, engineMetrics } from '../lib/noise';
 
   const root = document.querySelector('.bday-demo') as HTMLElement | null;
   const canvas = document.getElementById('bday-canvas') as HTMLCanvasElement | null;
@@ -169,7 +169,7 @@ P(match)`;
 
     async function engineResult() {
       engineEl.textContent = 'engine (10⁶ samples)…';
-      try { const r = await runNoise('days ~[23] rand::unif_int(1,365); P(vec::has_duplicate(days))'); engineEl.innerHTML = `engine, 10⁶ samples, 23 people: <span class="ok">${r.value ?? r.output.trim()}</span>`; } catch { engineEl.textContent = ''; }
+      try { const r = await runNoise('days ~[23] rand::unif_int(1,365); P(vec::has_duplicate(days))'); engineEl.innerHTML = `engine, 23 people: <span class="ok">${r.value ?? r.output.trim()}</span> — ${engineMetrics(r)}`; } catch { engineEl.textContent = ''; }
     }
 
     const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting && e.intersectionRatio > 0.5) setStep(Number((e.target as HTMLElement).dataset.step)); }, { threshold: [0.5], rootMargin: '-18% 0px -18% 0px' });

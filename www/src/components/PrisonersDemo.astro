@@ -83,7 +83,7 @@ P(all_win)               # ~ 0.3118`;
 </style>
 
 <script>
-  import { runNoise } from '../lib/noise';
+  import { runNoise, engineMetrics } from '../lib/noise';
 
   const root = document.querySelector('.pris-demo') as HTMLElement | null;
   const canvas = document.getElementById('pris-canvas') as HTMLCanvasElement | null;
@@ -356,7 +356,7 @@ for prisoner in 0..n {
 };
 P(all_win, 20000)`);
         const p = r.value ?? r.output.trim();
-        engineEl.innerHTML = `engine: random <span class="am">(½)¹⁰⁰≈10⁻³⁰</span> · loop strategy P(all free) <span class="ok">${p}</span> (analytic 0.3118)`;
+        engineEl.innerHTML = `engine: random <span class="am">(½)¹⁰⁰≈10⁻³⁰</span> · loop strategy P(all free) <span class="ok">${p}</span> (analytic 0.3118) — ${engineMetrics(r)}`;
       } catch { engineEl.textContent = ''; }
     }
 

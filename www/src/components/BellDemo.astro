@@ -82,7 +82,7 @@ P(sum > 1)            # -> 0.159, Normal(0,1)`;
 </style>
 
 <script>
-  import { runNoise } from '../lib/noise';
+  import { runNoise, engineMetrics } from '../lib/noise';
 
   const root = document.querySelector('.bell-demo') as HTMLElement | null;
   const canvas = document.getElementById('bell-canvas') as HTMLCanvasElement | null;
@@ -212,7 +212,7 @@ P(sum > 1)            # -> 0.159, Normal(0,1)`;
       engineEl.innerHTML = prev + (prev ? '<br>' : '') + `engine: ${tag.label} = <span class="loading">…</span>`;
       try {
         const r = await runNoise(tag.src);
-        engineEl.innerHTML = prev + (prev ? '<br>' : '') + `engine: ${tag.label} = <span class="ok">${r.value ?? r.output.trim()}</span> (${tag.exact})`;
+        engineEl.innerHTML = prev + (prev ? '<br>' : '') + `engine: ${tag.label} = <span class="ok">${r.value ?? r.output.trim()}</span> (${tag.exact}) — ${engineMetrics(r)}`;
       } catch { engineEl.innerHTML = prev; }
     }
 

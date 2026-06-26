@@ -190,6 +190,8 @@ code, pre { font-family: var(--mono); }
 .stage-engine { margin: 0; font-size: 0.84rem; color: var(--ink-dim); font-family: var(--mono); min-height: 1.2em; }
 .stage-engine .ok { color: #1f6f8b; font-weight: 700; }
 .stage-engine .am { color: #8a2d4a; font-weight: 700; }
+/* the throughput tail after an engine answer — quiet, so the number stays the hero */
+.metric { color: var(--ink-faint); }
 
 .scrolly-steps { display: flex; flex-direction: column; }
 .scrolly-step {

@@ -2,6 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import Gallery from '../components/Gallery.astro';
 import ShaderFigure from '../components/ShaderFigure.astro';
+import ConceptDemo from '../components/ConceptDemo.astro';
 import CircleDemo from '../components/CircleDemo.astro';
 import BirthdayDemo from '../components/BirthdayDemo.astro';
 import BellDemo from '../components/BellDemo.astro';
@@ -11,7 +12,7 @@ import PrisonersDemo from '../components/PrisonersDemo.astro';
 const ideas = [
   {
     k: 'Everything is a distribution',
-    d: 'A number is just a distribution with all its weight on a single point. Operators lift over random variables automatically — so X below is random, and Y is random too, with no special syntax. Propagating uncertainty reads exactly like ordinary arithmetic.',
+    d: 'A number is just a distribution with all its weight on a single point — a Dirac delta. Operators lift over random variables automatically — so X below is random, and Y is random too, with no special syntax. Propagating uncertainty reads exactly like ordinary arithmetic.',
     code: 'X ~ unif(-1, 1)\nY = 2 * X + 3   # Y is a distribution too',
   },
   {
@@ -46,6 +47,7 @@ const ideas = [
         <a href="#performance">Performance</a>
         <a href="/play">Playground</a>
         <a href="/skill">Skills</a>
+        <a href="#author">About</a>
         <a href="https://github.com/manucorporat/noise-lang">GitHub</a>
       </nav>
     </div>
@@ -79,11 +81,13 @@ const ideas = [
       <div class="measure">
         <h2 class="sec" data-reveal>A visual tour</h2>
         <p data-reveal>
-          Five short stories, simplest first. Just scroll — each one walks through its program, then
+          Short stories, simplest first. We start with the one idea everything else rests on — every
+          value is a distribution — then build up. Just scroll: each one walks through its program,
           plays out what the numbers mean, and confirms the answer with the real engine. No buttons.
         </p>
       </div>
 
+      <div class="tour-item"><div class="wide"><ConceptDemo /></div></div>
       <div class="tour-item"><div class="wide"><CircleDemo /></div></div>
       <div class="tour-item"><div class="wide"><BirthdayDemo /></div></div>
       <div class="tour-item"><div class="wide"><BellDemo /></div></div>
@@ -206,6 +210,53 @@ const ideas = [
       </div>
     </section>
 
+    <section id="author" class="section">
+      <div class="measure">
+        <h2 class="sec" data-reveal>About the author</h2>
+
+        <div class="author" data-reveal>
+          <figure class="author-portrait">
+            <picture>
+              <source srcset="/manu.webp" type="image/webp" />
+              <img
+                src="/manu.jpg"
+                width="900"
+                height="934"
+                loading="lazy"
+                decoding="async"
+                alt="Manu Martínez-Almeida"
+              />
+            </picture>
+            <figcaption>Manu Martínez-Almeida</figcaption>
+          </figure>
+
+          <div class="author-body">
+            <p class="author-lede">
+              <span class="author-name">Manu Mtz.-Almeida.</span>
+              Creator of <a href="https://github.com/gin-gonic/gin">Gin</a>, the Go web
+              framework, and a core contributor to <a href="https://ionicframework.com/">Ionic</a>
+              and <a href="https://stenciljs.com/">Stencil</a>. Principal engineer at
+              <a href="https://www.builder.io/">Builder.io</a>, working on compilers,
+              high-performance systems, and AI agents.
+            </p>
+            <p>
+              I started Noise nine years ago and never quite finished it. The idea grew out of
+              my telecommunications degree — a world of signals, noise, and probability — where
+              I kept wishing for a language that could express uncertainty as naturally as it
+              expresses arithmetic. This is that wish, picked up again all these years later.
+            </p>
+            <p class="author-links">
+              <a href="https://github.com/manucorporat">github.com/manucorporat</a>
+              <span class="author-sep">·</span>
+              <a href="https://x.com/manucorporat">x.com/manucorporat</a>
+              <span class="author-sep">·</span>
+              <a href="https://www.linkedin.com/in/manumartinez-almeida">linkedin</a>
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <footer class="doc-footer measure">
       <hr />
       <p class="muted" id="footer-version">noise~lang — running on WebAssembly.</p>
@@ -301,6 +352,61 @@ const ideas = [
 
   .doc-footer { padding-bottom: 3rem; }
   .doc-footer p { font-size: 0.92rem; }
+
+  /* about the author — a journal-style author note, typeset like the end of a paper */
+  .author {
+    display: flex;
+    gap: 1.6rem;
+    align-items: flex-start;
+    margin-top: 0.6rem;
+  }
+  .author-portrait {
+    flex: 0 0 auto;
+    width: 168px;
+    margin: 0;
+  }
+  .author-portrait img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: var(--paper-2);
+    /* a faint warm cast so the photo sits in the cream palette rather than on top of it */
+    filter: saturate(0.92) contrast(1.02);
+  }
+  .author-portrait figcaption {
+    margin-top: 0.5rem;
+    font-size: 0.82rem;
+    font-style: italic;
+    color: var(--ink-dim);
+    text-align: center;
+  }
+  .author-body { flex: 1 1 auto; min-width: 0; }
+  .author-body > p { margin: 0 0 0.85rem; }
+  .author-body > p:last-child { margin-bottom: 0; }
+  .author-lede { color: #2c2a24; }
+  /* small-caps name, the way an author byline is set in a journal */
+  .author-name {
+    font-weight: 700;
+    font-variant: small-caps;
+    letter-spacing: 0.02em;
+    margin-right: 0.15em;
+  }
+  .author-links {
+    font-size: 0.9rem;
+    font-family: var(--mono);
+    color: var(--ink-dim);
+    padding-top: 0.3rem;
+    border-top: 1px solid var(--rule);
+  }
+  .author-sep { color: var(--ink-faint); margin: 0 0.5em; }
+
+  @media (max-width: 560px) {
+    .author { flex-direction: column; gap: 1.1rem; }
+    .author-portrait { width: 140px; align-self: flex-start; }
+    .author-portrait figcaption { text-align: left; }
+  }
 </style>
 
 <script>

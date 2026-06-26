@@ -75,7 +75,7 @@ Print("FM error", E(vec::mse(rec_fm, msg), 40000));`;
 </style>
 
 <script>
-  import { runNoise } from '../lib/noise';
+  import { runNoise, engineMetrics } from '../lib/noise';
 
   const canvas = document.getElementById('amfm-canvas') as HTMLCanvasElement | null;
   const stepsEl = document.getElementById('amfm-steps');
@@ -302,7 +302,7 @@ Print("FM", E(vec::mse(rec_fm, msg), 40000));`;
       const out = res.output.trim().split('\n');
       const am = (out.find((l) => l.startsWith('AM')) ?? '').replace('AM', '').trim();
       const fm = (out.find((l) => l.startsWith('FM')) ?? '').replace('FM', '').trim();
-      engineEl.innerHTML = `engine: AM error <span class="am">${am}</span> · FM error <span class="ok">${fm}</span>`;
+      engineEl.innerHTML = `engine: AM error <span class="am">${am}</span> · FM error <span class="ok">${fm}</span> — ${engineMetrics(res)}`;
     } catch { engineEl.textContent = ''; }
   }
 </script>
