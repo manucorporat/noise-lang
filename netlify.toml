@@ -12,5 +12,6 @@
   command = "../netlify/install-wasm-pack.sh && pnpm build"
 
 [build.environment]
-  # Pin a Rust toolchain; Netlify's image ships rustup.
-  RUST_VERSION = "1.83.0"
+  # Toolchain for the install script. Use "stable" (some deps require a recent
+  # Cargo, e.g. edition2024 needs Rust >= 1.85), or pin a specific version.
+  RUST_VERSION = "stable"
