@@ -992,7 +992,7 @@ mod tests {
     fn permutation_is_a_uniform_permutation() {
         // `permutation(n)` draws a length-n array that is a permutation of 0..n every lane: no
         // duplicates, the values 0..n-1 (so sum = n(n-1)/2 and max = n-1).
-        assert_eq!(num("deck ~ permutation(5); E(has_duplicate(deck))"), 0.0);
+        assert_eq!(num("deck ~ permutation(5); E(has_duplicates(deck))"), 0.0);
         assert_eq!(num("deck ~ permutation(5); E(sum(deck))"), 10.0); // 0+1+2+3+4
         assert_eq!(num("deck ~ permutation(5); E(max(deck))"), 4.0);
         // uniform: element 0 is equally likely to land in any position (P = 1/5 each).
@@ -1328,11 +1328,21 @@ mod tests {
     }
 
     #[test]
-    fn has_duplicate_correctness() {
-        assert!(!boolean("has_duplicate([1, 2, 3])"));
-        assert!(boolean("has_duplicate([1, 2, 2, 3])"));
-        assert!(!boolean("has_duplicate([])"));
-        assert!(!boolean("has_duplicate([7])"));
+    fn has_duplicates_correctness() {
+        assert!(!boolean("has_duplicates([1, 2, 3])"));
+        assert!(boolean("has_duplicates([1, 2, 2, 3])"));
+        assert!(!boolean("has_duplicates([])"));
+        assert!(!boolean("has_duplicates([7])"));
+    }
+
+    #[test]
+    fn count_duplicates_correctness() {
+        // counts equal pairs i<j: none, one pair, and three pairs among [2,2,2].
+        assert_eq!(num("count_duplicates([1, 2, 3])"), 0.0);
+        assert_eq!(num("count_duplicates([1, 2, 2, 3])"), 1.0);
+        assert_eq!(num("count_duplicates([2, 2, 2])"), 3.0);
+        assert_eq!(num("count_duplicates([])"), 0.0);
+        assert_eq!(num("count_duplicates([7])"), 0.0);
     }
 
     #[test]
@@ -1394,7 +1404,7 @@ mod tests {
     #[test]
     fn library_matches_a_noise_written_version() {
         // The §0 property: each library function IS expressible in Noise. A Noise-written `sum`,
-        // `dot`, and `has_duplicate` must match the builtin on the same inputs.
+        // `dot`, and `has_duplicates` must match the builtin on the same inputs.
         let noise_sum = "mysum(xs) = { acc = 0; for x in xs { acc = acc + x }; acc };";
         assert_eq!(num(&format!("{noise_sum} mysum([1, 2, 3, 4])")), num("sum([1, 2, 3, 4])"));
 
@@ -1425,7 +1435,7 @@ mod tests {
     #[test]
     fn birthday_problem_for_23() {
         // The headline win: 23 people, one line. Analytic ≈ 0.5073.
-        let p = run_num("days ~[23] unif_int(1, 365); P(has_duplicate(days))");
+        let p = run_num("days ~[23] unif_int(1, 365); P(has_duplicates(days))");
         assert!((p - 0.5073).abs() < 5e-3, "P(shared birthday among 23) = {p}");
     }
 
@@ -1472,7 +1482,7 @@ mod tests {
         // After `use`, bare names resolve — like Rust.
         assert_eq!(run_raw("use math; sqrt(25)").unwrap(), Value::Num(5.0));
         assert_eq!(run_raw("use vec; sum([10, 20])").unwrap(), Value::Num(30.0));
-        let p = run_raw("use rand; use vec; P(has_duplicate(~[2] unif_int(1, 6)))").unwrap();
+        let p = run_raw("use rand; use vec; P(has_duplicates(~[2] unif_int(1, 6)))").unwrap();
         assert!((as_num(p) - 1.0 / 6.0).abs() < 5e-3);
         // `use builtin;` is a harmless no-op (always active anyway).
         assert_eq!(run_raw("use builtin; Len([1, 2])").unwrap().to_string(), "2");

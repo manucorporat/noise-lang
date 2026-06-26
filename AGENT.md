@@ -28,7 +28,7 @@ state is **Phases 0–3 plus core-model-rework Steps 1–4 complete** (see `PLAN
   (independent batches — subsumes the old `iid`/`iidmat`), the matrix-product `@` operator, and the
   collections/linear-algebra library (`range`, `push`, `len`, `sum`, `count`, `any`, `all`, `max`,
   `min`, `mean`, `dot`, `normsq`, `norm`, `scale`, `vadd`, `vsub`, `vsign`, `matvec`, `normalize`,
-  `has_duplicate`). The birthday problem for 23 and a generalized CLT are now one expression.
+  `has_duplicates`). The birthday problem for 23 and a generalized CLT are now one expression.
 - **Modules (Rust-style scoping):** builtins are namespaced into `rand` (distributions + `rotation`),
   `math` (`pi`/`e`/`sqrt`/`round`/`log`/`log10`), `vec` (collections/linear-algebra, incl. `mse`),
   and `builtin` (`P`/`E`/`var`/`print`/`range`/`push`/`len`). `builtin` is active by default; the
@@ -198,7 +198,7 @@ git-ignored.
 
 - Deterministic core + RV runtime + Phase-3 probability surface + core-model rework Steps 1–4
   (recipes/`~`-drawing, user functions, `normal`/`E`/`var`/`sqrt`/`pi`, **collections**: arrays,
-  indexing, `for`, `true`/`false`, the `~[shape]` draw, the `@` product, the `sum`/`dot`/`has_duplicate`/… library) **plus a
+  indexing, `for`, `true`/`false`, the `~[shape]` draw, the `@` product, the `sum`/`dot`/`has_duplicates`/… library) **plus a
   Rust-style module system** (`rand`/`math`/`vec` strict, `builtin` default; `use mod;` or
   `mod::name` paths) complete and green (**130 tests**, clippy clean). 21 runnable examples in
   `examples/` (each checks an analytic value), all carrying their `use` lines.

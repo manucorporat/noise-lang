@@ -104,7 +104,7 @@ path). Start each program with the `use` lines you need.
 | `builtin` | always   | `P`, `Q`, `E`, `Var`, `Print`, `Len` |
 | `rand`    | `use rand;` | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `exp`, `exp_int`, `poisson`, `geometric`, `rotation` |
 | `math`    | `use math;` | `pi`, `e`, `sqrt`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign` |
-| `vec`     | `use vec;`  | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `normsq`, `norm`, `vadd`, `vsub`, `matvec`, `transpose`, `normalize`, `quantize`, `has_duplicate`, `mse`, `ones`, `zeros`, `iota` |
+| `vec`     | `use vec;`  | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `normsq`, `norm`, `vadd`, `vsub`, `matvec`, `transpose`, `normalize`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` |
 | `signal`  | `use signal;` | `sine`, `cosine`, `noise_white`, `sample` |
 
 ```noise
@@ -121,12 +121,12 @@ recipe (`=`) → draw (`~` / `~[n]`) → transform (`=`) → query (`P`/`E`/`Var
 
 ```noise
 use rand;   # unif_int
-use vec;    # has_duplicate
+use vec;    # has_duplicates
 
 n     = 23;
 bday  = unif_int(1, 365);   # a recipe
 days  ~[n] bday;            # n independent draws
-match = has_duplicate(days);
+match = has_duplicates(days);
 Print("P(shared birthday among", n, ") =", P(match))
 ```
 

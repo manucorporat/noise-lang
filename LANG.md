@@ -78,7 +78,7 @@ the shape just says how many.)
 ```
 Bday = unif_int(1, 365)
 days ~[23] Bday            # 23 independent draws, one fresh node each
-P(has_duplicate(days))
+P(has_duplicates(days))
 ```
 
 A bare `~` is a scalar (rank 0); `~[1] dist` is a length-1 *array* — same draw, different shape,
@@ -377,7 +377,7 @@ The modules:
 | `builtin` | `P`, `Q`, `E`, `Var`, `Print`, `Len` (capital-only) | **always active** (no `use`) |
 | `rand`    | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `exp`, `exp_int`, `poisson`, `geometric`, `rotation` (batched sampling is the `~[shape]` operator, not a builtin) | needs `use rand;` |
 | `math`    | `pi`, `e`, `sqrt`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign` | needs `use math;` |
-| `vec`     | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `normsq`, `norm`, `vadd`, `vsub`, `matvec`, `transpose`, `normalize`, `quantize`, `has_duplicate`, `mse`, `ones`, `zeros`, `iota` | needs `use vec;` |
+| `vec`     | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `normsq`, `norm`, `vadd`, `vsub`, `matvec`, `transpose`, `normalize`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` | needs `use vec;` |
 | `signal`  | `sine`, `cosine` (lazy waveforms), `noise_white` (lazy white noise), `sample` | needs `use signal;` |
 | `engine`  | `set_max_loops` (run-time evaluator knobs) | needs `use engine;` |
 
@@ -459,14 +459,15 @@ identically (e.g. `sum` over `dist` elements lifts to an Add-chain RV).
   `normalize`, the constructors `ones(n)`/`zeros(n)`/`iota(n)`,
   `mse(a, b)` (mean squared error between two equal-length signals), `quantize(v, centroids)` (snap
   each coordinate of `v` to its nearest value in a constant codebook — the optimal scalar/Lloyd–Max
-  quantizer), plus `has_duplicate(xs)` (true iff some pair is equal — the birthday predicate).
-  `dot`/`vadd`/`vsub`/`mse` require equal-length vectors; `transpose` a rectangular matrix (array of
+  quantizer), plus `has_duplicates(xs)` (true iff some pair is equal — the birthday predicate) and
+  `count_duplicates(xs)` (how many pairs `i<j` are equal — the number of birthday collisions, of which
+  `has_duplicates` is just the `> 0` case). `dot`/`vadd`/`vsub`/`mse` require equal-length vectors; `transpose` a rectangular matrix (array of
   equal-length rows).
 
 ```
 use rand; use vec;
 days ~[23] unif_int(1, 365);         # 23 independent birthdays
-P(has_duplicate(days))               # ≈ 0.507 — the birthday paradox in one expression
+P(has_duplicates(days))               # ≈ 0.507 — the birthday paradox in one expression
 
 clt = sum(~[12] unif(0, 1)) - 6;     # sum of 12 uniforms, centered → ~ N(0, 1)
 P(clt > 1)                           # ≈ 0.159, agreeing with normal(0, 1)

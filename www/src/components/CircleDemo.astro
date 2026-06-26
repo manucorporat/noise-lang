@@ -32,11 +32,11 @@ C = X**2 + Y**2 < 1
     <div class="scrolly-steps" id="pi-steps">
       <div class="scrolly-step" data-step="0">
         <h4>Two random draws</h4>
-        <p>Start with the code. <code class="code-inline">X ~ unif(-1, 1)</code> and <code class="code-inline">Y ~ unif(-1, 1)</code> each draw a number anywhere in [-1, 1] — together, a random point in the square.</p>
+        <p>Same <code class="code-inline">~</code> as before, now used twice. <code class="code-inline">X ~ unif(-1, 1)</code> and <code class="code-inline">Y ~ unif(-1, 1)</code> each draw a number anywhere in [-1, 1] — together, a random point in the square.</p>
       </div>
       <div class="scrolly-step" data-step="1">
         <h4>Ask one yes/no question</h4>
-        <p><code class="code-inline">C = X**2 + Y**2 &lt; 1</code> is true exactly when the point falls inside the unit circle. In Noise that comparison is itself a random variable — an event.</p>
+        <p><code class="code-inline">C = X**2 + Y**2 &lt; 1</code> is true exactly when the point falls inside the unit circle. In Noise that comparison is itself a random variable — a <a class="ref" href="https://en.wikipedia.org/wiki/Bernoulli_distribution" target="_blank" rel="noopener">Bernoulli distribution</a>, landing true or false on each draw.</p>
       </div>
       <div class="scrolly-step" data-step="2">
         <h4>Now throw the darts</h4>
@@ -53,6 +53,9 @@ C = X**2 + Y**2 < 1
 <style>
   .pi-canvas { aspect-ratio: 1 / 1; max-width: 230px; max-height: 230px; margin: 0 auto; }
   .pi-code { font-size: 0.82rem; }
+  /* quiet inline reference link, matching the other tour steps */
+  .scrolly-step a.ref { color: var(--link); text-decoration: none; border-bottom: 1px solid var(--rule); }
+  .scrolly-step a.ref:hover { color: var(--link-hover); border-bottom-color: currentColor; }
 </style>
 
 <script>

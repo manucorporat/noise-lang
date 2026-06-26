@@ -15,7 +15,7 @@ All of these exercise the live language: `unif` / `unif_int` / `bernoulli`, `~` 
 bindings, operator lifting (`+ - * / **`, comparisons, `&& || !`), lifted `if`, `P(event)`,
 and `Print` / `round` / string `+`. Several also use **collections** — the shaped draw `~[n] d`
 to sample `n` independent variables (`~[n, m] d` for a matrix) and reducers like `sum` / `count` /
-`any` / `all` / `has_duplicate`. Names
+`any` / `all` / `has_duplicates`. Names
 are **module-scoped** (Rust-style): each example opens with `use rand;` / `use math;` / `use vec;`
 to bring the distributions, math, and vector helpers into scope (`P` / `Print` / `Len` and the
 `a..b` range are in the always-on `builtin` module). Sampled values use `P`'s fixed default budget
@@ -52,7 +52,7 @@ and a derived value like `4 * P(C)` or a ratio rounds itself correctly.
 
 - **Collections make independence a one-liner.** `birthday`, `dice_sum`, `coin_streak`,
   `exactly_two_heads`, `irwin_hall`, and `reliability` use the shaped draw `~[n] d` to sample `n`
-  *independent* variables at once, then a reducer (`sum`/`count`/`any`/`all`/`has_duplicate`).
+  *independent* variables at once, then a reducer (`sum`/`count`/`any`/`all`/`has_duplicates`).
   `birthday` scales to 23 people — 253 pairwise comparisons — that the old hand-unrolled form
   couldn't express.
 - **The sharing rule still holds underneath.** `~[n] d` produces `n` *distinct* draws (independence);

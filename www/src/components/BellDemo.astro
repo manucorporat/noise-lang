@@ -36,7 +36,7 @@ P(sum > 1)            # -> 0.159, Normal(0,1)`;
     <div class="scrolly-steps" id="bell-steps">
       <div class="scrolly-step" data-step="0">
         <h4>Each peg is a coin flip</h4>
-        <p>A ball meets twelve pegs; at each it goes left or right with equal chance. <code class="code-inline">~[12] bernoulli(0.5)</code> is those twelve flips; <code class="code-inline">count</code> tallies how many went right.</p>
+        <p>Two dice already hinted at a bell; twelve coin flips sharpen it. A ball meets twelve pegs; at each it goes left or right with equal chance. <code class="code-inline">~[12] bernoulli(0.5)</code> is those twelve flips, and <code class="code-inline">count</code> collapses the batch back to one number — how many went right.</p>
       </div>
       <div class="scrolly-step" data-step="1">
         <h4>Where does it land?</h4>

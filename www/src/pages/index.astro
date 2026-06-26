@@ -57,18 +57,17 @@ const ideas = [
     <div class="measure masthead">
       <h1 class="doc-title" data-reveal>The Noise Programming Language</h1>
       <p class="doc-meta" data-reveal style="--reveal-delay: 60ms">
-        A static random-variable algebra &amp; forward Monte-Carlo engine. Compiled to WebAssembly,
-        runnable in this page.
+        A small, expression-based, stochastic language: write random variables like ordinary
+        variables. JIT-compiled, massively parallelizable, blazing fast.
       </p>
       <div class="abstract" data-reveal style="--reveal-delay: 120ms">
         <p>
           <span class="abstract-label">Abstract.</span>
           In Noise, every value is a probability distribution: a number is the degenerate case, a
-          point mass. Operators lift over random variables, the binding <code class="code-inline">~</code>
-          draws a fresh sample while <code class="code-inline">=</code> names a transformation, and a
+          point mass. Operators lift over random variables and a
           query such as <code class="code-inline">P(event)</code> estimates a probability by simulation.
           The result is a small language in which propagating uncertainty and running Monte-Carlo
-          experiments reads like ordinary mathematics.
+          experiments reads like ordinary mathematics, highly optimized.
         </p>
       </div>
     </div>
@@ -79,11 +78,12 @@ const ideas = [
 
     <section id="tour" class="section">
       <div class="measure">
-        <h2 class="sec" data-reveal>A visual tour</h2>
+        <h2 class="sec" data-reveal>Keep scrolling</h2>
         <p data-reveal>
-          Short stories, simplest first. We start with the one idea everything else rests on — every
-          value is a distribution — then build up. Just scroll: each one walks through its program,
-          plays out what the numbers mean, and confirms the answer with the real engine. No buttons.
+          The best way to learn a language is to watch it unfold in front of you — so keep scrolling.
+          Six small programs, each one idea past the last, animate as you read them, then run for real
+          on the compiled engine in your browser. It has a touch of magic to it: every variable here
+          is a whole wave of possibility, and a query is what collapses it to a single number.
         </p>
       </div>
 

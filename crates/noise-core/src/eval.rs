@@ -1070,7 +1070,8 @@ impl Engine {
             "vsub" => self.lib_vsub(args, span),
             "matvec" => self.lib_matvec(args, span),
             "normalize" => self.lib_normalize(args, span),
-            "has_duplicate" => self.lib_has_duplicate(args, span),
+            "has_duplicates" => self.lib_has_duplicates(args, span),
+            "count_duplicates" => self.lib_count_duplicates(args, span),
             "mse" => self.lib_mse(args, span),
             "sin" => self.lib_ufunc(UnOp::Sin, args, span),
             "cos" => self.lib_ufunc(UnOp::Cos, args, span),
@@ -1577,19 +1578,27 @@ impl Engine {
         self.binop(BinOp::Div, ss, Value::Num(n as f64), span)
     }
 
-    /// `has_duplicate(xs)` — true iff some pair of elements is equal (the birthday predicate).
+    /// `has_duplicates(xs)` — true iff some pair of elements is equal (the birthday predicate).
+    /// Thin wrapper over [`Self::lib_count_duplicates`]: a collision exists iff the count is `> 0`.
+    fn lib_has_duplicates(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let count = self.lib_count_duplicates(args, span)?;
+        self.binop(BinOp::Gt, count, Value::Num(0.0), span)
+    }
+
+    /// `count_duplicates(xs)` — number of equal pairs `i<j` (the count of birthday collisions).
     /// `O(n²)` comparison nodes; fine at the small `n` the headline examples use.
-    fn lib_has_duplicate(&mut self, args: &[Value], span: Span) -> Result<Value> {
-        let [xs] = arity1("has_duplicate", args, span)?;
-        let xs = self.expect_array("has_duplicate", xs, span)?;
-        let mut dup = Value::Bool(false);
+    fn lib_count_duplicates(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [xs] = arity1("count_duplicates", args, span)?;
+        let xs = self.expect_array("count_duplicates", xs, span)?;
+        let mut count = Value::Num(0.0);
         for i in 0..xs.len() {
             for j in (i + 1)..xs.len() {
                 let eq = self.binop(BinOp::Eq, xs[i].clone(), xs[j].clone(), span)?;
-                dup = self.binop(BinOp::Or, dup, eq, span)?;
+                let ind = self.indicator(eq, span)?;
+                count = self.binop(BinOp::Add, count, ind, span)?;
             }
         }
-        Ok(dup)
+        Ok(count)
     }
 
     /// Resolve a `Value::Dist` to its `RvId`, else a spanned runtime error.
@@ -1657,7 +1666,8 @@ fn module_of(name: &str) -> Option<&'static str> {
         | "Min" | "min" | "Mean" | "mean" | "Dot" | "dot" | "Normsq" | "normsq" | "Norm"
         | "norm" | "Vadd" | "vadd" | "Vsub" | "vsub"
         | "Matvec" | "matvec" | "Transpose" | "transpose" | "Normalize" | "normalize"
-        | "Has_duplicate" | "has_duplicate" | "Mse" | "mse" | "Ones" | "ones" | "Zeros"
+        | "Has_duplicates" | "has_duplicates" | "Count_duplicates" | "count_duplicates"
+        | "Mse" | "mse" | "Ones" | "ones" | "Zeros"
         | "zeros" | "Iota" | "iota" | "quantize" => "vec",
         // signal generation (DSP waveforms) + colored noise + materialization
         "Sine" | "sine" | "Cosine" | "cosine" | "Sample" | "sample" | "noise_white"

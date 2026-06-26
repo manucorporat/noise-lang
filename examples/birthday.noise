@@ -9,5 +9,5 @@ use rand;   # unif_int
 n     = 23;
 bday  = unif_int(1, 365);
 days  ~[n] bday;
-match = vec::has_duplicate(days);
+match = vec::has_duplicates(days);
 Print("P(shared birthday among", n, ") =", P(match))
