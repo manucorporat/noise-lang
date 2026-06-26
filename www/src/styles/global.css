@@ -146,8 +146,11 @@ code, pre { font-family: var(--mono); }
 
 /* --- shared scrollytelling demo scaffold (sticky stage + scrolling narrative steps) --- */
 .scrolly { margin-top: 1.25rem; }
-.scrolly-grid { display: grid; grid-template-columns: 1fr 0.6fr; gap: 2.5rem; align-items: start; }
-@media (max-width: 860px) { .scrolly-grid { grid-template-columns: 1fr; gap: 0; } }
+/* minmax(0, …) lets the tracks shrink below their content's max-content width — without it the
+   non-wrapping <pre> code lines force the track wider than the viewport (horizontal scroll), since
+   the code panel's own overflow-x:auto never engages while the grid track keeps growing. */
+.scrolly-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.6fr); gap: 2.5rem; align-items: start; }
+@media (max-width: 860px) { .scrolly-grid { display: block; } }
 
 /* Full-height sticky column that vertically centers its inner panel. No transform, so the panel
    can never spill above its own section (which `translateY(-50%)` did). */
@@ -155,6 +158,7 @@ code, pre { font-family: var(--mono); }
   position: sticky;
   top: 56px;
   height: calc(100vh - 56px);
+  min-width: 0; /* allow the column to shrink below its content's max-content width */
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -164,6 +168,7 @@ code, pre { font-family: var(--mono); }
   flex-direction: column;
   gap: 0.6rem;
   padding: 0.85rem;
+  min-width: 0;
   /* no inner scrolling — the full code is always shown (panels are sized to fit) */
 }
 .stage-title { margin: 0; font-size: 1.12rem; font-weight: 700; color: var(--ink); }
@@ -171,9 +176,33 @@ code, pre { font-family: var(--mono); }
    so "Figure N" stays glued to what it describes instead of trailing the tall scroll runway */
 .scrolly-stage > .figure-caption { margin-top: 0.5rem; font-size: 0.82rem; line-height: 1.45; flex: 0 0 auto; }
 @media (max-width: 860px) {
-  /* on a single column, let the stage flow normally instead of sticking */
-  .scrolly-stage { position: static; height: auto; display: block; }
-  .stage-inner { max-height: none; overflow: visible; }
+  /* Single column: pin the (shrunk) stage to the top so the visualization stays on-screen while the
+     narrative steps scroll underneath it — otherwise you scroll the animation out of view before
+     you've read the step describing it. Kept compact so the steps below stay readable. */
+  .scrolly-stage {
+    position: sticky;
+    top: 48px;
+    height: auto;
+    display: block;
+    z-index: 5;
+    background: var(--paper);
+    padding-bottom: 0.4rem;
+  }
+  .stage-inner {
+    max-height: none;
+    overflow: visible;
+    gap: 0.45rem;
+    padding: 0.7rem;
+    /* a soft drop shadow separates the pinned stage from steps sliding behind it */
+    box-shadow: 0 10px 16px -12px rgba(0, 0, 0, 0.28);
+  }
+  .stage-inner .stage-title { font-size: 1rem; }
+  /* shrink the canvas + code so the pinned stage stays around half the viewport. The triple-class
+     selectors clear the (0,2,0) specificity of Astro's scoped per-demo canvas rules. */
+  .scrolly .stage-inner .stage-canvas { height: 132px; }
+  .scrolly .stage-inner .amfm-canvas-wrap { height: 116px; }
+  .scrolly .stage-inner .pi-canvas { max-width: 132px; max-height: 132px; }
+  .scrolly .stage-inner .code-body { max-height: 6.2em; font-size: 0.78rem; padding: 0.55rem 0.8rem; line-height: 1.5; }
 }
 .stage-canvas {
   width: 100%;
@@ -209,10 +238,13 @@ code, pre { font-family: var(--mono); }
 .scrolly-step.active { opacity: 1; }
 .scrolly-step h4 { margin: 0 0 0.55rem; font-size: 1.2rem; color: var(--accent); }
 .scrolly-step p { margin: 0; font-size: 1.04rem; color: var(--ink); }
+.scrolly-step { min-width: 0; }
 @media (max-width: 860px) {
-  .scrolly-step { min-height: 52vh; }
-  /* stage flows normally on mobile, so the desktop sticky runway is just dead space */
-  .scrolly-step:last-child { min-height: 52vh; padding-bottom: 0; }
+  /* the pinned stage covers the upper viewport, so each step gets a runway that keeps its text in
+     the readable band below the stage; the first step starts right under the stage. */
+  .scrolly-step { min-height: 60vh; }
+  .scrolly-step:first-child { padding-top: 1.5vh; }
+  .scrolly-step:last-child { min-height: 60vh; padding-bottom: 10vh; }
 }
 
 /* a demo's heading + optional caption, story-style (no section numbering) */
