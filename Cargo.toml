@@ -10,3 +10,4 @@ edition = "2021"
 version = "0.1.0"
 authors = ["Manu Mtz.-Almeida <manu.valladolid@gmail.com>"]
 license = "MIT"
+repository = "https://github.com/manucorporat/noise-lang"

@@ -33,6 +33,7 @@
           <span class="dot"></span> Output
         </div>
         <pre id="pg-output" class="pg-output"><span class="muted">Press Run to evaluate.</span></pre>
+        <div id="pg-metrics" class="pg-metrics" hidden></div>
       </div>
     </aside>
   </div>
@@ -46,9 +47,12 @@
     grid-template-columns: 1.5fr 1fr;
     gap: 1rem;
     align-items: stretch;
+    /* Grow to use the viewport height when there's room (tall screens), but stay usable on short
+       ones and never get so tall the page can't breathe. The editor + output panes flex to fill. */
+    min-height: clamp(460px, calc(100vh - 10rem), 900px);
   }
   @media (max-width: 880px) {
-    .pg-grid { grid-template-columns: 1fr; }
+    .pg-grid { grid-template-columns: 1fr; min-height: 0; }
   }
 
   .pg-editor-wrap { display: flex; flex-direction: column; overflow: hidden; }
@@ -61,8 +65,10 @@
     background: var(--paper);
     flex-wrap: wrap;
   }
-  .pg-editor { height: 440px; width: 100%; }
-  @media (max-width: 880px) { .pg-editor { height: 320px; } }
+  /* Fill the remaining column height (Monaco's automaticLayout measures the container). min-height:0
+     lets the flex child shrink below content size so the toolbar never gets pushed off. */
+  .pg-editor { flex: 1; min-height: 0; height: auto; width: 100%; }
+  @media (max-width: 880px) { .pg-editor { flex: none; height: 320px; } }
 
   .pg-select-wrap { position: relative; display: inline-flex; }
   .pg-select {
@@ -141,13 +147,32 @@
   .pg-output .val { color: #9a5b00; font-weight: 700; }
   .pg-output .err { color: #a4262c; }
   .pg-output .label { color: var(--ink-dim); }
+
+  /* Engine readout: a compact strip of stat chips shown after a run that forced sampling. Inline
+     flow (not flex) so the " · " separators and intra-chip spaces are real text that wraps and
+     copy-pastes as a readable line. */
+  .pg-metrics {
+    padding: 0.5rem 0.85rem;
+    border-top: 1px solid var(--rule);
+    background: var(--paper);
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    line-height: 1.7;
+    color: var(--ink-dim);
+  }
+  .pg-metric { white-space: nowrap; }
+  .pg-metrics[hidden] { display: none; }
+  .pg-metric .m-key { font-variant: small-caps; letter-spacing: 0.04em; color: var(--ink-faint); }
+  .pg-metric .m-val { color: var(--ink); font-weight: 700; }
+  .pg-metric.m-rate .m-val { color: var(--accent); }
+  .m-sep { color: var(--ink-faint); opacity: 0.6; }
 </style>
 
 <script>
   import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
   import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
   import { registerNoise, LANGUAGE_ID, THEME_ID } from '../lib/noise-lang';
-  import { runNoise } from '../lib/noise';
+  import { runNoise, type NoiseResult } from '../lib/noise';
   import { examples, defaultExampleId, examplesByCategory } from '../data/examples';
   import { parseHash, encodeCode } from '../lib/share';
 
@@ -159,6 +184,7 @@
   const explEl = $('pg-explanation');
   const statusEl = $('pg-status');
   const outEl = $('pg-output');
+  const metricsEl = $('pg-metrics');
   const select = $('pg-select') as HTMLSelectElement;
 
   registerNoise(monaco);
@@ -200,6 +226,8 @@
 
   function clearOutput() {
     outEl.innerHTML = '<span class="muted">Press Run to evaluate.</span>';
+    metricsEl.hidden = true;
+    metricsEl.innerHTML = '';
   }
 
   function setHash(value: string) {
@@ -263,12 +291,12 @@
     runBtn.disabled = true;
     statusEl.textContent = 'running…';
     outEl.innerHTML = '<span class="muted">running…</span>';
-    const t0 = performance.now();
+    metricsEl.hidden = true;
     try {
       const res = await runNoise(editor.getValue());
-      const ms = Math.round(performance.now() - t0);
-      statusEl.textContent = `done in ${ms} ms`;
+      statusEl.textContent = `done in ${fmtMs(res.elapsedMs)}`;
       renderResult(res);
+      renderMetrics(res);
     } catch (e) {
       statusEl.textContent = 'error';
       outEl.innerHTML = `<span class="err">${escapeHtml(String(e))}</span>`;
@@ -277,7 +305,7 @@
     }
   }
 
-  function renderResult(res: { ok: boolean; value: string | null; output: string; error: string | null }) {
+  function renderResult(res: NoiseResult) {
     const parts: string[] = [];
     if (res.output) parts.push(escapeHtml(res.output.replace(/\n$/, '')));
     if (res.ok) {
@@ -290,6 +318,54 @@
       parts.push(`<span class="err">${escapeHtml(res.error ?? 'error')}</span>`);
     }
     outEl.innerHTML = parts.join('\n') || '<span class="muted">(no output)</span>';
+  }
+
+  // The engine readout. Most programs force some Monte-Carlo sampling (P/E/Var/Q); for those we show
+  // what was computed and how fast. A purely deterministic program forces nothing — we then show
+  // just the time, since "0 ops" would be misleading (the work was the deterministic eval, untimed).
+  function renderMetrics(res: NoiseResult) {
+    const s = res.stats;
+    const chips: Array<[string, string, string?]> = [];
+    if (s.samples > 0) {
+      chips.push(['samples', fmtCount(s.samples)]);
+      chips.push(['ops', fmtCount(s.ops)]);
+      chips.push(['random', fmtCount(s.rng_draws)]);
+    }
+    chips.push(['time', fmtMs(res.elapsedMs)]);
+    // ops/sec only makes sense when both an op count and a measurable time exist. The label already
+    // says "/sec", so the value is a bare count (no redundant "/s" suffix).
+    if (s.ops > 0 && res.elapsedMs > 0) {
+      chips.push(['ops/sec', fmtCount(Math.round(s.ops / (res.elapsedMs / 1000))), 'm-rate']);
+    }
+    // Real text nodes for the space and separator (not just flex gap) so the line copy-pastes
+    // readably: "samples 1.00M · ops 8.00M · …".
+    metricsEl.innerHTML = chips
+      .map(
+        ([key, val, cls]) =>
+          `<span class="pg-metric ${cls ?? ''}"><span class="m-key">${key}</span> ` +
+          `<span class="m-val">${val}</span></span>`,
+      )
+      .join('<span class="m-sep"> · </span>');
+    metricsEl.hidden = false;
+  }
+
+  // Compact SI-ish formatting: 1_234_567 → "1.23M", so the strip stays scannable at a glance.
+  function fmtCount(n: number): string {
+    if (n < 1000) return String(n);
+    const units = ['K', 'M', 'B', 'T'];
+    let u = -1;
+    let v = n;
+    while (v >= 1000 && u < units.length - 1) {
+      v /= 1000;
+      u++;
+    }
+    return `${v >= 100 ? v.toFixed(0) : v.toFixed(2)}${units[u]}`;
+  }
+
+  function fmtMs(ms: number): string {
+    if (ms < 1) return `${ms.toFixed(2)} ms`;
+    if (ms < 1000) return `${ms.toFixed(ms < 10 ? 1 : 0)} ms`;
+    return `${(ms / 1000).toFixed(2)} s`;
   }
 
   function escapeHtml(s: string) {

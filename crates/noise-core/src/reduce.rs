@@ -97,8 +97,10 @@ pub fn run_reduction<R: Reducer>(
     }
     let n_chunks = n.div_ceil(CHUNK_SAMPLES);
 
-    // Compile ONCE; the resulting program is shared (by reference) across all workers.
-    let program = compile_root(graph, root);
+    // Compile ONCE; the resulting program is shared (by reference) across all workers. Record the
+    // run-time counters here on the driver thread (before fan-out) so workers stay lock-free.
+    let (program, cost) = compile_root(graph, root);
+    crate::stats::record(n, cost.ops, cost.sources);
 
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -278,7 +280,7 @@ mod tests {
         let r = MomentsReducer;
 
         // Compile once, share the program across all the thread-count variations.
-        let program = compile_root(g, id);
+        let (program, _cost) = compile_root(g, id);
         let base = run_parallel(&*program, n, seed, &r, n_chunks, 1).into_moments();
         for t in [2usize, 3, 5, 8] {
             let m = run_parallel(&*program, n, seed, &r, n_chunks, t).into_moments();
@@ -362,7 +364,7 @@ mod tests {
         let seed = 0xC0FFEE;
         let n_chunks = n.div_ceil(CHUNK_SAMPLES);
         let r = MomentsReducer;
-        let program = compile_root(g, id); // compile ONCE, shared across thread counts
+        let (program, _cost) = compile_root(g, id); // compile ONCE, shared across thread counts
 
         let drive = |threads: usize| {
             run_parallel(&*program, n, seed, &r, n_chunks, threads); // warm up

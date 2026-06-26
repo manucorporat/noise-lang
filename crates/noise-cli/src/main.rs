@@ -57,6 +57,15 @@ fn install_ide_integration() {
             continue;
         }
         let dest = base.join("extensions").join("noise-lang");
+        // A symlink here means a dev install (e.g. `ln -s` from the README) already
+        // points at a source tree — leave it be rather than writing through it.
+        if let Ok(meta) = std::fs::symlink_metadata(&dest) {
+            if meta.file_type().is_symlink() {
+                println!("• {name}: already linked (dev install) → {}", dest.display());
+                installed += 1;
+                continue;
+            }
+        }
         match write_extension(&dest) {
             Ok(()) => {
                 println!("✓ {name}: installed → {}", dest.display());

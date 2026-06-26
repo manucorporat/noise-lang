@@ -22,6 +22,7 @@ pub mod rng;
 pub mod sampler;
 pub mod signal;
 pub mod simplify;
+pub mod stats;
 pub mod wasm_emit;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_host;
@@ -31,6 +32,7 @@ pub use dist::RvId;
 pub use error::{NoiseError, Result};
 pub use eval::Engine;
 pub use sampler::Moments;
+pub use stats::RunStats;
 pub use value::Value;
 
 /// Convenience: parse and evaluate a source string with a fresh engine.

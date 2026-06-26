@@ -220,6 +220,52 @@ pub fn supported(graph: &RvGraph, root: RvId) -> bool {
     }
 }
 
+/// Per-draw cost of a cone: its distinct-node count (`ops`) and how many of those are RNG sources
+/// (`sources`). Both walk the cone counting each `RvId` once (matching CSE), so they reflect what a
+/// single lane actually evaluates — the playground multiplies them by the draw count for its
+/// "operations" / "random numbers" readout. Backend-independent: computed on the simplified graph.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NodeCost {
+    /// Distinct nodes in the cone — one per-lane operation each.
+    pub ops: u64,
+    /// Distinct RNG source nodes — one random draw per lane each.
+    pub sources: u64,
+}
+
+/// Compute the [`NodeCost`] of `root`'s cone (see [`NodeCost`]).
+pub fn cost(graph: &RvGraph, root: RvId) -> NodeCost {
+    fn go(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>, c: &mut NodeCost) {
+        if !seen.insert(id) {
+            return;
+        }
+        c.ops += 1;
+        match graph.node(id) {
+            RvNode::Src(_) => c.sources += 1,
+            RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+            RvNode::Unary(_, a) => go(graph, *a, seen, c),
+            RvNode::Binary(_, a, b) => {
+                go(graph, *a, seen, c);
+                go(graph, *b, seen, c);
+            }
+            RvNode::Select { cond, a, b } => {
+                go(graph, *cond, seen, c);
+                go(graph, *a, seen, c);
+                go(graph, *b, seen, c);
+            }
+            RvNode::Gather { elems, index } => {
+                for &e in elems.iter() {
+                    go(graph, e, seen, c);
+                }
+                go(graph, *index, seen, c);
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut c = NodeCost::default();
+    go(graph, root, &mut seen, &mut c);
+    c
+}
+
 /// Number of distinct nodes in the cone of `root` (each `RvId` once) — the count of per-stream
 /// value slots a stack-machine backend (WASM) must reserve, since it memoizes every node into a
 /// local rather than an SSA value.

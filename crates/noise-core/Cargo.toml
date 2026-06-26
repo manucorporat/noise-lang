@@ -4,7 +4,11 @@ edition.workspace = true
 version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
 description = "Core of the Noise probabilistic language: lexer, parser, evaluator, sampler."
+keywords = ["probabilistic", "monte-carlo", "language", "interpreter", "sampling"]
+categories = ["science", "mathematics", "compilers"]
 
 [dependencies]
 cranelift = { version = "0.127.4", optional = true }

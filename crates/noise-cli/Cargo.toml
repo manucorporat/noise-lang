@@ -4,11 +4,15 @@ edition.workspace = true
 version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+readme = "README.md"
 description = "REPL and file runner for the Noise language."
+keywords = ["probabilistic", "monte-carlo", "language", "repl", "sampling"]
+categories = ["command-line-utilities", "science", "mathematics"]
 
 [[bin]]
 name = "noise"
 path = "src/main.rs"
 
 [dependencies]
-noise-core = { path = "../noise-core" }
+noise-core = { path = "../noise-core", version = "0.1.0" }

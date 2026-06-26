@@ -87,9 +87,18 @@ impl Engine {
         &self.graph
     }
 
+    /// Run-time counters (samples drawn, operations, random draws) accumulated since the last
+    /// [`run`](Engine::run). The CLI/playground read this to show how much Monte-Carlo work the
+    /// program triggered. See [`crate::stats`].
+    pub fn stats(&self) -> crate::stats::RunStats {
+        crate::stats::snapshot()
+    }
+
     /// Parse and evaluate a whole program, returning the value of the last statement
     /// (or `Unit` for an empty program).
     pub fn run(&mut self, src: &str) -> Result<Value> {
+        // Fresh run-time counters for this program (the playground reads them after `run`).
+        crate::stats::reset();
         let program = parse(src)?;
         let mut last = Value::Unit;
         for stmt in &program.stmts {

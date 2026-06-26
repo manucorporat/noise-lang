@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::bytecode::{compile, run_batch, Program as ByteProgram, BATCH};
 use crate::dist::{RvGraph, RvId};
+use crate::kernel::NodeCost;
 use crate::rng::Rng;
 
 /// Compiles the transitive cone of a root RV into an immutable, shareable [`Program`].
@@ -31,22 +32,22 @@ pub trait Backend {
 ///
 /// Each codegen path falls back to the interpreter for any graph it can't profitably emit, so the
 /// choice only ever affects speed, never results.
-pub fn compile_root(graph: &RvGraph, root: RvId) -> Box<dyn Program> {
+///
+/// Returns the compiled program alongside the simplified cone's [`NodeCost`] — the per-draw
+/// operation/source counts the playground multiplies by the draw count for its run-time readout.
+/// Computing it here (on the post-simplify graph, once) keeps it backend-independent and exact.
+pub fn compile_root(graph: &RvGraph, root: RvId) -> (Box<dyn Program>, NodeCost) {
     // Simplify once (fold constants, apply identities, CSE) so the backend lowers a smaller DAG.
     // The rewritten graph is local — backends copy what they need, retaining no reference to it.
     let (graph, root) = crate::simplify::simplify(graph, root);
+    let cost = crate::kernel::cost(&graph, root);
     #[cfg(feature = "jit")]
-    {
-        crate::jit::JitBackend::new().compile(&graph, root)
-    }
+    let program = crate::jit::JitBackend::new().compile(&graph, root);
     #[cfg(all(not(feature = "jit"), target_arch = "wasm32"))]
-    {
-        crate::wasm_host::WasmHostBackend::new().compile(&graph, root)
-    }
+    let program = crate::wasm_host::WasmHostBackend::new().compile(&graph, root);
     #[cfg(all(not(feature = "jit"), not(target_arch = "wasm32")))]
-    {
-        InterpBackend.compile(&graph, root)
-    }
+    let program = InterpBackend.compile(&graph, root);
+    (program, cost)
 }
 
 /// An immutable compiled program. `Send + Sync` so a single compilation is shared by reference
