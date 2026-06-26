@@ -224,7 +224,9 @@ code, pre { font-family: var(--mono); }
 
 .scrolly-steps { display: flex; flex-direction: column; }
 .scrolly-step {
-  min-height: 68vh;
+  /* window-relative height: each step centers its text, so the empty remainder is the breathing
+     room between consecutive blocks as you scroll. Bigger min-height → more space between them. */
+  min-height: 82vh;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -234,7 +236,7 @@ code, pre { font-family: var(--mono); }
 .scrolly-step:first-child { padding-top: 8vh; }
 /* Trailing runway so the sticky stage stays pinned while the final step is read, instead of
    sliding up the moment the last text is centered. */
-.scrolly-step:last-child { min-height: 68vh; padding-bottom: 40vh; }
+.scrolly-step:last-child { min-height: 82vh; padding-bottom: 40vh; }
 .scrolly-step.active { opacity: 1; }
 .scrolly-step h4 { margin: 0 0 0.55rem; font-size: 1.2rem; color: var(--accent); }
 .scrolly-step p { margin: 0; font-size: 1.04rem; color: var(--ink); }
@@ -242,9 +244,9 @@ code, pre { font-family: var(--mono); }
 @media (max-width: 860px) {
   /* the pinned stage covers the upper viewport, so each step gets a runway that keeps its text in
      the readable band below the stage; the first step starts right under the stage. */
-  .scrolly-step { min-height: 60vh; }
+  .scrolly-step { min-height: 75vh; }
   .scrolly-step:first-child { padding-top: 1.5vh; }
-  .scrolly-step:last-child { min-height: 60vh; padding-bottom: 10vh; }
+  .scrolly-step:last-child { min-height: 75vh; padding-bottom: 10vh; }
 }
 
 /* a demo's heading + optional caption, story-style (no section numbering) */
