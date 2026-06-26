@@ -709,6 +709,45 @@ mod tests {
     }
 
     #[test]
+    fn newlines_separate_statements_so_semicolons_are_optional() {
+        // a line break ends a statement just like `;`
+        let prog = parse("a = 1\nb = 2\na + b").unwrap();
+        assert_eq!(prog.stmts.len(), 3);
+        // `;` still works, including several statements on one line
+        let prog = parse("a = 1; b = 2\nc = 3").unwrap();
+        assert_eq!(prog.stmts.len(), 3);
+        // blank lines and comment-only lines don't create empty statements
+        let prog = parse("a = 1\n\n# note\nb = 2\n").unwrap();
+        assert_eq!(prog.stmts.len(), 2);
+        // line breaks separate statements inside a block, too
+        match parse_one("{ a = 1\n b = 2\n a + b }") {
+            Expr::Block(stmts) => assert_eq!(stmts.len(), 3),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_leading_operator_continues_the_previous_line() {
+        // the Pratt parser ignores newlines mid-expression, so an operator at the start of the
+        // next line continues the statement rather than starting a new one (turboquant style).
+        let prog = parse("total = a\n + b\n * c").unwrap();
+        assert_eq!(prog.stmts.len(), 1);
+        match &prog.stmts[0].expr {
+            Expr::Bind(BindKind::Assign, name, rhs) => {
+                assert_eq!(name, "total");
+                assert!(matches!(rhs.expr, Expr::Binary(BinOp::Add, _, _)));
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_values_on_one_line_without_a_separator_is_still_an_error() {
+        // `1 2` (same line, no `;`) must stay an error — the newline rule shouldn't mask it.
+        assert!(matches!(parse("1 2").unwrap_err().kind, ErrorKind::Parse(_)));
+    }
+
+    #[test]
     fn module_paths_and_use_parse() {
         // a qualified call carries the path inside the name string
         assert!(matches!(parse_one("rand::unif(0, 1)"), Expr::Call(n, _) if n == "rand::unif"));

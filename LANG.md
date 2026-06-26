@@ -116,7 +116,11 @@ symbolic (a distribution) until then.
 
 ## Lexical structure
 
-- **Whitespace** (spaces, tabs, newlines) separates tokens and is otherwise insignificant.
+- **Whitespace** (spaces, tabs) separates tokens and is otherwise insignificant. A **newline**
+  also separates tokens but, *between two complete statements*, doubles as a statement separator
+  (see grammar) — so `;` is optional and only needed to put several statements on one line. A
+  newline *inside* an unfinished expression is insignificant, so an operator can lead a
+  continuation line (`total = a\n  + b`).
 - **Comments** run to end of line, started by `#` or `//`.
 - **Numbers**: `[0-9]+` or `[0-9]*.[0-9]+` / `[0-9]+.[0-9]*`, parsed as `f64`. No exponent
   syntax yet. A leading `-` is *not* part of the literal — it is the unary minus operator.
@@ -141,7 +145,7 @@ symbolic (a distribution) until then.
 [ ]                       array literal / indexing
 ..                        half-open integer range (0..n)
 ::                        module path separator (rand::unif)
-,  ;                      argument sep, statement terminator
+,  ;                      argument sep, statement separator (or use a newline)
 if else for in use        keywords
 true false                boolean literals
 ```
@@ -149,8 +153,9 @@ true false                boolean literals
 ## Grammar (informal)
 
 ```
-program   := stmt*                         # statements, ';'-separated
-stmt      := expr ( ';' )?                 # trailing ';' optional; ';' may also separate
+program   := stmt*                         # statements separated by ';' or a newline
+stmt      := expr ( ';' | NEWLINE )?       # separator optional before a terminator; ';' is
+                                           #   only required for two statements on one line
 expr      := bind | opexpr
 bind      := IDENT ('=' | '~') expr        # right-associative
 opexpr    := precedence-climbing over the operator table below
