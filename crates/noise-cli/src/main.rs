@@ -7,12 +7,14 @@ use std::path::{Path, PathBuf};
 use noise_core::Engine;
 
 /// The VS Code / Cursor syntax extension, baked into the binary so `ide-integration`
-/// is self-contained no matter where `noise` runs from. Mirrors `editors/vscode-noise/`.
-const EXT_PKG_JSON: &str = include_str!("../../../editors/vscode-noise/package.json");
+/// is self-contained no matter where `noise` runs from. These are a vendored copy of
+/// `editors/vscode-noise/` kept in sync by `build.rs` — vendored (rather than reached
+/// via `../../../editors`) so the files survive the `cargo publish` tarball.
+const EXT_PKG_JSON: &str = include_str!("../vendor/vscode-noise/package.json");
 const EXT_LANG_CONFIG: &str =
-    include_str!("../../../editors/vscode-noise/language-configuration.json");
+    include_str!("../vendor/vscode-noise/language-configuration.json");
 const EXT_TMLANGUAGE: &str =
-    include_str!("../../../editors/vscode-noise/syntaxes/noise.tmLanguage.json");
+    include_str!("../vendor/vscode-noise/syntaxes/noise.tmLanguage.json");
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
