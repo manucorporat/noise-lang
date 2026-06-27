@@ -60,6 +60,11 @@ pub struct Engine {
     /// worst-case complexity stays deterministic regardless of cone size — without ever erroring.
     /// Defaults to [`builtins::MAX_OPS_DEFAULT`] (a built-in safety ceiling), not unlimited.
     max_opts: u64,
+    /// Validate-only mode (set by [`Engine::check`]). When on, the sampling estimators
+    /// (`P`/`E`/`Var`/`Q`) skip their Monte Carlo loop and return a neutral placeholder — the
+    /// program is still parsed, evaluated, and graph-built (so type/shape/scope errors surface),
+    /// but no draws happen, so a check finishes fast regardless of the configured sample budget.
+    check_mode: bool,
 }
 
 impl Default for Engine {
@@ -79,6 +84,7 @@ impl Engine {
             output: String::new(),
             max_samples: builtins::P_DEFAULT_N,
             max_opts: builtins::MAX_OPS_DEFAULT,
+            check_mode: false,
         }
     }
 
@@ -118,6 +124,18 @@ impl Engine {
     /// Tests do `let rv = eng.run_rv("X ~ unif(-1,1); X ** 2")?;`.
     pub fn run_rv(&mut self, src: &str) -> Result<Value> {
         self.run(src)
+    }
+
+    /// Validate a program without running its Monte Carlo: parse it, evaluate every statement, and
+    /// build the sample-DAG — surfacing syntax, scope, type, and shape errors — but skip the actual
+    /// sampling in `P`/`E`/`Var`/`Q` (see [`Engine::check_mode`]). Returns the last value (whose
+    /// estimator results are placeholders) so callers can just check for `Ok`. Fast regardless of
+    /// the configured sample budget.
+    pub fn check(&mut self, src: &str) -> Result<Value> {
+        self.check_mode = true;
+        let result = self.run(src);
+        self.check_mode = false;
+        result
     }
 
     fn eval(&mut self, node: &Spanned) -> Result<Value> {
@@ -232,7 +250,7 @@ impl Engine {
                     self.output.push('\n');
                     Ok(Value::Unit)
                 } else {
-                    builtins::call(base, &arg_vals, &self.graph, self.max_samples, self.max_opts, node.span)
+                    builtins::call(base, &arg_vals, &self.graph, self.max_samples, self.max_opts, node.span, self.check_mode)
                 }
             }
             // Extracted into methods to keep `eval`'s stack frame small (recursion-depth budget).

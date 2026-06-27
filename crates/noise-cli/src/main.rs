@@ -21,6 +21,13 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("-h") | Some("--help") => print_help(),
         Some("ide-integration") => install_ide_integration(),
+        Some("validate") => match args.get(1) {
+            Some(path) => validate_file(path),
+            None => {
+                eprintln!("error: `validate` needs a file path: noise validate <file>");
+                std::process::exit(1);
+            }
+        },
         Some(path) => run_file(path),
         None => repl(),
     }
@@ -31,6 +38,7 @@ fn print_help() {
     println!("usage:");
     println!("  noise                   start a REPL");
     println!("  noise <file>            run a program file");
+    println!("  noise validate <file>   parse and build the graph without producing output");
     println!("  noise ide-integration   install the VS Code / Cursor syntax extension");
 }
 
@@ -115,6 +123,29 @@ fn run_file(path: &str) {
         // Don't echo a trailing `unit` (e.g. when the program ends in `print(...)`).
         Ok(noise_core::Value::Unit) => {}
         Ok(value) => println!("{value}"),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Parse `path` and evaluate it to build the sample-DAG, reporting any errors — but without
+/// running the Monte Carlo (`P`/`E`/`Var`/`Q` skip sampling) and without printing the program's
+/// output or its final value. This catches syntax errors and graph-construction errors (undefined
+/// names, type/shape mismatches, etc.) that pure parsing would miss, so it's a fast "does this
+/// program hold together?" check that finishes regardless of the program's sample budget.
+fn validate_file(path: &str) {
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {path}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let mut engine = Engine::new();
+    match engine.check(&src) {
+        Ok(_) => println!("✓ {path}: valid"),
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);

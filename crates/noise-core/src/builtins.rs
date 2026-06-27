@@ -48,6 +48,7 @@ pub fn call(
     default_n: usize,
     max_opts: u64,
     span: Span,
+    check: bool,
 ) -> Result<Value> {
     match name {
         "unif" => {
@@ -164,15 +165,15 @@ pub fn call(
             }
             Ok(Value::Num(if name == "log" { x.ln() } else { x.log10() }))
         }
-        "E" | "Var" => moment(name, arg_vals, graph, default_n, max_opts, span),
+        "E" | "Var" => moment(name, arg_vals, graph, default_n, max_opts, span, check),
         "round" => {
             // round(x, digits) — round x to `digits` decimal places. Handy for messages.
             let [x, digits] = two_nums(name, arg_vals, span)?;
             let factor = 10f64.powi(digits as i32);
             Ok(Value::Num((x * factor).round() / factor))
         }
-        "P" => prob(arg_vals, graph, default_n, max_opts, span),
-        "Q" => quantile(arg_vals, graph, default_n, max_opts, span),
+        "P" => prob(arg_vals, graph, default_n, max_opts, span, check),
+        "Q" => quantile(arg_vals, graph, default_n, max_opts, span, check),
         // --- pure collection builtins (no graph access; PLAN-COLLECTIONS §3) ---
         "Len" => len(name, arg_vals, span),
         // pure vector constructors / rearrangers (graph-free; just move `Value`s around)
@@ -217,7 +218,7 @@ fn clamp_to_op_budget(n: usize, graph: &RvGraph, root: RvId, max_opts: u64) -> u
     n.min(cap)
 }
 
-fn prob(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, span: Span) -> Result<Value> {
+fn prob(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, span: Span, check: bool) -> Result<Value> {
     if arg_vals.is_empty() || arg_vals.len() > 2 {
         return Err(NoiseError::runtime(
             format!(
@@ -244,6 +245,12 @@ fn prob(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, sp
         // A deterministic event is exact — no sampling, no error.
         Value::Bool(b) => Ok(Value::Est { val: if *b { 1.0 } else { 0.0 }, se: 0.0 }),
         Value::Dist(id) if graph.kind(*id) == RvKind::Bool => {
+            // Validate-only mode: the event graph is built and type-checked; skip the Monte Carlo
+            // estimate and hand back a neutral, in-range placeholder (a valid probability, so it's
+            // safe if it flows into a range-checked constructor downstream).
+            if check {
+                return Ok(Value::Est { val: 0.5, se: 0.0 });
+            }
             let n = clamp_to_op_budget(n, graph, *id, max_opts);
             let p_hat = sampler::moments(graph, *id, n, P_DEFAULT_SEED).mean;
             // Standard error of a Monte Carlo probability estimate; rule-of-three floor keeps
@@ -270,7 +277,7 @@ fn prob(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, sp
 /// standard error (`E` ↔ mean, `Var` ↔ population variance). `P` is the special case for
 /// events; `E`/`Var` are total over any number or numeric RV (a bool RV works too — its mean is
 /// `P`). A deterministic number is exact: `E(5) = 5 ± 0`, `Var(5) = 0 ± 0`.
-fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, span: Span) -> Result<Value> {
+fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, span: Span, check: bool) -> Result<Value> {
     if arg_vals.is_empty() || arg_vals.len() > 2 {
         return Err(NoiseError::runtime(
             format!("{name} expects 1 or 2 arguments (quantity, optional sample count), got {}", arg_vals.len()),
@@ -301,6 +308,10 @@ fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, default_n: usize, max
             Ok(Value::Est { val: if want_var { 0.0 } else { f64::from(*b) }, se: 0.0 })
         }
         Value::Dist(id) => {
+            // Validate-only mode: the quantity's graph is built and type-checked; skip sampling.
+            if check {
+                return Ok(Value::Est { val: 0.0, se: 0.0 });
+            }
             let n = clamp_to_op_budget(n, graph, *id, max_opts);
             let m = sampler::moments(graph, *id, n, P_DEFAULT_SEED);
             let nf = n as f64;
@@ -327,7 +338,7 @@ fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, default_n: usize, max
 ///
 /// Returns a plain `Num` (not an `Est`): a sample quantile's standard error depends on the density
 /// at that point, so we don't claim auto-rounded precision the way `P`/`E` do.
-fn quantile(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, span: Span) -> Result<Value> {
+fn quantile(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, span: Span, check: bool) -> Result<Value> {
     if arg_vals.len() < 2 || arg_vals.len() > 3 {
         return Err(NoiseError::runtime(
             format!(
@@ -363,6 +374,10 @@ fn quantile(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64
         Value::Est { val, .. } => Ok(Value::Num(*val)),
         Value::Bool(b) => Ok(Value::Num(f64::from(*b))),
         Value::Dist(id) => {
+            // Validate-only mode: the quantity's graph is built and type-checked; skip sampling.
+            if check {
+                return Ok(Value::Num(0.0));
+            }
             let n = clamp_to_op_budget(n, graph, *id, max_opts);
             let mut draws = sampler::sample_n(graph, *id, n, P_DEFAULT_SEED);
             draws.sort_by(f64::total_cmp);

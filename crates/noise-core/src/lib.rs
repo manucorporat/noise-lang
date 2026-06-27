@@ -503,6 +503,29 @@ mod tests {
         assert!(run_raw("engine::set_max_opts(0)").unwrap_err().to_string().contains(">= 1"));
     }
 
+    #[test]
+    fn check_builds_graph_but_skips_monte_carlo() {
+        // `check` validates a program — parse + evaluate + build the graph — without sampling.
+        // With a 100-million-sample budget a real run would be glacial; `check` returns instantly
+        // because P/E/Var/Q hand back placeholders instead of forcing the cone.
+        let prelude = "use rand; use math; use vec; use signal;\n";
+        let heavy = "engine::set_max_samples(100000000); X ~ normal(0,1); P(X < 0) + E(X) + Var(X) + Q(X, 0.5)";
+        assert!(Engine::new().check(&format!("{prelude}{heavy}")).is_ok());
+
+        // The placeholder probability stays in range, so it's safe flowing into a range-checked
+        // constructor (this would error if `P` returned NaN or an out-of-[0,1] value).
+        assert!(Engine::new()
+            .check(&format!("{prelude}X ~ normal(0,1); B ~ bernoulli(P(X < 0))"))
+            .is_ok());
+
+        // `check` still surfaces parse, scope, and type errors the way `run` does.
+        assert!(Engine::new().check(&format!("{prelude}Y ~ normal(mu, 1)")).is_err());
+        assert!(Engine::new().check("X ~ unif(0, 1").is_err());
+        assert!(Engine::new()
+            .check(&format!("{prelude}X ~ normal(0,1); P(X)"))
+            .is_err());
+    }
+
     // --- lifted `if` over a random variable (per-lane select) ---
 
     #[test]
