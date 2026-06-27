@@ -12,7 +12,7 @@
 //!     interpreter (the "B2" gate). One cost function, parameterized by `inline_trans`: the native
 //!     JIT inlines `ln`/`sin`/`cos` (passes `true`), the WASM emitter still imports them from the
 //!     host (passes `false`) — see PLAN.md "Browser note".
-//!   * [`const_int_exponent`] — the `x ** k` small-integer-power test (repeated multiply vs a `pow`
+//!   * [`const_int_exponent`] — the `x ^ k` small-integer-power test (repeated multiply vs a `pow`
 //!     call), shared so both backends agree on which exponents fuse.
 
 use std::collections::HashSet;
@@ -53,7 +53,7 @@ pub fn seed_state(seed: u64, streams: usize) -> Vec<u64> {
 }
 
 /// If node `id` is a constant non-negative integer in `0..=64`, return it as an exponent count.
-/// Such `x ** k` lower to repeated multiply (no `pow` call) on every backend.
+/// Such `x ^ k` lower to repeated multiply (no `pow` call) on every backend.
 pub fn const_int_exponent(graph: &RvGraph, id: RvId) -> Option<u32> {
     match graph.node(id) {
         RvNode::ConstNum(x) if x.fract() == 0.0 && *x >= 0.0 && *x <= 64.0 => Some(*x as u32),

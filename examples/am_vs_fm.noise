@@ -17,7 +17,7 @@ am_modulate(m)      = [1 + m, 0 * m];                # message in the LENGTH  (I
 fm_modulate(m, dev) = [cos(dev * m), sin(dev * m)];  # message in the ANGLE   (dev = how far it swings)
 
 # Demodulators: read the message back out of a (noisy) phasor [I, Q].
-am_demodulate(iq)      = (iq[0] ** 2 + iq[1] ** 2) ** 0.5 - 1;  # arrow LENGTH, minus the carrier
+am_demodulate(iq)      = (iq[0] ^ 2 + iq[1] ^ 2) ^ 0.5 - 1;  # arrow LENGTH, minus the carrier
 fm_demodulate(iq, dev) = atan(iq[1] / iq[0]) / dev;            # arrow ANGLE, undo the deviation
 
 # ---- the experiment ----
@@ -46,4 +46,4 @@ Print("FM recovered-message error (MSE) =", fm_err);
 # The advantage GROWS with the deviation; in the small-signal limit it approaches dev^2. The real
 # simulation lands a bit under that ideal because at finite noise the angle reading degrades on the
 # wider swings — exactly the kind of honest detail a closed-form 'dev^2' hides.
-Print("FM is", round(am_err / fm_err, 1), "x cleaner for the same static  (small-signal ideal: dev^2 =", dev ** 2, ")")
+Print("FM is", round(am_err / fm_err, 1), "x cleaner for the same static  (small-signal ideal: dev^2 =", dev ^ 2, ")")

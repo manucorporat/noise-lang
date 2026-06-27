@@ -57,6 +57,27 @@ state is **Phases 0–3 plus core-model-rework Steps 1–4 complete** (see `PLAN
   `mse(demodulate(modulate(msg) + static), msg)` pipeline (FM beats AM, emergent); `examples/
   nyquist.noise` shows aliasing below `2·f`. Also `math::log`/`log10` (dB), `vec::mse` (signal
   compare), and `Value::Num` Display now trims float dust (`format_num` in `value.rs`).
+- **Complex numbers (PLAN-COMPLEX, done):** `Value::Complex { re: Box<Value>, im: Box<Value> }` — a
+  complex scalar whose two channels are *real* `Value`s (`Num`/`Est`/`Dist`), so complex arithmetic
+  reuses the whole real lifting machinery (`binop_complex` decomposes `* / ^` into real ops) and
+  the sample-DAG/VM stay strictly `f64` — **no complex value-channel was added to the VM**. The type
+  emerges from `math::i`/`j` (the unit `0+1i`, a constant like `pi`/`e`) or `rand::normal_complex`
+  (a CSCG drawn with `~`, yielding `Complex{Dist,Dist}` in `Engine::draw`). Complex-aware `math::`
+  ufuncs (`exp` Euler, `abs`/`arg` magnitude/phase, `conj`/`re`/`im`, principal `sqrt`) live in
+  `math_ufunc` (dispatched from `lib_call`). `vec` made complex-correct (§7): `normsq`/`norm`/`mse`
+  magnitude-based (real out), `dot` bilinear + new `vdot` (Hermitian)/`adjoint`/`outer`; `max`/`min`
+  error. **`rand::exp` was renamed `rand::exponential`** (and `exp_int`→`exponential_int`) to free
+  `exp` for the math function. Examples: `am_vs_fm_complex.noise` (the radio win), `shor_period.noise`
+  (faithful quantum period-finding — complex inverse-QFT interference comb + `rand::categorical`).
+- **General surface (PLAN-COMPLEX §8):** the `%` operator (`BinOp::Mod`, floored, real-only, all
+  backends), `math::floor`/`ceil` (`UnOp::Floor`/`Ceil`, native cranelift/wasm instructions), and
+  **comprehensions** `[for x in xs { body }]` — the `for` loop wrapped in `[ ]` to collect body
+  values (`Expr::Comprehension`, build-time unroll that closes over the outer frame —
+  `eval_comprehension`). **`continue`** (`Expr::Continue` → `Value::Continue`, a control sentinel
+  that short-circuits a `{ block }`) skips a loop iteration / omits a comprehension element — that's
+  the filter mechanism (deterministic only). Plus `vec::outer` and `rand::categorical`, and the
+  deterministic integer builtins **`math::gcd`** / **`math::modpow`** (square-and-multiply in `i128`,
+  exact past `2^53`; `builtins.rs`). `examples/shor_period.noise` is `shor(N)` → the factors of N.
 
 **Next up:** optional perf fast-follow — the fused `Reduce` VM instruction (`PLAN-COLLECTIONS.md`
 §3.5) to collapse the `O(d²)` matvec DAG and reach larger `d`. The dynamics fork (sequential/
@@ -82,7 +103,7 @@ GOAL.md LANG.md PLAN.md README.md
 | File | Role |
 |------|------|
 | `error.rs` | `Span`, `NoiseError` (`ErrorKind`: UnexpectedChar/UnterminatedString/Parse/Runtime), `Result`. Every failure is typed + spanned. **No panics in the pipeline.** |
-| `lexer.rs` | Hand-written lexer → `Vec<Token>` ending in `Eof`. Token set is a superset of what Phase 0 evaluates (comparisons, `**`, `!`, `if/else`, strings all tokenize). |
+| `lexer.rs` | Hand-written lexer → `Vec<Token>` ending in `Eof`. Token set is a superset of what Phase 0 evaluates (comparisons, `^`, `!`, `if/else`, strings all tokenize). |
 | `ast.rs` | `Expr` (Number/**Bool**/Str/Ident/Unary/Binary/Bind/**FnDef**/Call/Block/If/**Array**/**Index**/**For**/**Use**), `BinOp`, `UnOp`, `BindKind` (Assign=`=`, Sample=`~`), `Spanned`, `Program`, **`split_path`** (splits `mod::name`; qualified names ride inside `Ident`/`Call` name strings). |
 | `parser.rs` | Pratt / precedence-climbing parser; `infix_op` precedence table. Disambiguates `f(x)=…`/`f()~…` function defs from calls via `matching_paren_after`. In-module `mod tests`. |
 | `value.rs` | `Value`: Num/Bool/Str/Unit/**Recipe(Recipe)** (undrawn distribution)/**Dist(RvId)**/**Est{val,se}** (Monte Carlo estimate; displays rounded to its standard error)/**Array(Rc<Vec<Value>>)** (fixed-length, build-time)/**Signal(Rc<SignalSpec>)** (lazy waveform generator). `format_num` trims float dust from `Num` Display. |
@@ -98,7 +119,7 @@ GOAL.md LANG.md PLAN.md README.md
 ## Build & run
 
 ```sh
-cargo test                       # 130 tests in noise-core, all pass
+cargo test                       # 191 tests in noise-core, all pass
 cargo clippy --all-targets       # must stay clean (watch approx_constant: avoid literals near π)
 cargo run -p noise-cli           # REPL
 cargo run -p noise-cli -- f.noise  # run a file (prints last statement's value)
@@ -139,8 +160,8 @@ git-ignored.
 ### Deterministic core (Phases 0–1)
 
 - Numbers: integer **and** float literals → `f64`.
-- Arithmetic `+ - * / **` with correct precedence; `**` right-associative.
-- Prefix `-` (negate) and `!` (logical not). `-2 ** 2 == -4` (unary minus looser than `**`).
+- Arithmetic `+ - * / ^` with correct precedence; `^` right-associative.
+- Prefix `-` (negate) and `!` (logical not). `-2 ^ 2 == -4` (unary minus looser than `^`).
 - Comparisons `== != < > <= >=` → `bool`; equality is same-type only.
 - Parentheses, `{ }` blocks (value = last statement; **no new scope** — bindings leak out).
 - `if cond { .. } else { .. }`; `else` optional; condition must be `bool`.

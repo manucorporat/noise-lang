@@ -2,8 +2,8 @@
 // Runs at build time and returns HTML with <span class> tokens styled by the component. Class
 // names match the Monaco-paper palette: k=keyword, d=distribution, q=query, o=operator, c=comment.
 const MODULES = /\b(rand|vec|math|signal|builtin)::/g;
-const KEYWORDS = /\b(use|if|else|for|in|true|false)\b/g;
-const DISTS = /\b(unif_int|unif|normal_int|normal|bernoulli|poisson|geometric|exp_int|exp|rotation)\b/g;
+const KEYWORDS = /\b(use|if|else|for|in|continue|true|false)\b/g;
+const DISTS = /\b(unif_int|unif|normal_int|normal_complex|normal|bernoulli|poisson|geometric|exponential_int|exponential|categorical|rotation|permutation)\b/g;
 const QUERIES = /\b(P|E|Var|Q|Print|Len)\b/g;
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

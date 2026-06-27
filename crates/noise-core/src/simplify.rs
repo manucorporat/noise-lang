@@ -13,8 +13,8 @@
 //!     surviving sources (hence their RNG consumption) is preserved; only the ops actually removed
 //!     change anything.
 //!
-//! Identities are restricted to those exact for *all* finite draws (`x+0`, `x*1`, `x/1`, `x**1`,
-//! `x**0`, double `-`/`!`): we avoid `x*0 → 0` and `x/x → 1`, which would be wrong for a non-finite
+//! Identities are restricted to those exact for *all* finite draws (`x+0`, `x*1`, `x/1`, `x^1`,
+//! `x^0`, double `-`/`!`): we avoid `x*0 → 0` and `x/x → 1`, which would be wrong for a non-finite
 //! lane (`inf*0`, `0/0`) the user could construct.
 
 use std::collections::HashMap;
@@ -127,6 +127,8 @@ impl Builder {
                 UnOp::Atan => return self.num(x.atan()),
                 UnOp::Sign => return self.num((x > 0.0) as i32 as f64 - (x < 0.0) as i32 as f64),
                 UnOp::Round => return self.num(x.round()),
+                UnOp::Floor => return self.num(x.floor()),
+                UnOp::Ceil => return self.num(x.ceil()),
                 UnOp::Not => {} // kind-checked away upstream; fall through
             }
         }
@@ -155,6 +157,7 @@ impl Builder {
                 Sub => return self.num(a - b),
                 Mul => return self.num(a * b),
                 Div => return self.num(a / b),
+                Mod => return self.num(a - b * (a / b).floor()),
                 Pow => return self.num(a.powf(b)),
                 Lt => return self.boolean(a < b),
                 Gt => return self.boolean(a > b),
@@ -184,7 +187,7 @@ impl Builder {
             Mul if ln == Some(1.0) => return r,
             Div if rn == Some(1.0) => return l,
             Pow if rn == Some(1.0) => return l,
-            Pow if rn == Some(0.0) => return self.num(1.0), // x**0 == 1 (matches powf, incl. inf/nan)
+            Pow if rn == Some(0.0) => return self.num(1.0), // x^0 == 1 (matches powf, incl. inf/nan)
             _ => {}
         }
         self.intern(Key::Binary(op, l, r), RvNode::Binary(op, l, r), kind)
@@ -263,7 +266,7 @@ mod tests {
 
     #[test]
     fn applies_identities() {
-        // X + 0, X * 1, X ** 1 all collapse to X (the same source node).
+        // X + 0, X * 1, X ^ 1 all collapse to X (the same source node).
         for (op, c) in [(BinOp::Add, 0.0), (BinOp::Mul, 1.0), (BinOp::Pow, 1.0), (BinOp::Div, 1.0)] {
             let mut g = RvGraph::default();
             let x = src(&mut g);
@@ -276,7 +279,7 @@ mod tests {
 
     #[test]
     fn x_pow_zero_is_one_and_drops_the_draw() {
-        // X ** 0  →  1. The root is the constant; X is no longer reachable from it, so the backend
+        // X ^ 0  →  1. The root is the constant; X is no longer reachable from it, so the backend
         // (which lowers only the root cone) never samples it — even though it lingers in the arena.
         let mut g = RvGraph::default();
         let x = src(&mut g);
@@ -340,12 +343,12 @@ mod tests {
 
         let cases = [
             ("dice_sum", "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B"),
-            ("pi", "use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X**2 + Y**2 < 1"),
+            ("pi", "use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1"),
             ("poly_deep", "use rand; X ~ unif(0,1); ((X*X+X)*X - X)*X + X*X - X + 1"),
             // CSE: a subexpression reused several times.
             ("cse_reuse", "use rand; X ~ unif(0,1); Y ~ unif(0,1); (X+Y)*(X+Y) + (X+Y)*3 - (X+Y)"),
-            // Identity-bearing: `* 1`, `+ 0`, `** 1` that survive to graph nodes.
-            ("identities", "use rand; X ~ unif(0,1); (X * 1 + 0) ** 1 + X*X"),
+            // Identity-bearing: `* 1`, `+ 0`, `^ 1` that survive to graph nodes.
+            ("identities", "use rand; X ~ unif(0,1); (X * 1 + 0) ^ 1 + X*X"),
         ];
         println!("\n  cone size (nodes the backend lowers): before → after simplify");
         for (name, src) in cases {

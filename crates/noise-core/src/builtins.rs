@@ -90,7 +90,18 @@ pub fn call(
                 Recipe::Normal { mu, sigma }
             }))
         }
-        "exp" | "exp_int" => {
+        "normal_complex" => {
+            // Circularly-symmetric complex Gaussian: re/im each ~ N(0, sigma/√2), so E|z|² = sigma².
+            let sigma = one_num(name, arg_vals, span)?;
+            if sigma < 0.0 || !sigma.is_finite() {
+                return Err(NoiseError::runtime(
+                    format!("normal_complex(sigma) needs a finite sigma >= 0, got {sigma}"),
+                    span,
+                ));
+            }
+            Ok(Value::Recipe(Recipe::NormalComplex { sigma }))
+        }
+        "exponential" | "exponential_int" => {
             let rate = one_num(name, arg_vals, span)?;
             if rate <= 0.0 || !rate.is_finite() {
                 return Err(NoiseError::runtime(
@@ -98,7 +109,7 @@ pub fn call(
                     span,
                 ));
             }
-            Ok(Value::Recipe(if name == "exp_int" {
+            Ok(Value::Recipe(if name == "exponential_int" {
                 Recipe::ExpInt { rate }
             } else {
                 Recipe::Exp { rate }
@@ -164,6 +175,41 @@ pub fn call(
                 return Err(NoiseError::runtime(format!("{name} needs x > 0, got {x}"), span));
             }
             Ok(Value::Num(if name == "log" { x.ln() } else { x.log10() }))
+        }
+        "gcd" => {
+            // Greatest common divisor (Euclid), defined on integers via |a|, |b|; gcd(0, 0) = 0.
+            // Deterministic integer op (a `Dist` argument errors in `as_num`).
+            let [a, b] = two_nums(name, arg_vals, span)?;
+            let mut a = as_int(name, a, span)?.unsigned_abs();
+            let mut b = as_int(name, b, span)?.unsigned_abs();
+            while b != 0 {
+                let t = b;
+                b = a % b;
+                a = t;
+            }
+            Ok(Value::Num(a as f64))
+        }
+        "modpow" => {
+            // Modular exponentiation base^exp mod modulus, by square-and-multiply in `i128` — exact
+            // (no `base^exp` overflow) and O(log exp). exp >= 0, modulus > 0. The explicit form of
+            // the `(base ^ exp) % modulus` idiom (which silently loses precision past 2^53).
+            let [base, exp, modulus] = three_nums(name, arg_vals, span)?;
+            let base = as_int(name, base, span)?;
+            let exp = as_int(name, exp, span)?;
+            let modulus = as_int(name, modulus, span)?;
+            if exp < 0 {
+                return Err(NoiseError::runtime(
+                    format!("modpow exponent must be >= 0, got {exp}"),
+                    span,
+                ));
+            }
+            if modulus <= 0 {
+                return Err(NoiseError::runtime(
+                    format!("modpow modulus must be > 0, got {modulus}"),
+                    span,
+                ));
+            }
+            Ok(Value::Num(modpow_int(base, exp as u64, modulus) as f64))
         }
         "E" | "Var" => moment(name, arg_vals, graph, default_n, max_opts, span, check),
         "round" => {
@@ -323,6 +369,11 @@ fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, default_n: usize, max
                 Ok(Value::Est { val: m.mean, se: (m.variance / nf).sqrt() })
             }
         }
+        // Complex `E`/`Var` are deferred (PLAN-COMPLEX §5): query the channels separately.
+        Value::Complex { .. } => Err(NoiseError::runtime(
+            format!("{name} of a complex value is not supported yet — query the channels separately, e.g. `{name}(math::re(z))` and `{name}(math::im(z))`"),
+            span,
+        )),
         other => Err(NoiseError::runtime(
             format!("{name} expects a number or numeric random variable, got {}", other.type_name()),
             span,
@@ -542,6 +593,48 @@ fn two_nums(name: &str, args: &[Value], span: Span) -> Result<[f64; 2]> {
         ));
     }
     Ok([as_num(&args[0], span)?, as_num(&args[1], span)?])
+}
+
+fn three_nums(name: &str, args: &[Value], span: Span) -> Result<[f64; 3]> {
+    if args.len() != 3 {
+        return Err(NoiseError::runtime(
+            format!("{name} expects 3 arguments, got {}", args.len()),
+            span,
+        ));
+    }
+    Ok([as_num(&args[0], span)?, as_num(&args[1], span)?, as_num(&args[2], span)?])
+}
+
+/// Largest exactly-representable `f64` integer (`2^53`). The integer builtins (`gcd`/`modpow`)
+/// reject anything beyond it, so every value round-trips through `i64` without precision loss.
+const MAX_EXACT_INT: f64 = 9_007_199_254_740_992.0;
+
+/// Coerce a deterministic number to an exact integer (`i64`) for `gcd`/`modpow`, or a spanned
+/// error: it must be a finite whole number with magnitude `<= 2^53`.
+fn as_int(name: &str, n: f64, span: Span) -> Result<i64> {
+    if n.fract() != 0.0 || !n.is_finite() || n.abs() > MAX_EXACT_INT {
+        return Err(NoiseError::runtime(
+            format!("{name} needs integer arguments (whole, |x| <= 2^53), got {n}"),
+            span,
+        ));
+    }
+    Ok(n as i64)
+}
+
+/// `base^exp mod modulus` by square-and-multiply in `i128` (so intermediate products are exact).
+/// `modulus > 0`; the result is normalized to `[0, modulus)`, so a negative `base` is handled.
+fn modpow_int(base: i64, mut exp: u64, modulus: i64) -> i64 {
+    let m = modulus as i128;
+    let mut result: i128 = 1 % m; // 0 when modulus == 1
+    let mut b = (base as i128 % m + m) % m;
+    while exp > 0 {
+        if exp & 1 == 1 {
+            result = result * b % m;
+        }
+        b = b * b % m;
+        exp >>= 1;
+    }
+    result as i64
 }
 
 /// Extract a deterministic `Value::Num` or return a spanned runtime error. (Distribution

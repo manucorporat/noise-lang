@@ -60,8 +60,8 @@ leading `-` is the unary-minus operator, not part of the literal. Identifiers ar
 Strings are double-quoted with **no escape sequences** (`"like this"`); they are a label/utility
 type for `Print` and messages — a string can never enter a random-variable expression.
 
-**Operators** (precedence low → high; all left-associative except `**` and binding, which are
-right-associative; prefix `-`/`!` bind tighter than everything below `**`, so `-2 ** 2 == -4`):
+**Operators** (precedence low → high; all left-associative except `^` and binding, which are
+right-associative; prefix `-`/`!` bind tighter than everything below `^`, so `-2 ^ 2 == -4`):
 
 | Level | Operators | Meaning |
 |------:|-----------|---------|
@@ -72,7 +72,7 @@ right-associative; prefix `-`/`!` bind tighter than everything below `**`, so `-
 | 5 | `== != < > <= >=` | comparison |
 | 6 | `+ -` | add / subtract (`+` also concatenates if either side is a string) |
 | 7 | `* / @` | multiply / divide (elementwise/broadcast) · `@` = matrix product |
-| 8 | `**` | power (right-assoc) |
+| 8 | `^` | power (right-assoc) |
 | 9 | prefix `- ! ~` | negate · logical not · draw |
 | 10 | postfix `[index]` | index (repeatable: `M[i][j]`) |
 | 11 | call, `()` grouping, `{}` blocks | |
@@ -82,7 +82,7 @@ right-associative; prefix `-`/`!` bind tighter than everything below `**`, so `-
 known at build time), `dist` (a drawn random variable / distribution handle), `estimate` (a number
 carrying a standard error, produced by `P`/`E`/`Var`), and `signal` (a lazy waveform).
 
-- Arithmetic `+ - * / **` need numbers → number (division & `**` are IEEE-754: `1/0 == inf`, no
+- Arithmetic `+ - * / ^` need numbers → number (division & `^` are IEEE-754: `1/0 == inf`, no
   panic). With a `dist` operand the op **lifts** to a `dist`; pure-constant subexprs fold eagerly.
 - `+` **concatenates** when either side is a string (the other is stringified): `"x = " + 5`.
 - Ordering `< > <= >=` need two numbers → bool. Equality `== !=` compares two values of the *same*
@@ -102,9 +102,9 @@ path). Start each program with the `use` lines you need.
 | Module    | `use`?   | Items |
 |-----------|----------|-------|
 | `builtin` | always   | `P`, `Q`, `E`, `Var`, `Print`, `Len` |
-| `rand`    | `use rand;` | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `exp`, `exp_int`, `poisson`, `geometric`, `rotation`, `permutation` |
-| `math`    | `use math;` | `pi`, `e`, `sqrt`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign` |
-| `vec`     | `use vec;`  | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `normsq`, `norm`, `transpose`, `normalize`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` |
+| `rand`    | `use rand;` | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `normal_complex`, `exponential`, `exponential_int`, `poisson`, `geometric`, `categorical`, `rotation`, `permutation` |
+| `math`    | `use math;` | `pi`, `e`, `i`/`j` (imaginary unit), `sqrt`, `exp`, `abs`, `arg`, `conj`, `re`, `im`, `floor`, `ceil`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign`, `gcd`, `modpow` |
+| `vec`     | `use vec;`  | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` |
 | `signal`  | `use signal;` | `sine`, `cosine`, `sample`, `noise_white`, `noise_brown`, `noise_pink`, `noise_ou` |
 
 ```noise
@@ -137,10 +137,13 @@ Print("P(shared birthday among", n, ") =", P(match))
 - `unif(a, b)` — continuous uniform on `[a, b)`. **Continuous → never use `==` on it.**
 - `unif_int(a, b)` — discrete uniform on `a..=b` *inclusive*. Use this for dice/coins/counts.
 - `bernoulli(p)` — `true` with probability `p` (a bool-RV).
-- `normal(mu, sigma)`, `exp(rate)` (`mean = 1/rate`), `poisson(lambda)`, `geometric(p)` (failures
-  before first success).
-- `_int` family — `normal_int`, `exp_int` round each draw to the nearest integer (so `==`/counts
-  are meaningful). `unif_int` is already discrete.
+- `normal(mu, sigma)`, `exponential(rate)` (`mean = 1/rate`), `poisson(lambda)`, `geometric(p)`
+  (failures before first success). **Note:** the exponential *distribution* is `rand::exponential`;
+  `exp` is the exponential *function* `math::exp`.
+- `_int` family — `normal_int`, `exponential_int` round each draw to the nearest integer (so
+  `==`/counts are meaningful). `unif_int` is already discrete.
+- `normal_complex(sigma)` — a circularly-symmetric complex Gaussian (`E|z|² = sigma²`); a complex
+  RV. `categorical(weights)` — sample an index ∝ weights (`y ~ rand::categorical(probs)`).
 - `rotation(d)` — a fresh random `d×d` orthonormal matrix per sample (Haar rotation).
 
 **Queries** (all `builtin`; default `n = 1e6` samples, fixed seed → reproducible):
@@ -165,7 +168,7 @@ must be a **constant non-negative integer in range** — never a random variable
 append/push.
 
 **Arithmetic broadcasts** over arrays (NumPy-style, nesting for matrices):
-`[1,2,3] + [10,20,30]` → `[11,22,33]`, `1 + [1,2,3]` → `[2,3,4]`, `[1,2,3] ** 2` → `[1,4,9]`.
+`[1,2,3] + [10,20,30]` → `[11,22,33]`, `1 + [1,2,3]` → `[2,3,4]`, `[1,2,3] ^ 2` → `[1,4,9]`.
 The `@` operator is the **matrix product** (`v @ w` dot, `M @ v` matvec, `M @ N` matmul); `*`
 stays elementwise. `sin`/`cos`/`atan` are ufuncs (scalar, lifted over RVs, or mapped over arrays).
 
@@ -198,6 +201,23 @@ use vec;
 acc = 0; for x in 1..5 { acc = acc + x }; acc      # 1+2+3+4 = 10
 ```
 
+**Comprehensions** `[for x in xs { body }]` build an array — it's the `for x in xs { body }` loop
+wrapped in `[ ]` so each body value is collected. The body **closes over outer variables** (Noise
+has no closures, so this is how you "map with captured state"). Use **`continue`** to skip an
+element — that's how you *filter*:
+
+```noise
+a = 7; N = 15;
+fx = [for x in 0..6 { (a ^ x) % N }];                  # body closes over a, N
+evens = [for x in 0..10 { if x % 2 != 0 { continue }; x }];  # filter via continue
+```
+
+`continue` skips the rest of the loop body (in a `for` loop it drops that iteration's side effects;
+in a comprehension it omits the element). The skip condition must be deterministic.
+
+**`%` (floored modulo)** is `a − b·floor(a/b)`, so it takes the sign of `b` and `x % n ∈ [0, n)`
+for `n > 0` (clock/modular arithmetic): `-1 % 3 == 2`. `math::floor` / `math::ceil` round (real-only).
+
 **User functions.** `f(a) = expr` is pure (lifts over RVs); `f() ~ dist` draws fresh per call:
 
 ```noise
@@ -226,6 +246,23 @@ for `sample(sine(f), n)`.
 ```noise
 use signal;
 msg = sample(0.3 * sine(3), 64);   # render the lazy tone at 64 points
+```
+
+**Complex numbers.** `complex` is a first-class scalar. There's no literal — it **emerges** from
+`math::i` (alias `math::j`, the unit `0 + 1i`) plus the ordinary operators, or from
+`rand::normal_complex(sigma)` (a circularly-symmetric complex-Gaussian RV). Real promotes to
+`re + 0i`; a pure-real expression stays a number. `* / ^` are true complex ops; **ordering
+(`< > <=`) and `%` are type errors** on ℂ. Functions branch by type: `math::exp` (Euler
+`e^{iθ} = cos θ + i sin θ`), `math::abs`/`math::arg` (magnitude/phase, real out), `math::conj`,
+`math::re`/`math::im`, `math::sqrt`. In `vec`: `normsq`/`norm`/`mse` are magnitude-based (real out),
+`dot` is bilinear while `vdot` conjugates (Hermitian), plus `outer` and `adjoint`.
+
+```noise
+use math; use rand; use vec;
+z = 2 + 3*math::i;                       # complex emerges from math::i
+math::abs(z); math::arg(z);              # magnitude & phase (reals)
+math::exp(math::i * math::pi)            # ≈ -1  (Euler's identity)
+static ~[64] rand::normal_complex(1);    # 64 iid complex-Gaussian static samples
 ```
 
 ## Hazards — what NOT to do

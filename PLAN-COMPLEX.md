@@ -5,7 +5,12 @@ example, which already does complex arithmetic *by hand* (`[I, Q]` phasors). The
 that the same machinery — Euler `exp`, complex `@`, `abs`/`arg` — is exactly what a faithful
 small-scale **quantum** simulation (period-finding / Shor) needs. One feature, two payoffs.
 
-> **Status: proposal — not yet built.** Review and adjust before implementation.
+> **Status: IMPLEMENTED.** Both tracks shipped. Complex is a first-class scalar
+> (`Value::Complex`, operators, `math::i`/`j`, the `math::` ufuncs, `rand::normal_complex`, the
+> `vec` consistency pass) with `examples/am_vs_fm_complex.noise`; the general surface (`%`,
+> `math::floor`/`ceil`, comprehensions, `vec::outer`, `rand::categorical`) and the quantum capstone
+> `examples/shor_period.noise` are in. One deviation from the sketch below: the exponential
+> *distribution* was renamed **`rand::exponential`** (from `exp`) so `math::exp` is the function.
 
 > **Read first:** `AGENT.md` (current code), `LANG.md` (the language contract — update it as you add
 > surface), then this doc. `PLAN-COLLECTIONS.md` is the sibling plan for arrays/loops.

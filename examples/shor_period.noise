@@ -1,0 +1,59 @@
+# Shor's algorithm — the quantum factoring method that breaks RSA — run end to end: `shor(N)` takes
+# a number and returns its two factors. `shor(15)` -> [3, 5].
+#
+# The magic is ONE step: finding the PERIOD r of f(x) = a^x mod N. Classically that costs ~N tries;
+# a quantum computer reads it off in one shot by making all the inputs INTERFERE — complex amplitudes
+# that cancel everywhere except at multiples of Q/r. We reproduce that interference EXACTLY with plain
+# complex linear algebra, then the factors fall out of gcd(a^(r/2) +- 1, N).
+#
+# (This is a 2^n SIMULATION: gorgeous for small N, never efficient — "efficient Shor" needs a real
+# quantum computer. What's faithful here is the PHYSICS: the amplitudes and their interference.)
+use math;   # i, exp, pi (complex amplitudes), gcd, modpow (modular arithmetic — exact, no overflow)
+use vec;    # outer, normsq, count
+
+# one-hot encode a value v as a length-`width` row: 1 in column v, 0 elsewhere.
+onehot(v, width) = [for w in 0..width { if v == w { 1 } else { 0 } }];
+
+# --- the QUANTUM subroutine: the period r of a^x mod N, read off the interference comb ---
+# Build the Q-input superposition, inverse-QFT it, and the readout probabilities form a comb of
+# exactly r equally-spaced spikes — so the period is just the number of spikes. (A real machine
+# measures the comb and uses continued fractions; in simulation we hold the whole comb and count.)
+period(a, N, Q) = {
+  ks  = 0..Q;
+  fx  = [for x in 0..Q { math::modpow(a, x, N) }];           # the oracle on every input
+  Psi = [for x in 0..Q { onehot(fx[x], N) }] / Q ^ 0.5;     # entangle + normalize the state
+  # QFT[y][x] = e^{-2pi i x y / Q}/sqrt(Q): one complex `exp` over the index outer product. The matmul
+  # `@` adds the phasors over C — same-residue amplitudes REINFORCE, the rest CANCEL (the reason ℂ is here).
+  QFT = math::exp(math::i * (-2 * math::pi / Q) * vec::outer(ks, ks)) / Q ^ 0.5;
+  vec::count([for p in QFT @ Psi { vec::normsq(p) > 0.0001 }])   # r = number of spikes in the comb
+};
+
+# --- Shor's algorithm: factor N ---
+# Pick the smallest base a (if it already shares a factor with N, gcd hands us one for free); else use
+# the quantum period r and read the factors out of gcd(a^(r/2) +- 1, N). Returns the two factors.
+shor(N) = {
+  Q = 1; for i in 0..16 { if Q < N { Q = Q * 2 } };   # counting register size: smallest 2^t >= N
+  p = 1; q = N;                                        # p == 1 means "no nontrivial factor found yet"
+  for a in 2..N {
+    if p == 1 {
+      if math::gcd(a, N) > 1 {
+        p = math::gcd(a, N); q = N / p                 # lucky: a already shares a factor with N
+      } else {
+        r = period(a, N, Q);                           # the quantum step
+        if r % 2 == 0 {                                # need an even period
+          s = math::modpow(a, r / 2, N);               # a^(r/2) mod N
+          g = math::gcd(s - 1, N);
+          if g > 1 { if g < N { p = g; q = N / g } }   # a nontrivial factor — done
+        }
+      }
+    }
+  };
+  [p, q]
+};
+
+# 7^x mod 15 has period 4, and 15's counting register has Q = 16 inputs — so the comb is 4 clean
+# spikes and the quantum subroutine genuinely carries the factorization.
+Print("period of 7^x mod 15 (the quantum step) =", period(7, 15, 16));   # 4
+Print("shor(15) =", shor(15));   # [3, 5] — factored
+Print("shor(21) =", shor(21));   # [3, 7]
+Print("shor(35) =", shor(35));   # [5, 7]

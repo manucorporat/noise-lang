@@ -12,7 +12,7 @@ P(win by switching) = 0.6668
 
 Each example ends in `Print(...)`, building a message with string concatenation and `round`.
 All of these exercise the live language: `unif` / `unif_int` / `bernoulli`, `~` random-variable
-bindings, operator lifting (`+ - * / **`, comparisons, `&& || !`), lifted `if`, `P(event)`,
+bindings, operator lifting (`+ - * / ^`, comparisons, `&& || !`), lifted `if`, `P(event)`,
 and `Print` / `round` / string `+`. Several also use **collections** — the shaped draw `~[n] d`
 to sample `n` independent variables (`~[n, m] d` for a matrix) and reducers like `sum` / `count` /
 `any` / `all` / `has_duplicates`. Names
@@ -46,6 +46,8 @@ and a derived value like `4 * P(C)` or a ratio rounds itself correctly.
 | `qjl_scalar.noise` | QJL unbiasedness in 1-D (TurboQuant building block): `normal`, `E`/`Var`, `sqrt`, `pi` | 1.0 / 0.5708 | 1 / 0.572 |
 | `turboquant.noise` | **the d-dim capstone** — the MSE 1-bit quantizer is inner-product biased by 2/π *and* carries ~3× the squared error; the QJL rescaling is unbiased (`~[d,d]`, `@`, `transpose`, `sign`, `E`) | bias 2/π; err ≪ | 0.64× / 1.0×; err 0.11 vs 0.035 |
 | `am_vs_fm.noise` | telecom, end to end: `mse(demodulate(modulate(msg) + static), msg)` — same static, but FM (message in the angle) recovers cleaner than AM (message in the amplitude). Uses lazy `sine` + `cos`/`sin`/`atan` ufuncs + array broadcasting | FM ≫ AM cleaner | AM 0.087, FM 0.014 (6× cleaner) |
+| `am_vs_fm_complex.noise` | the **complex-number** retelling of `am_vs_fm`: the carrier is one complex phasor `z`, AM writes the message into `\|z\|` and FM into `arg(z)`, and static is a single `rand::normal_complex` draw (circular symmetry is now a property of the *type*). Uses `math::i`/`exp`/`abs`/`arg` | FM ≫ AM cleaner | AM 0.044, FM 0.005 (8× cleaner) |
+| `shor_period.noise` | **Shor's factoring algorithm** end to end as `shor(N)`: a complex inverse-QFT (`math::exp` + `vec::outer` + complex `@`) makes the inputs interfere into a comb whose spike count is the period `r`, then `gcd(a^(r/2)±1, N)` yields the factors. Uses the `math::gcd`/`math::modpow` builtins, comprehensions, and `for`-loop control flow | `shor(15)` | `[3, 5]` |
 | `nyquist.noise` | the Nyquist–Shannon theorem by counterexample: a 7-cycle wave sampled below `2·7` aliases into a 3-cycle one (identical samples); above, they separate. Lazy `signal` + `sample(sig, n)` | 0 vs > 0 | 0 (aliased) / 1 (resolved) |
 
 ## What these deliberately show about the design

@@ -1,7 +1,7 @@
 //! Hand-written lexer. Produces a flat `Vec<Token>` ending in `Eof`.
 //!
 //! Token set is intentionally a superset of what Phase 0 evaluates so the Pratt parser
-//! and later phases (comparisons, `!`, `if`/`else`, `**`, strings) can grow without
+//! and later phases (comparisons, `!`, `if`/`else`, `^`, strings) can grow without
 //! re-touching the lexer. See LANG.md for the canonical token table.
 
 use crate::error::{NoiseError, ErrorKind, Result, Span};
@@ -19,7 +19,8 @@ pub enum TokKind {
     Minus,
     Star,
     Slash,
-    StarStar, // **
+    Percent,  // % — floored modulo
+    Caret, // ^ — exponentiation (reads like math)
     At,       // @ — matrix product
     Eq,       // =
     Tilde,    // ~
@@ -48,6 +49,7 @@ pub enum TokKind {
     Else,
     For,
     In,
+    Continue,
     Use,
     Eof,
 }
@@ -124,6 +126,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
                 "else" => TokKind::Else,
                 "for" => TokKind::For,
                 "in" => TokKind::In,
+                "continue" => TokKind::Continue,
                 "true" => TokKind::True,
                 "false" => TokKind::False,
                 "use" => TokKind::Use,
@@ -155,7 +158,6 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
         // multi/single-char operators and punctuation
         let two = if i + 1 < n { Some(bytes[i + 1] as char) } else { None };
         let (kind, len) = match (c, two) {
-            ('*', Some('*')) => (TokKind::StarStar, 2),
             ('=', Some('=')) => (TokKind::EqEq, 2),
             ('!', Some('=')) => (TokKind::BangEq, 2),
             ('<', Some('=')) => (TokKind::Le, 2),
@@ -168,6 +170,8 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
             ('-', _) => (TokKind::Minus, 1),
             ('*', _) => (TokKind::Star, 1),
             ('/', _) => (TokKind::Slash, 1),
+            ('%', _) => (TokKind::Percent, 1),
+            ('^', _) => (TokKind::Caret, 1),
             ('=', _) => (TokKind::Eq, 1),
             ('~', _) => (TokKind::Tilde, 1),
             ('@', _) => (TokKind::At, 1),
@@ -209,10 +213,10 @@ mod tests {
     fn operators_are_matched_greedily() {
         use TokKind::*;
         assert_eq!(
-            kinds("** == != <= >= && || :: .. = ~ @ < > ! + - * / ( ) { } [ ] , ;"),
+            kinds("^ == != <= >= && || :: .. = ~ @ < > ! + - * / % ( ) { } [ ] , ;"),
             vec![
-                StarStar, EqEq, BangEq, Le, Ge, AmpAmp, PipePipe, ColonColon, DotDot, Eq, Tilde,
-                At, Lt, Gt, Bang, Plus, Minus, Star, Slash, LParen, RParen, LBrace, RBrace,
+                Caret, EqEq, BangEq, Le, Ge, AmpAmp, PipePipe, ColonColon, DotDot, Eq, Tilde,
+                At, Lt, Gt, Bang, Plus, Minus, Star, Slash, Percent, LParen, RParen, LBrace, RBrace,
                 LBracket, RBracket, Comma, Semi, Eof,
             ]
         );
@@ -252,9 +256,9 @@ mod tests {
     fn keywords_are_distinguished_from_identifiers() {
         use TokKind::*;
         assert_eq!(
-            kinds("if else for in use iffy _x x1"),
+            kinds("if else for in continue use iffy _x x1"),
             vec![
-                If, Else, For, In, Use, Ident("iffy".into()), Ident("_x".into()),
+                If, Else, For, In, Continue, Use, Ident("iffy".into()), Ident("_x".into()),
                 Ident("x1".into()), Eof,
             ]
         );

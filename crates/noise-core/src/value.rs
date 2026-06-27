@@ -45,6 +45,33 @@ pub enum Value {
     /// `normal` RV nodes (so `E` can average over realizations), one independent draw stream per
     /// leaf-vector lane. The `NoiseSpec` carries the strength and color.
     Noise(NoiseSpec),
+    /// A **complex scalar** (PLAN-COMPLEX). `re`/`im` are each a *real* scalar `Value` —
+    /// `Num`/`Est` for a constant complex (`2 + 3i`), or `Dist` for a complex random variable
+    /// (e.g. a `rand::normal_complex` draw). Representing the two channels as ordinary real
+    /// `Value`s lets complex arithmetic reuse the whole real lifting/folding machinery
+    /// (`binop_complex` decomposes `* / ^` into real ops on the channels), so the sample-DAG and
+    /// VM stay strictly `f64` — no complex value-channel was added there. A complex value emerges
+    /// only from `math::i`/`j` (the unit `0 + 1i`) or a complex distribution; pure-real
+    /// expressions stay `Num`. Invariant: `re`/`im` are always real scalars (`Num`/`Est`/`Dist`).
+    Complex { re: Box<Value>, im: Box<Value> },
+    /// The **`continue` control sentinel** (PLAN-COMPLEX §8). Produced by evaluating `continue`; it
+    /// short-circuits the enclosing `{ block }` (the evaluator stops at the statement that yields
+    /// it) and signals the surrounding loop to skip — a `for` discards the iteration, a
+    /// comprehension omits the element. Not a data value: using it in arithmetic/arrays is a type
+    /// error, like any other misuse.
+    Continue,
+}
+
+impl Value {
+    /// Build a complex value from two real-scalar channels (the single constructor, so the
+    /// `re`/`im`-are-real-scalars invariant lives in one place).
+    pub fn complex(re: Value, im: Value) -> Value {
+        Value::Complex { re: Box::new(re), im: Box::new(im) }
+    }
+    /// A constant complex from two `f64`s — `re + im·i`.
+    pub fn cnum(re: f64, im: f64) -> Value {
+        Value::complex(Value::Num(re), Value::Num(im))
+    }
 }
 
 impl Value {
@@ -60,8 +87,25 @@ impl Value {
             Value::Array(_) => "array",
             Value::Signal(_) => "signal",
             Value::Noise(_) => "noise",
+            Value::Complex { .. } => "complex",
+            Value::Continue => "continue",
         }
     }
+}
+
+/// Format a constant complex `re + im·i` the way a mathematician writes it: `"2 + 3i"`,
+/// `"2 - 3i"`, `"3i"`, `"-1i"`, `"0"` for `0 + 0i`, `"2"` for a real-valued `2 + 0i`. Only used
+/// for the constant case (both channels `Num`/`Est`); a complex *random variable* prints via the
+/// channel `Display` fallback in [`Value::fmt`].
+fn format_complex_const(re: f64, im: f64) -> String {
+    if im == 0.0 {
+        return format_num(re);
+    }
+    if re == 0.0 {
+        return format!("{}i", format_num(im));
+    }
+    let sign = if im < 0.0 { "-" } else { "+" };
+    format!("{} {} {}i", format_num(re), sign, format_num(im.abs()))
 }
 
 /// Round `val` to the decimal places justified by standard error `se`: `digits =
@@ -121,6 +165,19 @@ impl fmt::Display for Value {
             }
             Value::Signal(s) => write!(f, "{s}"),
             Value::Noise(spec) => write!(f, "{spec}"),
+            // Constant channels render as `2 + 3i`; random channels fall back to `<re> + <im>i`.
+            Value::Complex { re, im } => {
+                let as_const = |v: &Value| match v {
+                    Value::Num(n) => Some(*n),
+                    Value::Est { val, .. } => Some(*val),
+                    _ => None,
+                };
+                match (as_const(re), as_const(im)) {
+                    (Some(a), Some(b)) => write!(f, "{}", format_complex_const(a, b)),
+                    _ => write!(f, "{re} + {im}i"),
+                }
+            }
+            Value::Continue => write!(f, "continue"),
         }
     }
 }

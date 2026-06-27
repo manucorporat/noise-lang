@@ -110,8 +110,8 @@ mod tests {
     fn floats_and_unary() {
         assert_eq!(num("1.5 + 2.5"), 4.0);
         assert_eq!(num("-3 + 1"), -2.0);
-        assert_eq!(num("-2 ** 2"), -4.0); // ** binds tighter than unary minus
-        assert_eq!(num("2 ** 3 ** 2"), 512.0); // right-assoc
+        assert_eq!(num("-2 ^ 2"), -4.0); // ^ binds tighter than unary minus
+        assert_eq!(num("2 ^ 3 ^ 2"), 512.0); // right-assoc
     }
 
     #[test]
@@ -248,8 +248,8 @@ mod tests {
 
     #[test]
     fn derived_rv_square() {
-        // X ~ unif(-1,1); X**2: E=1/3, Var = 1/5 - 1/9 = 4/45 ≈ 0.08889.
-        let m = moments_of("X ~ unif(-1,1); X ** 2", 1_000_000, 42);
+        // X ~ unif(-1,1); X^2: E=1/3, Var = 1/5 - 1/9 = 4/45 ≈ 0.08889.
+        let m = moments_of("X ~ unif(-1,1); X ^ 2", 1_000_000, 42);
         assert!((m.mean - 1.0 / 3.0).abs() < 3e-3, "mean = {}", m.mean);
         assert!((m.variance - 4.0 / 45.0).abs() < 3e-3, "var = {}", m.variance);
     }
@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn pi_via_monte_carlo() {
         // The corrected example: π = 4·P(point in unit circle).
-        let pi = run_num("X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X**2 + Y**2 < 1)");
+        let pi = run_num("X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1)");
         assert!((pi - std::f64::consts::PI).abs() < 0.02, "pi estimate = {pi}");
     }
 
@@ -436,12 +436,12 @@ mod tests {
 
         // P knows itself to ~4 digits at N=1e8, but `4 * P` has 4× the error → 3 decimals shown
         // (e.g. "3.141"/"3.142"), not a spurious "3.1416".
-        let pi = display_of("X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X**2 + Y**2 < 1, 100000000)");
+        let pi = display_of("X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1, 100000000)");
         assert_eq!(decimals(&pi), 3, "should propagate to 3 decimals, got {pi}");
         assert!((pi.parse::<f64>().unwrap() - std::f64::consts::PI).abs() < 0.01, "pi = {pi}");
 
         // Default budget → larger error → coarser: 2 decimals ("3.14").
-        let pi_coarse = display_of("X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X**2 + Y**2 < 1)");
+        let pi_coarse = display_of("X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1)");
         assert_eq!(decimals(&pi_coarse), 2, "default budget should show 2 decimals, got {pi_coarse}");
         assert!(
             (pi_coarse.parse::<f64>().unwrap() - std::f64::consts::PI).abs() < 0.02,
@@ -839,7 +839,9 @@ mod tests {
         assert!((run_num("2 * pi") - std::f64::consts::TAU).abs() < 1e-12);
         // `pi` resolves inside a function body (params-only scope) — it's a constant, not a var.
         assert!((run_num("circ(r) = 2 * pi * r; circ(1)") - std::f64::consts::TAU).abs() < 1e-12);
-        assert!(run("sqrt(-1)").is_err());
+        // Real `sqrt` is IEEE: a negative argument is NaN, not an error (complex sqrt is opt-in via
+        // `math::sqrt(-1 + 0*math::i)`).
+        assert!(run_num("sqrt(-1)").is_nan());
     }
 
     #[test]
@@ -855,11 +857,11 @@ mod tests {
     #[test]
     fn exponential_has_the_right_moments() {
         // Exp(rate): mean = 1/rate, variance = 1/rate^2. For rate = 2: mean 0.5, var 0.25.
-        let m = moments_of("X ~ exp(2); X", 1_000_000, 1);
+        let m = moments_of("X ~ exponential(2); X", 1_000_000, 1);
         assert!((m.mean - 0.5).abs() < 0.01, "mean = {}", m.mean);
         assert!((m.variance - 0.25).abs() < 0.01, "var = {}", m.variance);
         // memoryless tail: P(X > 1) = e^-(rate*1) = e^-2 ≈ 0.1353 for rate = 2.
-        let p = run_num("X ~ exp(2); P(X > 1)");
+        let p = run_num("X ~ exponential(2); P(X > 1)");
         assert!((p - (-2.0f64).exp()).abs() < 3e-3, "P(X>1) = {p}");
     }
 
@@ -900,7 +902,7 @@ mod tests {
         assert!(draws_of("Z ~ normal_int(0, 5); Z", 20_000, 8)
             .iter()
             .all(|&x| x.fract() == 0.0));
-        assert!(draws_of("X ~ exp_int(0.5); X", 20_000, 9)
+        assert!(draws_of("X ~ exponential_int(0.5); X", 20_000, 9)
             .iter()
             .all(|&x| x.fract() == 0.0 && x >= 0.0));
         // Rounding preserves the mean closely: E(normal_int(10, 3)) ≈ 10.
@@ -910,17 +912,17 @@ mod tests {
 
     #[test]
     fn new_distribution_domains_and_recipe_display() {
-        assert!(run("exp(0)").is_err()); // rate must be > 0
-        assert!(run("exp(-1)").is_err());
+        assert!(run("exponential(0)").is_err()); // rate must be > 0
+        assert!(run("exponential(-1)").is_err());
         assert!(run("poisson(0)").is_err()); // lambda must be > 0
         assert!(run("geometric(0)").is_err()); // p must be > 0
         assert!(run("geometric(1.5)").is_err()); // p must be <= 1
         // undrawn recipes print themselves
-        assert_eq!(display_of("exp(2)"), "exp(2)");
+        assert_eq!(display_of("exponential(2)"), "exponential(2)");
         assert_eq!(display_of("poisson(3)"), "poisson(3)");
         assert_eq!(display_of("geometric(0.5)"), "geometric(0.5)");
         assert_eq!(display_of("normal_int(0, 1)"), "normal_int(0, 1)");
-        assert_eq!(display_of("exp_int(2)"), "exp_int(2)");
+        assert_eq!(display_of("exponential_int(2)"), "exponential_int(2)");
         // recipes bound with `=` stay undrawn; `~` draws independent copies
         let p = run_num("D = poisson(3); a ~ D; b ~ D; P(a == b && a == 0)");
         assert!((p - (-3.0f64).exp().powi(2)).abs() < 3e-3, "P(a==b==0) = {p}");
@@ -935,7 +937,7 @@ mod tests {
         // The 97.5th percentile of a standard normal is ≈ 1.96.
         assert!((run_num("Z ~ normal(0, 1); Q(Z, 0.975)") - 1.96).abs() < 0.02);
         // Median of Exp(rate) is ln(2)/rate; for rate = 1 that's ≈ 0.693.
-        assert!((run_num("X ~ exp(1); Q(X, 0.5)") - 2.0f64.ln()).abs() < 5e-3);
+        assert!((run_num("X ~ exponential(1); Q(X, 0.5)") - 2.0f64.ln()).abs() < 5e-3);
     }
 
     #[test]
@@ -1165,7 +1167,7 @@ mod tests {
         assert_eq!(num("log10(1000)"), 3.0);
         assert_eq!(num("log10(1)"), 0.0);
         assert!((num("log(e)") - 1.0).abs() < 1e-12);
-        assert!((num("log(e ** 3)") - 3.0).abs() < 1e-12);
+        assert!((num("log(e ^ 3)") - 3.0).abs() < 1e-12);
         assert!(run("log(0)").is_err()); // domain x > 0
         assert!(run("log10(0 - 5)").is_err());
         // vec::mse — mean squared error between two signals
@@ -1271,7 +1273,7 @@ mod tests {
         assert_eq!(display_of("1 + [1, 2, 3]"), "[2, 3, 4]"); // scalar ⊕ array
         assert_eq!(display_of("[1, 2, 3] + [10, 20, 30]"), "[11, 22, 33]"); // array ⊕ array
         assert_eq!(display_of("[2, 4, 6] / 2"), "[1, 2, 3]");
-        assert_eq!(display_of("[1, 2, 3] ** 2"), "[1, 4, 9]");
+        assert_eq!(display_of("[1, 2, 3] ^ 2"), "[1, 4, 9]");
         // nested: an array of arrays broadcasts recursively ([I,Q] + [nI,nQ]).
         assert_eq!(display_of("[[1, 2], [3, 4]] + [[10, 20], [30, 40]]"), "[[11, 22], [33, 44]]");
         assert!(run("[1, 2] + [1, 2, 3]").is_err()); // length mismatch
@@ -1285,7 +1287,7 @@ mod tests {
         // the advantage emerging from the model, not a hand-written formula.
         let lib = "am_mod(m) = [1 + m, 0 * m]; \
                    fm_mod(m, dev) = [cos(dev * m), sin(dev * m)]; \
-                   am_demod(iq) = (iq[0] ** 2 + iq[1] ** 2) ** 0.5 - 1; \
+                   am_demod(iq) = (iq[0] ^ 2 + iq[1] ^ 2) ^ 0.5 - 1; \
                    fm_demod(iq, dev) = atan(iq[1] / iq[0]) / dev; \
                    N = 32; dev = 3; sigma = 0.3; \
                    msg = 0.3 * sin(iota(N) * (2 * pi * 2 / N)); \
@@ -1363,8 +1365,8 @@ mod tests {
         assert!((prod_ratio - 1.0).abs() < 0.05, "prod ratio = {prod_ratio}");
         // The payoff: the unbiased two-stage estimate has far lower mean-squared inner-product error
         // than the biased MSE quantizer, whose error is dominated by its 2/pi bias floor.
-        let mse_err = run_num(&format!("{common} E((dot(y, mse) - t) ** 2, 12000)"));
-        let prod_err = run_num(&format!("{common} E((prod - t) ** 2, 12000)"));
+        let mse_err = run_num(&format!("{common} E((dot(y, mse) - t) ^ 2, 12000)"));
+        let prod_err = run_num(&format!("{common} E((prod - t) ^ 2, 12000)"));
         assert!(prod_err < mse_err * 0.6, "prod err {prod_err} should be << MSE err {mse_err}");
     }
 
@@ -1623,7 +1625,7 @@ mod tests {
              est = y @ m
                  + sqrt(pi / 2) / d * vec::norm(x - m)
                    * (y @ (vec::transpose(S) @ sign(S @ (x - m))));
-             (est - true_ip) ** 2"
+             (est - true_ip) ^ 2"
         );
 
         let n = 1_000_000usize;
@@ -1660,5 +1662,578 @@ mod tests {
             Value::Est { val, .. } => val,
             other => panic!("expected number, got {other:?}"),
         }
+    }
+
+    // ===================== complex numbers (PLAN-COMPLEX) =====================
+
+    /// Pull `(re, im)` out of a constant `Value::Complex` (or promote a real scalar).
+    fn complex_of(src: &str) -> (f64, f64) {
+        match run(src).unwrap() {
+            Value::Complex { re, im } => (as_num(*re), as_num(*im)),
+            Value::Num(n) => (n, 0.0),
+            other => panic!("expected complex, got {other:?} for {src:?}"),
+        }
+    }
+
+    #[test]
+    fn complex_emerges_from_i_and_displays() {
+        // The type emerges from `math::i` + the existing operators (no complex literal).
+        assert_eq!(display_of("2 + 3*math::i"), "2 + 3i");
+        assert_eq!(display_of("2 - 3*math::i"), "2 - 3i");
+        assert_eq!(display_of("3*math::i"), "3i");
+        assert_eq!(display_of("-1*math::i"), "-1i");
+        assert_eq!(display_of("0*math::i"), "0"); // 0 + 0i collapses to 0
+        // `j` is an alias for `i` (electrical-engineering convention).
+        assert_eq!(complex_of("math::j"), (0.0, 1.0));
+        // a user variable `i` still shadows the constant (vars win over the math fallback).
+        assert_eq!(num("i = 5; i"), 5.0);
+    }
+
+    #[test]
+    fn complex_arithmetic_folds() {
+        // (2+3i)(1+1i) = -1 + 5i ; (2+3i)/(1+1i) = 2.5 + 0.5i
+        assert_eq!(complex_of("(2 + 3*math::i) * (1 + 1*math::i)"), (-1.0, 5.0));
+        assert_eq!(complex_of("(2 + 3*math::i) / (1 + 1*math::i)"), (2.5, 0.5));
+        // real promotes to re + 0i
+        assert_eq!(complex_of("5 + 2*math::i"), (5.0, 2.0));
+        // integer power = repeated multiply: (1+i)^2 = 2i, (1+i)^3 = -2 + 2i
+        assert_eq!(complex_of("(1 + math::i) ^ 2"), (0.0, 2.0));
+        assert_eq!(complex_of("(1 + math::i) ^ 3"), (-2.0, 2.0));
+        // exact (re, im) equality
+        assert!(boolean("(2 + 3*math::i) == (2 + 3*math::i)"));
+        assert!(boolean("(2 + 3*math::i) != (2 + 4*math::i)"));
+    }
+
+    #[test]
+    fn complex_has_no_ordering() {
+        // ℂ is not totally ordered — `<` etc. are a type error, like comparing one number to none.
+        assert!(run("(1 + math::i) < (2 + math::i)").is_err());
+        assert!(run("math::i > 0").is_err());
+    }
+
+    #[test]
+    fn euler_identity_and_magnitude() {
+        // e^{iπ} = -1 (Euler). Imag part is sin(π) ≈ 0.
+        let (re, im) = complex_of("math::exp(math::i * math::pi)");
+        assert!((re + 1.0).abs() < 1e-12, "re = {re}");
+        assert!(im.abs() < 1e-12, "im = {im}");
+        // |3 + 4i| = 5 ; arg(i) = π/2 ; conj(2+3i) = 2-3i ; re/im selectors
+        assert_eq!(num("math::abs(3 + 4*math::i)"), 5.0);
+        assert!((num("math::arg(math::i)") - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        assert_eq!(complex_of("math::conj(2 + 3*math::i)"), (2.0, -3.0));
+        assert_eq!(num("math::re(2 + 3*math::i)"), 2.0);
+        assert_eq!(num("math::im(2 + 3*math::i)"), 3.0);
+        // principal square root: sqrt(-1 + 0i) = i, sqrt(2i) = 1 + i
+        assert_eq!(complex_of("math::sqrt(-1 + 0*math::i)"), (0.0, 1.0));
+        let (sr, si) = complex_of("math::sqrt(2*math::i)");
+        assert!((sr - 1.0).abs() < 1e-12 && (si - 1.0).abs() < 1e-12, "sqrt(2i) = {sr}+{si}i");
+        // real sqrt stays IEEE: sqrt(-1.0) is NaN (no auto-promotion to complex)
+        assert!(num("math::sqrt(-1)").is_nan());
+    }
+
+    #[test]
+    fn exp_is_the_function_not_the_distribution() {
+        // `exp` is now the exponential FUNCTION (math); the distribution is `rand::exponential`.
+        assert!((num("math::exp(1)") - std::f64::consts::E).abs() < 1e-12);
+        assert_eq!(num("math::exp(0)"), 1.0);
+        // the distribution kept its semantics under the new name
+        let m = moments_of("X ~ rand::exponential(2); X", 200_000, 1);
+        assert!((m.mean - 0.5).abs() < 0.02, "mean = {}", m.mean);
+    }
+
+    #[test]
+    fn normal_complex_is_a_cscg() {
+        // Circularly-symmetric: E|z|² = σ² (total power), E re = E im = 0.
+        let power = run_num("z ~ rand::normal_complex(2); E(math::re(z)^2 + math::im(z)^2)");
+        assert!((power - 4.0).abs() < 0.1, "E|z|^2 = {power}");
+        let mre = run_num("z ~ rand::normal_complex(2); E(math::re(z))");
+        assert!(mre.abs() < 0.05, "E re = {mre}");
+        // drawn with ~[n] like any distribution: an array of independent complex RVs
+        let s = run_num("zs ~[3] rand::normal_complex(1); E(vec::normsq(zs))");
+        assert!((s - 3.0).abs() < 0.1, "E normsq = {s}");
+    }
+
+    #[test]
+    fn vec_consistency_over_complex() {
+        // magnitude-based ops return a REAL: normsq(z) = Σ|zᵢ|², norm, mse.
+        assert_eq!(num("vec::normsq([3 + 4*math::i])"), 25.0);
+        assert_eq!(num("vec::norm([3 + 4*math::i])"), 5.0);
+        assert_eq!(num("vec::mse([1 + 1*math::i], [1 + 0*math::i])"), 1.0); // |i|² = 1
+        // sum/mean lift component-wise (stay complex)
+        assert_eq!(complex_of("vec::sum([1 + 1*math::i, 2 + 3*math::i])"), (3.0, 4.0));
+        // dot stays bilinear (no conjugation): [i]·[i] = i·i = -1
+        assert_eq!(complex_of("vec::dot([math::i], [math::i])"), (-1.0, 0.0));
+        // vdot is Hermitian (conjugates the first arg): conj(i)·i = (-i)(i) = 1
+        assert_eq!(complex_of("vec::vdot([math::i], [math::i])"), (1.0, 0.0));
+        // outer product builds a matrix; adjoint = conjugate transpose
+        assert_eq!(complex_of("vec::outer([math::i], [1])[0][0]"), (0.0, 1.0));
+        assert_eq!(complex_of("vec::adjoint([[math::i]])[0][0]"), (0.0, -1.0));
+        // max/min are a deliberate type error on ℂ (no ordering)
+        assert!(run("vec::max([1 + math::i, 2 + math::i])").is_err());
+    }
+
+    #[test]
+    fn am_vs_fm_complex_fm_wins() {
+        // The headline payoff: FM recovers the message markedly cleaner than AM under identical
+        // circularly-symmetric static. (The complex variant of examples/am_vs_fm.noise.)
+        let src = "
+            engine::set_max_samples(8000);
+            am_modulate(m)      = 1 + m;
+            fm_modulate(m, dev) = math::exp(math::i*dev*m);
+            am_demodulate(z)      = math::abs(z) - 1;
+            fm_demodulate(z, dev) = math::arg(z) / dev;
+            dev = 3; sigma = 0.3;
+            msg = signal::sample(0.3*signal::sine(3), 64);
+            static ~[Len(msg)] rand::normal_complex(sigma);
+            am_err = E(vec::mse(am_demodulate(am_modulate(msg)      + static),      msg));
+            fm_err = E(vec::mse(fm_demodulate(fm_modulate(msg, dev) + static, dev), msg));
+            am_err / fm_err";
+        let ratio = run_num(src);
+        assert!(ratio > 3.0, "FM should be several× cleaner, got {ratio}x");
+    }
+
+    // ===================== % operator + floor/ceil (PLAN-COMPLEX §8) =====================
+
+    #[test]
+    fn floored_modulo_takes_sign_of_divisor() {
+        // floored: result has the sign of `b`, so `x % n ∈ [0, n)` for n > 0 (clock arithmetic).
+        assert_eq!(num("7 % 3"), 1.0);
+        assert_eq!(num("-1 % 3"), 2.0); // NOT -1 (truncated) — floored
+        assert_eq!(num("7 % -3"), -2.0); // sign of divisor
+        assert_eq!(num("5.5 % 2"), 1.5);
+        assert_eq!(num("13 % 12"), 1.0);
+        // x % 0 = NaN (no panic)
+        assert!(num("1 % 0").is_nan());
+        // precedence: same level as `* /`, looser than `^`
+        assert_eq!(num("1 + 7 % 3"), 2.0);
+        assert_eq!(num("2 ^ 3 % 5"), 3.0); // (2^3) % 5 = 8 % 5
+    }
+
+    #[test]
+    fn floor_ceil_ufuncs() {
+        assert_eq!(num("math::floor(2.7)"), 2.0);
+        assert_eq!(num("math::ceil(2.1)"), 3.0);
+        assert_eq!(num("math::floor(-2.1)"), -3.0);
+        assert_eq!(num("math::ceil(-2.9)"), -2.0);
+        // map over arrays
+        assert_eq!(display_of("math::floor([1.9, 2.1, 3.5])"), "[1, 2, 3]");
+        // real-only: complex floor is a type error
+        assert!(run("math::floor(1 + math::i)").is_err());
+        // lifts over a random variable (interp and JIT agree)
+        let m = run_num("X ~ rand::unif_int(0, 11); E(X % 4)");
+        assert!((m - 1.5).abs() < 0.05, "E(X % 4) = {m}"); // {0,1,2,3} uniform-ish over 0..11
+    }
+
+    // ===================== comprehensions (PLAN-COMPLEX §8) =====================
+
+    #[test]
+    fn comprehensions_map_and_close_over_outer() {
+        assert_eq!(display_of("[for x in 0..5 { x*x }]"), "[0, 1, 4, 9, 16]");
+        // body closes over an outer variable (no closures needed)
+        assert_eq!(display_of("a = 10; [for x in 0..3 { a + x }]"), "[10, 11, 12]");
+        // a pure 1-to-1 map: result length always equals the iterable's
+        assert_eq!(num("Len([for x in 0..7 { x }])"), 7.0);
+        // empty array literal still parses (not a comprehension)
+        assert_eq!(display_of("[]"), "[]");
+        // a multi-statement body block works (and leaks, like every Noise block)
+        assert_eq!(display_of("[for x in 0..3 { y = x + 1; y * y }]"), "[1, 4, 9]");
+    }
+
+    // ===================== vec::outer / vec::categorical (PLAN-COMPLEX §8-9) =====================
+
+    #[test]
+    fn outer_product_and_categorical() {
+        // outer(a, b)[i][j] = a_i * b_j
+        assert_eq!(display_of("vec::outer([1, 2], [10, 20, 30])"), "[[10, 20, 30], [20, 40, 60]]");
+        // categorical samples an index proportional to the weights
+        let p = run_num("y ~ rand::categorical([0, 0, 1, 0]); E(y)"); // all mass on index 2
+        assert!((p - 2.0).abs() < 1e-9, "E(categorical) = {p}");
+        let q = run_num("y ~ rand::categorical([3, 1]); E((y == 0))"); // P(index 0) = 3/4
+        assert!((q - 0.75).abs() < 3e-3, "P(y==0) = {q}");
+    }
+
+    #[test]
+    fn gcd_and_modpow_builtins() {
+        // gcd (Euclid), defined via absolute values; gcd(0, 0) = 0.
+        assert_eq!(num("math::gcd(48, 18)"), 6.0);
+        assert_eq!(num("math::gcd(0, 0)"), 0.0);
+        assert_eq!(num("math::gcd(-12, 8)"), 4.0);
+        assert_eq!(num("math::gcd(17, 5)"), 1.0); // coprime
+        // modpow: exact even when base^exp would overflow 2^53.
+        assert_eq!(num("math::modpow(7, 4, 15)"), 1.0); // 7^4 = 2401 ≡ 1
+        assert_eq!(num("math::modpow(2, 10, 1000)"), 24.0); // 1024 mod 1000
+        assert_eq!(num("math::modpow(7, 100, 13)"), 9.0); // 7^100 is astronomically large
+        assert_eq!(num("math::modpow(2, 0, 15)"), 1.0); // base^0 = 1
+        assert_eq!(num("math::modpow(2, 5, 1)"), 0.0); // anything mod 1 = 0
+        // exactness: `2^64 % 13` would lose precision via float `^`; modpow is exact (= 3).
+        assert_eq!(num("math::modpow(2, 64, 13)"), 3.0);
+        // domain errors: non-integer, negative exponent, non-positive modulus, RV argument
+        assert!(run("math::gcd(1.5, 2)").is_err());
+        assert!(run("math::modpow(2, -1, 7)").is_err());
+        assert!(run("math::modpow(2, 3, 0)").is_err());
+        assert!(run("X ~ rand::unif_int(1, 5); math::gcd(X, 10)").is_err());
+    }
+
+    #[test]
+    fn shor_factors_via_quantum_period_finding() {
+        // The full algorithm (examples/shor_period.noise): `shor(N)` returns N's two factors. The
+        // quantum step `period(a, N, Q)` reads the period of a^x mod N off the interference comb (its
+        // number of spikes), and the factors fall out of gcd(a^(r/2) +- 1, N).
+        let lib = "
+            onehot(v, width) = [for w in 0..width { if v == w { 1 } else { 0 } }];
+            period(a, N, Q) = {
+                ks = 0..Q;
+                fx = [for x in 0..Q { math::modpow(a, x, N) }];
+                Psi = [for x in 0..Q { onehot(fx[x], N) }] / Q^0.5;
+                QFT = math::exp(math::i * (-2*math::pi/Q) * vec::outer(ks, ks)) / Q^0.5;
+                vec::count([for p in QFT @ Psi { vec::normsq(p) > 0.0001 }])
+            };
+            shor(N) = {
+                Q = 1; for i in 0..16 { if Q < N { Q = Q * 2 } };
+                p = 1; q = N;
+                for a in 2..N {
+                    if p == 1 {
+                        if math::gcd(a, N) > 1 { p = math::gcd(a, N); q = N / p }
+                        else {
+                            r = period(a, N, Q);
+                            if r % 2 == 0 { s = math::modpow(a, r/2, N); g = math::gcd(s - 1, N);
+                                if g > 1 { if g < N { p = g; q = N / g } } }
+                        }
+                    }
+                };
+                [p, q]
+            };";
+        // the quantum subroutine reads period(7^x mod 15) = 4 off a clean 4-spike comb (4 | Q = 16)
+        assert_eq!(run_num(&format!("{lib} period(7, 15, 16)")), 4.0);
+        assert_eq!(run_num(&format!("{lib} period(4, 15, 16)")), 2.0); // base 4 -> period 2
+        // shor(15) genuinely factors via the quantum period (a = 2 is coprime, period 4 | 16) -> [3, 5]
+        assert_eq!(run_num(&format!("{lib} shor(15)[0]")), 3.0);
+        assert_eq!(run_num(&format!("{lib} shor(15)[1]")), 5.0);
+        // a few more composites factor correctly (product check)
+        assert_eq!(run_num(&format!("{lib} shor(21)[0] * shor(21)[1]")), 21.0);
+        assert_eq!(run_num(&format!("{lib} shor(35)[0] * shor(35)[1]")), 35.0);
+    }
+
+    // ===================== complex: deeper coverage =====================
+
+    #[test]
+    fn complex_subtraction_negation_and_mixed_real() {
+        assert_eq!(complex_of("(3 + 4*math::i) - (1 + 2*math::i)"), (2.0, 2.0));
+        // unary minus on a complex (constant and the imaginary unit)
+        assert_eq!(complex_of("-(2 + 3*math::i)"), (-2.0, -3.0));
+        assert_eq!(complex_of("-math::i"), (0.0, -1.0));
+        // real ⊕ complex in both orders, promotion to re + 0i
+        assert_eq!(complex_of("(2 + 3*math::i) - 5"), (-3.0, 3.0));
+        assert_eq!(complex_of("5 - (2 + 3*math::i)"), (3.0, -3.0));
+        assert_eq!(complex_of("2 * (2 + 3*math::i)"), (4.0, 6.0));
+        assert_eq!(complex_of("(2 + 3*math::i) * 2"), (4.0, 6.0));
+        // division by a purely imaginary number: 10 / (2i) = -5i
+        assert_eq!(complex_of("10 / (2*math::i)"), (0.0, -5.0));
+    }
+
+    #[test]
+    fn complex_power_edge_cases() {
+        assert_eq!(complex_of("(2 + 3*math::i) ^ 0"), (1.0, 0.0)); // z^0 = 1
+        assert_eq!(complex_of("(2 + 3*math::i) ^ 1"), (2.0, 3.0)); // z^1 = z
+        assert_eq!(complex_of("(1 + math::i) ^ -1"), (0.5, -0.5)); // reciprocal
+        // a general complex power is rejected (needs a constant integer exponent)
+        assert!(run("(1 + math::i) ^ 1.5").is_err());
+        assert!(run("(1 + math::i) ^ (1 + math::i)").is_err());
+        assert!(run("2 ^ math::i").is_err());
+        assert!(run("(1 + math::i) ^ 100000").is_err()); // exponent magnitude cap
+    }
+
+    #[test]
+    fn complex_type_errors() {
+        // ordering, modulo, logical, and bool/string mixing are all rejected on ℂ
+        assert!(run("math::i < math::i").is_err());
+        assert!(run("(1 + math::i) <= 2").is_err());
+        assert!(run("math::i % 2").is_err());
+        assert!(run("math::i && true").is_err());
+        assert!(run("\"a\" + math::i").is_err());
+        // a complex can't be an `if` condition (not a bool)
+        assert!(run("if math::i { 1 } else { 0 }").is_err());
+        // E/Var of a complex is deferred — a clear, actionable error
+        assert!(run("z ~ rand::normal_complex(1); E(z)").is_err());
+    }
+
+    #[test]
+    fn arg_is_quadrant_correct() {
+        let pi = std::f64::consts::PI;
+        assert!((num("math::arg(1 + 1*math::i)") - pi / 4.0).abs() < 1e-12);
+        assert!((num("math::arg(-1 + 1*math::i)") - 3.0 * pi / 4.0).abs() < 1e-12);
+        assert!((num("math::arg(-1 - 1*math::i)") + 3.0 * pi / 4.0).abs() < 1e-12);
+        assert!((num("math::arg(1 - 1*math::i)") + pi / 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn complex_ufuncs_map_over_arrays() {
+        // exp / conj / re map elementwise over a complex array
+        assert_eq!(display_of("math::re([1 + 2*math::i, 3 + 4*math::i])"), "[1, 3]");
+        assert_eq!(display_of("math::im([1 + 2*math::i, 3 + 4*math::i])"), "[2, 4]");
+        assert_eq!(complex_of("math::conj([1 + 2*math::i, 3 + 4*math::i])[1]"), (3.0, -4.0));
+        // abs over a complex array → real array
+        assert_eq!(display_of("math::abs([3 + 4*math::i, 0 + 1*math::i])"), "[5, 1]");
+    }
+
+    #[test]
+    fn complex_matmul() {
+        // vec @ vec is the bilinear dot over ℂ: (1+i)*1 + 2*i = 1 + 3i
+        assert_eq!(complex_of("[1 + 1*math::i, 2] @ [1, math::i]"), (1.0, 3.0));
+        // i·I (matrix @ vector): [[i,0],[0,i]] @ [1,1] = [i, i]
+        let out = "M = [[math::i, 0], [0, math::i]]; (M @ [1, 1])[0]";
+        assert_eq!(complex_of(out), (0.0, 1.0));
+    }
+
+    #[test]
+    fn complex_random_variable_paths() {
+        // |e^{iX}| = 1 for every lane (cos²+sin² = 1): exp lifts the imaginary RV via cos/sin.
+        let m = run_num("X ~ rand::unif(0, 1); E(math::abs(math::exp(math::i * X)))");
+        assert!((m - 1.0).abs() < 1e-9, "E|e^iX| = {m}");
+        // exp of a *random real part* is unsupported (no exp node in the VM)
+        assert!(run("X ~ rand::unif(0,1); math::exp(X)").is_err());
+        // sqrt over a real RV is IEEE `^ 0.5`: E[sqrt(U(0,4))] = (1/4)∫₀⁴ √x dx = 4/3
+        let s = run_num("X ~ rand::unif(0, 4); E(math::sqrt(X))");
+        assert!((s - 4.0 / 3.0).abs() < 0.02, "E sqrt = {s}");
+        // arg over an RV phasor near -1 sits at ±π (left half-plane quadrant fix)
+        let a = run_num("z ~ rand::normal_complex(0.02); E(math::abs(math::arg((0 - 1) + z)))");
+        assert!((a - std::f64::consts::PI).abs() < 0.05, "E|arg| near -1 = {a}");
+    }
+
+    #[test]
+    fn normal_complex_parameters_and_independence() {
+        // sigma = 0 is a point mass at 0+0i.
+        assert_eq!(run_num("z ~ rand::normal_complex(0); E(math::abs(z))"), 0.0);
+        // sigma < 0 is rejected.
+        assert!(run("z ~ rand::normal_complex(-1); z").is_err());
+        // each channel is N(0, sigma/√2): Var(re) = sigma²/2 = 2 for sigma = 2.
+        let v = run_num("z ~ rand::normal_complex(2); Var(math::re(z))");
+        assert!((v - 2.0).abs() < 0.1, "Var(re) = {v}");
+        // re and im are independent ⇒ E(re·im) ≈ 0.
+        let cov = run_num("z ~ rand::normal_complex(2); E(math::re(z) * math::im(z))");
+        assert!(cov.abs() < 0.05, "E(re·im) = {cov}");
+    }
+
+    #[test]
+    fn vec_lifts_and_magnitudes_over_complex() {
+        // linear ops lift component-wise (stay complex)
+        assert_eq!(complex_of("vec::mean([2 + 2*math::i, 4 + 4*math::i])"), (3.0, 3.0));
+        assert_eq!(num("vec::transpose([[1 + 1*math::i, 2], [3, 4*math::i]])[0][1]"), 3.0);
+        // normalize a complex vector → unit magnitude
+        assert!((num("vec::norm(vec::normalize([3 + 4*math::i]))") - 1.0).abs() < 1e-12);
+        // dot is bilinear, vdot is Hermitian: dot([i,i],[i,i]) = -2, vdot = +2 (= normsq)
+        assert_eq!(complex_of("vec::dot([math::i, math::i], [math::i, math::i])"), (-2.0, 0.0));
+        assert_eq!(complex_of("vec::vdot([math::i, math::i], [math::i, math::i])"), (2.0, 0.0));
+        // vdot(z, z) == normsq(z) (a real)
+        assert_eq!(complex_of("vec::vdot([3 + 4*math::i], [3 + 4*math::i])"), (25.0, 0.0));
+        // on REAL vectors vdot coincides with dot
+        assert_eq!(num("vec::vdot([1, 2, 3], [4, 5, 6])"), num("vec::dot([1, 2, 3], [4, 5, 6])"));
+        // adjoint = conjugate transpose (rectangular)
+        assert_eq!(complex_of("vec::adjoint([[1 + 1*math::i, 2 + 1*math::i, 3]])[1][0]"), (2.0, -1.0));
+    }
+
+    #[test]
+    fn complex_scoping_of_i_and_j() {
+        // qualified `math::i` resolves with NO `use` (run_raw has no prelude)
+        match run_raw("math::abs(3 + 4*math::i)").unwrap() {
+            Value::Num(n) => assert_eq!(n, 5.0),
+            other => panic!("got {other:?}"),
+        }
+        // a bare `i` needs `use math;` — out of scope without it
+        assert!(run_raw("i").is_err());
+    }
+
+    // ===================== % / floor / ceil: deeper coverage =====================
+
+    #[test]
+    fn modulo_precedence_and_fractional() {
+        // unary minus is looser than `%` here only via grouping; `-7 % 3` parses as `-(7 % 3)`? No:
+        // prefix `-` binds tighter than `^`, hence tighter than `%` — so `-7 % 3 = (-7) % 3 = 2`.
+        assert_eq!(num("-7 % 3"), 2.0);
+        assert_eq!(num("10 % 2.5"), 0.0);
+        assert_eq!(num("10.5 % 3"), 1.5);
+        // chains left-to-right with `*` and `/`
+        assert_eq!(num("13 % 12 * 2"), 2.0); // (13 % 12) * 2
+        // propagates an estimate's error (E carries one)
+        let m = run_num("X ~ rand::unif_int(0, 9); E(X) % 100");
+        assert!((m - 4.5).abs() < 0.1, "E(X) % 100 = {m}");
+    }
+
+    #[test]
+    fn floor_ceil_over_values_and_rvs() {
+        assert_eq!(num("math::ceil(-2.9)"), -2.0);
+        assert_eq!(display_of("math::ceil([1.1, 2.0, 2.9])"), "[2, 2, 3]");
+        // E[floor(U(0,3))] = mean of {0,1,2} weighted by the unit intervals = 1.0
+        let m = run_num("X ~ rand::unif(0, 3); E(math::floor(X))");
+        assert!((m - 1.0).abs() < 0.05, "E floor = {m}");
+        // ceil is real-only
+        assert!(run("math::ceil(1 + math::i)").is_err());
+    }
+
+    // ===================== comprehensions: deeper coverage =====================
+
+    #[test]
+    fn comprehensions_nest_and_over_arrays() {
+        // nested comprehension builds a matrix
+        assert_eq!(display_of("[for i in 0..2 { [for j in 0..3 { i*j }] }]"), "[[0, 0, 0], [0, 1, 2]]");
+        // iterate a literal array (not just a range)
+        assert_eq!(display_of("[for x in [10, 20, 30] { x + 1 }]"), "[11, 21, 31]");
+        // a body that maps each element through several ops
+        assert_eq!(display_of("[for x in 0..4 { (2*x) % 3 }]"), "[0, 2, 1, 0]");
+        // the loop variable leaks (Noise blocks don't scope) — last value survives
+        assert_eq!(num("[for x in 0..3 { x }]; x"), 2.0);
+    }
+
+    #[test]
+    fn comprehensions_build_random_variables() {
+        // a comprehension over an array of RVs builds independent transformed nodes
+        let m = run_num("ds ~[3] rand::unif(0, 1); E(vec::sum([for d in ds { 2*d }]))");
+        assert!((m - 3.0).abs() < 0.05, "E sum = {m}"); // each 2·E[U]=1, three of them
+    }
+
+    #[test]
+    fn comprehension_errors() {
+        // iterating a non-array
+        assert!(run("[for x in 5 { x }]").is_err());
+        // an undrawn recipe in the body is rejected like anywhere else
+        assert!(run("[for x in 0..3 { rand::unif(0, 1) }]").is_err());
+    }
+
+    #[test]
+    fn continue_filters_in_comprehensions_and_loops() {
+        // filter form: `if bad { continue }; keep` — the imperative idiom
+        assert_eq!(display_of("[for x in 0..10 { if x % 2 != 0 { continue }; x }]"), "[0, 2, 4, 6, 8]");
+        // else-continue form
+        assert_eq!(display_of("[for x in 0..10 { if x % 3 == 0 { x } else { continue } }]"), "[0, 3, 6, 9]");
+        // all elements skipped → empty array
+        assert_eq!(display_of("[for x in 0..5 { continue }]"), "[]");
+        // continue in a plain `for` skips that iteration's side effects (here, accumulation)
+        assert_eq!(num("acc = 0; for x in 0..10 { if x % 2 != 0 { continue }; acc = acc + x }; acc"), 20.0);
+        // it propagates up through a nested block
+        assert_eq!(display_of("[for x in 0..6 { { if x % 2 == 1 { continue } }; x*10 }]"), "[0, 20, 40]");
+        // a RANDOM continue is rejected (the array length is fixed at build time) — clean error
+        assert!(run("B ~ rand::bernoulli(0.5); [for x in 0..3 { if B { continue }; x }]").is_err());
+        // misused as a data value → a plain type error (not a panic)
+        assert!(run("1 + continue").is_err());
+    }
+
+    // ===================== categorical / outer: deeper coverage =====================
+
+    #[test]
+    fn categorical_proportions_and_errors() {
+        // single-weight is a point mass at index 0
+        assert_eq!(run_num("y ~ rand::categorical([5]); E(y)"), 0.0);
+        // proportional sampling: weights [1,1,2] → P(index 2) = 1/2
+        let p = run_num("y ~ rand::categorical([1, 1, 2]); E((y == 2))");
+        assert!((p - 0.5).abs() < 3e-3, "P(y==2) = {p}");
+        // domain errors
+        assert!(run("y ~ rand::categorical([])").is_err()); // empty
+        assert!(run("y ~ rand::categorical([1, -1])").is_err()); // negative weight
+        assert!(run("y ~ rand::categorical([0, 0])").is_err()); // zero total
+    }
+
+    #[test]
+    fn outer_product_shapes() {
+        assert_eq!(display_of("vec::outer([1, 2], [3, 4])"), "[[3, 4], [6, 8]]");
+        // rectangular: len(a) rows, len(b) cols (`Len` is the always-on builtin, not `vec::`)
+        assert_eq!(num("Len(vec::outer([1, 2, 3], [4, 5]))"), 3.0);
+        assert_eq!(num("Len(vec::outer([1, 2, 3], [4, 5])[0])"), 2.0);
+    }
+
+    #[test]
+    fn exponential_distribution_renamed_cleanly() {
+        // `exp` is the function (e^2), NOT a distribution; the old name is gone.
+        assert!((num("math::exp(2)") - (2.0f64).exp()).abs() < 1e-12);
+        assert!(run("X ~ exp_int(2); X").is_err()); // old `exp_int` name removed
+        // the distribution lives on as `rand::exponential` with the same tail.
+        let p = run_num("X ~ rand::exponential(2); P(X > 1)");
+        assert!((p - (-2.0f64).exp()).abs() < 3e-3, "P(X>1) = {p}");
+    }
+
+    // ===================== mixing complex with everything else (robustness) =====================
+
+    #[test]
+    fn complex_broadcasts_with_arrays() {
+        // complex scalar ⊕ real array (both orders), real array ⊕ complex array
+        assert_eq!(display_of("(2 + 3*math::i) + [1, 2, 3]"), "[3 + 3i, 4 + 3i, 5 + 3i]");
+        assert_eq!(display_of("[1, 2] + [math::i, 2*math::i]"), "[1 + 1i, 2 + 2i]");
+        // complex array scaled by a real scalar (result may mix complex & real elements)
+        assert_eq!(display_of("[1 + 1*math::i, 2] * 2"), "[2 + 2i, 4]");
+        // length mismatch is a clean error
+        assert!(run("[math::i] + [1, 2]").is_err());
+        // real matrix @ complex vector: [[1,2],[3,4]] @ [i,i] = [3i, 7i]
+        assert_eq!(complex_of("([[1, 2], [3, 4]] @ [math::i, math::i])[0]"), (0.0, 3.0));
+        assert_eq!(complex_of("([[1, 2], [3, 4]] @ [math::i, math::i])[1]"), (0.0, 7.0));
+    }
+
+    #[test]
+    fn complex_real_equality() {
+        // a complex with zero imaginary part equals the matching real, and differs otherwise
+        assert!(boolean("(2 + 0*math::i) == 2"));
+        assert!(boolean("2 == (2 + 0*math::i)"));
+        assert!(!boolean("2 == (2 + 3*math::i)"));
+        assert!(boolean("(2 + 3*math::i) != 2"));
+    }
+
+    #[test]
+    fn complex_mixing_errors_cleanly() {
+        // complex can't combine with a signal / lazy noise / bool / undrawn recipe
+        assert!(run("signal::sine(3) + math::i").is_err());
+        assert!(run("signal::noise_white(1) + math::i").is_err());
+        assert!(run("math::i + true").is_err());
+        assert!(run("math::i + rand::unif(0, 1)").is_err());
+        // complex can't be an array index, a counted event, or an ordered extremum
+        assert!(run("[10, 20, 30][math::i]").is_err());
+        assert!(run("vec::count([math::i])").is_err());
+        assert!(run("vec::max([math::i, 2*math::i])").is_err());
+        // a lifted `if` (random condition) with complex branches is unsupported — a clean error
+        assert!(run("B ~ rand::bernoulli(0.5); if B { math::i } else { 0*math::i }").is_err());
+        // a random gather over complex elements is likewise rejected
+        assert!(run("k ~ rand::unif_int(0, 1); [math::i, 2*math::i][k]").is_err());
+    }
+
+    #[test]
+    fn complex_degenerate_values_dont_panic() {
+        // division by 0 + 0i yields NaN channels (no panic)
+        let (re, im) = complex_of("(1 + math::i) / (0*math::i)");
+        assert!(re.is_nan() && im.is_nan(), "got {re}+{im}i");
+        // abs/arg of 0 + 0i are well-defined (0 and 0)
+        assert_eq!(num("math::abs(0*math::i)"), 0.0);
+        assert_eq!(num("math::arg(0*math::i)"), 0.0);
+        // real ufuncs of plain reals (the real branch)
+        assert_eq!(num("math::conj(5)"), 5.0);
+        assert_eq!(num("math::re(5)"), 5.0);
+        assert_eq!(num("math::im(5)"), 0.0);
+        assert_eq!(num("math::abs(-7)"), 7.0);
+    }
+
+    #[test]
+    fn estimates_flow_through_complex() {
+        // a `P`/`E` estimate (carries a standard error) promotes into a complex value and through
+        // the magnitude ufuncs, floor, and exp — none of which should choke on the `Est` channel.
+        assert!((run_num("D ~ rand::unif_int(1,6); math::abs(P(D > 3) + 0*math::i)") - 0.5).abs() < 0.01);
+        // 6.5·P(D>3) ≈ 3.25 (off the integer boundary, so floor is a stable 3 despite MC noise)
+        assert_eq!(run_num("D ~ rand::unif_int(1,6); math::floor(6.5 * P(D > 3))"), 3.0);
+        assert_eq!(run_num("D ~ rand::unif_int(1,6); math::exp(0 * P(D > 3))"), 1.0);
+        // sum over a mix of real and complex elements stays complex
+        assert_eq!(complex_of("vec::sum([1, math::i, 2 + 2*math::i])"), (3.0, 3.0));
+    }
+
+    // ===================== identity fold: correctness guards =====================
+
+    #[test]
+    fn identity_fold_preserves_values_and_ieee() {
+        // `1*X → X` keeps the SAME draw (structural sharing), so `X - 1*X` is exactly 0.
+        let z = run("X ~ rand::unif(0,1); X - 1*X").unwrap();
+        // every lane is 0 → mean exactly 0
+        assert_eq!(run_num("X ~ rand::unif(0,1); E(X - 1*X)"), 0.0);
+        assert!(matches!(z, Value::Dist(_)));
+        // `0*X → 0` and `X + 0 → X`
+        assert_eq!(run_num("X ~ rand::unif(0,1); E(0 * X)"), 0.0);
+        assert!((run_num("X ~ rand::unif(0,1); E(X + 0)") - 0.5).abs() < 0.01);
+        // the fold does NOT fire for constants, so IEEE `0 * inf = NaN` is preserved.
+        assert!(num("0 * (1 / 0)").is_nan());
+        // the fold does NOT fire for a bool RV: `0 * event` is still a type error, not 0.
+        assert!(run("B ~ rand::bernoulli(0.5); 0 * B").is_err());
     }
 }

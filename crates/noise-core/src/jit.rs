@@ -20,7 +20,7 @@
 //! *in distribution* but not draw-for-draw under a shared seed; that's by design.
 //!
 //! Scope: `unif` / `unif_int` / `normal` / `exp` / `geometric` sources, `+ - * /`, integer-constant
-//! `**`, comparisons, `&& ||`, unary `- !` and the math ufuncs, and lifted `if` (`Select`).
+//! `^`, comparisons, `&& ||`, unary `- !` and the math ufuncs, and lifted `if` (`Select`).
 //! `Poisson` (Knuth's variable-length per-lane loop) stays interpreter-only; transcendental-bound
 //! graphs that the interpreter samples faster also stay there (see [`crate::kernel::profitable`]).
 
@@ -616,7 +616,7 @@ fn emit_geometric(fb: &mut FunctionBuilder, s: &[Variable; 4], p: f64) -> Value 
     fb.ins().floor(q)
 }
 
-/// `base ** k` for a small non-negative integer `k`, as repeated multiply (k = 0 → 1.0).
+/// `base ^ k` for a small non-negative integer `k`, as repeated multiply (k = 0 → 1.0).
 fn emit_pow(fb: &mut FunctionBuilder, base: Value, k: u32) -> Value {
     if k == 0 {
         return fb.ins().f64const(1.0);
@@ -641,6 +641,8 @@ fn emit_unary(fb: &mut FunctionBuilder, math: &MathRefs, op: UnOp, a: Value) -> 
         UnOp::Cos => emit_trig(fb, a, true),
         UnOp::Atan => call1(fb, math.atan, a),
         UnOp::Round => call1(fb, math.round, a),
+        UnOp::Floor => fb.ins().floor(a),
+        UnOp::Ceil => fb.ins().ceil(a),
         UnOp::Sign => {
             // -1 / 0 / +1 as (a > 0) - (a < 0), matching `apply_un` (0 exactly at 0, unlike signum).
             let zero = fb.ins().f64const(0.0);
@@ -659,6 +661,13 @@ fn emit_binary(fb: &mut FunctionBuilder, op: BinOp, a: Value, b: Value) -> Value
         BinOp::Sub => fb.ins().fsub(a, b),
         BinOp::Mul => fb.ins().fmul(a, b),
         BinOp::Div => fb.ins().fdiv(a, b),
+        BinOp::Mod => {
+            // floored modulo: a − b·floor(a/b)
+            let q = fb.ins().fdiv(a, b);
+            let fq = fb.ins().floor(q);
+            let bf = fb.ins().fmul(b, fq);
+            fb.ins().fsub(a, bf)
+        }
         BinOp::Lt => cmp_to_f64(fb, FloatCC::LessThan, a, b),
         BinOp::Gt => cmp_to_f64(fb, FloatCC::GreaterThan, a, b),
         BinOp::Le => cmp_to_f64(fb, FloatCC::LessThanOrEqual, a, b),
@@ -746,14 +755,14 @@ mod tests {
     #[test]
     fn jit_dice_and_indicator_match_interp() {
         assert_jit_matches_interp("use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B", 3);
-        assert_jit_matches_interp("use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X**2 + Y**2 < 1", 4);
+        assert_jit_matches_interp("use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1", 4);
     }
 
     #[test]
     fn jit_continuous_sources_match_interp() {
         // B2: normal/exp/geometric are now emitted directly (ln/cos shims + native sqrt/floor).
         assert_jit_matches_interp("use rand; Z ~ normal(2,3); Z", 5);
-        assert_jit_matches_interp("use rand; X ~ exp(2); X", 6);
+        assert_jit_matches_interp("use rand; X ~ exponential(2); X", 6);
         assert_jit_matches_interp("use rand; G ~ geometric(0.25); G", 7);
         // _int variants exercise the Round ufunc on top of a continuous source.
         assert_jit_matches_interp("use rand; Z ~ normal_int(10,3); Z", 8);
@@ -761,11 +770,23 @@ mod tests {
 
     #[test]
     fn jit_ufuncs_and_nonconst_pow_match_interp() {
-        // sin/cos/atan/sign ufuncs and a non-constant `**` (pow libcall) over an RV.
+        // sin/cos/atan/sign ufuncs and a non-constant `^` (pow libcall) over an RV.
         assert_jit_matches_interp("use rand; use math; X ~ unif(0,1); sin(X) + cos(X)", 9);
         assert_jit_matches_interp("use rand; use math; X ~ unif(-1,1); atan(X)", 10);
         assert_jit_matches_interp("use rand; use math; X ~ unif(-1,1); sign(X)", 11);
-        assert_jit_matches_interp("use rand; A ~ unif(1,2); B ~ unif(1,2); A ** B", 12);
+        assert_jit_matches_interp("use rand; A ~ unif(1,2); B ~ unif(1,2); A ^ B", 12);
+    }
+
+    #[test]
+    fn jit_mod_floor_ceil_match_interp() {
+        // The new VM ops (BinOp::Mod via floor, UnOp::Floor/Ceil native instructions) must agree
+        // with the interpreter draw-for-distribution.
+        assert_jit_matches_interp("use rand; X ~ unif(0,10); X % 3", 13);
+        assert_jit_matches_interp("use rand; X ~ unif(-5,5); X % 4", 14);
+        assert_jit_matches_interp("use rand; use math; X ~ unif(-3,3); math::floor(X)", 15);
+        assert_jit_matches_interp("use rand; use math; X ~ unif(-3,3); math::ceil(X)", 16);
+        // floored modulo of a negative dividend: a − b·floor(a/b) (composed op chain)
+        assert_jit_matches_interp("use rand; use math; X ~ unif(0,8); math::floor(X) % 3", 17);
     }
 
     /// The default kernel must actually interleave `STREAMS` RNG streams (not silently build a
@@ -790,7 +811,7 @@ mod tests {
     fn stream_count_preserves_distribution() {
         let cases = [
             ("use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B", 7.0),
-            ("use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X**2 + Y**2 < 1", std::f64::consts::FRAC_PI_4),
+            ("use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1", std::f64::consts::FRAC_PI_4),
         ];
         for (src, expected) in cases {
             let mut eng = crate::Engine::new();
@@ -846,13 +867,13 @@ mod tests {
         }
 
         let cases = [
-            ("pi_indicator", "use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X**2 + Y**2 < 1"),
+            ("pi_indicator", "use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1"),
             ("dice_sum", "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B"),
             ("poly_deep", "use rand; X ~ unif(0,1); ((X*X+X)*X - X)*X + X*X - X + 1"),
             ("normal_poly", "use rand; Z ~ normal(0,1); ((Z*Z+Z)*Z - Z)*Z + Z*Z"),
             // Transcendental-bound now that ln/cos are inlined: the multi-stream win should appear.
             ("normal_sum", "use rand; X ~ normal(0,1); Y ~ normal(0,1); X + Y"),
-            ("exp_tail", "use rand; X ~ exp(2); X > 1"),
+            ("exp_tail", "use rand; X ~ exponential(2); X > 1"),
             ("sin_wave", "use rand; use math; X ~ unif(0,1); sin(6.283*X) + cos(6.283*X)"),
         ];
         let batches = 4000;

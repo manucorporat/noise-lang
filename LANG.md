@@ -134,7 +134,7 @@ symbolic (a distribution) until then.
 ### Tokens
 
 ```
-+  -  *  /  **            arithmetic  (`*` is elementwise / broadcast)
++  -  *  /  ^            arithmetic  (`*` is elementwise / broadcast)
 @                         matrix product  (dot / mat·vec / matmul by shape)
 == != < > <= >=           comparison
 && ||                     logical and / or
@@ -179,9 +179,9 @@ Everything is an expression: `bind`, `block`, and `if` all produce values.
 
 ## Operator precedence
 
-Lowest to highest. All binary operators are left-associative **except** `**` and
+Lowest to highest. All binary operators are left-associative **except** `^` and
 binding, which are right-associative. Prefix `-`/`!` bind tighter than everything below
-`**` (so `-2 ** 2 == -(2 ** 2) == -4`, matching common math convention).
+`^` (so `-2 ^ 2 == -(2 ^ 2) == -4`, matching common math convention).
 
 | Level | Operators            | Assoc  |
 |-------|----------------------|--------|
@@ -191,8 +191,8 @@ binding, which are right-associative. Prefix `-`/`!` bind tighter than everythin
 | 4     | `&&`                 | left   |
 | 5     | `== != < > <= >=`    | left   |
 | 6     | `+ -`                | left   |
-| 7     | `* / @`              | left   |
-| 8     | `**`                 | right  |
+| 7     | `* / % @`            | left   |
+| 8     | `^`                 | right  |
 | 9     | prefix `- ! ~`       | —      |
 | 10    | postfix `[index]`    | —      |
 | 11    | call, grouping       | —      |
@@ -205,8 +205,9 @@ family into separate runtime types.
 
 Runtime values: `number` (`f64`, a point mass), `bool` (a point mass on `{T,F}` — i.e. a
 Bernoulli; see core model §1), `string`, `unit` (`()`), `array` (a fixed-length, build-time
-sequence of values — see "Collections"), and `signal` (a **lazy waveform generator** — see
-"Signals"). An **`estimate`** is a `number` carrying a standard error (produced by `P`); it
+sequence of values — see "Collections"), `signal` (a **lazy waveform generator** — see
+"Signals"), and **`complex`** (a complex scalar — see "Complex numbers"). An **`estimate`** is a
+`number` carrying a standard error (produced by `P`); it
 behaves like a number in arithmetic (propagating the error) and displays rounded to its
 justified precision. **`dist`** — a non-degenerate random variable / distribution handle — is
 produced by `unif`/`unif_int`/`bernoulli`, bound by a binding, and propagated by operator
@@ -216,8 +217,13 @@ model, `number`/`bool`/`dist`/`estimate` are all the *same kind of thing* (a dis
 split is the implementation detail being removed.
 
 Type rules (current):
-- Arithmetic `+ - * / **` require both operands to be `number` → `number`.
-  Division and `**` follow IEEE-754 (`1/0 == inf`, no panic).
+- Arithmetic `+ - * / ^` require both operands to be `number` → `number`.
+  Division and `^` follow IEEE-754 (`1/0 == inf`, no panic).
+- **`%` (floored modulo)** requires two `number`s → `number`, defined as `a − b·floor(a/b)`, so
+  the result takes the sign of `b` and `x % n ∈ [0, n)` for `n > 0` (clock/modular arithmetic).
+  `x % 0` is `NaN` (no panic). Real-only — `%` on a `complex` is an error.
+- If **either** operand of `+ - * / ^` is `complex` (or both), the op is the corresponding
+  complex operation (the real operand promotes to `re + 0i`); see "Complex numbers".
 - **`+` also concatenates** when *either* operand is a `string`: the other operand is
   stringified via its display form, giving a `string` (e.g. `"x = " + 5` → `"x = 5"`). This
   is deterministic-only — a string can never enter a random-variable expression.
@@ -284,15 +290,21 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
   is a point mass at `mu`). Like the others it returns an undrawn **recipe**; `Z ~ normal(0, 1)`
   draws it. Sampled via Box–Muller. (Being continuous, `==` on it is almost surely false — see
   hazards.)
-- **`exp(rate)`** — the exponential `Exp(rate)` (continuous; `rate > 0`, `mean = 1/rate`).
-  Inverse-CDF sampled.
+- **`exponential(rate)`** — the exponential `Exp(rate)` (continuous; `rate > 0`, `mean = 1/rate`).
+  Inverse-CDF sampled. (Renamed from `exp`, which is now the exponential **function** `math::exp`.)
+- **`normal_complex(sigma)`** — a circularly-symmetric complex Gaussian (CSCG): `re`/`im` each
+  `~ N(0, sigma/√2)`, independent, so `E|z|² = sigma²`. Draws a `complex` RV (`z ~ …` or `~[n] …`).
+  The textbook model for radio static / thermal noise / Rayleigh fading.
+- **`categorical(weights)`** — sample an index `0..len(weights)` with probability proportional to
+  the (constant, non-negative) `weights`. The honest "measure a discrete distribution" primitive
+  (`y ~ rand::categorical(probs)`). Built by inverse-CDF from one `unif(0,total)` draw.
 - **`poisson(lambda)`** — Poisson counts (discrete, `lambda > 0`, `mean = variance = lambda`),
   support `0, 1, 2, …`. Sampled via Knuth's algorithm.
 - **`geometric(p)`** — the number of failures before the first success (discrete, `0 < p <= 1`,
   support `0, 1, 2, …`, `mean = (1-p)/p`). `==`/counts are meaningful.
-- **The `_int` family** — `normal_int(mu, sigma)` and `exp_int(rate)` draw the matching continuous
-  distribution and round each draw to the nearest integer, so `==`/counts are meaningful (the
-  discrete `unif_int` is already its own constructor).
+- **The `_int` family** — `normal_int(mu, sigma)` and `exponential_int(rate)` draw the matching
+  continuous distribution and round each draw to the nearest integer, so `==`/counts are meaningful
+  (the discrete `unif_int` is already its own constructor).
 - **`E(x)`** / **`E(x, n)`** and **`Var(x)`** / **`Var(x, n)`** — the Monte Carlo **expectation**
   and **variance** of a *numeric* quantity (a number or a numeric/bool RV), the companions to
   `P` for non-events. Both return an `estimate`: `E` carries the standard error of the mean
@@ -310,6 +322,12 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
 - **`sqrt(x)`** (`x >= 0`) and the constants **`pi`**, **`e`** — math helpers for scaling
   factors. `pi`/`e` are bare identifiers resolved as constants, so they also work *inside*
   function bodies (which otherwise see only their parameters).
+- **`math::gcd(a, b)`** and **`math::modpow(base, exp, mod)`** — deterministic integer number
+  theory (the modular-arithmetic core). `gcd` is Euclid's algorithm on `|a|`, `|b|` (`gcd(0,0)=0`);
+  `modpow` is `base^exp mod` by square-and-multiply, **exact** even when `base**exp` would overflow
+  `f64`'s `2^53` (the explicit, predictable form of the `(base ^ exp) % mod` idiom). Both require
+  whole-number arguments with `|x| <= 2^53` (`modpow` needs `exp >= 0`, `mod > 0`) and are
+  deterministic-only — a random-variable argument is an error (no per-lane integer loop in the VM).
 - **`P(event)`** / **`P(event, n)`** — the probability that a bool-RV (or deterministic bool)
   is true, returned as a plain `number` in `[0,1]` so it composes in arithmetic (`4 * P(C)`).
   `P` of a numeric (non-event) value is an error. Estimated by Monte Carlo over `n` samples
@@ -375,9 +393,9 @@ The modules:
 | Module    | Items | Default? |
 |-----------|-------|----------|
 | `builtin` | `P`, `Q`, `E`, `Var`, `Print`, `Len` (capital-only) | **always active** (no `use`) |
-| `rand`    | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `exp`, `exp_int`, `poisson`, `geometric`, `rotation` (batched sampling is the `~[shape]` operator, not a builtin) | needs `use rand;` |
-| `math`    | `pi`, `e`, `sqrt`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign` | needs `use math;` |
-| `vec`     | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `normsq`, `norm`, `transpose`, `normalize`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` (vector `+`/`-` and `@` cover add/sub/matvec) | needs `use vec;` |
+| `rand`    | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `normal_complex`, `exponential`, `exponential_int`, `poisson`, `geometric`, `categorical`, `rotation`, `permutation` (batched sampling is the `~[shape]` operator, not a builtin) | needs `use rand;` |
+| `math`    | `pi`, `e`, `i`/`j` (imaginary unit), `sqrt`, `exp`, `abs`, `arg`, `conj`, `re`, `im`, `floor`, `ceil`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign`, `gcd`, `modpow` | needs `use math;` |
+| `vec`     | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` (vector `+`/`-` and `@` cover add/sub/matvec) | needs `use vec;` |
 | `signal`  | `sine`, `cosine` (lazy waveforms), `noise_white` (lazy white noise), `sample` | needs `use signal;` |
 | `engine`  | `set_max_samples`, `set_max_opts` (run-time evaluator knobs) | needs `use engine;` |
 
@@ -433,17 +451,28 @@ just an array of `dist`.
   range** — never a random variable (a random gather is the dynamics fork). Out-of-bounds, a
   non-integer, or a `dist` index is a spanned error.
 - **Arithmetic broadcasts over arrays** (NumPy-style): `[1,2,3] + [10,20,30] = [11,22,33]`,
-  `1 + [1,2,3] = [2,3,4]`, `[2,4,6] / 2 = [1,2,3]`, `[1,2,3] ** 2 = [1,4,9]`. It nests, so an
+  `1 + [1,2,3] = [2,3,4]`, `[2,4,6] / 2 = [1,2,3]`, `[1,2,3] ^ 2 = [1,4,9]`. It nests, so an
   array-of-arrays (a matrix, or an `[I, Q]` signal pair) broadcasts recursively. Lengths must match.
 - **`sin`/`cos`/`atan` are ufuncs** (in `math`): a scalar computes directly, a random variable
   lifts to a graph node (sampled per lane — `E[cos(X)] = e^{-σ²/2}`), and an **array maps
   elementwise**. So `cos(phase_vector)` builds a waveform and `atan(noisy_Q / noisy_I)` demodulates
-  one with the same function. (`sqrt` over an RV is `** 0.5`.)
+  one with the same function. (`sqrt` over an RV is `^ 0.5`.)
 - **`for x in xs { body }`** is a **build-time unroll**: it evaluates `xs` to a concrete array,
   then runs `body` once per element with `x` bound in the *current* frame. Bindings leak (blocks
   don't scope — see below), which is exactly how an accumulator persists:
   `acc = 0; for x in xs { acc = acc + x }; acc`. The loop evaluates to `unit`. Because the body is
   re-run per element, each `~` inside is a **distinct node** — `n` independent draws for free.
+- **Comprehensions** `[for x in xs { body }]` build an array by collecting `body` over `xs` —
+  literally the `for x in xs { body }` loop wrapped in `[ ]` so each body value is kept instead of
+  discarded. The body sees the **outer environment** (it closes over surrounding variables, so no
+  closures or higher-order `map` are needed): `fx = [for x in 0..Q { (a ^ x) % N }]`.
+- **`continue`** skips the rest of the enclosing loop body. In a `for` loop it discards that
+  iteration's side effects; in a comprehension it **omits** that element — which is how a
+  comprehension *filters*: `evens = [for x in 0..10 { if x % 2 != 0 { continue }; x }]`. The skip
+  condition must be **deterministic** (a `continue` guarded by a random variable is an error — the
+  array length is fixed at build time and can't vary per Monte Carlo lane). Mechanically, `continue`
+  evaluates to a control sentinel that short-circuits the current `{ block }` and is consumed by the
+  loop; using it as a data value (`1 + continue`) is a type error.
 
 ### The collections / linear-algebra library
 
@@ -516,6 +545,42 @@ sample(cosine(7), 10)                # explicit: 10 samples of a 7-cycle wave (N
 The two-argument `sine(n, f)` is an eager shorthand for `sample(sine(f), n)`. This mirrors the rest
 of the language: a signal is symbolic until a sized context (or `sample`) forces it, just as a
 random variable is symbolic until `E`/`P` forces it.
+
+### Complex numbers
+
+`complex` is a first-class scalar type. There is **no complex literal**: a complex value emerges
+from the constant **`math::i`** (alias **`math::j`**, the imaginary unit `0 + 1i`) plus the ordinary
+operators — `2 + 3*math::i` — or from a complex distribution (`rand::normal_complex`). A pure-real
+expression stays a `number`; `math::i` is the only seed of complexity, and a real operand promotes
+to `re + 0i` whenever it meets a complex one.
+
+- **Operators.** `+ - * /` are complex when either operand is complex; `*`/`/` are true complex
+  multiply/divide. `^` with a **constant integer** exponent is repeated multiply (`z ^ 3`). `==`/
+  `!=` compare both channels. **Ordering `< > <= >=` is a type error** — ℂ has no total order
+  (compare `math::abs(z)` if you mean magnitude). `%` is real-only. Arrays of complex broadcast
+  elementwise like any other array; `@` is complex matmul.
+- **`math::` functions** (all branch by input type — real in → real semantics, complex in → complex):
+  - **`exp(z)`** — `e^z`. Real `e^x`; complex Euler `e^a·(cos b + i·sin b)`. (This is the renamed
+    exponential *function*; the *distribution* is now `rand::exponential`.)
+  - **`abs(z)`** — magnitude `√(re²+im²)` (real out); for a real `x` it is `|x|`.
+  - **`arg(z)`** — phase `atan2(im, re)` (real out).
+  - **`conj(z)`** — `re − i·im`. **`re(z)` / `im(z)`** — the channels (real out).
+  - **`sqrt(z)`** — real branch is IEEE (`sqrt(-1.0)` is `NaN`); complex branch is the principal
+    root (`sqrt(-1 + 0*i) == i`).
+- **Distribution.** `rand::normal_complex(sigma)` draws a circularly-symmetric complex Gaussian
+  (`E|z|² = sigma²`) — radio static / Rayleigh fading. Drawn with `~` / `~[n]` like any distribution.
+- **`vec` over complex** (PLAN-COMPLEX §7): linear ops lift component-wise (`sum`, `mean`,
+  `normalize`, `transpose`); magnitude ops return a **real** (`normsq = Σ|zᵢ|²`, `norm`, `mse`);
+  ordering ops are a type error (`max`, `min`, `quantize`). `dot` stays **bilinear** (`Σ aᵢbᵢ`, no
+  conjugation, matching `@`); **`vdot`** is the **Hermitian** inner product `Σ conj(aᵢ)·bᵢ`, and
+  **`adjoint`** is the conjugate transpose. **`outer(a, b)[i][j] = aᵢ·bⱼ`** builds a matrix.
+
+```
+z = 2 + 3*math::i;                    # complex emerges from math::i
+math::abs(z)                          # 3.6055… (a real)
+math::exp(math::i * math::pi)         # ≈ -1  (Euler's identity)
+static ~[64] rand::normal_complex(1)  # 64 iid complex-Gaussian noise samples
+```
 
 ## Scope
 

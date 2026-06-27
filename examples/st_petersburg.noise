@@ -13,7 +13,7 @@ play(rounds) = {
   live   = true;                          # still playing? (no head has landed yet)
   for k in 0..rounds {
     first  = flips[k] && live;            # the first head — this ends the game
-    payout = if first { 2 ** (k + 1) } else { payout };
+    payout = if first { 2 ^ (k + 1) } else { payout };
     live   = live && !flips[k];
   };
   payout

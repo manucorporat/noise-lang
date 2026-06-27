@@ -114,6 +114,8 @@ fn apply(op: SigOp, x: f64) -> f64 {
         SigOp::Unary(UnOp::Atan) => x.atan(),
         SigOp::Unary(UnOp::Sign) => (x > 0.0) as i32 as f64 - (x < 0.0) as i32 as f64,
         SigOp::Unary(UnOp::Round) => x.round(),
+        SigOp::Unary(UnOp::Floor) => x.floor(),
+        SigOp::Unary(UnOp::Ceil) => x.ceil(),
         SigOp::Unary(UnOp::Not) => {
             if x == 0.0 {
                 1.0
@@ -132,6 +134,7 @@ fn scalar_binop(op: BinOp, a: f64, b: f64) -> f64 {
         BinOp::Sub => a - b,
         BinOp::Mul => a * b,
         BinOp::Div => a / b,
+        BinOp::Mod => a - b * (a / b).floor(),
         BinOp::Pow => a.powf(b),
         BinOp::Lt => (a < b) as i32 as f64,
         BinOp::Gt => (a > b) as i32 as f64,

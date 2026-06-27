@@ -79,6 +79,10 @@ pub enum Recipe {
     UniformInt { lo: f64, hi: f64 },
     Bernoulli { p: f64 },
     Normal { mu: f64, sigma: f64 },
+    /// A circularly-symmetric complex Gaussian (CSCG, PLAN-COMPLEX §5): `re`/`im` each
+    /// `~ N(0, sigma/√2)`, independent, so `E|z|² = sigma²`. Drawing it yields a `Value::Complex`
+    /// whose two channels are independent normal RV nodes — see `Engine::draw`.
+    NormalComplex { sigma: f64 },
     Exp { rate: f64 },
     Poisson { lambda: f64 },
     Geometric { p: f64 },
@@ -105,11 +109,12 @@ impl std::fmt::Display for Recipe {
             Recipe::UniformInt { lo, hi } => write!(f, "unif_int({lo}, {hi})"),
             Recipe::Bernoulli { p } => write!(f, "bernoulli({p})"),
             Recipe::Normal { mu, sigma } => write!(f, "normal({mu}, {sigma})"),
-            Recipe::Exp { rate } => write!(f, "exp({rate})"),
+            Recipe::NormalComplex { sigma } => write!(f, "normal_complex({sigma})"),
+            Recipe::Exp { rate } => write!(f, "exponential({rate})"),
             Recipe::Poisson { lambda } => write!(f, "poisson({lambda})"),
             Recipe::Geometric { p } => write!(f, "geometric({p})"),
             Recipe::NormalInt { mu, sigma } => write!(f, "normal_int({mu}, {sigma})"),
-            Recipe::ExpInt { rate } => write!(f, "exp_int({rate})"),
+            Recipe::ExpInt { rate } => write!(f, "exponential_int({rate})"),
             Recipe::Rotation { d } => write!(f, "rotation({d})"),
             Recipe::Permutation { n } => write!(f, "permutation({n})"),
         }

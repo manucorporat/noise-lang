@@ -40,7 +40,7 @@
       "patterns": [
         {
           "name": "keyword.control.noise",
-          "match": "\\b(use|if|else|for|in)\\b"
+          "match": "\\b(use|if|else|for|in|continue)\\b"
         },
         {
           "name": "constant.language.boolean.noise",
@@ -57,7 +57,7 @@
     },
     "distributions": {
       "name": "support.function.distribution.noise",
-      "match": "\\b(unif_int|unif|normal_int|normal|bernoulli|poisson|geometric|exp_int|exp|iid|iidmat|rotation)\\b"
+      "match": "\\b(unif_int|unif|normal_int|normal_complex|normal|bernoulli|poisson|geometric|exponential_int|exponential|categorical|rotation|permutation)\\b"
     },
     "queries": {
       "name": "support.function.builtin.noise",
@@ -65,7 +65,7 @@
     },
     "builtins": {
       "name": "support.function.noise",
-      "match": "\\b(pi|e|sqrt|round|log10|log|sin|cos|atan|sign|sum|count|any|all|max|min|mean|dot|normsq|norm|vadd|vsub|vsign|matvec|transpose|normalize|quantize|has_duplicate|mse|ones|zeros|iota|scale|sine|cosine|noise_white|sample)\\b"
+      "match": "\\b(pi|e|i|j|sqrt|exp|abs|arg|conj|re|im|floor|ceil|round|log10|log|sin|cos|atan|sign|gcd|modpow|sum|count|any|all|max|min|mean|dot|vdot|normsq|norm|vadd|vsub|vsign|matvec|transpose|adjoint|normalize|outer|quantize|has_duplicate|mse|ones|zeros|iota|scale|sine|cosine|noise_white|sample)\\b"
     },
     "operators": {
       "patterns": [

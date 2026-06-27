@@ -6,7 +6,7 @@ import CodePanel from './CodePanel.astro';
 const code = `X ~ rand::unif(-1, 1)
 Y ~ rand::unif(-1, 1)
 
-C = X**2 + Y**2 < 1
+C = X^2 + Y^2 < 1
 
 4 * P(C)`;
 ---
@@ -36,7 +36,7 @@ C = X**2 + Y**2 < 1
       </div>
       <div class="scrolly-step" data-step="1">
         <h4>Ask one yes/no question</h4>
-        <p><code class="code-inline">C = X**2 + Y**2 &lt; 1</code> is true exactly when the point falls inside the unit circle. In Noise that comparison is itself a random variable — a <a class="ref" href="https://en.wikipedia.org/wiki/Bernoulli_distribution" target="_blank" rel="noopener">Bernoulli distribution</a>, landing true or false on each draw.</p>
+        <p><code class="code-inline">C = X^2 + Y^2 &lt; 1</code> is true exactly when the point falls inside the unit circle. In Noise that comparison is itself a random variable — a <a class="ref" href="https://en.wikipedia.org/wiki/Bernoulli_distribution" target="_blank" rel="noopener">Bernoulli distribution</a>, landing true or false on each draw.</p>
       </div>
       <div class="scrolly-step" data-step="2">
         <h4>Now throw the darts</h4>
@@ -139,7 +139,7 @@ C = X**2 + Y**2 < 1
 
     async function engineResult() {
       engineEl.textContent = 'engine (10⁶ samples)…';
-      try { const r = await runNoise('X ~ rand::unif(-1,1); Y ~ rand::unif(-1,1); 4 * P(X**2 + Y**2 < 1)'); engineEl.innerHTML = `engine: π ≈ <span class="ok">${r.value ?? r.output.trim()}</span> — ${engineMetrics(r)}`; } catch { engineEl.textContent = ''; }
+      try { const r = await runNoise('X ~ rand::unif(-1,1); Y ~ rand::unif(-1,1); 4 * P(X^2 + Y^2 < 1)'); engineEl.innerHTML = `engine: π ≈ <span class="ok">${r.value ?? r.output.trim()}</span> — ${engineMetrics(r)}`; } catch { engineEl.textContent = ''; }
     }
 
     const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting && e.intersectionRatio > 0.5) setStep(Number((e.target as HTMLElement).dataset.step)); }, { threshold: [0.5], rootMargin: '-18% 0px -18% 0px' });

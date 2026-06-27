@@ -7,19 +7,21 @@ export const THEME_ID = 'noise-paper';
 
 // Module-scoped builtin names, by role, so the highlighter can color them distinctly.
 const DISTRIBUTIONS = [
-  'unif', 'unif_int', 'bernoulli', 'normal', 'normal_int', 'exp', 'exp_int',
-  'poisson', 'geometric', 'rotation',
+  'unif', 'unif_int', 'bernoulli', 'normal', 'normal_int', 'normal_complex',
+  'exponential', 'exponential_int', 'poisson', 'geometric', 'categorical',
+  'rotation', 'permutation',
 ];
 const QUERIES = ['P', 'Q', 'E', 'Var']; // probability / moment / quantile queries
 const BUILTINS = [
   'Print', 'Len',
   'sqrt', 'round', 'log', 'log10', 'sin', 'cos', 'atan', 'sign',
-  'sum', 'count', 'any', 'all', 'max', 'min', 'mean', 'dot', 'normsq', 'norm',
-  'transpose', 'normalize', 'quantize', 'has_duplicate', 'mse',
+  'exp', 'abs', 'arg', 'conj', 're', 'im', 'floor', 'ceil', 'gcd', 'modpow',
+  'sum', 'count', 'any', 'all', 'max', 'min', 'mean', 'dot', 'vdot', 'normsq', 'norm',
+  'transpose', 'adjoint', 'normalize', 'outer', 'quantize', 'has_duplicate', 'mse',
   'ones', 'zeros', 'iota', 'vsign', 'scale',
   'sine', 'cosine', 'noise_white', 'sample',
 ];
-const CONSTANTS = ['pi', 'e'];
+const CONSTANTS = ['pi', 'e', 'i', 'j'];
 const MODULES = ['builtin', 'rand', 'math', 'vec', 'signal'];
 
 let registered = false;
@@ -53,7 +55,7 @@ export function registerNoise(monaco: typeof Monaco): void {
 
   monaco.languages.setMonarchTokensProvider(LANGUAGE_ID, {
     defaultToken: '',
-    keywords: ['if', 'else', 'for', 'in', 'use', 'true', 'false'],
+    keywords: ['if', 'else', 'for', 'in', 'continue', 'use', 'true', 'false'],
     distributions: DISTRIBUTIONS,
     queries: QUERIES,
     builtins: BUILTINS,

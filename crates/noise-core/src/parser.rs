@@ -1,11 +1,11 @@
 //! Hand-written Pratt (precedence-climbing) parser. Turns tokens into a `Program`.
 //!
-//! Precedence (low → high), all left-associative except `**` and prefix unary:
+//! Precedence (low → high), all left-associative except `^` and prefix unary:
 //!   assignment `=` `~` (right-assoc, lowest)
 //!   comparison `== != < > <= >=`
 //!   additive   `+ -`
 //!   multiplicative `* /`
-//!   power `**` (right-assoc)
+//!   power `^` (right-assoc)
 //!   prefix `- !`
 //!   call / primary
 //! See LANG.md for the canonical table.
@@ -383,6 +383,10 @@ impl Parser {
             TokKind::LBrace => self.parse_block(),
             TokKind::If => self.parse_if(),
             TokKind::For => self.parse_for(),
+            TokKind::Continue => {
+                let tok = self.bump();
+                Ok(Spanned::new(Expr::Continue, tok.span))
+            }
             TokKind::LBracket => self.parse_array(),
             other => Err(NoiseError::parse(
                 format!("unexpected token {:?}", other),
@@ -434,18 +438,49 @@ impl Parser {
     /// call-argument rule).
     fn parse_array(&mut self) -> Result<Spanned> {
         let open = self.expect(TokKind::LBracket)?;
-        let mut elems = Vec::new();
-        if *self.peek() != TokKind::RBracket {
-            loop {
-                elems.push(self.parse_expr()?);
-                if !self.eat(&TokKind::Comma) {
-                    break;
-                }
-            }
+        if *self.peek() == TokKind::RBracket {
+            let close = self.expect(TokKind::RBracket)?;
+            return Ok(Spanned::new(Expr::Array(Vec::new()), Span::new(open.span.start, close.span.end)));
+        }
+        // `[for x in iter (if cond) { body }]` — a comprehension, detected by a leading `for`. It
+        // mirrors the `for x in xs { body }` loop statement exactly, just wrapped in `[ ]` so the
+        // body values are collected into an array (rather than discarded).
+        if *self.peek() == TokKind::For {
+            return self.parse_comprehension(open.span.start);
+        }
+        let mut elems = vec![self.parse_expr()?];
+        while self.eat(&TokKind::Comma) {
+            elems.push(self.parse_expr()?);
         }
         let close = self.expect(TokKind::RBracket)?;
         let span = Span::new(open.span.start, close.span.end);
         Ok(Spanned::new(Expr::Array(elems), span))
+    }
+
+    /// Parse a comprehension `for IDENT in opexpr { body }`, with the leading `[` already consumed
+    /// (`start` is its offset) and the trailing `]` consumed here. The iterable is a bare `opexpr`
+    /// (binding power 0), so it doesn't swallow the `{` that opens the body block. It is exactly the
+    /// `for` loop statement wrapped in `[ ]` — a pure 1-to-1 map yielding `Len(iter)` elements.
+    fn parse_comprehension(&mut self, start: usize) -> Result<Spanned> {
+        self.expect(TokKind::For)?;
+        let var = match self.bump().kind {
+            TokKind::Ident(name) => name,
+            other => {
+                return Err(NoiseError::parse(
+                    format!("expected a loop variable name after `for`, found {other:?}"),
+                    self.span(),
+                ))
+            }
+        };
+        self.expect(TokKind::In)?;
+        let iter = self.parse_bp(0)?;
+        let body = self.parse_block()?;
+        let close = self.expect(TokKind::RBracket)?;
+        let span = Span::new(start, close.span.end);
+        Ok(Spanned::new(
+            Expr::Comprehension { body: Box::new(body), var, iter: Box::new(iter) },
+            span,
+        ))
     }
 
     /// `for IDENT in EXPR { body }` — parsed like `if`. The iterable is a bare `opexpr` (no
@@ -502,8 +537,8 @@ impl Parser {
     }
 }
 
-/// Prefix operators bind tighter than everything except `**` (so `-2 ** 2 == -(2**2)`,
-/// matching common math/Python convention) and looser than `**`.
+/// Prefix operators bind tighter than everything except `^` (so `-2 ^ 2 == -(2^2)`,
+/// matching common math/Python convention) and looser than `^`.
 const PREFIX_BP: u8 = 13;
 
 /// `..` (range) binding powers — the lowest of any infix form, so the bounds are full operator
@@ -517,8 +552,8 @@ const MATMUL_LBP: u8 = 11;
 const MATMUL_RBP: u8 = 12;
 
 /// Returns `(op, left_bp, right_bp)` for an infix token. Left-assoc ops have
-/// `left_bp < right_bp`; `**` is right-assoc (`left_bp > right_bp`).
-/// Precedence low→high: `..` < `||` < `&&` < comparison < `+ -` < `* /` < prefix < `**`.
+/// `left_bp < right_bp`; `^` is right-assoc (`left_bp > right_bp`).
+/// Precedence low→high: `..` < `||` < `&&` < comparison < `+ -` < `* /` < prefix < `^`.
 fn infix_op(k: &TokKind) -> Option<(BinOp, u8, u8)> {
     use BinOp::*;
     Some(match k {
@@ -534,7 +569,8 @@ fn infix_op(k: &TokKind) -> Option<(BinOp, u8, u8)> {
         TokKind::Minus => (Sub, 9, 10),
         TokKind::Star => (Mul, 11, 12),
         TokKind::Slash => (Div, 11, 12),
-        TokKind::StarStar => (Pow, 14, 13),
+        TokKind::Percent => (Mod, 11, 12),
+        TokKind::Caret => (Pow, 14, 13),
         _ => return None,
     })
 }
@@ -552,8 +588,8 @@ mod tests {
 
     #[test]
     fn power_is_right_associative() {
-        // 2 ** 3 ** 2  ==>  2 ** (3 ** 2)
-        match parse_one("2 ** 3 ** 2") {
+        // 2 ^ 3 ^ 2  ==>  2 ^ (3 ^ 2)
+        match parse_one("2 ^ 3 ^ 2") {
             Expr::Binary(BinOp::Pow, l, r) => {
                 assert!(matches!(l.expr, Expr::Number(n) if n == 2.0));
                 assert!(matches!(r.expr, Expr::Binary(BinOp::Pow, _, _)));
@@ -571,6 +607,43 @@ mod tests {
             }
             other => panic!("got {other:?}"),
         }
+    }
+
+    #[test]
+    fn modulo_binds_like_multiplication() {
+        // 1 + 7 % 3  ==>  1 + (7 % 3)
+        match parse_one("1 + 7 % 3") {
+            Expr::Binary(BinOp::Add, _, r) => {
+                assert!(matches!(r.expr, Expr::Binary(BinOp::Mod, _, _)))
+            }
+            other => panic!("got {other:?}"),
+        }
+        // 2 ^ 3 % 5  ==>  (2 ^ 3) % 5  (^ binds tighter than %)
+        match parse_one("2 ^ 3 % 5") {
+            Expr::Binary(BinOp::Mod, l, _) => {
+                assert!(matches!(l.expr, Expr::Binary(BinOp::Pow, _, _)))
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comprehensions_parse() {
+        // `[for x in iter { body }]` is a Comprehension, not an Array.
+        match parse_one("[for x in 0..5 { x*x }]") {
+            Expr::Comprehension { var, iter, body } => {
+                assert_eq!(var, "x");
+                assert!(matches!(iter.expr, Expr::Range(_, _)));
+                assert!(matches!(body.expr, Expr::Block(_)));
+            }
+            other => panic!("got {other:?}"),
+        }
+        // a comma-separated list is still a plain array (not a comprehension)
+        assert!(matches!(parse_one("[1, 2, 3]"), Expr::Array(v) if v.len() == 3));
+        // a single-element array (no `for`) is still an array
+        assert!(matches!(parse_one("[42]"), Expr::Array(v) if v.len() == 1));
+        // `continue` is a primary expression
+        assert!(matches!(parse_one("continue"), Expr::Continue));
     }
 
     #[test]

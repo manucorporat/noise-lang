@@ -121,7 +121,7 @@ impl Engine {
     }
 
     /// Convenience alias of [`Engine::run`]: the last statement's value is the RV.
-    /// Tests do `let rv = eng.run_rv("X ~ unif(-1,1); X ** 2")?;`.
+    /// Tests do `let rv = eng.run_rv("X ~ unif(-1,1); X ^ 2")?;`.
     pub fn run_rv(&mut self, src: &str) -> Result<Value> {
         self.run(src)
     }
@@ -147,7 +147,9 @@ impl Engine {
             Expr::Unary(op, rhs) => {
                 let v = self.eval(rhs)?;
                 forbid_recipe(&v, rhs.span)?;
-                if is_dist(&v) {
+                if matches!(v, Value::Complex { .. }) {
+                    self.unary_complex(*op, v, node.span)
+                } else if is_dist(&v) {
                     self.lift_unary(*op, v, node.span)
                 } else {
                     eval_unary(*op, v, node.span) // deterministic fast path, unchanged
@@ -192,6 +194,11 @@ impl Engine {
                 let mut last = Value::Unit;
                 for s in stmts {
                     last = self.eval(s)?;
+                    // `continue` short-circuits the block: the remaining statements don't run, and
+                    // the sentinel propagates up to the enclosing loop (see `eval_comprehension`).
+                    if matches!(last, Value::Continue) {
+                        return Ok(Value::Continue);
+                    }
                 }
                 Ok(last)
             }
@@ -255,6 +262,7 @@ impl Engine {
             }
             // Extracted into methods to keep `eval`'s stack frame small (recursion-depth budget).
             Expr::Array(elems) => self.eval_array(elems),
+            Expr::Comprehension { body, var, iter } => self.eval_comprehension(body, var, iter),
             Expr::Range(lo, hi) => self.eval_range(lo, hi, node.span),
             Expr::Index(arr, idx) => self.eval_index(arr, idx),
             Expr::For { var, iter, body } => self.eval_for(var, iter, body),
@@ -269,6 +277,8 @@ impl Engine {
                 self.used.insert(module.clone());
                 Ok(Value::Unit)
             }
+            // The `continue` control sentinel — short-circuits the enclosing block / loop body.
+            Expr::Continue => Ok(Value::Continue),
         }
     }
 
@@ -286,6 +296,15 @@ impl Engine {
                 if let Some(c) = math_const(base) {
                     if m == "math" {
                         return Ok(Value::Num(c));
+                    }
+                    return Err(NoiseError::runtime(
+                        format!("'{base}' is in module 'math', not '{m}'"),
+                        span,
+                    ));
+                }
+                if math_const_complex(base) {
+                    if m == "math" {
+                        return Ok(Value::cnum(0.0, 1.0));
                     }
                     return Err(NoiseError::runtime(
                         format!("'{base}' is in module 'math', not '{m}'"),
@@ -312,6 +331,15 @@ impl Engine {
                 if let Some(c) = math_const(name) {
                     if self.module_active("math") {
                         return Ok(Value::Num(c));
+                    }
+                    return Err(NoiseError::runtime(
+                        format!("'{name}' is in module 'math' — add `use math;` or write `math::{name}`"),
+                        span,
+                    ));
+                }
+                if math_const_complex(name) {
+                    if self.module_active("math") {
+                        return Ok(Value::cnum(0.0, 1.0));
                     }
                     return Err(NoiseError::runtime(
                         format!("'{name}' is in module 'math' — add `use math;` or write `math::{name}`"),
@@ -498,6 +526,36 @@ impl Engine {
         Ok(Value::Unit)
     }
 
+    /// `[for var in iter { body }]` — a comprehension (PLAN-COMPLEX §8). Build-time unrolled exactly
+    /// like a leaking `for`: bind `var` to each element in the *current* frame (so the body closes
+    /// over outer variables — this is why a higher-order `map(xs, f)` is unnecessary and Noise needs
+    /// no closures), evaluate `body`, and collect the results. A pure 1-to-1 map: the result always
+    /// has `Len(iter)` elements.
+    fn eval_comprehension(&mut self, body: &Spanned, var: &str, iter: &Spanned) -> Result<Value> {
+        let iv = self.eval(iter)?;
+        let xs = match iv {
+            Value::Array(xs) => xs,
+            other => {
+                return Err(NoiseError::runtime(
+                    format!("a comprehension needs an array to iterate, got {}", other.type_name()),
+                    iter.span,
+                ))
+            }
+        };
+        let mut out = Vec::with_capacity(xs.len());
+        for x in xs.iter() {
+            self.vars.insert(var.to_string(), x.clone());
+            let v = self.eval(body)?;
+            // `continue` in the body omits this element — that's how a comprehension filters.
+            if matches!(v, Value::Continue) {
+                continue;
+            }
+            forbid_recipe(&v, body.span)?;
+            out.push(v);
+        }
+        Ok(Value::Array(Rc::new(out)))
+    }
+
     /// Evaluate a user-function call: bind args to params in a *fresh* frame (params-only scope
     /// — functions are pure in their arguments and may call other functions, but do not capture
     /// outer variables), evaluate the body, then restore the caller's frame. A `~` function
@@ -598,6 +656,13 @@ impl Engine {
         if let Recipe::Permutation { n } = r {
             return self.draw_permutation(n);
         }
+        // A complex draw yields a `Value::Complex` (two independent real channels), not a scalar id.
+        if let Recipe::NormalComplex { sigma } = r {
+            let s = sigma / std::f64::consts::SQRT_2;
+            let re = self.graph.push(RvNode::Src(Source::Normal { mu: 0.0, sigma: s }), RvKind::Num);
+            let im = self.graph.push(RvNode::Src(Source::Normal { mu: 0.0, sigma: s }), RvKind::Num);
+            return Ok(Value::complex(Value::Dist(re), Value::Dist(im)));
+        }
         let id = match r {
             Recipe::Uniform { lo, hi } => {
                 self.graph.push(RvNode::Src(Source::Uniform(Uniform { lo, hi })), RvKind::Num)
@@ -634,9 +699,10 @@ impl Engine {
                 let c = self.graph.push(RvNode::ConstNum(p), RvKind::Num);
                 self.graph.push(RvNode::Binary(BinOp::Lt, u, c), RvKind::Bool)
             }
-            // Handled above with an early return (they yield arrays, not a scalar `id`).
+            // Handled above with an early return (they yield arrays/complex, not a scalar `id`).
             Recipe::Rotation { .. } => unreachable!("rotation drawn via draw_rotation"),
             Recipe::Permutation { .. } => unreachable!("permutation drawn via draw_permutation"),
+            Recipe::NormalComplex { .. } => unreachable!("normal_complex drawn via the complex path"),
         };
         Ok(Value::Dist(id))
     }
@@ -669,7 +735,8 @@ impl Engine {
                 RvKind::Bool
             }
             // Math ufuncs need a numeric RV and yield a numeric RV.
-            UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Sign | UnOp::Round => {
+            UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Sign | UnOp::Round | UnOp::Floor
+            | UnOp::Ceil => {
                 if kind != RvKind::Num {
                     return Err(NoiseError::runtime(
                         format!("cannot apply {} to {}", unop_name(op), kind.type_name()),
@@ -690,7 +757,7 @@ impl Engine {
         let (lid, lk) = self.operand_to_rv(l, span)?;
         let (rid, rk) = self.operand_to_rv(r, span)?;
         let result_kind = match op {
-            Add | Sub | Mul | Div | Pow => {
+            Add | Sub | Mul | Div | Mod | Pow => {
                 if lk != RvKind::Num || rk != RvKind::Num {
                     return Err(NoiseError::runtime(
                         format!("arithmetic on {} and {}", lk.type_name(), rk.type_name()),
@@ -808,14 +875,72 @@ impl Engine {
         }
         // Arrays broadcast elementwise (NumPy-style): array⊕array (length-matched) and
         // array⊕scalar both map the op over the elements — so `signal + noise`, `1 + m`, and
-        // `phase / kf` all work on whole signals.
+        // `phase / kf` all work on whole signals. (A complex scalar meeting an array broadcasts
+        // here, recursing into `binop` per element where the complex path below handles it.)
         if matches!(l, Value::Array(_)) || matches!(r, Value::Array(_)) {
             return self.binop_broadcast(op, l, r, span);
+        }
+        // A complex operand (either a constant `2 + 3i` or a complex RV) routes through the
+        // complex arithmetic path: `* / ^` are true complex operations, a real operand promotes
+        // to `re + 0i`, and ordering (`< > <= >=`) is a type error (no total order on ℂ).
+        if matches!(l, Value::Complex { .. }) || matches!(r, Value::Complex { .. }) {
+            return self.binop_complex(op, l, r, span);
+        }
+        // Algebraic identity folds before lifting: `0*x → 0`, `1*x → x`, `x+0/0+x → x`, `x-0 → x`.
+        // These keep an RV out of the graph where it provably doesn't matter — and, crucially, let
+        // `math::i * x` keep a *literal* `0` real channel (`0*x`), so a complex `exp` over a random
+        // angle (`e^{i·X}`) still sees a constant real part. Only fires when the non-constant side is
+        // numeric, so `0 * bool_event` still type-errors rather than silently folding to 0.
+        if let Some(folded) = self.fold_identity(op, &l, &r) {
+            return Ok(folded);
         }
         if is_dist(&l) || is_dist(&r) {
             self.lift_binary(op, l, r, span)
         } else {
             eval_binary(op, l, r, span)
+        }
+    }
+
+    /// Whether `v` is a `dist<number>` — the survivor guard for [`Self::fold_identity`]. The fold
+    /// fires *only* on the RV path: for two constants, `eval_binary` already evaluates the identity
+    /// IEEE-honestly (e.g. `0 * inf == NaN`), so there is nothing to fold and nothing to get wrong.
+    /// Restricting to a numeric RV also keeps `0 * event` (a `dist<bool>`) a clean type error.
+    fn is_num_dist(&self, v: &Value) -> bool {
+        matches!(v, Value::Dist(id) if self.graph.kind(*id) == RvKind::Num)
+    }
+
+    /// Fold the arithmetic identities `1*x → x`, `x+0/0+x → x`, `x-0 → x`, and `0*x → 0` when the
+    /// surviving operand is a numeric RV (`dist<number>`) and the other side is the literal `0`/`1`.
+    /// This keeps a provably-irrelevant RV out of the graph — and, crucially, lets `math::i * x`
+    /// keep a *literal* `0` real channel (`0*x`), so a complex `exp` over a random angle (`e^{i·X}`)
+    /// still sees a constant real part. (`0*x → 0` discards `x`'s inf/NaN propagation, but only for a
+    /// measure-zero set of draws; for constant operands the fold never fires.) `None` falls through.
+    fn fold_identity(&self, op: BinOp, l: &Value, r: &Value) -> Option<Value> {
+        let is0 = |v: &Value| matches!(v, Value::Num(n) if *n == 0.0);
+        let is1 = |v: &Value| matches!(v, Value::Num(n) if *n == 1.0);
+        match op {
+            BinOp::Mul => {
+                if (is0(l) && self.is_num_dist(r)) || (is0(r) && self.is_num_dist(l)) {
+                    Some(Value::Num(0.0))
+                } else if is1(l) && self.is_num_dist(r) {
+                    Some(r.clone())
+                } else if is1(r) && self.is_num_dist(l) {
+                    Some(l.clone())
+                } else {
+                    None
+                }
+            }
+            BinOp::Add => {
+                if is0(l) && self.is_num_dist(r) {
+                    Some(r.clone())
+                } else if is0(r) && self.is_num_dist(l) {
+                    Some(l.clone())
+                } else {
+                    None
+                }
+            }
+            BinOp::Sub if is0(r) && self.is_num_dist(l) => Some(l.clone()),
+            _ => None,
         }
     }
 
@@ -918,6 +1043,146 @@ impl Engine {
                     span,
                 ))
             }
+        }
+    }
+
+    /// Combine two operands where at least one is **complex** (PLAN-COMPLEX §3). Every complex op
+    /// is expressed as real ops on the two channels via [`Self::binop`], so it folds for constant
+    /// complex and lifts into the (real) sample-DAG when a channel is an RV — no complex value
+    /// flows through the VM. A real operand promotes to `re + 0i`; ordering and logical ops are a
+    /// type error (ℂ has no total order, and a complex value is not an event).
+    fn binop_complex(&mut self, op: BinOp, l: Value, r: Value, span: Span) -> Result<Value> {
+        use BinOp::*;
+        match op {
+            Add | Sub => {
+                let (lr, li) = self.complex_parts(l, span)?;
+                let (rr, ri) = self.complex_parts(r, span)?;
+                let re = self.binop(op, lr, rr, span)?;
+                let im = self.binop(op, li, ri, span)?;
+                Ok(Value::complex(re, im))
+            }
+            Mul => {
+                // (a+bi)(c+di) = (ac − bd) + (ad + bc) i
+                let (a, b) = self.complex_parts(l, span)?;
+                let (c, d) = self.complex_parts(r, span)?;
+                let ac = self.binop(Mul, a.clone(), c.clone(), span)?;
+                let bd = self.binop(Mul, b.clone(), d.clone(), span)?;
+                let ad = self.binop(Mul, a, d, span)?;
+                let bc = self.binop(Mul, b, c, span)?;
+                let re = self.binop(Sub, ac, bd, span)?;
+                let im = self.binop(Add, ad, bc, span)?;
+                Ok(Value::complex(re, im))
+            }
+            Div => {
+                // (a+bi)/(c+di) = [(ac + bd) + (bc − ad) i] / (c² + d²)
+                let (a, b) = self.complex_parts(l, span)?;
+                let (c, d) = self.complex_parts(r, span)?;
+                let cc = self.binop(Mul, c.clone(), c.clone(), span)?;
+                let dd = self.binop(Mul, d.clone(), d.clone(), span)?;
+                let denom = self.binop(Add, cc, dd, span)?;
+                let ac = self.binop(Mul, a.clone(), c.clone(), span)?;
+                let bd = self.binop(Mul, b.clone(), d.clone(), span)?;
+                let bc = self.binop(Mul, b, c, span)?;
+                let ad = self.binop(Mul, a, d, span)?;
+                let re_num = self.binop(Add, ac, bd, span)?;
+                let im_num = self.binop(Sub, bc, ad, span)?;
+                let re = self.binop(Div, re_num, denom.clone(), span)?;
+                let im = self.binop(Div, im_num, denom, span)?;
+                Ok(Value::complex(re, im))
+            }
+            Pow => self.complex_pow(l, r, span),
+            // Exact (re, im) comparison: equal iff both channels are equal.
+            Eq => {
+                let (lr, li) = self.complex_parts(l, span)?;
+                let (rr, ri) = self.complex_parts(r, span)?;
+                let re_eq = self.binop(Eq, lr, rr, span)?;
+                let im_eq = self.binop(Eq, li, ri, span)?;
+                self.binop(And, re_eq, im_eq, span)
+            }
+            Ne => {
+                let (lr, li) = self.complex_parts(l, span)?;
+                let (rr, ri) = self.complex_parts(r, span)?;
+                let re_ne = self.binop(Ne, lr, rr, span)?;
+                let im_ne = self.binop(Ne, li, ri, span)?;
+                self.binop(Or, re_ne, im_ne, span)
+            }
+            Lt | Gt | Le | Ge => Err(NoiseError::runtime(
+                "complex numbers have no ordering (ℂ is not totally ordered) — compare `math::abs(z)` if you mean magnitude".to_string(),
+                span,
+            )),
+            Mod => Err(NoiseError::runtime(
+                "modulo `%` is real-only — it has no meaning on a complex number".to_string(),
+                span,
+            )),
+            And | Or => Err(NoiseError::runtime(
+                "logical operator needs two bool events, got complex".to_string(),
+                span,
+            )),
+        }
+    }
+
+    /// `z ^ k` for a complex base and a **constant integer** exponent: repeated complex multiply
+    /// (negative `k` reciprocates). Enough for the QFT/quantum path; a general complex exponent is
+    /// deferred (a clear error). The exponent magnitude is capped so a stray `z ^ 1e9` can't build
+    /// an unbounded graph at build time.
+    fn complex_pow(&mut self, base: Value, exp: Value, span: Span) -> Result<Value> {
+        let k = match scalar_const(&exp) {
+            Some(k) if k.fract() == 0.0 && k.is_finite() => k,
+            _ => {
+                return Err(NoiseError::runtime(
+                    "complex `^` needs a constant integer exponent (e.g. `z ^ 2`); a general complex power is not supported".to_string(),
+                    span,
+                ))
+            }
+        };
+        if k.abs() > 4096.0 {
+            return Err(NoiseError::runtime(
+                format!("complex `^` exponent {k} is too large (max magnitude 4096)"),
+                span,
+            ));
+        }
+        let n = k.abs() as u32;
+        let mut acc = Value::cnum(1.0, 0.0);
+        for _ in 0..n {
+            acc = self.binop_complex(BinOp::Mul, acc, base.clone(), span)?;
+        }
+        if k < 0.0 {
+            acc = self.binop_complex(BinOp::Div, Value::cnum(1.0, 0.0), acc, span)?;
+        }
+        Ok(acc)
+    }
+
+    /// Prefix unary op on a **complex** value. Only `-` (negate both channels) is defined; `!`
+    /// (logical not) needs a bool. Negation goes through `binop` so it lifts when a channel is an RV.
+    fn unary_complex(&mut self, op: UnOp, v: Value, span: Span) -> Result<Value> {
+        let (re, im) = self.complex_parts(v, span)?;
+        match op {
+            UnOp::Neg => {
+                let nr = self.binop(BinOp::Sub, Value::Num(0.0), re, span)?;
+                let ni = self.binop(BinOp::Sub, Value::Num(0.0), im, span)?;
+                Ok(Value::complex(nr, ni))
+            }
+            _ => Err(NoiseError::runtime(
+                format!("cannot apply {} to a complex value", unop_name(op)),
+                span,
+            )),
+        }
+    }
+
+    /// Split an operand into its `(re, im)` real channels for complex arithmetic. A complex value
+    /// hands back its stored channels; a real scalar (`Num`/`Est`/`Dist<number>`) promotes to
+    /// `x + 0i`; anything else (`Bool`/`Str`/array/…) is a spanned type error.
+    fn complex_parts(&self, v: Value, span: Span) -> Result<(Value, Value)> {
+        match v {
+            Value::Complex { re, im } => Ok((*re, *im)),
+            v @ (Value::Num(_) | Value::Est { .. }) => Ok((v, Value::Num(0.0))),
+            Value::Dist(id) if self.graph.kind(id) == RvKind::Num => {
+                Ok((Value::Dist(id), Value::Num(0.0)))
+            }
+            other => Err(NoiseError::runtime(
+                format!("cannot use {} in a complex expression", other.type_name()),
+                span,
+            )),
         }
     }
 
@@ -1111,9 +1376,12 @@ impl Engine {
             "min" => self.lib_extreme(name, args, span),
             "mean" => self.lib_mean(args, span),
             "dot" => self.lib_dot(args, span),
+            "vdot" => self.lib_vdot(args, span),
             "normsq" => self.lib_normsq(args, span),
             "norm" => self.lib_norm(args, span),
             "normalize" => self.lib_normalize(args, span),
+            "adjoint" => self.lib_adjoint(args, span),
+            "outer" => self.lib_outer(args, span),
             "has_duplicates" => self.lib_has_duplicates(args, span),
             "count_duplicates" => self.lib_count_duplicates(args, span),
             "mse" => self.lib_mse(args, span),
@@ -1121,6 +1389,11 @@ impl Engine {
             "cos" => self.lib_ufunc(UnOp::Cos, args, span),
             "atan" => self.lib_ufunc(UnOp::Atan, args, span),
             "sign" => self.lib_ufunc(UnOp::Sign, args, span),
+            // complex-aware math ufuncs (PLAN-COMPLEX §4) + the real rounding family (§8).
+            "exp" | "abs" | "sqrt" | "arg" | "conj" | "re" | "im" | "floor" | "ceil" => {
+                self.math_ufunc(name, args, span)
+            }
+            "categorical" => self.lib_categorical(args, span),
             "noise_white" => self.lib_noise(NoiseKind::White, args, span),
             "noise_brown" => self.lib_noise(NoiseKind::Brown, args, span),
             "noise_pink" => self.lib_noise(NoiseKind::Pink, args, span),
@@ -1460,13 +1733,113 @@ impl Engine {
         Ok(acc)
     }
 
-    /// `normsq(a)` — `dot(a, a)`.
-    fn lib_normsq(&mut self, args: &[Value], span: Span) -> Result<Value> {
-        let [a] = arity1("normsq", args, span)?;
-        self.lib_dot(&[a.clone(), a.clone()], span)
+    /// `vdot(a, b)` — the **Hermitian** inner product `Σ conj(aᵢ)·bᵢ` (PLAN-COMPLEX §7, numpy's
+    /// `vdot`). Conjugates the *first* argument, unlike the bilinear [`Self::lib_dot`] / `@`. For
+    /// real vectors it coincides with `dot`; for complex vectors it is the physically-meaningful
+    /// inner product (so `vdot(z, z) == normsq(z)`, a real).
+    fn lib_vdot(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [a, b] = arity2("vdot", args, span)?;
+        let a = self.expect_array("vdot", a, span)?;
+        let b = self.expect_array("vdot", b, span)?;
+        if a.len() != b.len() {
+            return Err(length_mismatch("vdot", a.len(), b.len(), span));
+        }
+        let mut acc = Value::Num(0.0);
+        for (ai, bi) in a.iter().zip(b.iter()) {
+            let ca = self.math_ufunc("conj", std::slice::from_ref(ai), span)?;
+            let prod = self.binop(BinOp::Mul, ca, bi.clone(), span)?;
+            acc = self.binop(BinOp::Add, acc, prod, span)?;
+        }
+        Ok(acc)
     }
 
-    /// `norm(a)` — Euclidean length, `normsq(a) ** 0.5` (so it lifts over RVs, and folds to
+    /// `outer(a, b)` — the outer product `M[i][j] = aᵢ·bⱼ` (an `len(a)×len(b)` matrix). The general
+    /// linear-algebra primitive behind building a QFT matrix (`outer(iota, iota)` through complex
+    /// `exp`) and one-hot encodings. Lifts/folds elementwise like every product.
+    fn lib_outer(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [a, b] = arity2("outer", args, span)?;
+        let a = self.expect_array("outer", a, span)?;
+        let b = self.expect_array("outer", b, span)?;
+        let mut rows = Vec::with_capacity(a.len());
+        for ai in a.iter() {
+            let mut row = Vec::with_capacity(b.len());
+            for bj in b.iter() {
+                row.push(self.binop(BinOp::Mul, ai.clone(), bj.clone(), span)?);
+            }
+            rows.push(Value::Array(Rc::new(row)));
+        }
+        Ok(Value::Array(Rc::new(rows)))
+    }
+
+    /// `adjoint(M)` — the conjugate transpose `Mᴴ` (`conj` ∘ `transpose`, PLAN-COMPLEX §7): the
+    /// quantum/linear-algebra "dagger". For a real matrix it is the plain transpose.
+    fn lib_adjoint(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [m] = arity1("adjoint", args, span)?;
+        let t = builtins::call("transpose", std::slice::from_ref(m), &self.graph, self.max_samples, self.max_opts, span, self.check_mode)?;
+        self.math_ufunc("conj", &[t], span)
+    }
+
+    /// `categorical(weights)` — sample an index `0..len(weights)` with probability proportional to
+    /// `weights` (PLAN-COMPLEX §9; the honest measurement op `y ~ categorical(|ψ|²)`). The weights
+    /// must be constant, non-negative numbers summing to a positive total. Built by inverse-CDF: a
+    /// single `unif(0, total)` draw `u`, then `index = #{k : prefix_k ≤ u}` (each prefix threshold a
+    /// lifted indicator). Returns a `Dist<number>` directly — like a gather, *not* a recipe — so
+    /// each call builds an independent draw (bind-and-redraw shares the one draw, as with `gather`).
+    fn lib_categorical(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [w] = arity1("categorical", args, span)?;
+        let xs = self.expect_array("categorical", w, span)?;
+        if xs.is_empty() {
+            return Err(NoiseError::runtime("categorical needs a non-empty weight vector".to_string(), span));
+        }
+        let mut weights = Vec::with_capacity(xs.len());
+        for e in xs.iter() {
+            match scalar_const(e) {
+                Some(v) if v >= 0.0 && v.is_finite() => weights.push(v),
+                _ => return Err(NoiseError::runtime(
+                    "categorical weights must be constant, non-negative numbers".to_string(),
+                    span,
+                )),
+            }
+        }
+        let total: f64 = weights.iter().sum();
+        if total <= 0.0 {
+            return Err(NoiseError::runtime("categorical weights must sum to a positive value".to_string(), span));
+        }
+        let u = self.graph.push(RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: total })), RvKind::Num);
+        let mut prefix = 0.0;
+        let mut index = Value::Num(0.0);
+        for &wk in &weights {
+            prefix += wk;
+            let cond = self.binop(BinOp::Le, Value::Num(prefix), Value::Dist(u), span)?;
+            let ind = self.indicator(cond, span)?;
+            index = self.binop(BinOp::Add, index, ind, span)?;
+        }
+        Ok(index)
+    }
+
+    /// `normsq(a)` — `Σ |aᵢ|²`, the squared Euclidean norm. **Magnitude-based**, so it always
+    /// returns a *real* (PLAN-COMPLEX §7): for a real vector this is `Σ aᵢ²` (unchanged); for a
+    /// complex vector it is `Σ (reᵢ² + imᵢ²)` — exactly what measurement probabilities and signal
+    /// error need. Nested arrays (matrices) sum over all leaves (Frobenius).
+    fn lib_normsq(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [a] = arity1("normsq", args, span)?;
+        let xs = self.expect_array("normsq", a, span)?;
+        let mut acc = Value::Num(0.0);
+        for x in xs.iter() {
+            let mag = if matches!(x, Value::Array(_)) {
+                self.lib_normsq(std::slice::from_ref(x), span)?
+            } else {
+                let (re, im) = self.complex_parts(x.clone(), span)?;
+                let rr = self.binop(BinOp::Mul, re.clone(), re, span)?;
+                let ii = self.binop(BinOp::Mul, im.clone(), im, span)?;
+                self.binop(BinOp::Add, rr, ii, span)?
+            };
+            acc = self.binop(BinOp::Add, acc, mag, span)?;
+        }
+        Ok(acc)
+    }
+
+    /// `norm(a)` — Euclidean length, `normsq(a) ^ 0.5` (so it lifts over RVs, and folds to
     /// `sqrt` for constant vectors).
     fn lib_norm(&mut self, args: &[Value], span: Span) -> Result<Value> {
         let ns = self.lib_normsq(args, span)?;
@@ -1587,6 +1960,186 @@ impl Engine {
         }
     }
 
+    /// The complex-aware `math::` ufuncs (PLAN-COMPLEX §4): `exp`/`abs`/`sqrt`/`arg`/`conj`/`re`/`im`
+    /// and the real-only rounding family `floor`/`ceil` (§8). Each branches by input type — real in →
+    /// real semantics; complex in → complex semantics — and maps elementwise over arrays (so it works
+    /// on a whole complex signal). Like every ufunc it folds for constants and lifts into the (real)
+    /// sample-DAG when a channel is an RV.
+    fn math_ufunc(&mut self, name: &str, args: &[Value], span: Span) -> Result<Value> {
+        let [x] = arity1(name, args, span)?;
+        // Map over arrays uniformly (a complex array is an array of `Complex`/real elements).
+        if let Value::Array(xs) = x {
+            let mut out = Vec::with_capacity(xs.len());
+            for e in xs.iter() {
+                out.push(self.math_ufunc(name, std::slice::from_ref(e), span)?);
+            }
+            return Ok(Value::Array(Rc::new(out)));
+        }
+        let x = x.clone();
+        match name {
+            "exp" => self.cufunc_exp(x, span),
+            // |z| = √(re² + im²); for a real `x` this is √(x²) = |x| (and lifts/folds the same way).
+            "abs" => {
+                let (a, b) = self.complex_parts(x, span)?;
+                let aa = self.binop(BinOp::Mul, a.clone(), a, span)?;
+                let bb = self.binop(BinOp::Mul, b.clone(), b, span)?;
+                let s = self.binop(BinOp::Add, aa, bb, span)?;
+                self.binop(BinOp::Pow, s, Value::Num(0.5), span)
+            }
+            "sqrt" => self.cufunc_sqrt(x, span),
+            "arg" => self.cufunc_arg(x, span),
+            "conj" => match x {
+                Value::Complex { re, im } => {
+                    let neg_im = self.binop(BinOp::Sub, Value::Num(0.0), *im, span)?;
+                    Ok(Value::complex(*re, neg_im))
+                }
+                real => {
+                    // `conj` of a real is itself — but reject non-numerics with a clear message.
+                    let _ = self.complex_parts(real.clone(), span)?;
+                    Ok(real)
+                }
+            },
+            "re" => {
+                let (a, _) = self.complex_parts(x, span)?;
+                Ok(a)
+            }
+            "im" => {
+                let (_, b) = self.complex_parts(x, span)?;
+                Ok(b)
+            }
+            "floor" => self.cufunc_round_fam(UnOp::Floor, x, span),
+            "ceil" => self.cufunc_round_fam(UnOp::Ceil, x, span),
+            _ => unreachable!("math_ufunc dispatched on an unknown name '{name}'"),
+        }
+    }
+
+    /// `exp(z)` — `e^z`. Real `x` → `e^x`; complex `z = a + bi` → Euler `e^a·(cos b + i·sin b)`.
+    /// The imaginary part may be an RV (cos/sin lift); the **real part must be a constant** — there
+    /// is no `exp` node in the VM, so a random real part (`math::exp` of a real RV) is rejected. In
+    /// practice the complex `exp` is always applied to a purely-imaginary angle (`e^{iθ}`), where
+    /// `a = 0`.
+    fn cufunc_exp(&mut self, x: Value, span: Span) -> Result<Value> {
+        match x {
+            Value::Num(n) => Ok(Value::Num(n.exp())),
+            Value::Est { val, .. } => Ok(Value::Num(val.exp())),
+            Value::Dist(_) => Err(NoiseError::runtime(
+                "math::exp of a random real value is not supported (the VM has no exp node); exp of a complex angle e^{i·θ} works because it lowers to cos/sin".to_string(),
+                span,
+            )),
+            Value::Complex { re, im } => {
+                let a = match scalar_const(&re) {
+                    Some(a) => a,
+                    None => {
+                        return Err(NoiseError::runtime(
+                            "math::exp needs a constant real part (e^a); only the imaginary angle may be random".to_string(),
+                            span,
+                        ))
+                    }
+                };
+                let ea = a.exp();
+                let cos = self.lib_ufunc(UnOp::Cos, std::slice::from_ref(&im), span)?;
+                let sin = self.lib_ufunc(UnOp::Sin, std::slice::from_ref(&im), span)?;
+                let re_out = self.binop(BinOp::Mul, Value::Num(ea), cos, span)?;
+                let im_out = self.binop(BinOp::Mul, Value::Num(ea), sin, span)?;
+                Ok(Value::complex(re_out, im_out))
+            }
+            other => Err(NoiseError::runtime(
+                format!("math::exp expects a number or complex value, got {}", other.type_name()),
+                span,
+            )),
+        }
+    }
+
+    /// `sqrt(z)`. Real `x` → IEEE `√x` (so `sqrt(-1.0)` stays `NaN`; a real RV lifts via `x ^ 0.5`).
+    /// **Constant** complex → the principal square root. A complex *random variable* square root is
+    /// not supported (exotic; would need per-lane branch logic) — a clear error.
+    fn cufunc_sqrt(&mut self, x: Value, span: Span) -> Result<Value> {
+        match x {
+            Value::Num(n) => Ok(Value::Num(n.sqrt())),
+            Value::Est { val, .. } => Ok(Value::Num(val.sqrt())),
+            Value::Dist(id) if self.graph.kind(id) == RvKind::Num => {
+                self.binop(BinOp::Pow, Value::Dist(id), Value::Num(0.5), span)
+            }
+            Value::Complex { re, im } => match (scalar_const(&re), scalar_const(&im)) {
+                (Some(a), Some(b)) => {
+                    let r = (a * a + b * b).sqrt();
+                    let re_out = ((r + a) / 2.0).max(0.0).sqrt();
+                    let mut im_out = ((r - a) / 2.0).max(0.0).sqrt();
+                    if b < 0.0 {
+                        im_out = -im_out;
+                    }
+                    Ok(Value::cnum(re_out, im_out))
+                }
+                _ => Err(NoiseError::runtime(
+                    "math::sqrt of a complex random variable is not supported".to_string(),
+                    span,
+                )),
+            },
+            other => Err(NoiseError::runtime(
+                format!("math::sqrt expects a number or complex value, got {}", other.type_name()),
+                span,
+            )),
+        }
+    }
+
+    /// `arg(z)` — the phase angle. Complex `z` → `atan2(im, re)`. Real `x` → `0` for `x ≥ 0`, `π`
+    /// for `x < 0` (the real restriction of `atan2`). Both branches lift over RVs.
+    fn cufunc_arg(&mut self, x: Value, span: Span) -> Result<Value> {
+        match x {
+            Value::Complex { re, im } => self.complex_atan2(*im, *re, span),
+            Value::Num(n) => Ok(Value::Num(if n < 0.0 { std::f64::consts::PI } else { 0.0 })),
+            Value::Est { val, .. } => {
+                Ok(Value::Num(if val < 0.0 { std::f64::consts::PI } else { 0.0 }))
+            }
+            Value::Dist(id) if self.graph.kind(id) == RvKind::Num => {
+                let neg = self.binop(BinOp::Lt, Value::Dist(id), Value::Num(0.0), span)?;
+                self.select(neg, Value::Num(std::f64::consts::PI), Value::Num(0.0), span)
+            }
+            other => Err(NoiseError::runtime(
+                format!("math::arg expects a number or complex value, got {}", other.type_name()),
+                span,
+            )),
+        }
+    }
+
+    /// `atan2(y, x)` over real-scalar channels (constant or RV). Folds to `f64::atan2` when both are
+    /// constant; otherwise builds the quadrant-correct form `atan(y/x) + adj`, where `adj` shifts by
+    /// `±π` in the left half-plane (`x < 0`). The `x = 0` axis is measure-zero for the continuous RVs
+    /// this is used on, so it isn't special-cased in the lifted path.
+    fn complex_atan2(&mut self, y: Value, x: Value, span: Span) -> Result<Value> {
+        if let (Some(yc), Some(xc)) = (scalar_const(&y), scalar_const(&x)) {
+            return Ok(Value::Num(yc.atan2(xc)));
+        }
+        let pi = std::f64::consts::PI;
+        let yx = self.binop(BinOp::Div, y.clone(), x.clone(), span)?;
+        let core = self.lib_ufunc(UnOp::Atan, std::slice::from_ref(&yx), span)?;
+        let x_neg = self.binop(BinOp::Lt, x, Value::Num(0.0), span)?;
+        let y_nonneg = self.binop(BinOp::Ge, y, Value::Num(0.0), span)?;
+        let pick = self.select(y_nonneg, Value::Num(pi), Value::Num(-pi), span)?;
+        let adj = self.select(x_neg, pick, Value::Num(0.0), span)?;
+        self.binop(BinOp::Add, core, adj, span)
+    }
+
+    /// `floor(x)` / `ceil(x)` — real-only (PLAN-COMPLEX §8). Scalars fold; a real RV lifts to a
+    /// `Floor`/`Ceil` node; a complex input is a type error (no Gaussian-integer rounding).
+    fn cufunc_round_fam(&mut self, op: UnOp, x: Value, span: Span) -> Result<Value> {
+        match x {
+            Value::Num(n) => Ok(Value::Num(apply_unop_f64(op, n))),
+            Value::Est { val, .. } => Ok(Value::Num(apply_unop_f64(op, val))),
+            Value::Dist(id) if self.graph.kind(id) == RvKind::Num => {
+                self.lift_unary(op, Value::Dist(id), span)
+            }
+            Value::Complex { .. } => Err(NoiseError::runtime(
+                format!("{} is real-only — it has no meaning on a complex number", unop_name(op)),
+                span,
+            )),
+            other => Err(NoiseError::runtime(
+                format!("{} expects a number, got {}", unop_name(op), other.type_name()),
+                span,
+            )),
+        }
+    }
+
     /// `mse(a, b)` — mean squared error between two equal-length signals: `mean((aᵢ-bᵢ)²)`. A
     /// general "how different are these two signals" measure (e.g. recovered vs. transmitted).
     fn lib_mse(&mut self, args: &[Value], span: Span) -> Result<Value> {
@@ -1677,15 +2230,22 @@ fn module_of(name: &str) -> Option<&'static str> {
         // distribution constructors, including `rotation` (a recipe for a random orthonormal matrix,
         // drawn with `~` like any distribution). Batched sampling is the prefix `~[shape]` operator,
         // not a builtin — see the `Sample` AST node.
-        "unif" | "unif_int" | "bernoulli" | "normal" | "normal_int" | "exp" | "exp_int"
-        | "poisson" | "geometric" | "rotation" | "permutation" => "rand",
-        // math constants (lowercase only) + scalar math (sin/cos/atan/sign ufuncs lift/map)
-        "pi" | "e" => "math",
+        "unif" | "unif_int" | "bernoulli" | "normal" | "normal_int" | "normal_complex"
+        | "exponential" | "exponential_int" | "poisson" | "geometric" | "categorical"
+        | "rotation" | "permutation" => "rand",
+        // math constants (lowercase only): pi/e (real), i/j (the imaginary unit, complex)
+        "pi" | "e" | "i" | "j" => "math",
         "sqrt" | "round" | "log" | "log10" | "sin" | "cos" | "atan" | "sign" => "math",
+        // deterministic integer number theory (modular-arithmetic core)
+        "gcd" | "modpow" => "math",
+        // complex-aware math ufuncs (PLAN-COMPLEX §4) + the real rounding family (§8). `exp` is the
+        // exponential *function* here; the exponential *distribution* was renamed `rand::exponential`
+        // precisely so this name is free.
+        "exp" | "abs" | "arg" | "conj" | "re" | "im" | "floor" | "ceil" => "math",
         // collections / linear algebra (vector add/sub/matvec are the `+`/`-`/`@` operators)
-        "sum" | "count" | "any" | "all" | "max" | "min" | "mean" | "dot" | "normsq" | "norm"
-        | "transpose" | "normalize" | "has_duplicates" | "count_duplicates"
-        | "mse" | "ones" | "zeros" | "iota" | "quantize" => "vec",
+        "sum" | "count" | "any" | "all" | "max" | "min" | "mean" | "dot" | "vdot" | "normsq"
+        | "norm" | "transpose" | "adjoint" | "normalize" | "has_duplicates" | "count_duplicates"
+        | "mse" | "ones" | "zeros" | "iota" | "outer" | "quantize" => "vec",
         // signal generation (DSP waveforms) + colored noise + materialization
         "sine" | "cosine" | "sample" | "noise_white"
         | "noise_brown" | "noise_pink" | "noise_ou" => "signal",
@@ -1709,6 +2269,15 @@ fn math_const(name: &str) -> Option<f64> {
         "e" => Some(std::f64::consts::E),
         _ => None,
     }
+}
+
+/// The complex math constant `math::i` (alias `math::j`) — the imaginary unit `0 + 1i`. Like
+/// `pi`/`e` it is a *value*, resolved as a fallback after variable lookup (so a user's loop
+/// variable `i` still wins). `j` is provided because the AM/FM (electrical-engineering) example
+/// uses `j` for the imaginary unit, where `i` clashes with current/index.
+#[inline]
+fn math_const_complex(name: &str) -> bool {
+    matches!(name, "i" | "j")
 }
 
 /// Enforce the load-bearing rule "you cannot do arithmetic on an undrawn distribution"
@@ -1775,6 +2344,8 @@ fn unop_name(op: UnOp) -> &'static str {
         UnOp::Atan => "atan",
         UnOp::Sign => "sign",
         UnOp::Round => "round",
+        UnOp::Floor => "floor",
+        UnOp::Ceil => "ceil",
     }
 }
 
@@ -1789,6 +2360,8 @@ fn apply_unop_f64(op: UnOp, x: f64) -> f64 {
         // sign: -1 / 0 / +1 (0 at exactly zero, unlike f64::signum which is ±1 at ±0.0).
         UnOp::Sign => (x > 0.0) as i32 as f64 - (x < 0.0) as i32 as f64,
         UnOp::Round => x.round(),
+        UnOp::Floor => x.floor(),
+        UnOp::Ceil => x.ceil(),
         UnOp::Not => unreachable!("Not is a boolean op, not a numeric ufunc"),
     }
 }
@@ -1842,6 +2415,8 @@ fn eval_est_binary(op: BinOp, a: f64, sa: f64, b: f64, sb: f64, span: Span) -> R
         Sub => est(a - b, quad(sa, sb)),
         Mul => est(a * b, quad(b * sa, a * sb)),
         Div => est(a / b, quad(sa / b, a * sb / (b * b))),
+        // floored modulo is locally a translation in `a` (slope 1 a.e.), so the error rides along.
+        Mod => est(floored_mod(a, b), sa),
         // d/da(a^b) = b·a^(b-1); exponent error is usually negligible, so propagate via the base.
         Pow => est(a.powf(b), (b * a.powf(b - 1.0)).abs() * sa),
         Lt => Ok(Value::Bool(a < b)),
@@ -1855,6 +2430,14 @@ fn eval_est_binary(op: BinOp, a: f64, sa: f64, b: f64, sb: f64, span: Span) -> R
             span,
         )),
     }
+}
+
+/// Floored modulo `a − b·floor(a/b)` (PLAN-COMPLEX §8): the result takes the **sign of `b`**, so
+/// `x % n ∈ [0, n)` for `n > 0` — what modular/clock arithmetic wants (unlike Rust's `%`, which
+/// truncates toward zero). IEEE edge cases follow `floor`: `x % 0` is `NaN` (no panic).
+#[inline]
+fn floored_mod(a: f64, b: f64) -> f64 {
+    a - b * (a / b).floor()
 }
 
 /// View a `Num`/`Est` as `(value, standard_error)`; anything else is `None`.
@@ -1882,12 +2465,13 @@ fn eval_binary(op: BinOp, l: Value, r: Value, span: Span) -> Result<Value> {
         }
     }
     match op {
-        Add | Sub | Mul | Div | Pow => match (l, r) {
+        Add | Sub | Mul | Div | Mod | Pow => match (l, r) {
             (Value::Num(a), Value::Num(b)) => Ok(Value::Num(match op {
                 Add => a + b,
                 Sub => a - b,
                 Mul => a * b,
                 Div => a / b,
+                Mod => floored_mod(a, b),
                 Pow => a.powf(b),
                 _ => unreachable!(),
             })),

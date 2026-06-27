@@ -89,7 +89,7 @@ prod4 = tq_ip(x, y, m4, S4, d);
 # The fix lands on the truth (unbiased), and its inner-product error shrinks with bits, matching the
 # paper's D_prod table (scaled by 1/d) — error a fraction of the biased MSE quantizer's.
 Print("prod b=2 E[est]/true =", E(prod2) / true_ip, " (unbiased: ~1)");
-Print("D_prod b=1 =", E((prod1 - true_ip) ** 2), " (plain QJL; <= bound pi/2/d =", pi / 2 / d, ")");
-Print("D_prod b=2 =", E((prod2 - true_ip) ** 2), " (paper 0.56/d =", 0.56 / d, ")");
-Print("D_prod b=3 =", E((prod3 - true_ip) ** 2), " (paper 0.18/d =", 0.18 / d, ")");
-Print("D_prod b=4 =", E((prod4 - true_ip) ** 2), " (paper 0.047/d =", 0.047 / d, ")")
+Print("D_prod b=1 =", E((prod1 - true_ip) ^ 2), " (plain QJL; <= bound pi/2/d =", pi / 2 / d, ")");
+Print("D_prod b=2 =", E((prod2 - true_ip) ^ 2), " (paper 0.56/d =", 0.56 / d, ")");
+Print("D_prod b=3 =", E((prod3 - true_ip) ^ 2), " (paper 0.18/d =", 0.18 / d, ")");
+Print("D_prod b=4 =", E((prod4 - true_ip) ^ 2), " (paper 0.047/d =", 0.047 / d, ")")

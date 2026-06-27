@@ -15,7 +15,7 @@ static = signal::noise_white(0.3);
 rx_am = am + static;
 rx_fm = fm + static;
 
-rec_am = (rx_am[0]**2 + rx_am[1]**2)**0.5 - 1;
+rec_am = (rx_am[0]^2 + rx_am[1]^2)^0.5 - 1;
 rec_fm = math::atan(rx_fm[1] / rx_fm[0]) / 3;
 
 Print("AM error", E(vec::mse(rec_am, msg), 40000));
@@ -294,7 +294,7 @@ fm = [math::cos(3 * msg), math::sin(3 * msg)];
 static = signal::noise_white(0.3);
 rx_am = am + static;
 rx_fm = fm + static;
-rec_am = (rx_am[0]**2 + rx_am[1]**2)**0.5 - 1;
+rec_am = (rx_am[0]^2 + rx_am[1]^2)^0.5 - 1;
 rec_fm = math::atan(rx_fm[1] / rx_fm[0]) / 3;
 Print("AM", E(vec::mse(rec_am, msg), 40000));
 Print("FM", E(vec::mse(rec_fm, msg), 40000));`;

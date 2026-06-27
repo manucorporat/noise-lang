@@ -28,7 +28,7 @@
 //! wasm interpreter and check distribution parity with the interpreter, mirroring `jit`'s tests).
 //!
 //! Scope mirrors the JIT: `unif`/`unif_int`/`normal`/`exp`/`geometric` sources, `+ - * /`,
-//! integer-constant `**`, comparisons, `&& ||`, unary `- !` and the math ufuncs, and lifted `if`.
+//! integer-constant `^`, comparisons, `&& ||`, unary `- !` and the math ufuncs, and lifted `if`.
 //! `Poisson` stays interpreter-only (rejected by the gate). `unif_int` uses the float method
 //! (`lo + floor(u * count)`) rather than the native kernel's Lemire multiply-high — wasm has no
 //! 64×64→128 `mulhi`, and the float form is identical in distribution (what the parity tests check).
@@ -505,7 +505,7 @@ fn emit_geometric(s: &mut InstructionSink, ctx: &Ctx, j: usize, p: f64) {
     s.f64_const(f64c(denom)).f64_div().f64_floor();
 }
 
-/// `base ** k` for a small non-negative integer `k`, as repeated multiply (`k == 0` → `1.0`).
+/// `base ^ k` for a small non-negative integer `k`, as repeated multiply (`k == 0` → `1.0`).
 fn emit_pow(s: &mut InstructionSink, base: u32, k: u32) {
     if k == 0 {
         s.f64_const(f64c(1.0));
@@ -540,6 +540,12 @@ fn emit_unary(s: &mut InstructionSink, ctx: &Ctx, op: UnOp, a: u32) {
         UnOp::Round => {
             s.local_get(a).call(ROUND);
         }
+        UnOp::Floor => {
+            s.local_get(a).f64_floor();
+        }
+        UnOp::Ceil => {
+            s.local_get(a).f64_ceil();
+        }
         UnOp::Sign => {
             // (a > 0) - (a < 0): -1 / 0 / +1, exactly 0 at 0 (matches `apply_un`, unlike signum).
             s.local_get(a).f64_const(f64c(0.0)).f64_gt().f64_convert_i32_u();
@@ -550,6 +556,15 @@ fn emit_unary(s: &mut InstructionSink, ctx: &Ctx, op: UnOp, a: u32) {
 }
 
 fn emit_binary(s: &mut InstructionSink, op: BinOp, a: u32, b: u32) {
+    // Floored modulo needs both operands twice (`a − b·floor(a/b)`), so it builds its own stack.
+    if matches!(op, BinOp::Mod) {
+        s.local_get(a);
+        s.local_get(b);
+        s.local_get(a).local_get(b).f64_div().f64_floor();
+        s.f64_mul();
+        s.f64_sub();
+        return;
+    }
     s.local_get(a).local_get(b);
     match op {
         BinOp::Add => {
@@ -589,6 +604,7 @@ fn emit_binary(s: &mut InstructionSink, op: BinOp, a: u32, b: u32) {
         BinOp::Or => {
             s.f64_max();
         }
+        BinOp::Mod => unreachable!("Mod is handled before the generic two-operand path"),
         BinOp::Pow => unreachable!("Pow is handled before emit_binary"),
     }
 }
@@ -679,13 +695,13 @@ mod tests {
     #[test]
     fn wasm_dice_and_indicator_match_interp() {
         assert_wasm_matches_interp("use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B", 3);
-        assert_wasm_matches_interp("use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X**2 + Y**2 < 1", 4);
+        assert_wasm_matches_interp("use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1", 4);
     }
 
     #[test]
     fn wasm_continuous_sources_match_interp() {
         assert_wasm_matches_interp("use rand; Z ~ normal(2,3); Z", 5);
-        assert_wasm_matches_interp("use rand; X ~ exp(2); X", 6);
+        assert_wasm_matches_interp("use rand; X ~ exponential(2); X", 6);
         assert_wasm_matches_interp("use rand; G ~ geometric(0.25); G", 7);
         assert_wasm_matches_interp("use rand; Z ~ normal_int(10,3); Z", 8);
         // Second moment of N(0,1) must be ≈1 — a far tighter probe of the inlined `ln`/`cos` than the
@@ -700,11 +716,21 @@ mod tests {
         assert_wasm_matches_interp("use rand; use math; X ~ unif(0,1); sin(X) + cos(X)", 9);
         assert_wasm_matches_interp("use rand; use math; X ~ unif(-1,1); atan(X)", 10);
         assert_wasm_matches_interp("use rand; use math; X ~ unif(-1,1); sign(X)", 11);
-        assert_wasm_matches_interp("use rand; A ~ unif(1,2); B ~ unif(1,2); A ** B", 12);
+        assert_wasm_matches_interp("use rand; A ~ unif(1,2); B ~ unif(1,2); A ^ B", 12);
         // Trig over a wide argument range (multiple periods) — exercises the Cody–Waite range
         // reduction and quadrant selection, not just the small-angle kernel. E[sin²]=0.5.
         assert_wasm_matches_interp("use rand; use math; X ~ unif(-8,8); sin(X)*sin(X)", 17);
         assert_wasm_matches_interp("use rand; use math; X ~ unif(-8,8); cos(X)*cos(X)", 18);
+    }
+
+    #[test]
+    fn wasm_mod_floor_ceil_match_interp() {
+        // BinOp::Mod (a − b·floor(a/b)) and UnOp::Floor/Ceil (native f64.floor/f64.ceil) must match
+        // the interpreter — the wasm `Mod` builds its own stack (both operands twice).
+        assert_wasm_matches_interp("use rand; X ~ unif(0,10); X % 3", 19);
+        assert_wasm_matches_interp("use rand; X ~ unif(-5,5); X % 4", 20);
+        assert_wasm_matches_interp("use rand; use math; X ~ unif(-3,3); math::floor(X)", 21);
+        assert_wasm_matches_interp("use rand; use math; X ~ unif(-3,3); math::ceil(X)", 22);
     }
 
     #[test]
@@ -744,7 +770,7 @@ mod tests {
 
         // Arithmetic-dominated but carries a `pow` call (non-const exponent) → still profitable
         // (fusible > libcalls), but choose_streams keeps it single-stream (the call won't overlap).
-        let (eng, id) = graph_of("use rand; A ~ unif(1,2); B ~ unif(1,2); A ** B");
+        let (eng, id) = graph_of("use rand; A ~ unif(1,2); B ~ unif(1,2); A ^ B");
         let (bytes, streams) = emit_for(eng.graph(), id).expect("pow graph should emit");
         assert_eq!(streams, 1, "call-bearing graph should be single-stream");
         let (wasm_mean, count) = run_emitted(&bytes, streams, 0xABCDEF, 64);

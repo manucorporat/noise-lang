@@ -75,7 +75,7 @@ e = if d > a {
 ### Operators
 ```
 X + Y
-X ** Y
+X ^ Y
 X * Y
 X / Y
 
@@ -104,7 +104,7 @@ circle is `π/4`, so π is `4 · P(C)`.
 X ~ unif(-1, 1)
 Y ~ unif(-1, 1)
 
-C = X**2 + Y**2 < 1     # "fell inside the circle"
+C = X^2 + Y^2 < 1     # "fell inside the circle"
 
 4 * P(C)                // ≈ 3.14   (P(C) alone ≈ 0.785 = π/4)
 ```
@@ -122,6 +122,6 @@ A ~ unif_int(1, 6)
 B ~ unif_int(1, 6)
 P(A == 4 && B == 4)     // ≈ 1/36   (&& is planned, see PLAN.md Phase 3)
 ```
-Note: `P(X)**10` would compute `(1/6)^10` by hand — that's *you* doing the probability, not the
+Note: `P(X)^10` would compute `(1/6)^10` by hand — that's *you* doing the probability, not the
 language modeling 10 trials. The modeling form is to sample 10 independent rolls and ask
 `P(all ten == 4)` once those features exist.

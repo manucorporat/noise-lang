@@ -9,7 +9,8 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
-    Pow, // **
+    Mod, // % — floored modulo: a − b·floor(a/b)
+    Pow, // ^ — exponentiation (right-associative)
     Eq,  // ==
     Ne,  // !=
     Lt,
@@ -34,6 +35,11 @@ pub enum UnOp {
     // (`normal_int`/`exp_int`), which draw a continuous source then round each lane. Not parsed
     // as a surface operator/ufunc.
     Round,
+    // Floor / ceiling (`math::floor`/`math::ceil` ufuncs, PLAN-COMPLEX §8). Also the building block
+    // the `%` operator desugars to (`a − b·floor(a/b)`). Native in every backend (cranelift/wasm
+    // both have a floor/ceil instruction; the interpreter uses `f64::floor`/`ceil`).
+    Floor,
+    Ceil,
 }
 
 /// `=` binds a deterministic value; `~` binds a random variable / distribution.
@@ -79,6 +85,16 @@ pub enum Expr {
     If(Box<Spanned>, Box<Spanned>, Option<Box<Spanned>>),
     /// `[a, b, c]` — an array literal (fixed length, known at build time). See PLAN-COLLECTIONS.
     Array(Vec<Spanned>),
+    /// `[for var in iter { body }]` — a comprehension (PLAN-COMPLEX §8). Exactly the
+    /// `for var in iter { body }` loop statement wrapped in `[ ]` so each `body` value is
+    /// *collected* into a new array (rather than discarded). Build-time unrolled: `var` binds to
+    /// each element in the *current* frame (so the body closes over outer variables — no closures
+    /// needed). A pure 1-to-1 map: the result always has `Len(iter)` elements.
+    Comprehension {
+        body: Box<Spanned>,
+        var: String,
+        iter: Box<Spanned>,
+    },
     /// `a @ b` — the **matrix product** (Python/NumPy `@`). Dispatches on operand shape at build
     /// time: vector·vector → scalar dot, matrix·vector → matrix–vector product, matrix·matrix →
     /// matrix–matrix product. Lowers to sums of `*` (so it lifts over random variables like any
@@ -99,6 +115,11 @@ pub enum Expr {
     /// `use module;` — bring a module's items into unqualified scope (Rust-style). Evaluates to
     /// unit. `builtin` is always active; `rand`/`math`/`vec` need a `use` (or a `mod::name` path).
     Use(String),
+    /// `continue` — skip the rest of the enclosing loop body (PLAN-COMPLEX §8). Evaluating it
+    /// short-circuits the current `{ block }` (later statements don't run); a `for` loop discards
+    /// that iteration's side effects, and a comprehension *omits* that element. This is how a
+    /// comprehension expresses a filter (`if bad(x) { continue }; f(x)`) without special syntax.
+    Continue,
 }
 
 /// A qualified or bare name (`rand::unif`, `pi`). Modules are single-level for now. Qualified

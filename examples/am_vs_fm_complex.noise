@@ -1,0 +1,47 @@
+# Why FM radio shrugs off static better than AM — now with the math written the way physicists do.
+#
+# A radio carrier is a spinning arrow (a "phasor"). Instead of tracking its two coordinates [I, Q]
+# by hand (see am_vs_fm.noise, the beginner version), we write the arrow as ONE complex number z:
+# its LENGTH is |z| and its ANGLE is arg(z). AM hides the message in the length; FM hides it in the
+# angle. We modulate, add the SAME random static, demodulate, and measure how mangled it came out.
+use math;    # i, exp, abs, arg — complex numbers are first-class here
+use rand;    # normal_complex — radio static by its real name
+use vec;     # mse
+use signal;  # sine, sample
+
+engine::set_max_samples(40000);   # Monte Carlo budget for every E() below — set once, not per query
+
+# ---- a radio library, written in Noise itself ----
+# Modulators: take a message m, return the carrier as a complex phasor z.
+am_modulate(m)      = 1 + m;                      # message in the LENGTH:  z = (1 + m) + 0i
+fm_modulate(m, dev) = math::exp(math::i*dev*m);   # message in the ANGLE:   z = e^{i·dev·m}
+
+# Demodulators: read the message back out of a (noisy) phasor z.
+am_demodulate(z)      = math::abs(z) - 1;   # arrow LENGTH, minus the carrier
+fm_demodulate(z, dev) = math::arg(z) / dev; # arrow ANGLE, undo the deviation
+
+# ---- the experiment ----
+dev   = 3;     # FM deviation (modulation index): bigger = wider band = more noise-immune
+sigma = 0.3;   # static (noise) strength
+
+# The message: a gentle 3-cycle tone. `sine(3)` is a LAZY signal (a frequency, no length); `sample`
+# picks the resolution — 64 points. (Small amplitude, so the FM angle never wraps past ±90 degrees.)
+msg = signal::sample(0.3*signal::sine(3), 64);
+
+# Static = a circularly-symmetric complex Gaussian — radio noise by its real name. ONE object gives
+# both quadratures, identical in every direction, so AM and FM face the same fight BY CONSTRUCTION:
+# circular symmetry is now a property of the TYPE, not a hand-written assertion about two noise lanes.
+static ~[Len(msg)] rand::normal_complex(sigma);
+
+# modulate -> add the same static -> demodulate -> compare to the original.
+# `mse` averages the error over the message samples (space); because `static` is random that per-run
+# mse is itself a random variable, so `E(...)` averages it over many noise realizations (the ensemble).
+am_err = E(vec::mse(am_demodulate(am_modulate(msg)      + static),      msg));
+fm_err = E(vec::mse(fm_demodulate(fm_modulate(msg, dev) + static, dev), msg));
+
+Print("AM recovered-message error (MSE) =", am_err);
+Print("FM recovered-message error (MSE) =", fm_err);
+# The advantage GROWS with the deviation; in the small-signal limit it approaches dev^2. The real
+# simulation lands a bit under that ideal because at finite noise the angle reading degrades on the
+# wider swings — exactly the honest detail a closed-form 'dev^2' hides.
+Print("FM is", round(am_err / fm_err, 1), "x cleaner for the same static  (small-signal ideal: dev^2 =", dev ^ 2, ")")

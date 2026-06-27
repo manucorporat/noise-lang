@@ -256,6 +256,8 @@ fn apply_un(op: UnOp, x: f64) -> f64 {
         // sign: -1 / 0 / +1 (0 at exactly zero, unlike f64::signum which is ±1 at ±0.0).
         UnOp::Sign => (x > 0.0) as i32 as f64 - (x < 0.0) as i32 as f64,
         UnOp::Round => x.round(),
+        UnOp::Floor => x.floor(),
+        UnOp::Ceil => x.ceil(),
     }
 }
 
@@ -268,6 +270,7 @@ fn apply_bin(op: BinOp, a: f64, b: f64) -> f64 {
         BinOp::Sub => a - b,
         BinOp::Mul => a * b,
         BinOp::Div => a / b,
+        BinOp::Mod => a - b * (a / b).floor(),
         BinOp::Pow => a.powf(b),
         BinOp::Lt => (a < b) as i32 as f64,
         BinOp::Gt => (a > b) as i32 as f64,
@@ -316,5 +319,19 @@ mod tests {
         // Not is logical over a 0/1 column.
         assert_eq!(apply_un(UnOp::Not, 0.0), 1.0);
         assert_eq!(apply_un(UnOp::Not, 1.0), 0.0);
+    }
+
+    #[test]
+    fn mod_floor_ceil_kernels() {
+        // Floored modulo: result takes the sign of the divisor.
+        assert_eq!(apply_bin(BinOp::Mod, 7.0, 3.0), 1.0);
+        assert_eq!(apply_bin(BinOp::Mod, -1.0, 3.0), 2.0);
+        assert_eq!(apply_bin(BinOp::Mod, 7.0, -3.0), -2.0);
+        assert_eq!(apply_bin(BinOp::Mod, 5.5, 2.0), 1.5);
+        assert!(apply_bin(BinOp::Mod, 1.0, 0.0).is_nan());
+        assert_eq!(apply_un(UnOp::Floor, 2.7), 2.0);
+        assert_eq!(apply_un(UnOp::Floor, -2.1), -3.0);
+        assert_eq!(apply_un(UnOp::Ceil, 2.1), 3.0);
+        assert_eq!(apply_un(UnOp::Ceil, -2.9), -2.0);
     }
 }
