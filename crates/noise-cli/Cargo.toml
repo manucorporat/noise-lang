@@ -15,4 +15,4 @@ name = "noise"
 path = "src/main.rs"
 
 [dependencies]
-noise-core = { path = "../noise-core", version = "0.1.0" }
+noise-core = { path = "../noise-core", version = "0.1.1" }
