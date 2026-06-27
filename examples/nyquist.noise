@@ -19,4 +19,10 @@ Print("undersampled (10 < 14 pts):  mse(fast, slow) =", vec::mse(signal::sample(
 # OVERSAMPLE at 64 (> 14): now there are enough snapshots to keep them apart, and mse is large.
 Print("oversampled  (64 > 14 pts):  mse(fast, slow) =", vec::mse(signal::sample(high, 64), signal::sample(low, 64)));
 
-Print("Sample too slowly and a 7-cycle wave masquerades as a 3-cycle one (7 folds to 10-7 = 3).")
+Print("Sample too slowly and a 7-cycle wave masquerades as a 3-cycle one (7 folds to 10-7 = 3).");
+
+# Undersampled at 10: the fast 7-cycle wave and the slow 3-cycle wave land on the SAME points — twins.
+plot::line(signal::sample(high, 10));
+plot::line(signal::sample(low, 10));
+# Oversampled at 64: now the fast wave shows all 7 wiggles and is obviously a different signal.
+plot::line(signal::sample(high, 64))

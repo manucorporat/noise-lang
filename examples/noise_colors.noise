@@ -28,4 +28,11 @@ Print("brown  (1/f^2)     :", round(neighbor_corr(signal::sample(signal::noise_b
 Print("");
 Print("OU colored noise — neighbor corr should track exp(-1/tau):");
 Print("  tau = 4 :", round(neighbor_corr(signal::sample(signal::noise_ou(1, 4),  n)), 3), " vs exp(-1/4)  = 0.779");
-Print("  tau = 32:", round(neighbor_corr(signal::sample(signal::noise_ou(1, 32), n)), 3), " vs exp(-1/32) = 0.969")
+Print("  tau = 32:", round(neighbor_corr(signal::sample(signal::noise_ou(1, 32), n)), 3), " vs exp(-1/32) = 0.969");
+
+# See the color: white noise is a jagged hiss, brown noise is a smooth wandering walk.
+plot::line(signal::sample(signal::noise_white(1), n));
+plot::line(signal::sample(signal::noise_brown(1), n));
+# And the structure behind it: white has no neighbor memory, brown's samples stay correlated for a long stretch.
+plot::corr(signal::sample(signal::noise_white(1), 64));
+plot::corr(signal::sample(signal::noise_brown(1), 64))

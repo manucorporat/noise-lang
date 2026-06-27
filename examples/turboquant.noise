@@ -63,6 +63,9 @@ Print("D_mse  b=4 =", E(normsq(x - mse4)), " (paper 0.009)");
 # === The catch: that 1-bit MSE quantizer is BIASED for inner products by exactly 2/pi.
 Print("MSE b=1  E[est]/true =", E(y @ mse1) / true_ip, " (biased: 2/pi =", 2 / pi, ")");
 
+# Picture the bias: the MSE estimate lands at ~2/pi of the truth, not 1.
+plot::value(E(y @ mse1) / true_ip);
+
 # === Algorithm 2: TurboQuant_prod. The MSE reconstruction `m` (at b-1 bits) plus a 1-bit QJL sketch
 #     of its residual r = x - m, using an independent Gaussian projection S, rescaled by ||r||.
 #     `tq_ip` returns the resulting estimate of <y, x>; it is provably unbiased (Theorem 2).
@@ -88,6 +91,8 @@ prod4 = tq_ip(x, y, m4, S4, d);
 
 # The fix lands on the truth (unbiased), and its inner-product error shrinks with bits, matching the
 # paper's D_prod table (scaled by 1/d) — error a fraction of the biased MSE quantizer's.
+# ...and the fix lands on 1 — the unbiased estimate with its confidence interval.
+plot::value(E(prod2) / true_ip);
 Print("prod b=2 E[est]/true =", E(prod2) / true_ip, " (unbiased: ~1)");
 Print("D_prod b=1 =", E((prod1 - true_ip) ^ 2), " (plain QJL; <= bound pi/2/d =", pi / 2 / d, ")");
 Print("D_prod b=2 =", E((prod2 - true_ip) ^ 2), " (paper 0.56/d =", 0.56 / d, ")");

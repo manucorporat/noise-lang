@@ -16,4 +16,7 @@ cross = d <= 0.5 * sin(angle);
 # error rides through the division, so the printed pi shows only the digits it has earned.
 p = P(cross);
 Print("P(needle crosses a line) =", p, " (exact 2/pi =", 2 / pi, ")");
-Print("pi estimate = 2 / P      =", 2 / p, " vs pi =", pi)
+Print("pi estimate = 2 / P      =", 2 / p, " vs pi =", pi);
+
+# The pi we squeezed out of the needle drops, shown with its error bar.
+plot::value(2 / p)

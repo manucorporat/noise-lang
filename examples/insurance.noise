@@ -7,3 +7,6 @@ loss ~ unif(0, 1000);
 claim = if loss > 200 { loss - 200 } else { 0 };
 p = P(claim > 0);
 Print("P(insurer pays a claim) =", p)
+
+# A big spike at $0 (small losses below the deductible) then a flat spread of real payouts.
+plot::histogram(claim)

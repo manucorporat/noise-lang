@@ -39,7 +39,8 @@ and a derived value like `4 * P(C)` or a ratio rounds itself correctly.
 | `birthday.noise` | birthday paradox for a group of 5 (one term per pair) | 0.0271 | 0.027 |
 | `prisoners.noise` | **the 100 Prisoners Riddle** — cycle-following strategy; boxes are a `permutation(n)` and a random box index is a per-lane *gather* (`boxes[box]`) | 0.3118 | 0.31 |
 | `reliability.noise` | 3-way parallel redundancy at 0.9 each; `P(any up)` | 0.999 | 0.999 |
-| `conditional_bayes.noise` | conditional probability by hand: `P(D==6 \| D>3)` as a ratio | 0.33333 | 0.334 |
+| `conditional_bayes.noise` | conditional probability with the `\|` bar: `P(D==6 \| D>3)` (≡ the ratio) | 0.33333 | 0.334 |
+| `beta_bernoulli.noise` | **Bayesian coin** — flat prior on the bias, a random parameter feeding `bernoulli`, then `\|` to read off the posterior mean / interval / predictive after 7-of-10 heads | 0.6667 | 0.667 |
 | `irwin_hall.noise` | `P(sum of three U(0,1) > 2)` | 0.16667 | 0.167 |
 | `clt_normal.noise` | a standard normal built from 12 uniforms (CLT); a tail prob | ~0.159 | 0.16 |
 | `functions.noise` | user functions: `max(a,b)=…` (pure, lifts over RVs) + `roll()~…` (draws per call) | 0.30556 / 0.16667 | 0.306 / 0.166 |
@@ -62,9 +63,15 @@ and a derived value like `4 * P(C)` or a ratio rounds itself correctly.
   variables and sharing" in `../LANG.md`.
 - **Modeling, not hand-arithmetic.** `coin_streak` and `exactly_two_heads` *model* the events with
   independent random variables and boolean logic, rather than multiplying probabilities by hand.
-- **Conditioning without an `observe` primitive.** `conditional_bayes` computes a conditional
-  probability as `P(A && B) / P(B)` — which works, but is exactly the spot where a native
-  `observe` / `P(A | B)` would help (planned; see `../PLAN.md` Phase 3).
+- **Conditioning with the `|` bar.** `conditional_bayes` uses `P(D == 6 | D > 3)` — Bayes scoped to
+  the query, no `observe`/side effect — and binds a conditioned value (`D | D > 3`) to reuse across
+  `E`/`Q`. It's exactly `P(A && C) / P(C)`, just less ceremony. (Rejection-based, so best when the
+  condition isn't rare; continuous/rare-event conditioning is the separate inference track.)
+- **Hierarchical models & Bayesian inference.** `beta_bernoulli` puts a *random parameter* into a
+  distribution (`bias ~ unif(0,1); flips ~[10] bernoulli(bias)`) — a prior — then conditions on the
+  data (`| count(flips) == 7`) to read off a posterior mean, credible interval, and predictive. The
+  inference is rejection-based (keep the lanes matching the data): great for a few discrete
+  observations, not yet for lots of continuous data (that needs importance/MCMC weighting).
 - **`if` over a random variable is a value, not control flow.** `dice_bet`, `insurance`,
   `advantage`, and `max_of_dice` use `if cond { a } else { b }` where `cond` is a random event —
   it builds a new random variable by selecting per sample (and gives `max`/`min`/`abs` for free).

@@ -238,6 +238,24 @@ impl Parser {
                 lhs = Spanned::new(Expr::Range(Box::new(lhs), Box::new(rhs)), span);
                 continue;
             }
+            // `|` (conditioning bar) builds a `Cond` node — `event | given`. It binds looser than
+            // every other operator (below `||`), so `A && B | C || D` is `(A && B) | (C || D)`: the
+            // whole event on the left, the whole condition on the right. Only valid inside a query
+            // (eval errors elsewhere); `r_bp > l_bp` keeps it left-leaning so a stray `A | B | C`
+            // nests and is rejected at eval rather than silently re-conditioning.
+            if *self.peek() == TokKind::Pipe {
+                if COND_LBP < min_bp {
+                    break;
+                }
+                self.bump(); // |
+                let rhs = self.parse_bp(COND_RBP)?;
+                let span = Span::new(lhs.span.start, rhs.span.end);
+                lhs = Spanned::new(
+                    Expr::Cond { event: Box::new(lhs), given: Box::new(rhs) },
+                    span,
+                );
+                continue;
+            }
             // `@` (matrix product) builds its own `MatMul` node, not a `Binary`. It binds like
             // `*` (same precedence as in Python), left-associative.
             if *self.peek() == TokKind::At {
@@ -551,6 +569,11 @@ const RANGE_RBP: u8 = 2;
 const MATMUL_LBP: u8 = 11;
 const MATMUL_RBP: u8 = 12;
 
+/// `|` (conditioning bar) binding powers — the loosest infix form (below `||`), so a query's event
+/// and condition are each a full operator expression. `r_bp > l_bp` keeps it left-leaning.
+const COND_LBP: u8 = 1;
+const COND_RBP: u8 = 2;
+
 /// Returns `(op, left_bp, right_bp)` for an infix token. Left-assoc ops have
 /// `left_bp < right_bp`; `^` is right-assoc (`left_bp > right_bp`).
 /// Precedence low→high: `..` < `||` < `&&` < comparison < `+ -` < `* /` < prefix < `^`.
@@ -770,6 +793,37 @@ mod tests {
                 assert_eq!(var, "x");
                 assert!(matches!(iter.expr, Expr::Ident(_)));
                 assert!(matches!(body.expr, Expr::Block(_)));
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conditioning_bar_parses_below_or() {
+        // `a | b` builds a `Cond`, not a `Binary`.
+        assert!(matches!(parse_one("a | b"), Expr::Cond { .. }));
+        // `|` binds looser than `||`: `a || b | c || d` is `(a||b) | (c||d)`.
+        match parse_one("a || b | c || d") {
+            Expr::Cond { event, given } => {
+                assert!(matches!(event.expr, Expr::Binary(BinOp::Or, _, _)));
+                assert!(matches!(given.expr, Expr::Binary(BinOp::Or, _, _)));
+            }
+            other => panic!("got {other:?}"),
+        }
+        // inside a query call it is a single argument: `P(D == 6 | D > 3)`.
+        match parse_one("P(D == 6 | D > 3)") {
+            Expr::Call(n, args) => {
+                assert_eq!(n, "P");
+                assert_eq!(args.len(), 1);
+                assert!(matches!(args[0].expr, Expr::Cond { .. }));
+            }
+            other => panic!("got {other:?}"),
+        }
+        // a binding can hold a conditioned value: `a = X | C`.
+        match parse_one("a = D == 6 | D > 3") {
+            Expr::Bind(BindKind::Assign, name, rhs) => {
+                assert_eq!(name, "a");
+                assert!(matches!(rhs.expr, Expr::Cond { .. }));
             }
             other => panic!("got {other:?}"),
         }

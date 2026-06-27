@@ -10,4 +10,7 @@ sign(t) = if t > 0 { 1 } else { -1 };
 s ~ normal(0, 1);
 estimate = sqrt(pi / 2) * s * sign(s);          # = sqrt(pi/2) * |s|
 Print("E[QJL 1-D estimate] =", E(estimate), "(unbiased target = 1.0)");
-Print("Var[estimate]       =", Var(estimate))
+Print("Var[estimate]       =", Var(estimate));
+
+# The 1-bit estimate should sit on 1.0 — show it with its confidence interval.
+plot::value(E(estimate))

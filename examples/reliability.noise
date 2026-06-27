@@ -1,10 +1,10 @@
 # A gadget has 3 backup parts, each working 90% of the time. The gadget keeps running as long
 # as AT LEAST ONE part still works. How often is it up? Almost always: it only fails if all
 # three fail at once, and that's 0.1 x 0.1 x 0.1 = 0.001, so it's up 0.999 of the time.
-use rand;   # bernoulli
-
 # Three independent parts, each up 90% of the time; the system is up if at least one works.
-part   = bernoulli(0.9);
+part   = rand::bernoulli(0.9);
 parts  ~[3] part;
 up     = vec::any(parts);
 Print("System uptime (3-way parallel) =", P(up))
+# Two bars: the system is up almost always, down only the tiny 0.001 of the time.
+plot::histogram(up)

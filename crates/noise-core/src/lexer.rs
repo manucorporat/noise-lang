@@ -32,6 +32,7 @@ pub enum TokKind {
     Ge,       // >=
     AmpAmp,   // &&
     PipePipe, // ||
+    Pipe,     // | — conditioning bar (`P(A | C)`); only meaningful inside P/E/Var/Q
     Bang,     // !
     // punctuation
     LParen,
@@ -164,6 +165,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
             ('>', Some('=')) => (TokKind::Ge, 2),
             ('&', Some('&')) => (TokKind::AmpAmp, 2),
             ('|', Some('|')) => (TokKind::PipePipe, 2),
+            ('|', _) => (TokKind::Pipe, 1),
             (':', Some(':')) => (TokKind::ColonColon, 2),
             ('.', Some('.')) => (TokKind::DotDot, 2),
             ('+', _) => (TokKind::Plus, 1),
@@ -219,6 +221,16 @@ mod tests {
                 At, Lt, Gt, Bang, Plus, Minus, Star, Slash, Percent, LParen, RParen, LBrace, RBrace,
                 LBracket, RBracket, Comma, Semi, Eof,
             ]
+        );
+    }
+
+    #[test]
+    fn single_pipe_is_distinct_from_double_pipe() {
+        use TokKind::*;
+        // `|` (conditioning bar) and `||` (logical or) lex as different tokens.
+        assert_eq!(
+            kinds("a | b || c"),
+            vec![Ident("a".into()), Pipe, Ident("b".into()), PipePipe, Ident("c".into()), Eof]
         );
     }
 

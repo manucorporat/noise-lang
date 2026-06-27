@@ -14,4 +14,7 @@ Print("CLT (sum of", n, "uniforms) P(Z>1) ~", P(clt > 1));
 
 # Compare against an actual standard normal: the two tail probabilities should agree (~0.16).
 Z ~ normal(0, 1);
-Print("native normal           P(Z>1) =", P(Z > 1))
+Print("native normal           P(Z>1) =", P(Z > 1));
+
+# Stack up 12 random numbers and the totals trace the classic bell curve all on their own.
+plot::histogram(clt)

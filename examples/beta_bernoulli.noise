@@ -1,0 +1,29 @@
+# Learning a coin's bias from data — a tiny Bayesian update, end to end.
+# You flip a mystery coin 10 times and see 7 heads. What's its real bias, and what's the
+# next flip? We DON'T assume a fair coin: we put a flat prior on the bias, let the data
+# speak, and read off the posterior. (Beta-Bernoulli; the textbook answers are the checks.)
+use rand; use vec;
+
+bias  ~ unif(0, 1);            # prior: the bias could be anything in [0, 1], equally likely
+flips ~[10] bernoulli(bias);  # 10 flips of THIS coin — a random parameter feeding bernoulli
+next  ~ bernoulli(bias);      # an 11th flip from the same coin (for the prediction below)
+
+heads = count(flips);         # how many of the 10 came up heads
+
+# Before any data, the bias averages 1/2 — that's just the prior.
+Print("prior mean bias            =", E(bias), "(0.5)");
+
+# Now CONDITION on what we saw (7 heads). `| heads == 7` keeps the worlds matching the data;
+# the posterior mean of a flat prior after h of n heads is (h+1)/(n+2) = 8/12 = 0.6667.
+Print("posterior mean bias | 7/10 =", E(bias | heads == 7),        "(0.6667)");
+Print("posterior 90% interval     =",
+  Q(bias | heads == 7, 0.05), "..", Q(bias | heads == 7, 0.95));
+
+# The posterior PREDICTIVE: how likely is the NEXT flip heads, given the data? Same 8/12.
+Print("P(next flip heads | 7/10)  =", P(next | heads == 7),        "(0.6667)");
+
+# Before any flips, every bias is equally likely — the prior is flat.
+plot::histogram(bias);
+
+# After seeing 7 of 10 heads, the data pulls the bias toward ~0.7 — a clear peak appears.
+plot::histogram(bias | heads == 7)

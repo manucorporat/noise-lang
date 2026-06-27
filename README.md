@@ -7,10 +7,13 @@ Monte Carlo experiments reads like ordinary math.
 
 **Scope (be honest about it):** Noise today is a **static random-variable algebra + forward
 Monte Carlo** tool — excellent for things like estimating π, summing risks, or propagating
-uncertainty through a formula. Modeling *dynamic* stochastic systems (queues, Markov chains,
-random walks) needs sequential/stateful sampling the language does not have yet; that's a
-deliberate future track, not a current capability. See `GOAL.md`, `PLAN.md`, and `AGENT.md`
-for the precise state and roadmap.
+uncertainty through a formula. It also does **conditioning** (`P(A | C)`, Bayes scoped to a query)
+and **hierarchical models** (a random parameter, `p ~ unif(0,1); k ~ bernoulli(p)`), which together
+give *rejection-based* Bayesian inference — priors, posteriors, and predictives you can write and
+query (see `examples/beta_bernoulli.noise`). What's still out of scope: inference that scales to lots
+of continuous data (importance/MCMC weighting) and *dynamic* stochastic systems (queues, Markov
+chains, random walks), which need sequential/stateful sampling — deliberate future tracks, not
+current capabilities. See `GOAL.md`, `PLAN.md`, and `AGENT.md` for the precise state and roadmap.
 
 > **The one rule that surprises everyone:** a name bound with `~` is *one fixed draw* that every
 > mention reuses. So `X - X` is exactly `0`, and `Dice + Dice` is `2·Dice` — **not** two dice.

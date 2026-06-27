@@ -5,4 +5,7 @@ use rand;   # unif
 # Add three independent uniforms and ask how often the total clears 2.
 draws ~[3] unif(0, 1);
 total = vec::sum(draws);
-Print("P(sum of three uniforms > 2) =", P(total > 2))
+Print("P(sum of three uniforms > 2) =", P(total > 2));
+
+# The totals pile up in the middle and thin out at the edges — a little hill already forming.
+plot::histogram(total)

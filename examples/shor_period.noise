@@ -53,6 +53,12 @@ shor(N) = {
 
 # 7^x mod 15 has period 4, and 15's counting register has Q = 16 inputs — so the comb is 4 clean
 # spikes and the quantum subroutine genuinely carries the factorization.
+# The interference comb for 7^x mod 15: 4 evenly-spaced spikes, one per period step.
+combQFT = math::exp(math::i * (-2 * math::pi / 16) * vec::outer(0..16, 0..16)) / 16 ^ 0.5;
+combPsi = [for x in 0..16 { onehot(math::modpow(7, x, 15), 15) }] / 16 ^ 0.5;
+comb    = [for p in combQFT @ combPsi { vec::normsq(p) }];
+plot::line(comb);
+
 Print("period of 7^x mod 15 (the quantum step) =", period(7, 15, 16));   # 4
 Print("shor(15) =", shor(15));   # [3, 5] — factored
 Print("shor(21) =", shor(21));   # [3, 7]

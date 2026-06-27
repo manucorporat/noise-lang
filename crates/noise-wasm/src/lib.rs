@@ -6,9 +6,38 @@
 //! stdout that does not exist on `wasm32`. `stats` carries the run-time counters the playground
 //! shows (samples / operations / random draws); the JS side measures wall-clock to derive ops/sec.
 
-use noise_core::{Engine, RunStats, Value};
-use serde::Serialize;
+use noise_core::introspect::{Payload, Summary};
+use noise_core::{Engine, Output, RunStats, Value};
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
+
+/// One entry in the program's output stream, tagged for the JS renderer: a `Print` line (`text`) or
+/// a `plot::*` chart (`plot`). Keeping these in one ordered list is what lets the playground show
+/// text and charts interleaved exactly as the program emitted them.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum LogItem {
+    Text { text: String },
+    Plot { plot: IntrospectionOut },
+}
+
+/// Split an engine output stream into the text-only log (for simple demos that want a plain string)
+/// and the ordered, tagged `log` (for the playground's interleaved text+chart rendering).
+fn split_output(items: Vec<Output>) -> (String, Vec<LogItem>) {
+    let mut text = String::new();
+    let mut log = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Output::Text(line) => {
+                text.push_str(&line);
+                text.push('\n');
+                log.push(LogItem::Text { text: line });
+            }
+            Output::Plot(s) => log.push(LogItem::Plot { plot: summary_out(&s) }),
+        }
+    }
+    (text, log)
+}
 
 /// Run-time counters surfaced in the playground's "engine" readout. Mirrors [`RunStats`]; the JS
 /// side pairs these with a wall-clock time it measures around [`run`] to show ops/second.
@@ -43,26 +72,28 @@ struct RunResult {
     error: Option<String>,
     /// Run-time counters for the engine readout (partial work still counts on error).
     stats: Stats,
+    /// The output stream in source order: `Print` lines and `plot::*` charts, interleaved.
+    log: Vec<LogItem>,
 }
 
 /// Run a Noise program. Always returns a JSON string (never throws); the JS side reads
-/// `ok`/`value`/`output`/`error`/`stats`.
+/// `ok`/`value`/`output`/`error`/`stats`/`log`.
 #[wasm_bindgen]
 pub fn run(src: &str) -> String {
     let mut engine = Engine::new();
     let result = engine.run(src);
-    let output = engine.drain_output();
+    let (output, log) = split_output(engine.take_output());
     let stats: Stats = engine.stats().into();
     let payload = match result {
-        Ok(Value::Unit) => RunResult { ok: true, value: None, output, error: None, stats },
+        Ok(Value::Unit) => RunResult { ok: true, value: None, output, error: None, stats, log },
         Ok(value) => {
-            RunResult { ok: true, value: Some(value.to_string()), output, error: None, stats }
+            RunResult { ok: true, value: Some(value.to_string()), output, error: None, stats, log }
         }
-        Err(e) => RunResult { ok: false, value: None, output, error: Some(e.to_string()), stats },
+        Err(e) => RunResult { ok: false, value: None, output, error: Some(e.to_string()), stats, log },
     };
     // Serialization of this fixed, string-only struct cannot fail; fall back defensively anyway.
     serde_json::to_string(&payload).unwrap_or_else(|_| {
-        r#"{"ok":false,"value":null,"output":"","error":"internal serialization error"}"#.into()
+        r#"{"ok":false,"value":null,"output":"","error":"internal serialization error","log":[]}"#.into()
     })
 }
 
@@ -70,4 +101,272 @@ pub fn run(src: &str) -> String {
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+// === variable introspection (the playground "inspect without editing the code" path) ============
+//
+// The whole sidecar rests on one fact: `Engine`'s scope persists across `run` calls. So we run the
+// user's program once (building the graph + scope), then resolve each introspection *request* by
+// evaluating one more expression — `describe(x)` / `corr(a, b)` / `explain(y)` — against the SAME
+// engine. Those builtins are exactly the in-source ones; here they're driven by an external request
+// list instead of source text, so a variable can be inspected without touching the program.
+
+/// A live top-level binding, surfaced so the playground can list what's introspectable and offer
+/// only random variables (`kind` starting `dist<…>`) for `describe`/`corr`/`explain`.
+#[derive(Serialize)]
+struct Binding {
+    name: String,
+    kind: String,
+}
+
+/// One introspection request from the playground. `vars` holds one expression (a `describe`/
+/// `explain` target) or two (`corr`). `given` is an optional condition expression; `explain` flips
+/// the one-variable case to the driver fan-out. Targets/conditions are full Noise expressions
+/// evaluated in the program's scope — so the request can reference `X + Y` or a fresh condition the
+/// source never names.
+#[derive(Deserialize)]
+struct Request {
+    vars: Vec<String>,
+    #[serde(default)]
+    given: Option<String>,
+    #[serde(default)]
+    explain: bool,
+    /// With one (array) variable: the element×element correlation heatmap (`corr(vec)`).
+    #[serde(default)]
+    correlate: bool,
+}
+
+impl Request {
+    /// Lower a request to the Noise expression we evaluate in the retained scope. Arity picks the
+    /// operation; `given` wraps the target in a conditioning bar (parenthesized so precedence holds).
+    /// `describe` is polymorphic on the target's type (scalar/vector/matrix/dist), so one mapping
+    /// covers value cards, histograms, series, and heatmaps.
+    fn to_call(&self) -> Option<String> {
+        let target = self.vars.first()?;
+        let cond = |e: &str| match &self.given {
+            Some(g) => format!("({e}) | ({g})"),
+            None => e.to_string(),
+        };
+        Some(if self.explain {
+            format!("explain({})", cond(target))
+        } else if self.correlate {
+            format!("corr({target})") // one array → correlation matrix
+        } else if self.vars.len() >= 2 {
+            // `corr` doesn't take a condition yet; the front-end keeps `given` off two-var requests.
+            format!("corr({}, {})", self.vars[0], self.vars[1])
+        } else {
+            format!("describe({})", cond(target))
+        })
+    }
+}
+
+/// A histogram payload for the browser to draw (equal-width buckets over `[lo, hi]`).
+#[derive(Serialize)]
+struct HistOut {
+    lo: f64,
+    hi: f64,
+    bins: Vec<u64>,
+}
+
+/// One introspection result, tagged by `type` so the JS side renders it (distribution / relationship
+/// / explanation / a per-request error — one bad request never sinks the batch).
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum IntrospectionOut {
+    #[serde(rename = "dist1")]
+    Dist1 {
+        label: String,
+        n: u64,
+        mean: f64,
+        sd: f64,
+        min: f64,
+        max: f64,
+        q05: f64,
+        q25: f64,
+        q50: f64,
+        q75: f64,
+        q95: f64,
+        boolean: bool,
+        hist: HistOut,
+        head: Vec<f64>,
+    },
+    #[serde(rename = "dist2")]
+    Dist2 {
+        label: String,
+        label_b: String,
+        n: u64,
+        corr: f64,
+        cov: f64,
+        mean_a: f64,
+        mean_b: f64,
+        sd_a: f64,
+        sd_b: f64,
+        points: Vec<[f64; 2]>,
+    },
+    #[serde(rename = "explain")]
+    Explain { label: String, sd: f64, drivers: Vec<DriverOut> },
+    #[serde(rename = "value")]
+    Value { label: String, val: f64, se: f64 },
+    #[serde(rename = "grid")]
+    Grid {
+        label: String,
+        rows: usize,
+        cols: usize,
+        /// `true` for a vector (series view), `false` for a matrix (heatmap view).
+        series: bool,
+        mean: Vec<f64>,
+        sd: Vec<f64>,
+    },
+    #[serde(rename = "corrmatrix")]
+    CorrMatrix { label: String, n: usize, corr: Vec<f64> },
+    #[serde(rename = "error")]
+    Error { error: String },
+}
+
+#[derive(Serialize)]
+struct DriverOut {
+    name: String,
+    corr: f64,
+    share: f64,
+}
+
+/// Map an engine [`Summary`] to its serializable form (the CLI-only `view`/rendering is dropped —
+/// the browser gets the full payload and picks its own view).
+fn summary_out(s: &Summary) -> IntrospectionOut {
+    match &s.payload {
+        Payload::One(d) => IntrospectionOut::Dist1 {
+            label: s.label.clone(),
+            n: d.n,
+            mean: d.mean,
+            sd: d.sd,
+            min: d.min,
+            max: d.max,
+            q05: d.q05,
+            q25: d.q25,
+            q50: d.q50,
+            q75: d.q75,
+            q95: d.q95,
+            boolean: d.boolean,
+            hist: HistOut { lo: d.hist.lo, hi: d.hist.hi, bins: d.hist.bins.clone() },
+            head: d.head.clone(),
+        },
+        Payload::Two(d) => IntrospectionOut::Dist2 {
+            label: s.label.clone(),
+            label_b: s.label_b.clone().unwrap_or_default(),
+            n: d.n,
+            corr: d.corr,
+            cov: d.cov,
+            mean_a: d.mean_a,
+            mean_b: d.mean_b,
+            sd_a: d.sd_a,
+            sd_b: d.sd_b,
+            points: d.points.iter().map(|&(x, y)| [x, y]).collect(),
+        },
+        Payload::Explain(e) => IntrospectionOut::Explain {
+            label: s.label.clone(),
+            sd: e.sd,
+            drivers: e
+                .drivers
+                .iter()
+                .map(|d| DriverOut { name: d.name.clone(), corr: d.corr, share: d.share })
+                .collect(),
+        },
+        Payload::Value(v) => IntrospectionOut::Value { label: s.label.clone(), val: v.val, se: v.se },
+        Payload::Grid(g) => IntrospectionOut::Grid {
+            label: s.label.clone(),
+            rows: g.rows,
+            cols: g.cols,
+            series: g.is_series(),
+            mean: g.mean.clone(),
+            sd: g.sd.clone(),
+        },
+        Payload::CorrMatrix(c) => {
+            IntrospectionOut::CorrMatrix { label: s.label.clone(), n: c.n, corr: c.corr.clone() }
+        }
+    }
+}
+
+/// The run result plus the live bindings and the resolved introspections.
+#[derive(Serialize)]
+struct IntrospectResult {
+    ok: bool,
+    value: Option<String>,
+    output: String,
+    error: Option<String>,
+    stats: Stats,
+    /// The program's live top-level variables (name + kind), for the picker.
+    bindings: Vec<Binding>,
+    /// One entry per request, in request order.
+    introspections: Vec<IntrospectionOut>,
+    /// The output stream in source order: `Print` lines and `plot::*` charts, interleaved.
+    log: Vec<LogItem>,
+}
+
+/// Run a program, then resolve a list of introspection requests against its (retained) scope.
+/// `requests_json` is a JSON array of [`Request`]. Always returns a JSON string. The bindings and
+/// per-request results let the playground show a variable's distribution, two variables' relationship,
+/// or what drives a variable — all without the source containing a single `describe`/`corr` call.
+#[wasm_bindgen]
+pub fn run_with_introspection(src: &str, requests_json: &str) -> String {
+    let mut engine = Engine::new();
+    let result = engine.run(src);
+    // Capture the program's own output stream (Print + plot::*) now — before the follow-up runs.
+    let (output, log) = split_output(engine.take_output());
+    let stats: Stats = engine.stats().into();
+    let bindings: Vec<Binding> =
+        engine.bindings().into_iter().map(|(name, kind)| Binding { name, kind: kind.to_string() }).collect();
+
+    let requests: Vec<Request> = serde_json::from_str(requests_json).unwrap_or_default();
+    let mut introspections = Vec::with_capacity(requests.len());
+    // Only resolve requests if the program itself ran (a failed program has no scope to inspect).
+    if result.is_ok() {
+        for req in &requests {
+            let out = match req.to_call() {
+                None => IntrospectionOut::Error { error: "empty request".into() },
+                Some(call) => match engine.run(&call) {
+                    Ok(Value::Summary(s)) => summary_out(&s),
+                    Ok(_) => IntrospectionOut::Error { error: "not a random variable".into() },
+                    Err(e) => IntrospectionOut::Error { error: e.to_string() },
+                },
+            };
+            engine.take_output(); // discard any stray output from a resolved expression
+            introspections.push(out);
+        }
+    }
+
+    let payload = match result {
+        Ok(Value::Unit) => IntrospectResult {
+            ok: true,
+            value: None,
+            output,
+            error: None,
+            stats,
+            bindings,
+            introspections,
+            log,
+        },
+        Ok(value) => IntrospectResult {
+            ok: true,
+            value: Some(value.to_string()),
+            output,
+            error: None,
+            stats,
+            bindings,
+            introspections,
+            log,
+        },
+        Err(e) => IntrospectResult {
+            ok: false,
+            value: None,
+            output,
+            error: Some(e.to_string()),
+            stats,
+            bindings,
+            introspections,
+            log,
+        },
+    };
+    serde_json::to_string(&payload).unwrap_or_else(|_| {
+        r#"{"ok":false,"value":null,"output":"","error":"internal serialization error","bindings":[],"introspections":[],"log":[]}"#.into()
+    })
 }

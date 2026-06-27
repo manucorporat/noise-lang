@@ -35,6 +35,9 @@ for prisoner in 0..n {
   all_win = all_win && found;
 };
 
+# The whole escape is one yes/no event — show how often everyone makes it out.
+plot::histogram(all_win);
+
 # Heavier than most examples: a random box index is a per-lane gather, which runs on the
 # interpreter, so we use a smaller sample budget here.
 Print("P(all 100 prisoners go free) =", P(all_win), " (analytic ~0.3118)")

@@ -8,3 +8,6 @@ B ~ unif_int(1, 20);
 higher = if A > B { A } else { B };
 p = P(higher >= 15);
 Print("P(advantage roll >= 15) =", p)
+
+# Advantage leans the d20 toward the high end: big numbers get the tallest bars.
+plot::histogram(higher)

@@ -66,6 +66,25 @@ pub fn compile(graph: &RvGraph, root: RvId) -> Program {
     }
 }
 
+/// Lower several roots into ONE shared instruction stream (a single `lower` memo), then return the
+/// program plus the register holding each root, in input order. The shared memo is the whole point:
+/// any source feeding more than one root compiles to a *single* instruction, so every root reads the
+/// **same** per-lane draw of it — i.e. the roots are sampled *jointly*. This is what makes a paired
+/// statistic (covariance, correlation, a scatter point) correct: two separately-compiled roots would
+/// place their shared sources at different stream positions and so would not pair lane-for-lane (the
+/// same joint-sampling requirement as conditioning). `Program::root` is set to the first root (a
+/// don't-care for multi-root reads, which index `regs` directly). Like [`compile`], this lowers the
+/// raw graph (no simplify pass) so cross-root source sharing is preserved verbatim.
+pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
+    let mut memo: HashMap<RvId, Reg> = HashMap::new();
+    let mut insts: Vec<Inst> = Vec::new();
+    let mut gathers: Vec<Box<[Reg]>> = Vec::new();
+    let regs: Vec<Reg> =
+        roots.iter().map(|&r| lower(graph, r, &mut memo, &mut insts, &mut gathers)).collect();
+    let root = regs.first().copied().unwrap_or(0);
+    (Program { n_regs: insts.len(), insts, root, gathers }, regs)
+}
+
 fn lower(
     graph: &RvGraph,
     id: RvId,

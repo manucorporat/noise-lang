@@ -117,8 +117,9 @@ fn run_file(path: &str) {
     };
     let mut engine = Engine::new();
     let result = engine.run(&src);
-    // Flush anything `Print` captured during the run (in source order), then the final value.
-    print!("{}", engine.drain_output());
+    // Render the output stream in source order: `Print` lines and `plot::*` charts (as ASCII),
+    // interleaved exactly as the program emitted them, then the final value.
+    print_output(engine.take_output());
     match result {
         // Don't echo a trailing `unit` (e.g. when the program ends in `print(...)`).
         Ok(noise_core::Value::Unit) => {}
@@ -178,11 +179,22 @@ fn repl() {
             continue;
         }
         let result = engine.run(line);
-        print!("{}", engine.drain_output());
+        print_output(engine.take_output());
         match result {
             Ok(noise_core::Value::Unit) => {}
             Ok(value) => println!("{value}"),
             Err(e) => eprintln!("{e}"),
+        }
+    }
+}
+
+/// Render a program's output stream to stdout in source order — `Print` lines as text and `plot::*`
+/// charts as ASCII (each via its `Display`), interleaved exactly as emitted.
+fn print_output(items: Vec<noise_core::Output>) {
+    for item in items {
+        match item {
+            noise_core::Output::Text(line) => println!("{line}"),
+            noise_core::Output::Plot(plot) => println!("{plot}"),
         }
     }
 }

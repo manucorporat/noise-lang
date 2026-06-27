@@ -20,4 +20,10 @@ Print("dithered:  E[sign(v + u)] =", E(sign(v + u)), " (recovers v =", v, ")");
 Print("linearity check (dithered average should equal the input):");
 Print("  v = -0.5 ->", E(sign(-0.5 + u)));
 Print("  v =  0.0 ->", E(sign( 0.0 + u)));
-Print("  v =  0.8 ->", E(sign( 0.8 + u)))
+Print("  v =  0.8 ->", E(sign( 0.8 + u)));
+
+# Sweep the input from -1 to +1 and plot the dithered 1-bit average at each level: a clean straight
+# ramp, proof that the noisy comparator reconstructs the analog value linearly.
+ramp = [sign(-1.0 + u), sign(-0.8 + u), sign(-0.6 + u), sign(-0.4 + u), sign(-0.2 + u),
+        sign( 0.0 + u), sign( 0.2 + u), sign( 0.4 + u), sign( 0.6 + u), sign( 0.8 + u), sign( 1.0 + u)];
+plot::line(ramp)

@@ -1,6 +1,10 @@
 // Thin client-side wrapper around the WASM engine. Loads the module once (lazily) and exposes a
 // typed `runNoise`. The .wasm is imported as a URL so Vite fingerprints and serves it correctly.
-import init, { run as wasmRun, version as wasmVersion } from '../wasm/pkg/noise.js';
+import init, {
+  run as wasmRun,
+  run_with_introspection as wasmRunIntrospect,
+  version as wasmVersion,
+} from '../wasm/pkg/noise.js';
 import wasmUrl from '../wasm/pkg/noise_bg.wasm?url';
 
 let ready: Promise<void> | null = null;
@@ -56,6 +60,123 @@ export async function runNoise(src: string): Promise<NoiseResult> {
 export async function noiseVersion(): Promise<string> {
   await loadNoise();
   return wasmVersion();
+}
+
+// --- variable introspection (the "inspect without editing the code" path) --------------------
+
+/** A live top-level binding of the program — what the variable picker lists. */
+export interface Binding {
+  name: string;
+  /** Value kind, e.g. `dist<number>` / `dist<bool>` (introspectable) or `number` / `array`. */
+  kind: string;
+}
+
+/** A histogram to draw: equal-width buckets `bins` spanning `[lo, hi]`. */
+export interface Hist {
+  lo: number;
+  hi: number;
+  bins: number[];
+}
+
+/** One introspection result, tagged by `type` (mirrors the Rust `IntrospectionOut`). */
+export type Introspection =
+  | {
+      type: 'dist1';
+      label: string;
+      n: number;
+      mean: number;
+      sd: number;
+      min: number;
+      max: number;
+      q05: number;
+      q25: number;
+      q50: number;
+      q75: number;
+      q95: number;
+      boolean: boolean;
+      hist: Hist;
+      head: number[];
+    }
+  | {
+      type: 'dist2';
+      label: string;
+      label_b: string;
+      n: number;
+      corr: number;
+      cov: number;
+      mean_a: number;
+      mean_b: number;
+      sd_a: number;
+      sd_b: number;
+      points: [number, number][];
+    }
+  | {
+      type: 'explain';
+      label: string;
+      sd: number;
+      drivers: { name: string; corr: number; share: number }[];
+    }
+  | { type: 'value'; label: string; val: number; se: number }
+  | {
+      type: 'grid';
+      label: string;
+      rows: number;
+      cols: number;
+      /** true → vector (series view); false → matrix (heatmap view). */
+      series: boolean;
+      mean: number[];
+      sd: number[];
+    }
+  | { type: 'corrmatrix'; label: string; n: number; corr: number[] }
+  | { type: 'error'; error: string };
+
+/** A request: one variable (`describe`/`explain`) or two (`corr`), with an optional condition. */
+export interface IntrospectRequest {
+  /** One or two variable *expressions*, evaluated in the program's scope. */
+  vars: string[];
+  /** Optional condition expression — `describe(v | given)`. */
+  given?: string;
+  /** When true, the one-variable request becomes `explain(v)` (driver fan-out). */
+  explain?: boolean;
+  /** When true, a single (array) variable becomes `corr(v)` (element correlation heatmap). */
+  correlate?: boolean;
+}
+
+/** One item in the program's output stream: a `Print` line or a `plot::*` chart, in source order. */
+export type LogItem = { kind: 'text'; text: string } | { kind: 'plot'; plot: Introspection };
+
+export interface NoiseIntrospectResult extends NoiseResult {
+  /** The program's live top-level variables (for the picker). */
+  bindings: Binding[];
+  /** One result per request, in request order. */
+  introspections: Introspection[];
+  /** The output stream in source order: `Print` lines and `plot::*` charts, interleaved. */
+  log: LogItem[];
+}
+
+/**
+ * Run a program and, against its retained scope, resolve a list of introspection requests — the
+ * sidecar that powers the playground inspector. Passing `[]` requests still returns `bindings`, so a
+ * plain Run can populate the variable picker. Never throws; failures surface in `error` (and
+ * per-request failures as `{ type: 'error' }` entries).
+ */
+export async function runNoiseWithIntrospection(
+  src: string,
+  requests: IntrospectRequest[],
+): Promise<NoiseIntrospectResult> {
+  await loadNoise();
+  const t0 = performance.now();
+  const raw = wasmRunIntrospect(src, JSON.stringify(requests));
+  const elapsedMs = performance.now() - t0;
+  const parsed = JSON.parse(raw) as Omit<NoiseIntrospectResult, 'elapsedMs'>;
+  return {
+    ...parsed,
+    stats: parsed.stats ?? ZERO_STATS,
+    bindings: parsed.bindings ?? [],
+    introspections: parsed.introspections ?? [],
+    log: parsed.log ?? [],
+    elapsedMs,
+  };
 }
 
 /** Compact count: 1.2B / 3.4M / 12k / 950. */

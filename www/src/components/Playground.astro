@@ -32,8 +32,31 @@
         <div class="pg-output-head">
           <span class="dot"></span> Output
         </div>
-        <pre id="pg-output" class="pg-output"><span class="muted">Press Run to evaluate.</span></pre>
+        <div id="pg-output" class="pg-output"><span class="muted">Press Run to evaluate.</span></div>
         <div id="pg-metrics" class="pg-metrics" hidden></div>
+      </div>
+
+      <div class="pg-inspect-wrap glass" id="pg-inspect-wrap" hidden>
+        <div class="pg-output-head">
+          <span class="dot dot-2"></span> Inspect
+          <span class="pg-inspect-hint">click a variable · two to relate</span>
+        </div>
+        <div class="pg-inspect-body">
+          <div class="pg-vars" id="pg-vars"></div>
+          <div class="pg-inspect-controls">
+            <input
+              id="pg-given"
+              class="pg-given"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="condition (optional), e.g. heads == 7"
+            />
+            <button id="pg-explain" class="btn btn-ghost btn-sm" type="button" title="What drives this variable?">Explain</button>
+            <button id="pg-correlate" class="btn btn-ghost btn-sm" type="button" title="Correlation heatmap of an array's elements">Corr</button>
+          </div>
+          <div id="pg-charts" class="pg-charts"></div>
+        </div>
       </div>
     </aside>
   </div>
@@ -140,9 +163,12 @@
   .pg-output {
     margin: 0; padding: 0.85rem; flex: 1; overflow: auto;
     font-family: var(--mono); font-size: 0.86rem; line-height: 1.5;
-    color: var(--ink); white-space: pre-wrap; word-break: break-word;
+    color: var(--ink); word-break: break-word;
     background: var(--paper-2);
   }
+  /* Output is now a stream: Print lines (.out-text) and plot cards interleaved. */
+  .pg-output .out-text { font-family: var(--mono); white-space: pre-wrap; margin: 0; }
+  .pg-output .pg-card { margin: 0.55rem 0; background: var(--paper); }
   .pg-output .muted { color: var(--ink-faint); }
   .pg-output .val { color: #9a5b00; font-weight: 700; }
   .pg-output .err { color: #a4262c; }
@@ -166,13 +192,95 @@
   .pg-metric .m-val { color: var(--ink); font-weight: 700; }
   .pg-metric.m-rate .m-val { color: var(--accent); }
   .m-sep { color: var(--ink-faint); opacity: 0.6; }
+
+  /* --- Inspect panel: the "look at a variable without editing the code" surface --- */
+  .pg-inspect-wrap { display: flex; flex-direction: column; overflow: hidden; }
+  .dot.dot-2 { background: var(--link); }
+  .pg-inspect-hint { margin-left: auto; font-variant: normal; letter-spacing: 0; text-transform: none; font-size: 0.7rem; color: var(--ink-faint); font-style: italic; }
+  .pg-inspect-body { padding: 0.7rem 0.85rem; display: flex; flex-direction: column; gap: 0.6rem; }
+
+  .pg-vars { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .pg-var {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    padding: 0.18rem 0.5rem;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    background: var(--paper-2);
+    color: var(--ink-dim);
+    cursor: pointer;
+    transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+  }
+  .pg-var:hover { border-color: var(--accent); color: var(--ink); }
+  .pg-var.sel { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  .pg-var .pg-var-kind { opacity: 0.55; font-size: 0.68rem; margin-left: 0.25rem; }
+  .pg-var.bool { font-style: italic; }
+
+  .pg-inspect-controls { display: flex; gap: 0.4rem; align-items: center; }
+  .pg-given {
+    flex: 1;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    background: var(--paper-2);
+    color: var(--ink);
+  }
+  .pg-given:focus-visible { outline: 2px solid var(--link); border-color: var(--link); }
+  .btn-sm { font-size: 0.78rem; padding: 0.3rem 0.6rem; }
+  .btn-ghost.active { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
+  .pg-charts { display: flex; flex-direction: column; gap: 0.7rem; }
+  .pg-card { border: 1px solid var(--rule); border-radius: 6px; background: var(--paper); padding: 0.6rem 0.7rem; }
+  .pg-card-title { font-family: var(--mono); font-size: 0.82rem; color: var(--ink); font-weight: 700; margin-bottom: 0.15rem; }
+  .pg-card-sub { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-dim); margin-bottom: 0.4rem; line-height: 1.5; }
+  .pg-card-sub .k { color: var(--ink-faint); }
+  .pg-card-sub .v { color: var(--ink); font-weight: 600; }
+  .pg-chart-svg { width: 100%; height: auto; display: block; }
+  .pg-chart-svg .bar { fill: var(--accent); }
+  .pg-chart-svg .bar-bool { fill: var(--link); }
+  .pg-chart-svg .mean-line { stroke: var(--ink); stroke-width: 1; stroke-dasharray: 3 2; opacity: 0.7; }
+  .pg-chart-svg .pt { fill: var(--link); opacity: 0.5; }
+  .pg-chart-svg .axis { stroke: var(--rule); stroke-width: 1; }
+
+  .pg-driver { display: flex; align-items: center; gap: 0.5rem; font-family: var(--mono); font-size: 0.76rem; margin: 0.18rem 0; }
+  .pg-driver-name { width: 5.5rem; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pg-driver-bar { flex: 1; height: 0.7rem; background: var(--paper-2); border-radius: 3px; overflow: hidden; }
+  .pg-driver-fill { height: 100%; background: var(--accent); border-radius: 3px; }
+  .pg-driver-pct { width: 3rem; text-align: right; color: var(--ink-dim); }
+  .pg-inspect-err { font-family: var(--mono); font-size: 0.76rem; color: #a4262c; }
+  .pg-inspect-empty { font-size: 0.78rem; color: var(--ink-faint); font-style: italic; }
+
+  /* --- Plots panel (program-driven `plot::*` charts) --- */
+  .pg-plots-wrap { display: flex; flex-direction: column; overflow: hidden; }
+  .dot.dot-3 { background: #9a5b00; }
+  #pg-plots { padding: 0.7rem 0.85rem; }
+
+  /* Value + CI card */
+  .pg-chart-svg .ci-line { stroke: var(--ink-dim); stroke-width: 1.5; }
+  .pg-chart-svg .ci-cap { stroke: var(--ink-dim); stroke-width: 1.5; }
+  .pg-chart-svg .ci-dot { fill: var(--accent); }
+  /* Series error bars */
+  .pg-chart-svg .series-bar { stroke: var(--link); stroke-width: 1.5; opacity: 0.55; }
+  .pg-chart-svg .series-dot { fill: var(--link); }
+  /* Heatmap cells use inline fill (data-driven), so no class rule needed. */
+  .pg-heat-legend { font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint); margin-top: 0.25rem; display: flex; align-items: center; gap: 0.3rem; }
+  .pg-heat-swatch { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 2px; }
 </style>
 
 <script>
   import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
   import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
   import { registerNoise, LANGUAGE_ID, THEME_ID } from '../lib/noise-lang';
-  import { runNoise, type NoiseResult } from '../lib/noise';
+  import {
+    runNoiseWithIntrospection,
+    type NoiseIntrospectResult,
+    type Introspection,
+    type IntrospectRequest,
+    type Binding,
+  } from '../lib/noise';
+  // (LogItem is structural; we read res.log items inline.)
   import { examples, defaultExampleId, examplesByCategory } from '../data/examples';
   import { parseHash, encodeCode } from '../lib/share';
 
@@ -186,6 +294,12 @@
   const outEl = $('pg-output');
   const metricsEl = $('pg-metrics');
   const select = $('pg-select') as HTMLSelectElement;
+  const inspectWrap = $('pg-inspect-wrap');
+  const varsEl = $('pg-vars');
+  const givenEl = $('pg-given') as HTMLInputElement;
+  const explainBtn = $('pg-explain') as HTMLButtonElement;
+  const correlateBtn = $('pg-correlate') as HTMLButtonElement;
+  const chartsEl = $('pg-charts');
 
   registerNoise(monaco);
 
@@ -206,6 +320,13 @@
 
   let currentId: string | null = defaultExampleId;
   let suppressHash = false; // guard so our own hash writes don't re-trigger a load
+
+  // --- Inspector state: which variables are selected (max 2), the optional condition, and whether
+  // we're in "explain" mode. Selection drives the introspection requests sent with every run. ---
+  let selected: string[] = [];
+  let explainMode = false;
+  let correlateMode = false;
+  let bindings: Binding[] = [];
 
   const editor = monaco.editor.create($('editor'), {
     value: byId.get(defaultExampleId)?.code ?? examples[0]?.code ?? '',
@@ -228,6 +349,14 @@
     outEl.innerHTML = '<span class="muted">Press Run to evaluate.</span>';
     metricsEl.hidden = true;
     metricsEl.innerHTML = '';
+    // Reset the inspector — a new/edited program has a fresh (unknown) scope until the next run.
+    inspectWrap.hidden = true;
+    selected = [];
+    explainMode = false;
+    correlateMode = false;
+    givenEl.value = '';
+    chartsEl.innerHTML = '';
+    varsEl.innerHTML = '';
   }
 
   function setHash(value: string) {
@@ -286,6 +415,22 @@
     if (select.value) selectExample(select.value);
   });
 
+  /** Random variables and arrays/numbers are all inspectable now (a number → value+CI, an array →
+   * grid/heatmap). Only structurally non-numeric kinds (complex, signal, …) stay disabled. */
+  const isRv = (b: Binding) => b.kind.startsWith('dist');
+  const isInspectable = (b: Binding) =>
+    b.kind.startsWith('dist') || b.kind === 'number' || b.kind === 'bool' || b.kind === 'array';
+
+  /** The introspection requests implied by the current selection (arity picks the operation). */
+  function currentRequests(): IntrospectRequest[] {
+    if (selected.length === 0) return [];
+    const given = givenEl.value.trim() || undefined;
+    if (explainMode) return [{ vars: [selected[0]], given, explain: true }];
+    if (correlateMode) return [{ vars: [selected[0]], correlate: true }];
+    if (selected.length >= 2) return [{ vars: [selected[0], selected[1]] }]; // corr (no condition yet)
+    return [{ vars: [selected[0]], given }];
+  }
+
   async function run() {
     const runBtn = $('pg-run') as HTMLButtonElement;
     runBtn.disabled = true;
@@ -293,10 +438,11 @@
     outEl.innerHTML = '<span class="muted">running…</span>';
     metricsEl.hidden = true;
     try {
-      const res = await runNoise(editor.getValue());
+      const res = await runNoiseWithIntrospection(editor.getValue(), currentRequests());
       statusEl.textContent = `done in ${fmtMs(res.elapsedMs)}`;
       renderResult(res);
       renderMetrics(res);
+      syncInspector(res);
     } catch (e) {
       statusEl.textContent = 'error';
       outEl.innerHTML = `<span class="err">${escapeHtml(String(e))}</span>`;
@@ -305,25 +451,114 @@
     }
   }
 
-  function renderResult(res: NoiseResult) {
-    const parts: string[] = [];
-    if (res.output) parts.push(escapeHtml(res.output.replace(/\n$/, '')));
+  /** Re-run just for the inspector (selection/condition/explain changed) — updates charts only,
+   * against the current editor source, without disturbing the output panel. */
+  async function inspect() {
+    try {
+      const res = await runNoiseWithIntrospection(editor.getValue(), currentRequests());
+      syncInspector(res);
+    } catch (e) {
+      chartsEl.innerHTML = `<div class="pg-inspect-err">${escapeHtml(String(e))}</div>`;
+    }
+  }
+
+  /** Reflect a run's bindings + introspections into the inspector: reveal the panel, render the
+   * variable chips, drop any selection that no longer exists, and draw the result cards. */
+  function syncInspector(res: NoiseIntrospectResult) {
+    bindings = res.bindings;
+    inspectWrap.hidden = bindings.length === 0;
+    const live = new Set(bindings.filter(isRv).map((b) => b.name));
+    selected = selected.filter((n) => live.has(n));
+    renderVarChips();
+    renderCharts(res.introspections);
+  }
+
+  function renderVarChips() {
+    varsEl.innerHTML = '';
+    for (const b of bindings) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'pg-var' + (selected.includes(b.name) ? ' sel' : '') + (b.kind === 'dist<bool>' ? ' bool' : '');
+      const kindShort =
+        b.kind === 'dist<number>' ? 'rv'
+        : b.kind === 'dist<bool>' ? 'event'
+        : b.kind;
+      chip.innerHTML = `${escapeHtml(b.name)}<span class="pg-var-kind">${kindShort}</span>`;
+      if (isInspectable(b)) {
+        chip.title =
+          b.kind === 'array'
+            ? `Inspect ${b.name} — per-element distribution (or "Corr" for its correlation heatmap).`
+            : b.kind === 'number' || b.kind === 'bool'
+              ? `Inspect ${b.name} — its value and confidence interval.`
+              : `Inspect ${b.name}'s distribution — click, or pick two to relate.`;
+        chip.addEventListener('click', () => toggleVar(b.name));
+      } else {
+        chip.disabled = true;
+        chip.style.opacity = '0.5';
+        chip.style.cursor = 'default';
+        chip.title = `${b.name} is a ${b.kind} — not inspectable yet.`;
+      }
+      varsEl.appendChild(chip);
+    }
+    explainBtn.classList.toggle('active', explainMode);
+    correlateBtn.classList.toggle('active', correlateMode);
+  }
+
+  /** Toggle a variable's selection. Cap at two (drop the oldest); a third click in explain mode just
+   * replaces the single explained variable. */
+  function toggleVar(name: string) {
+    if (selected.includes(name)) {
+      selected = selected.filter((n) => n !== name);
+    } else if (explainMode) {
+      selected = [name];
+    } else {
+      selected = [...selected, name].slice(-2);
+    }
+    renderVarChips();
+    inspect();
+  }
+
+  function renderCharts(items: Introspection[]) {
+    chartsEl.innerHTML = '';
+    if (selected.length === 0) {
+      chartsEl.innerHTML = '<div class="pg-inspect-empty">Click a variable above to see its distribution.</div>';
+      return;
+    }
+    if (items.length === 0) {
+      chartsEl.innerHTML = '<div class="pg-inspect-empty">Run the program (⌘↵) to inspect — or fix an error above.</div>';
+      return;
+    }
+    for (const it of items) chartsEl.appendChild(renderCard(it));
+  }
+
+  function renderResult(res: NoiseIntrospectResult) {
+    outEl.innerHTML = '';
+    const addText = (html: string, cls = 'out-text') => {
+      const el = document.createElement('div');
+      el.className = cls;
+      el.innerHTML = html;
+      outEl.appendChild(el);
+    };
+    // The output stream: Print lines and plot:: charts, interleaved in source order.
+    for (const item of res.log) {
+      if (item.kind === 'text') addText(escapeHtml(item.text));
+      else outEl.appendChild(renderCard(item.plot));
+    }
     if (res.ok) {
       if (res.value !== null) {
-        parts.push(`<span class="label">⇒ </span><span class="val">${escapeHtml(res.value)}</span>`);
-      } else if (!res.output) {
-        parts.push('<span class="muted">(no output)</span>');
+        addText(`<span class="label">⇒ </span><span class="val">${escapeHtml(res.value)}</span>`);
+      } else if (res.log.length === 0) {
+        addText('<span class="muted">(no output)</span>');
       }
     } else {
-      parts.push(`<span class="err">${escapeHtml(res.error ?? 'error')}</span>`);
+      addText(escapeHtml(res.error ?? 'error'), 'out-text err');
     }
-    outEl.innerHTML = parts.join('\n') || '<span class="muted">(no output)</span>';
   }
 
   // The engine readout. Most programs force some Monte-Carlo sampling (P/E/Var/Q); for those we show
   // what was computed and how fast. A purely deterministic program forces nothing — we then show
   // just the time, since "0 ops" would be misleading (the work was the deterministic eval, untimed).
-  function renderMetrics(res: NoiseResult) {
+  function renderMetrics(res: NoiseIntrospectResult) {
     const s = res.stats;
     const chips: Array<[string, string, string?]> = [];
     if (s.samples > 0) {
@@ -371,6 +606,255 @@
   function escapeHtml(s: string) {
     return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]!));
   }
+
+  // --- Inspector rendering: one card per introspection result (distribution / relationship / why) ---
+
+  /** Compact number: 3 significant-ish figures, trimming float dust. */
+  function fmtNum(x: number): string {
+    if (!isFinite(x)) return String(x);
+    if (x === 0) return '0';
+    const a = Math.abs(x);
+    const s = a >= 100 ? x.toFixed(0) : a >= 1 ? x.toFixed(2) : x.toFixed(4);
+    return s.replace(/\.?0+$/, '');
+  }
+
+  function card(title: string, sub: string, body: string): HTMLElement {
+    const el = document.createElement('div');
+    el.className = 'pg-card';
+    el.innerHTML = `<div class="pg-card-title">${escapeHtml(title)}</div>` +
+      (sub ? `<div class="pg-card-sub">${sub}</div>` : '') + body;
+    return el;
+  }
+
+  function renderCard(it: Introspection): HTMLElement {
+    if (it.type === 'error') return card('—', '', `<div class="pg-inspect-err">${escapeHtml(it.error)}</div>`);
+    if (it.type === 'dist1') return renderDist1(it);
+    if (it.type === 'dist2') return renderDist2(it);
+    if (it.type === 'explain') return renderExplain(it);
+    if (it.type === 'value') return renderValue(it);
+    if (it.type === 'grid') return renderGrid(it);
+    return renderCorrMatrix(it);
+  }
+
+  function renderValue(v: Extract<Introspection, { type: 'value' }>): HTMLElement {
+    if (!(v.se > 0)) return card(v.label, '', `<div class="pg-card-sub"><span class="v">${fmtNum(v.val)}</span> (exact)</div>`);
+    const half = 1.96 * v.se;
+    const sub = `<span class="v">${fmtNum(v.val)}</span> ± ${fmtNum(v.se)} · <span class="k">95% CI</span> ${fmtNum(v.val - half)} … ${fmtNum(v.val + half)}`;
+    return card(v.label, sub, ciSvg(v.val, v.se));
+  }
+
+  function renderGrid(g: Extract<Introspection, { type: 'grid' }>): HTMLElement {
+    const sub = `<span class="k">${g.series ? 'vector' : 'matrix'}</span> ${g.rows}×${g.cols} · per-cell mean`;
+    return card(g.label, sub, g.series ? seriesSvg(g.mean, g.sd) : heatmapSvg(g.mean, g.rows, g.cols));
+  }
+
+  function renderCorrMatrix(c: Extract<Introspection, { type: 'corrmatrix' }>): HTMLElement {
+    const sub = `<span class="k">corr</span> ${c.n}×${c.n} · element vs element`;
+    const legend =
+      `<div class="pg-heat-legend"><span class="pg-heat-swatch" style="background:${corrColor(-1)}"></span>-1` +
+      `<span class="pg-heat-swatch" style="background:${corrColor(0)}"></span>0` +
+      `<span class="pg-heat-swatch" style="background:${corrColor(1)}"></span>+1</div>`;
+    return card(`corr(${c.label})`, sub, gridSvg(c.corr, c.n, c.n, corrColor) + legend);
+  }
+
+  function renderDist1(d: Extract<Introspection, { type: 'dist1' }>): HTMLElement {
+    if (d.boolean) {
+      // An event: the informative readout is P(true), drawn as two bars.
+      const pTrue = d.mean;
+      const sub = `<span class="k">P(true)</span> <span class="v">${fmtNum(pTrue)}</span> · <span class="k">n</span> <span class="v">${fmtCount(d.n)}</span>`;
+      const body = barsSvg([1 - pTrue, pTrue], ['false', 'true'], true);
+      return card(d.label, sub, body);
+    }
+    const sub =
+      `<span class="k">mean</span> <span class="v">${fmtNum(d.mean)}</span> · ` +
+      `<span class="k">sd</span> <span class="v">${fmtNum(d.sd)}</span> · ` +
+      `<span class="k">med</span> <span class="v">${fmtNum(d.q50)}</span> · ` +
+      `<span class="k">90%</span> <span class="v">${fmtNum(d.q05)}…${fmtNum(d.q95)}</span> · ` +
+      `<span class="k">n</span> <span class="v">${fmtCount(d.n)}</span>`;
+    return card(d.label, sub, histSvg(d.hist, d.mean));
+  }
+
+  function renderDist2(d: Extract<Introspection, { type: 'dist2' }>): HTMLElement {
+    const sub =
+      `<span class="k">corr</span> <span class="v">${fmtNum(d.corr)}</span> · ` +
+      `<span class="k">cov</span> <span class="v">${fmtNum(d.cov)}</span> · ` +
+      `<span class="k">n</span> <span class="v">${fmtCount(d.n)}</span>`;
+    return card(`${d.label} vs ${d.label_b}`, sub, scatterSvg(d.points));
+  }
+
+  function renderExplain(e: Extract<Introspection, { type: 'explain' }>): HTMLElement {
+    const sub = `<span class="k">sd</span> <span class="v">${fmtNum(e.sd)}</span> · what drives it`;
+    if (e.drivers.length === 0) {
+      return card(`explain ${e.label}`, sub, '<div class="pg-inspect-empty">no named upstream variables</div>');
+    }
+    const rows = e.drivers
+      .map(
+        (d) =>
+          `<div class="pg-driver"><span class="pg-driver-name" title="${escapeHtml(d.name)}">${escapeHtml(d.name)}</span>` +
+          `<span class="pg-driver-bar"><span class="pg-driver-fill" style="width:${(d.share * 100).toFixed(0)}%"></span></span>` +
+          `<span class="pg-driver-pct">${(d.share * 100).toFixed(0)}%</span></div>`,
+      )
+      .join('');
+    return card(`explain ${e.label}`, sub, rows);
+  }
+
+  // --- tiny SVG chart builders (no chart lib; crisp, themeable, copy-free) ---
+  const W = 300;
+
+  function histSvg(h: { lo: number; hi: number; bins: number[] }, mean: number): string {
+    const H = 110;
+    const max = Math.max(1, ...h.bins);
+    const n = h.bins.length;
+    const bw = W / n;
+    const bars = h.bins
+      .map((c, i) => {
+        const bh = (c / max) * (H - 8);
+        return `<rect class="bar" x="${(i * bw + 0.5).toFixed(1)}" y="${(H - bh).toFixed(1)}" width="${(bw - 1).toFixed(1)}" height="${bh.toFixed(1)}"/>`;
+      })
+      .join('');
+    const span = h.hi - h.lo || 1;
+    const mx = ((mean - h.lo) / span) * W;
+    const meanLine =
+      mean >= h.lo && mean <= h.hi
+        ? `<line class="mean-line" x1="${mx.toFixed(1)}" y1="0" x2="${mx.toFixed(1)}" y2="${H}"/>`
+        : '';
+    return (
+      `<svg class="pg-chart-svg" viewBox="0 0 ${W} ${H + 16}" preserveAspectRatio="none" role="img">` +
+      bars + meanLine +
+      `<text x="2" y="${H + 13}" font-size="9" fill="currentColor" opacity="0.6">${fmtNum(h.lo)}</text>` +
+      `<text x="${W - 2}" y="${H + 13}" font-size="9" text-anchor="end" fill="currentColor" opacity="0.6">${fmtNum(h.hi)}</text>` +
+      `</svg>`
+    );
+  }
+
+  function barsSvg(fracs: number[], labels: string[], bool: boolean): string {
+    const H = 70;
+    const n = fracs.length;
+    const bw = W / n;
+    const bars = fracs
+      .map((fr, i) => {
+        const bh = fr * (H - 8);
+        return (
+          `<rect class="${bool ? 'bar-bool' : 'bar'}" x="${(i * bw + bw * 0.2).toFixed(1)}" y="${(H - bh).toFixed(1)}" width="${(bw * 0.6).toFixed(1)}" height="${bh.toFixed(1)}"/>` +
+          `<text x="${(i * bw + bw / 2).toFixed(1)}" y="${H + 12}" font-size="10" text-anchor="middle" fill="currentColor" opacity="0.7">${labels[i]}</text>`
+        );
+      })
+      .join('');
+    return `<svg class="pg-chart-svg" viewBox="0 0 ${W} ${H + 16}" role="img">${bars}</svg>`;
+  }
+
+  function scatterSvg(points: [number, number][]): string {
+    const H = 160;
+    const pad = 6;
+    if (points.length === 0) return '<div class="pg-inspect-empty">no points</div>';
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const [x, y] of points) {
+      x0 = Math.min(x0, x); x1 = Math.max(x1, x);
+      y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+    }
+    const dx = x1 - x0 || 1, dy = y1 - y0 || 1;
+    const sx = (x: number) => pad + ((x - x0) / dx) * (W - 2 * pad);
+    const sy = (y: number) => H - pad - ((y - y0) / dy) * (H - 2 * pad);
+    const dots = points
+      .map(([x, y]) => `<circle class="pt" cx="${sx(x).toFixed(1)}" cy="${sy(y).toFixed(1)}" r="1.6"/>`)
+      .join('');
+    return `<svg class="pg-chart-svg" viewBox="0 0 ${W} ${H}" role="img">${dots}</svg>`;
+  }
+
+  /** A value with its 95% CI as a point and whiskers, on a padded value axis. */
+  function ciSvg(val: number, se: number): string {
+    const H = 44;
+    const pad = 30;
+    const half = 1.96 * se;
+    const lo = val - half, hi = val + half;
+    const span = (hi - lo) * 1.5 || 1;
+    const cx = (x: number) => pad + ((x - (lo - (hi - lo) * 0.25)) / span) * (W - 2 * pad);
+    const y = H / 2;
+    return (
+      `<svg class="pg-chart-svg" viewBox="0 0 ${W} ${H}" role="img">` +
+      `<line class="ci-line" x1="${cx(lo).toFixed(1)}" y1="${y}" x2="${cx(hi).toFixed(1)}" y2="${y}"/>` +
+      `<line class="ci-cap" x1="${cx(lo).toFixed(1)}" y1="${y - 5}" x2="${cx(lo).toFixed(1)}" y2="${y + 5}"/>` +
+      `<line class="ci-cap" x1="${cx(hi).toFixed(1)}" y1="${y - 5}" x2="${cx(hi).toFixed(1)}" y2="${y + 5}"/>` +
+      `<circle class="ci-dot" cx="${cx(val).toFixed(1)}" cy="${y}" r="3.5"/>` +
+      `<text x="${cx(lo).toFixed(1)}" y="${y + 18}" font-size="9" text-anchor="middle" fill="currentColor" opacity="0.6">${fmtNum(lo)}</text>` +
+      `<text x="${cx(hi).toFixed(1)}" y="${y + 18}" font-size="9" text-anchor="middle" fill="currentColor" opacity="0.6">${fmtNum(hi)}</text>` +
+      `</svg>`
+    );
+  }
+
+  /** A per-index mean±sd series (forest/trace): dot at the mean, whisker at ±sd. */
+  function seriesSvg(mean: number[], sd: number[]): string {
+    const H = 120;
+    const pad = 6;
+    const n = mean.length;
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < n; i++) {
+      lo = Math.min(lo, mean[i] - sd[i]);
+      hi = Math.max(hi, mean[i] + sd[i]);
+    }
+    if (!(hi > lo)) { hi = lo + 1; lo -= 1; }
+    const sx = (i: number) => pad + (n <= 1 ? (W - 2 * pad) / 2 : (i / (n - 1)) * (W - 2 * pad));
+    const sy = (v: number) => H - pad - ((v - lo) / (hi - lo)) * (H - 2 * pad);
+    let s = '';
+    for (let i = 0; i < n; i++) {
+      const x = sx(i).toFixed(1);
+      s += `<line class="series-bar" x1="${x}" y1="${sy(mean[i] - sd[i]).toFixed(1)}" x2="${x}" y2="${sy(mean[i] + sd[i]).toFixed(1)}"/>`;
+      s += `<circle class="series-dot" cx="${x}" cy="${sy(mean[i]).toFixed(1)}" r="2"/>`;
+    }
+    return `<svg class="pg-chart-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img">${s}</svg>`;
+  }
+
+  /** A heatmap of `rows×cols` cell values, colored low→high by the sequential ramp. */
+  function heatmapSvg(vals: number[], rows: number, cols: number): string {
+    let lo = Infinity, hi = -Infinity;
+    for (const v of vals) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    const span = hi - lo || 1;
+    const color = (v: number) => seqColor((v - lo) / span);
+    const svg = gridSvg(vals, rows, cols, color);
+    const legend =
+      `<div class="pg-heat-legend"><span class="pg-heat-swatch" style="background:${seqColor(0)}"></span>${fmtNum(lo)}` +
+      `<span class="pg-heat-swatch" style="background:${seqColor(1)}"></span>${fmtNum(hi)}</div>`;
+    return svg + legend;
+  }
+
+  /** Generic colored-cell grid: `rows×cols` rects, `color(value)` → fill. Square-ish, fits W. */
+  function gridSvg(vals: number[], rows: number, cols: number, color: (v: number) => string): string {
+    const cell = Math.max(6, Math.min(28, Math.floor(W / Math.max(cols, 1))));
+    const w = cols * cell, h = rows * cell;
+    let s = '';
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        s += `<rect x="${c * cell}" y="${r * cell}" width="${cell - 0.5}" height="${cell - 0.5}" fill="${color(vals[r * cols + c])}"/>`;
+      }
+    }
+    return `<svg class="pg-chart-svg" viewBox="0 0 ${w} ${h}" style="max-width:${w}px" role="img">${s}</svg>`;
+  }
+
+  // Color ramps. Sequential: light paper → accent (amber). Diverging (corr): blue ← white → red.
+  function lerp(a: number, b: number, t: number) { return Math.round(a + (b - a) * t); }
+  function rgb(r: number, g: number, b: number) { return `rgb(${r},${g},${b})`; }
+  function seqColor(t: number): string {
+    const u = Math.max(0, Math.min(1, t));
+    return rgb(lerp(245, 154, u), lerp(238, 91, u), lerp(220, 0, u)); // #f5eedc → #9a5b00
+  }
+  function corrColor(c: number): string {
+    const t = Math.max(-1, Math.min(1, c));
+    if (t >= 0) return rgb(lerp(247, 40, t), lerp(247, 90, t), lerp(247, 160, t)); // white → blue
+    return rgb(lerp(247, 200, -t), lerp(247, 40, -t), lerp(247, 50, -t)); // white → red
+  }
+
+  // Inspector controls: a debounced condition field, and the explain toggle.
+  let givenTimer = 0;
+  givenEl.addEventListener('input', () => {
+    window.clearTimeout(givenTimer);
+    givenTimer = window.setTimeout(() => { if (selected.length) inspect(); }, 400);
+  });
+  explainBtn.addEventListener('click', () => {
+    explainMode = !explainMode;
+    if (explainMode && selected.length > 1) selected = selected.slice(0, 1);
+    renderVarChips();
+    if (selected.length) inspect();
+  });
 
   $('pg-run').addEventListener('click', run);
   $('pg-reset').addEventListener('click', () => {

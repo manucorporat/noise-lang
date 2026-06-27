@@ -5,3 +5,6 @@ use rand;
 Dice ~ unif_int(1, 6);
 p = P(Dice == 4);
 Print("P(rolling a 4) =", p)
+
+# See it for real: every face 1..6 shows up about equally often.
+plot::histogram(Dice)

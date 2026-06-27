@@ -1,9 +1,9 @@
 # Flip a fair coin three times. How often do you get heads exactly twice — no more, no less?
 # There are 3 ways to do it (HHT, HTH, THH) out of 8 equally likely outcomes, so 3/8 = 0.375.
-use rand;   # bernoulli
-
 # Flip a fair coin three times and count the heads; ask how often that count is exactly two.
-coin  = bernoulli(0.5);
+coin  = rand::bernoulli(0.5);
 flips ~[3] coin;
 heads = vec::count(flips);
 Print("P(exactly two heads of three) =", P(heads == 2))
+# See the whole shape: 0, 1, 2, or 3 heads — the bar at 2 is the 3/8 we asked about.
+plot::histogram(heads)

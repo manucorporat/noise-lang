@@ -11,3 +11,5 @@ bday  = unif_int(1, 365);
 days  ~[n] bday;
 match = vec::has_duplicates(days);
 Print("P(shared birthday among", n, ") =", P(match))
+# The answer as a dot with error bars — with 23 people it lands just past a coin flip.
+plot::value(P(match))

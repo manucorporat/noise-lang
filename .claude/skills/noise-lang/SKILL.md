@@ -145,6 +145,11 @@ Print("P(shared birthday among", n, ") =", P(match))
 - `normal_complex(sigma)` — a circularly-symmetric complex Gaussian (`E|z|² = sigma²`); a complex
   RV. `categorical(weights)` — sample an index ∝ weights (`y ~ rand::categorical(probs)`).
 - `rotation(d)` — a fresh random `d×d` orthonormal matrix per sample (Haar rotation).
+- **Random parameters (hierarchical models).** A parameter can itself be a random variable:
+  `p ~ unif(0,1); k ~ bernoulli(p)`. Supported for `unif`/`unif_int`/`normal`/`normal_int`/
+  `exponential`/`exponential_int`/`bernoulli` (not yet `poisson`/`geometric`/`normal_complex`). Two
+  draws of the same parameterized recipe are independent **given** the parameter. Combine with the
+  `|` bar for (rejection) Bayesian inference: `E(bias | count(flips) == 7)` is a posterior mean.
 
 **Queries** (all `builtin`; default `n = 1e6` samples, fixed seed → reproducible):
 
@@ -156,6 +161,12 @@ Print("P(shared birthday among", n, ") =", P(match))
   bool equals `P`.
 - `Q(x, q[, n])` — quantile (inverse CDF): `Q(X, 0.5)` median, `Q(X, 0.95)` 95th pct, `Q(X, 0)` /
   `Q(X, 1)` min/max draw. Returns a plain number.
+- **`event | given` — conditioning** (Bayes, scoped to one query, no `observe`/side effect):
+  `P(A | C)` is "P(A) given C holds", `E(X | C)` / `Q(X | C, q)` likewise. The `|` binds looser than
+  everything (below `||`). `given` must be an event; for `P`, the left side must be an event too.
+  `X | C` is also a **first-class value**: bind it (`hi = D | D > 3`), query it later (`P(hi < 5)`),
+  and operate on it (`2*(X|C)+1` is `(2X+1) | C`). You **cannot** combine two values conditioned on
+  *different* events — condition once, at the end (`(X + Y) | C`).
 - `Print(args…)` — space-separated, then newline; combine with string `+` and `round(x, d)`.
 - `Len(xs)` — element count of an array (a build-time constant).
 
@@ -229,12 +240,15 @@ P(roll() + roll() == 7)                  # two INDEPENDENT rolls
 Functions are **pure in their parameters** — the body sees only its args (plus `pi`/`e`), no outer
 variables, no closures. Calls unroll at build time, so recursion must terminate.
 
-**Conditional probability** has no native `observe`; write it as a ratio:
+**Conditional probability** uses the `|` bar (Bayes, scoped to the query) — prefer it over the
+hand-written ratio:
 
 ```noise
 use rand;
 D ~ unif_int(1, 6);
-Print("P(D==6 | D>3) =", P(D == 6 && D > 3) / P(D > 3))   # = 1/3
+Print("P(D==6 | D>3) =", P(D == 6 | D > 3))               # = 1/3 (≡ P(A && C) / P(C))
+hi = D | D > 3;                                           # a conditioned value — bind & reuse
+Print("E(roll | >3)  =", E(hi), " median:", Q(hi, 0.5))   # 5, 5
 ```
 
 **Signals (lazy waveforms).** `signal::sine(f)` / `cosine(f)` describe a waveform by frequency
@@ -281,7 +295,12 @@ static ~[64] rand::normal_complex(1);    # 64 iid complex-Gaussian static sample
   lanes that can't carry state across a time index. A lifted `if` picks a value per lane; it can't
   thread state across steps.
 - **Each query samples its own pass.** `P(A)`, `P(B)`, `P(A && B)` are estimated independently, so
-  exact cross-query consistency (`P(A && B) ≤ P(A)`) is not guaranteed.
+  exact cross-query consistency (`P(A && B) ≤ P(A)`) is not guaranteed. (Inside *one* conditional
+  query, event and condition share a pass — so `P(A | C)` is internally consistent.)
+- **Conditioning is rejection-based.** `P(A | C)` keeps the lanes where `C` happened, so its error
+  uses the in-condition count `m ≈ n·P(C)` — fine when `P(C)` isn't tiny. It is **not** posterior
+  inference: conditioning on a continuous measurement (`X == 4.7`, probability ~0) or a rare event
+  won't work; that's the separate inference track.
 
 ## Style conventions
 

@@ -7,3 +7,6 @@ die   = unif_int(1, 6);
 dice  ~[2] die;
 total = vec::sum(dice);
 Print("P(two dice sum to 7) =", P(total == 7))
+
+# The total piles up in a triangle: 7 is the tallest bar, 2 and 12 the shortest.
+plot::histogram(total)

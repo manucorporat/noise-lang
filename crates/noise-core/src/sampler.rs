@@ -6,7 +6,9 @@
 //! backend (e.g. a Cranelift JIT) changes only how a batch is produced, not this loop.
 
 use crate::backend::compile_root;
+use crate::bytecode::{compile_roots, run_batch, BATCH};
 use crate::dist::{RvGraph, RvId};
+use crate::rng::Rng;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Moments {
@@ -57,6 +59,167 @@ pub fn sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
 /// `seed` and converge to the same values within Monte-Carlo error.
 pub fn moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Moments {
     crate::reduce::run_reduction(graph, root, n, seed, &crate::reduce::MomentsReducer).into_moments()
+}
+
+/// Conditional moments — the forcing path behind `P(· | C)` / `E(· | C)` / `Var(· | C)`. `root`
+/// must be the conditioning root `select(C, quantity, NaN)`: NaN-valued lanes (where `C` is false)
+/// are skipped, so the moments are over the subpopulation where `C` holds. Returns those moments
+/// alongside the in-condition count `m` (≈ `n·P(C)`), which the caller uses for the standard error.
+/// `m == 0` means the condition never occurred in `n` draws (the conditional is undefined upstream).
+pub fn cond_moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> (Moments, u64) {
+    let acc = crate::reduce::run_reduction(graph, root, n, seed, &crate::reduce::CondMomentsReducer);
+    (acc.into_moments(), acc.count())
+}
+
+/// Collect the in-condition draws of a conditioning root `select(C, quantity, NaN)` — every
+/// non-NaN lane, in stream order — for a conditional quantile `Q(· | C)`. NaN lanes (where `C` is
+/// false) are dropped, so the returned vector holds exactly the `m ≈ n·P(C)` draws from the
+/// subpopulation where `C` holds (unsorted; the caller sorts).
+pub fn cond_sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
+    let mut out = Vec::new();
+    for_each_batch(graph, root, n, seed, |col| {
+        out.extend(col.iter().copied().filter(|x| !x.is_nan()));
+    });
+    out
+}
+
+/// Joint draws of two roots — the forcing path behind `corr`/`scatter` (relationship
+/// introspection). `a` and `b` are sampled in **one** pass over a shared instruction stream
+/// ([`compile_roots`]), so each returned `(aᵢ, bᵢ)` is one lane's *paired* draw (shared upstream
+/// randomness). When `cond` is `Some(c)`, only the lanes where `c` holds (its draw ≠ 0) are kept —
+/// the conditional relationship `corr(A, B | C)`. A single ordered RNG stream (not the per-chunk
+/// reseed of [`moments`]) keeps the pairing exact; this is the interpreter path (the introspection
+/// budget is modest, so the JIT/wasm fast paths aren't needed here).
+pub fn sample_pairs(
+    graph: &RvGraph,
+    a: RvId,
+    b: RvId,
+    cond: Option<RvId>,
+    n: usize,
+    seed: u64,
+) -> Vec<(f64, f64)> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut roots = vec![a, b];
+    if let Some(c) = cond {
+        roots.push(c);
+    }
+    let (prog, regs) = compile_roots(graph, &roots);
+    let (ra, rb) = (regs[0] as usize, regs[1] as usize);
+    let rc = cond.map(|_| regs[2] as usize);
+    let mut buf: Vec<Box<[f64]>> =
+        (0..prog.n_regs).map(|_| vec![0.0f64; BATCH].into_boxed_slice()).collect();
+    let mut rng = Rng::seed_from_u64(seed);
+    let mut out = Vec::with_capacity(n);
+    let mut remaining = n;
+    while remaining > 0 {
+        run_batch(&prog, &mut buf, &mut rng);
+        let take = remaining.min(BATCH);
+        for k in 0..take {
+            if rc.map_or(true, |c| buf[c][k] != 0.0) {
+                out.push((buf[ra][k], buf[rb][k]));
+            }
+        }
+        remaining -= take;
+    }
+    out
+}
+
+/// Per-element moments of a whole set of roots in ONE joint pass — the forcing path behind a
+/// vector/matrix summary (`describe` of an array). `roots` are the element RVs (row-major for a
+/// matrix); every lane draws them jointly ([`compile_roots`]), and we accumulate `Σx`/`Σx²` per
+/// element. Returns one [`Moments`] per root, in input order. Marginal moments don't *need* the
+/// joint pass, but sampling once for all elements is far cheaper than one pass each.
+pub fn grid_moments(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<Moments> {
+    let k = roots.len();
+    if k == 0 || n == 0 {
+        return vec![Moments { mean: 0.0, variance: 0.0 }; k];
+    }
+    let (prog, regs) = compile_roots(graph, roots);
+    let idx: Vec<usize> = regs.iter().map(|&r| r as usize).collect();
+    let (mut sum, mut sum_sq) = (vec![0.0f64; k], vec![0.0f64; k]);
+    let mut buf: Vec<Box<[f64]>> =
+        (0..prog.n_regs).map(|_| vec![0.0f64; BATCH].into_boxed_slice()).collect();
+    let mut rng = Rng::seed_from_u64(seed);
+    let mut count = 0u64;
+    let mut remaining = n;
+    while remaining > 0 {
+        run_batch(&prog, &mut buf, &mut rng);
+        let take = remaining.min(BATCH);
+        for j in 0..k {
+            let col = &buf[idx[j]];
+            let (mut s, mut sq) = (0.0f64, 0.0f64);
+            for &x in &col[..take] {
+                s += x;
+                sq += x * x;
+            }
+            sum[j] += s;
+            sum_sq[j] += sq;
+        }
+        count += take as u64;
+        remaining -= take;
+    }
+    let nf = count as f64;
+    (0..k)
+        .map(|j| {
+            let mean = sum[j] / nf;
+            Moments { mean, variance: (sum_sq[j] / nf - mean * mean).max(0.0) }
+        })
+        .collect()
+}
+
+/// The full `k×k` correlation matrix over a set of roots in ONE joint pass — the forcing path behind
+/// the element-vs-element heatmap (`corr` of a vector). Accumulates per-element `Σx`/`Σx²` and the
+/// pairwise `Σxᵢxⱼ`, then forms Pearson correlations. Row-major `k*k`; the diagonal is 1 (a constant
+/// element, zero variance, correlates 0 with everything). `O(k²)` per lane, so the caller caps `k`.
+pub fn corr_matrix(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<f64> {
+    let k = roots.len();
+    if k == 0 || n == 0 {
+        return vec![0.0; k * k];
+    }
+    let (prog, regs) = compile_roots(graph, roots);
+    let idx: Vec<usize> = regs.iter().map(|&r| r as usize).collect();
+    let mut sum = vec![0.0f64; k];
+    let mut cross = vec![0.0f64; k * k]; // upper triangle filled; symmetrized at the end
+    let mut buf: Vec<Box<[f64]>> =
+        (0..prog.n_regs).map(|_| vec![0.0f64; BATCH].into_boxed_slice()).collect();
+    let mut rng = Rng::seed_from_u64(seed);
+    let mut vals = vec![0.0f64; k];
+    let mut count = 0u64;
+    let mut remaining = n;
+    while remaining > 0 {
+        run_batch(&prog, &mut buf, &mut rng);
+        let take = remaining.min(BATCH);
+        for lane in 0..take {
+            for i in 0..k {
+                vals[i] = buf[idx[i]][lane];
+            }
+            for i in 0..k {
+                sum[i] += vals[i];
+                let row = i * k;
+                for j in i..k {
+                    cross[row + j] += vals[i] * vals[j];
+                }
+            }
+        }
+        count += take as u64;
+        remaining -= take;
+    }
+    let nf = count as f64;
+    let mean: Vec<f64> = sum.iter().map(|s| s / nf).collect();
+    let var: Vec<f64> = (0..k).map(|i| (cross[i * k + i] / nf - mean[i] * mean[i]).max(0.0)).collect();
+    let mut corr = vec![0.0f64; k * k];
+    for i in 0..k {
+        for j in i..k {
+            let cov = cross[i * k + j] / nf - mean[i] * mean[j];
+            let denom = (var[i] * var[j]).sqrt();
+            let c = if denom > 0.0 { (cov / denom).clamp(-1.0, 1.0) } else { f64::from(i == j) };
+            corr[i * k + j] = c;
+            corr[j * k + i] = c; // symmetric
+        }
+    }
+    corr
 }
 
 #[cfg(test)]

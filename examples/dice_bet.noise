@@ -7,3 +7,6 @@ D ~ unif_int(1, 6);
 payoff = if D == 6 { 10 } else { 0 - 2 };
 p = P(payoff > 0);
 Print("P(come out ahead) =", p)
+
+# Two outcomes only: a tall -2 bar (you usually lose a bit) and a short +10 bar.
+plot::histogram(payoff)

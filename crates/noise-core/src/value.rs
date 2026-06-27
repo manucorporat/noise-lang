@@ -10,7 +10,8 @@
 use std::fmt;
 use std::rc::Rc;
 
-use crate::dist::{Recipe, RvId};
+use crate::dist::{Recipe, RvId, RvKind};
+use crate::introspect::Summary;
 use crate::signal::{NoiseSpec, SignalSpec};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +55,20 @@ pub enum Value {
     /// only from `math::i`/`j` (the unit `0 + 1i`) or a complex distribution; pure-real
     /// expressions stay `Num`. Invariant: `re`/`im` are always real scalars (`Num`/`Est`/`Dist`).
     Complex { re: Box<Value>, im: Box<Value> },
+    /// A **conditioned value** — `event | given` (Bayes, scoped to a query). `quantity` is the RV
+    /// being measured (an event for `P`, any number for `E`/`Var`/`Q`; its kind is `q_kind`),
+    /// `condition` is the bool RV it is conditioned on. The two are kept *separate* (not yet fused)
+    /// so operations compose: `2*(X|C)+1` pushes the arithmetic into `quantity` and carries the same
+    /// `condition` along — it is `(2X+1) | C`. Two values conditioned on *different* events cannot be
+    /// combined (the one rule that keeps conditioning consistent). Like a `Recipe`, a conditioned
+    /// value is *consumed* by `P`/`E`/`Var`/`Q` (which fuse it into `select(condition, quantity, NaN)`
+    /// and sample the subpopulation where the condition holds), never operated on past that.
+    Cond { quantity: RvId, q_kind: RvKind, condition: RvId },
+    /// An **introspection summary** — what `describe`/`hist`/`samples`/`corr`/`scatter`/`explain`
+    /// evaluate to (see [`crate::introspect`]). It is a *value*: it binds, flows through, and
+    /// `Display`s as an ASCII block in the CLI (the playground serializes its `payload` instead).
+    /// `Rc` keeps it cheap to clone.
+    Summary(Rc<Summary>),
     /// The **`continue` control sentinel** (PLAN-COMPLEX §8). Produced by evaluating `continue`; it
     /// short-circuits the enclosing `{ block }` (the evaluator stops at the statement that yields
     /// it) and signals the surrounding loop to skip — a `for` discards the iteration, a
@@ -88,6 +103,8 @@ impl Value {
             Value::Signal(_) => "signal",
             Value::Noise(_) => "noise",
             Value::Complex { .. } => "complex",
+            Value::Cond { .. } => "conditioned value",
+            Value::Summary(_) => "summary",
             Value::Continue => "continue",
         }
     }
@@ -177,6 +194,10 @@ impl fmt::Display for Value {
                     _ => write!(f, "{re} + {im}i"),
                 }
             }
+            Value::Cond { quantity, condition, .. } => {
+                write!(f, "<conditioned #{} | #{}>", quantity.0, condition.0)
+            }
+            Value::Summary(s) => write!(f, "{s}"),
             Value::Continue => write!(f, "continue"),
         }
     }

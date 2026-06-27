@@ -187,6 +187,12 @@ pub struct MomentAcc {
 }
 
 impl MomentAcc {
+    /// Number of draws folded in. For the conditional reducer this is the *in-condition* count
+    /// `m ≈ n·P(C)` — the effective sample size a conditional estimate's standard error uses.
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
     pub fn into_moments(self) -> Moments {
         if self.count == 0 {
             return Moments { mean: 0.0, variance: 0.0 };
@@ -244,6 +250,37 @@ impl Reducer for MomentsReducer {
         acc.count += col.len() as u64;
         acc.sum += sum;
         acc.sum_sq += sum_sq;
+    }
+
+    fn merge(&self, a: MomentAcc, b: MomentAcc) -> MomentAcc {
+        MomentAcc { count: a.count + b.count, sum: a.sum + b.sum, sum_sq: a.sum_sq + b.sum_sq }
+    }
+}
+
+/// Like [`MomentsReducer`], but lanes whose draw is **NaN are skipped** rather than folded. This is
+/// the conditioning sentinel: a query `P(A | C)` / `E(X | C)` compiles to the single root
+/// `select(C, quantity, NaN)` — `quantity` on the lanes where `C` holds, `NaN` elsewhere — so one
+/// sampling pass draws event and condition *jointly* (shared upstream draws), and this reducer
+/// averages over exactly the in-condition lanes. `count` comes out as the in-condition sample size
+/// `m`, which the standard error uses. (No SIMD lanes here: the per-element `is_nan` branch already
+/// breaks vectorization, and conditioning is not the hot path.)
+pub struct CondMomentsReducer;
+
+impl Reducer for CondMomentsReducer {
+    type Acc = MomentAcc;
+
+    fn identity(&self) -> MomentAcc {
+        MomentAcc { count: 0, sum: 0.0, sum_sq: 0.0 }
+    }
+
+    fn absorb(&self, acc: &mut MomentAcc, col: &[f64]) {
+        for &x in col {
+            if !x.is_nan() {
+                acc.count += 1;
+                acc.sum += x;
+                acc.sum_sq += x * x;
+            }
+        }
     }
 
     fn merge(&self, a: MomentAcc, b: MomentAcc) -> MomentAcc {

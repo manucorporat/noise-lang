@@ -44,4 +44,10 @@ Print("FM recovered-message error (MSE) =", fm_err);
 # The advantage GROWS with the deviation; in the small-signal limit it approaches dev^2. The real
 # simulation lands a bit under that ideal because at finite noise the angle reading degrades on the
 # wider swings — exactly the honest detail a closed-form 'dev^2' hides.
-Print("FM is", round(am_err / fm_err, 1), "x cleaner for the same static  (small-signal ideal: dev^2 =", dev ^ 2, ")")
+Print("FM is", round(am_err / fm_err, 1), "x cleaner for the same static  (small-signal ideal: dev^2 =", dev ^ 2, ")");
+
+# See it, don't just measure it: the original tone, then what each scheme drags back out of the static.
+# FM's recovered wave hugs the message; AM's is visibly rattled by the same noise.
+plot::line(msg);
+plot::line(am_demodulate(am_modulate(msg) + static));
+plot::line(fm_demodulate(fm_modulate(msg, dev) + static, dev))

@@ -115,6 +115,15 @@ pub enum Expr {
     /// `use module;` — bring a module's items into unqualified scope (Rust-style). Evaluates to
     /// unit. `builtin` is always active; `rand`/`math`/`vec` need a `use` (or a `mod::name` path).
     Use(String),
+    /// `event | given` — a **conditioning** expression (`P(A | C)`, `E(X | C)`, …). It is *only*
+    /// meaningful as the first argument of a query (`P`/`E`/`Var`/`Q`): it restricts that single
+    /// query to the worlds where `given` holds (Bayes' rule, scoped to the query — no side effect,
+    /// no global state). `given` must be an event (bool); `event` is the quantity being measured.
+    /// Evaluated in any other position it is a spanned error.
+    Cond {
+        event: Box<Spanned>,
+        given: Box<Spanned>,
+    },
     /// `continue` — skip the rest of the enclosing loop body (PLAN-COMPLEX §8). Evaluating it
     /// short-circuits the current `{ block }` (later statements don't run); a `for` loop discards
     /// that iteration's side effects, and a comprehension *omits* that element. This is how a

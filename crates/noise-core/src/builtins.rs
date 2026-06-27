@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use crate::dist::{Recipe, RvGraph, RvId, RvKind};
+use crate::dist::{DistArg, Recipe, RvGraph, RvId, RvKind};
 use crate::error::{NoiseError, Result, Span};
 use crate::sampler;
 use crate::signal::{SignalSpec, Wave};
@@ -52,43 +52,64 @@ pub fn call(
 ) -> Result<Value> {
     match name {
         "unif" => {
-            let [lo, hi] = two_nums(name, arg_vals, span)?;
-            Ok(Value::Recipe(Recipe::Uniform { lo, hi }))
+            let [lo, hi] = two_args(name, arg_vals, graph, span)?;
+            match both_const(lo, hi) {
+                Some([lo, hi]) => Ok(Value::Recipe(Recipe::Uniform { lo, hi })),
+                None => Ok(Value::Recipe(Recipe::UniformDyn { lo, hi })),
+            }
         }
         "unif_int" => {
-            let [lo, hi] = two_nums(name, arg_vals, span)?;
-            if lo > hi {
-                return Err(NoiseError::runtime(
-                    format!("unif_int needs lo <= hi, got ({lo}, {hi})"),
-                    span,
-                ));
+            let [lo, hi] = two_args(name, arg_vals, graph, span)?;
+            match both_const(lo, hi) {
+                Some([lo, hi]) => {
+                    if lo > hi {
+                        return Err(NoiseError::runtime(
+                            format!("unif_int needs lo <= hi, got ({lo}, {hi})"),
+                            span,
+                        ));
+                    }
+                    // Treat bounds as inclusive integers (normalize once, at recipe construction).
+                    Ok(Value::Recipe(Recipe::UniformInt { lo: lo.round(), hi: hi.round() }))
+                }
+                // A random bound can't be range-checked here; the draw transform handles it per lane.
+                None => Ok(Value::Recipe(Recipe::UniformIntDyn { lo, hi })),
             }
-            // Treat bounds as inclusive integers (normalize once, at recipe construction).
-            Ok(Value::Recipe(Recipe::UniformInt { lo: lo.round(), hi: hi.round() }))
         }
         "bernoulli" => {
-            let p = one_num(name, arg_vals, span)?;
-            if !(0.0..=1.0).contains(&p) {
-                return Err(NoiseError::runtime(
-                    format!("bernoulli(p) needs 0 <= p <= 1, got {p}"),
-                    span,
-                ));
+            let p = one_arg(name, arg_vals, graph, span)?;
+            match p {
+                DistArg::Const(p) => {
+                    if !(0.0..=1.0).contains(&p) {
+                        return Err(NoiseError::runtime(
+                            format!("bernoulli(p) needs 0 <= p <= 1, got {p}"),
+                            span,
+                        ));
+                    }
+                    Ok(Value::Recipe(Recipe::Bernoulli { p }))
+                }
+                // A random p isn't range-checked: `(U < p)` is true with the lane's clamped p.
+                rv => Ok(Value::Recipe(Recipe::BernoulliDyn { p: rv })),
             }
-            Ok(Value::Recipe(Recipe::Bernoulli { p }))
         }
         "normal" | "normal_int" => {
-            let [mu, sigma] = two_nums(name, arg_vals, span)?;
-            if sigma < 0.0 || !sigma.is_finite() || !mu.is_finite() {
-                return Err(NoiseError::runtime(
-                    format!("{name}(mu, sigma) needs finite mu and sigma >= 0, got ({mu}, {sigma})"),
-                    span,
-                ));
+            let [mu, sigma] = two_args(name, arg_vals, graph, span)?;
+            let int = name == "normal_int";
+            match both_const(mu, sigma) {
+                Some([mu, sigma]) => {
+                    if sigma < 0.0 || !sigma.is_finite() || !mu.is_finite() {
+                        return Err(NoiseError::runtime(
+                            format!("{name}(mu, sigma) needs finite mu and sigma >= 0, got ({mu}, {sigma})"),
+                            span,
+                        ));
+                    }
+                    Ok(Value::Recipe(if int {
+                        Recipe::NormalInt { mu, sigma }
+                    } else {
+                        Recipe::Normal { mu, sigma }
+                    }))
+                }
+                None => Ok(Value::Recipe(Recipe::NormalDyn { mu, sigma, int })),
             }
-            Ok(Value::Recipe(if name == "normal_int" {
-                Recipe::NormalInt { mu, sigma }
-            } else {
-                Recipe::Normal { mu, sigma }
-            }))
         }
         "normal_complex" => {
             // Circularly-symmetric complex Gaussian: re/im each ~ N(0, sigma/√2), so E|z|² = sigma².
@@ -102,18 +123,20 @@ pub fn call(
             Ok(Value::Recipe(Recipe::NormalComplex { sigma }))
         }
         "exponential" | "exponential_int" => {
-            let rate = one_num(name, arg_vals, span)?;
-            if rate <= 0.0 || !rate.is_finite() {
-                return Err(NoiseError::runtime(
-                    format!("{name}(rate) needs a finite rate > 0, got {rate}"),
-                    span,
-                ));
+            let rate = one_arg(name, arg_vals, graph, span)?;
+            let int = name == "exponential_int";
+            match rate {
+                DistArg::Const(rate) => {
+                    if rate <= 0.0 || !rate.is_finite() {
+                        return Err(NoiseError::runtime(
+                            format!("{name}(rate) needs a finite rate > 0, got {rate}"),
+                            span,
+                        ));
+                    }
+                    Ok(Value::Recipe(if int { Recipe::ExpInt { rate } } else { Recipe::Exp { rate } }))
+                }
+                rv => Ok(Value::Recipe(Recipe::ExpDyn { rate: rv, int })),
             }
-            Ok(Value::Recipe(if name == "exponential_int" {
-                Recipe::ExpInt { rate }
-            } else {
-                Recipe::Exp { rate }
-            }))
         }
         "poisson" => {
             let lambda = one_num(name, arg_vals, span)?;
@@ -441,6 +464,153 @@ fn quantile(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64
     }
 }
 
+// --- conditional queries: `P(A | C)`, `E(X | C)`, `Var(X | C)`, `Q(X | C, q)` (Bayes, scoped to
+//     one query — no side effect). `eval.rs` builds the single conditioning root
+//     `select(C, quantity, NaN)` so event and condition are sampled *jointly* in one pass; these
+//     reduce over the non-NaN (in-condition) lanes via `sampler::cond_*`. The standard error uses
+//     the in-condition sample size `m ≈ n·P(C)`, not `n` — a rarer condition gives a looser estimate.
+
+/// The condition after `|` never held in any of the `n` draws, so `P(·|C)` / `E(·|C)` is undefined
+/// (a 0/0). Point the user at the two fixes rather than returning a silent NaN.
+fn cond_never(n: usize, span: Span) -> NoiseError {
+    NoiseError::runtime(
+        format!(
+            "the condition after `|` never occurred in {n} samples, so the conditional is undefined \
+             — use a more likely condition or raise the sample count"
+        ),
+        span,
+    )
+}
+
+/// Resolve an optional trailing sample-count `Value` for a conditional query (mirrors the validation
+/// in `prob`/`moment`/`quantile`). `None` → `default_n`.
+fn opt_count(name: &str, v: Option<&Value>, default_n: usize, span: Span) -> Result<usize> {
+    match v {
+        Some(v) => {
+            let n = as_num(v, span)?;
+            if n < 1.0 || !n.is_finite() {
+                return Err(NoiseError::runtime(
+                    format!("{name} sample count must be a finite number >= 1, got {n}"),
+                    span,
+                ));
+            }
+            Ok(n as usize)
+        }
+        None => Ok(default_n),
+    }
+}
+
+/// `P(event | cond)` — the conditional probability over the worlds where `cond` holds. `root` is the
+/// conditioning root `select(cond, event_indicator, NaN)` (built in `eval.rs`); `tail` is the
+/// optional `[n]` sample count after the `|`-expression. The estimate is a probability with the
+/// standard error of `m ≈ n·P(cond)` in-condition draws (so it self-rounds like an unconditional `P`).
+pub fn prob_cond(
+    graph: &RvGraph,
+    root: RvId,
+    tail: &[Value],
+    default_n: usize,
+    max_opts: u64,
+    span: Span,
+    check: bool,
+) -> Result<Value> {
+    if tail.len() > 1 {
+        return Err(NoiseError::runtime(
+            format!("P(event | cond) takes an optional sample count, got {} extra argument(s)", tail.len()),
+            span,
+        ));
+    }
+    if check {
+        return Ok(Value::Est { val: 0.5, se: 0.0 });
+    }
+    let n = opt_count("P", tail.first(), default_n, span)?;
+    let n = clamp_to_op_budget(n, graph, root, max_opts);
+    let (m, count) = sampler::cond_moments(graph, root, n, P_DEFAULT_SEED);
+    if count == 0 {
+        return Err(cond_never(n, span));
+    }
+    let p_hat = m.mean;
+    let cf = count as f64;
+    let se = (p_hat * (1.0 - p_hat) / cf).sqrt().max(0.5 / cf);
+    Ok(Value::Est { val: p_hat, se })
+}
+
+/// `E(x | cond)` / `Var(x | cond)` — the conditional mean/variance over the worlds where `cond`
+/// holds. `root` is `select(cond, x, NaN)`; `tail` is the optional `[n]`. The standard error uses the
+/// in-condition sample size.
+pub fn moment_cond(
+    name: &str,
+    graph: &RvGraph,
+    root: RvId,
+    tail: &[Value],
+    default_n: usize,
+    max_opts: u64,
+    span: Span,
+    check: bool,
+) -> Result<Value> {
+    if tail.len() > 1 {
+        return Err(NoiseError::runtime(
+            format!("{name}(x | cond) takes an optional sample count, got {} extra argument(s)", tail.len()),
+            span,
+        ));
+    }
+    if check {
+        return Ok(Value::Est { val: 0.0, se: 0.0 });
+    }
+    let n = opt_count(name, tail.first(), default_n, span)?;
+    let n = clamp_to_op_budget(n, graph, root, max_opts);
+    let (m, count) = sampler::cond_moments(graph, root, n, P_DEFAULT_SEED);
+    if count == 0 {
+        return Err(cond_never(n, span));
+    }
+    let cf = count as f64;
+    if name == "Var" {
+        Ok(Value::Est { val: m.variance, se: m.variance.abs() * (2.0 / cf).sqrt() })
+    } else {
+        Ok(Value::Est { val: m.mean, se: (m.variance / cf).sqrt() })
+    }
+}
+
+/// `Q(x | cond, q)` / `Q(x | cond, q, n)` — the conditional quantile over the worlds where `cond`
+/// holds. `root` is `select(cond, x, NaN)`; `tail` is `[q]` or `[q, n]`. Estimated by collecting the
+/// in-condition draws (NaN lanes dropped), sorting, and interpolating — like the unconditional `Q`.
+pub fn quantile_cond(
+    graph: &RvGraph,
+    root: RvId,
+    tail: &[Value],
+    default_n: usize,
+    max_opts: u64,
+    span: Span,
+    check: bool,
+) -> Result<Value> {
+    if tail.is_empty() || tail.len() > 2 {
+        return Err(NoiseError::runtime(
+            format!(
+                "Q(x | cond, q[, n]) needs a quantile level q in [0,1] (and an optional sample count), got {} argument(s) after the condition",
+                tail.len()
+            ),
+            span,
+        ));
+    }
+    let q = as_num(&tail[0], span)?;
+    if !(0.0..=1.0).contains(&q) {
+        return Err(NoiseError::runtime(
+            format!("Q needs a quantile level q in [0, 1], got {q}"),
+            span,
+        ));
+    }
+    if check {
+        return Ok(Value::Num(0.0));
+    }
+    let n = opt_count("Q", tail.get(1), default_n, span)?;
+    let n = clamp_to_op_budget(n, graph, root, max_opts);
+    let mut draws = sampler::cond_sample_n(graph, root, n, P_DEFAULT_SEED);
+    if draws.is_empty() {
+        return Err(cond_never(n, span));
+    }
+    draws.sort_by(f64::total_cmp);
+    Ok(Value::Num(empirical_quantile(&draws, q)))
+}
+
 /// Linear-interpolated empirical quantile of a **sorted, non-empty** sample (the `type-7` rule,
 /// numpy's default): position `q*(len-1)`, blended between its floor/ceil order statistics.
 fn empirical_quantile(sorted: &[f64], q: f64) -> f64 {
@@ -647,5 +817,60 @@ fn as_num(v: &Value, span: Span) -> Result<f64> {
             format!("expected a number, got {}", other.type_name()),
             span,
         )),
+    }
+}
+
+/// Resolve a distribution parameter that may be **deterministic or random** — the seam that lets
+/// `bernoulli(p)`/`normal(mu, sigma)`/… accept an RV parameter (hierarchical models). A `Num`/`Est`
+/// is a constant; a numeric `Dist` (`RvKind::Num`) is the parameter's per-lane draws. A bool RV, a
+/// recipe, or any other value is a spanned error (a probability/rate must be a number).
+fn dist_arg(name: &str, v: &Value, graph: &RvGraph, span: Span) -> Result<DistArg> {
+    match v {
+        Value::Num(n) => Ok(DistArg::Const(*n)),
+        Value::Est { val, .. } => Ok(DistArg::Const(*val)),
+        Value::Dist(id) if graph.kind(*id) == RvKind::Num => Ok(DistArg::Rv(*id)),
+        Value::Dist(id) => Err(NoiseError::runtime(
+            format!("{name} parameter must be a number or numeric random variable, got {}", graph.kind(*id).type_name()),
+            span,
+        )),
+        Value::Recipe(_) => Err(NoiseError::runtime(
+            format!("{name} parameter is an undrawn distribution — draw it with `~` first (e.g. `m ~ unif(0,1); {name}(…, m)`)"),
+            span,
+        )),
+        other => Err(NoiseError::runtime(
+            format!("{name} parameter must be a number or numeric random variable, got {}", other.type_name()),
+            span,
+        )),
+    }
+}
+
+/// Arity-1 distribution parameter (constant or RV).
+fn one_arg(name: &str, args: &[Value], graph: &RvGraph, span: Span) -> Result<DistArg> {
+    if args.len() != 1 {
+        return Err(NoiseError::runtime(
+            format!("{name} expects 1 argument, got {}", args.len()),
+            span,
+        ));
+    }
+    dist_arg(name, &args[0], graph, span)
+}
+
+/// Arity-2 distribution parameters (each constant or RV).
+fn two_args(name: &str, args: &[Value], graph: &RvGraph, span: Span) -> Result<[DistArg; 2]> {
+    if args.len() != 2 {
+        return Err(NoiseError::runtime(
+            format!("{name} expects 2 arguments, got {}", args.len()),
+            span,
+        ));
+    }
+    Ok([dist_arg(name, &args[0], graph, span)?, dist_arg(name, &args[1], graph, span)?])
+}
+
+/// If both parameters are constants, return them as plain `f64`s (the fast path that keeps the
+/// existing constant-parameter recipe + single source instruction); `None` if either is random.
+fn both_const(a: DistArg, b: DistArg) -> Option<[f64; 2]> {
+    match (a, b) {
+        (DistArg::Const(a), DistArg::Const(b)) => Some([a, b]),
+        _ => None,
     }
 }

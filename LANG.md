@@ -138,6 +138,7 @@ symbolic (a distribution) until then.
 @                         matrix product  (dot / mat·vec / matmul by shape)
 == != < > <= >=           comparison
 && ||                     logical and / or
+|                         conditioning bar (`P(A | C)`); only inside a query
 !                         logical not (prefix)
 =                         assignment bind
 ~  ~[n]  ~[n, m]          sample / distribution bind (optional draw shape)
@@ -186,16 +187,17 @@ binding, which are right-associative. Prefix `-`/`!` bind tighter than everythin
 | Level | Operators            | Assoc  |
 |-------|----------------------|--------|
 | 1     | `=` `~` (binding)    | right  |
-| 2     | `..` (range)         | left   |
-| 3     | `\|\|`               | left   |
-| 4     | `&&`                 | left   |
-| 5     | `== != < > <= >=`    | left   |
-| 6     | `+ -`                | left   |
-| 7     | `* / % @`            | left   |
-| 8     | `^`                 | right  |
-| 9     | prefix `- ! ~`       | —      |
-| 10    | postfix `[index]`    | —      |
-| 11    | call, grouping       | —      |
+| 2     | `\|` (conditioning)  | left   |
+| 3     | `..` (range)         | left   |
+| 4     | `\|\|`               | left   |
+| 5     | `&&`                 | left   |
+| 6     | `== != < > <= >=`    | left   |
+| 7     | `+ -`                | left   |
+| 8     | `* / % @`            | left   |
+| 9     | `^`                 | right  |
+| 10    | prefix `- ! ~`       | —      |
+| 11    | postfix `[index]`    | —      |
+| 12    | call, grouping       | —      |
 
 ## Values and types
 
@@ -263,9 +265,11 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
 
 ## Random variables (Phase 2)
 
-- **`unif(a, b)`** is a distribution constructor. `a` and `b` must be deterministic `number`s
-  (a `dist` argument is a spanned error). It returns an undrawn **recipe** for the uniform on
-  `[a, b)`; `X ~ unif(a, b)` draws a random variable from it (see "Binding semantics" above).
+- **`unif(a, b)`** is a distribution constructor. `a` and `b` are numbers **or numeric random
+  variables** (a *random* parameter makes a **hierarchical** distribution — see "Hierarchical
+  distributions" below; a `bool` RV or an undrawn recipe is a spanned error). It returns an undrawn
+  **recipe** for the uniform on `[a, b)`; `X ~ unif(a, b)` draws a random variable from it (see
+  "Binding semantics" above).
 - **Operator lifting:** any arithmetic/comparison/unary operator with at least one `dist`
   operand yields a `dist`; deterministic operands fold in as constants. Purely deterministic
   subexpressions still evaluate eagerly to plain values (and still surface spanned type
@@ -362,6 +366,103 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
   It is **not** sequential branching — the engine still samples independent lanes; a lifted `if`
   cannot carry state across a time step (that's the dynamics fork in `PLAN.md`).
 
+### Conditioning: `event | given`
+
+The **`|` bar** conditions a query on an event — Bayes' rule written the way mathematicians write
+it. `P(A | C)` is "the probability of `A` **given** `C` holds", restricted to the worlds where `C`
+is true. It is **scoped to the one query** — no global state, no side effect, no `observe`-style
+mutation: a `|` changes *that* `P`/`E`/`Var`/`Q` and nothing else.
+
+```
+D ~ unif_int(1, 6)
+P(D == 6 | D > 3)        # ≈ 0.3333 — given the roll beat 3, how often a 6? (= (1/6)/(1/2))
+E(D | D > 3)             # 5 — the mean roll among {4, 5, 6}
+Q(D | D > 3, 0.5)        # 5 — the conditional median
+```
+
+- The bar binds **looser than every other operator** (below `||`), so the whole event is on the
+  left and the whole condition on the right: `P(A && B | C || D)` is `P((A && B) | (C || D))`.
+- **`given` must be an event** (a `bool`/`dist<bool>`); for `P`, the left side must be an event too
+  (`E`/`Var`/`Q` take any numeric quantity). A conditional whose condition **never occurs** in the
+  sample (e.g. `P(D == 6 | D > 100)`) is a `0/0` — a spanned error, not a silent `NaN`.
+
+**A conditioned value is first-class.** `event | given` evaluates to a *conditioned value* you can
+**bind** and **query later** — and **operate on**, where an operation pushes into the quantity and
+carries the condition along (`2*(X|C)+1` is `(2X+1) | C`; a comparison `(X|C) < 3` is the
+conditioned event `(X<3) | C`). Like a `Recipe`, it is *consumed* by `P`/`E`/`Var`/`Q`, not used in
+plain arithmetic past that:
+
+```
+high = D | D > 3         # a conditioned value (bound, not yet queried)
+E(high)                  # 5
+P(high < 5)              # ≈ 0.3333 — P(D == 4 | D > 3)
+```
+
+The **one rule** that keeps conditioning consistent: you **cannot combine two values conditioned on
+different events** (`(X | C) + (Y | D)` is a spanned error) — condition once, at the end: `(X + Y) |
+C`. Under the hood a conditioned value keeps its `quantity` and `condition` as separate sample-DAG
+nodes; a query fuses them into one root, `select(condition, quantity, NaN)` (the quantity where the
+condition holds, a `NaN` sentinel elsewhere), and samples it in a **single joint pass** that skips
+the `NaN` lanes. Drawing event and condition together (shared upstream draws) is what makes
+`P(A && C) ≤ P(A)` hold within a conditional and what makes the conditional **quantile** correct —
+two separate passes would mis-pair the lanes.
+
+> **Status: implemented** for `P`/`E`/`Var`/`Q`, including bound conditioned values and operations
+> on them. The estimate uses the *in-condition* sample size `m ≈ n·P(C)` for its standard error, so
+> a rarer condition self-reports a looser estimate. Conditioning is **rejection-based** (it keeps the
+> lanes where `C` happened): excellent when `P(C)` is not tiny, but it does **not** do importance
+> weighting or posterior/MCMC inference — observing a *continuous* measurement (`X == 4.7`) or a
+> rare/high-dimensional event is the separate inference track (see `GOAL.md`).
+
+### Hierarchical distributions (a random parameter)
+
+A distribution's **parameter may itself be a random variable** — the building block of hierarchical
+/ Bayesian models. `p ~ unif(0, 1); k ~ bernoulli(p)` draws a coin whose *bias is itself random*:
+per Monte Carlo lane, `p` takes that lane's draw and `k` is a Bernoulli at that `p`.
+
+```
+p ~ unif(0, 1)
+k ~ bernoulli(p)
+P(k)                     # ≈ 0.5 — the parameter is integrated out: P(k) = E[p]
+
+mu ~ normal(0, 1)
+X  ~ normal(mu, 1)
+Var(X)                   # ≈ 2 — Var[mu] + E[σ²] = 1 + 1 (variance adds up the hierarchy)
+```
+
+- Supported for **`unif`, `unif_int`, `normal`, `normal_int`, `exponential`, `exponential_int`,
+  and `bernoulli`** (the location–scale / threshold families). `poisson`, `geometric`, and
+  `normal_complex` with a random parameter are not supported yet (a spanned error names the fix).
+- A parameter must be a number or a **numeric** RV; a `bool` RV or an **undrawn recipe**
+  (`bernoulli(unif(0,1))`) is an error — draw the parameter first (`m ~ unif(0,1); …(m)`).
+- A random parameter is **not range-checked** at construction (it's random): the draw transform
+  handles it per lane (e.g. `bernoulli(p)` is `U < p`, so a lane with `p > 1` is simply always true).
+- **Independence:** every `~` draw of a parameterized recipe reuses the *same* parameter node but a
+  *fresh* base draw — so `a ~ bernoulli(p); b ~ bernoulli(p)` are independent **given `p`** (and
+  positively correlated marginally, `Cov = Var[p]`), exactly the conditional-independence a
+  hierarchical model means.
+
+Under the hood, a random-parameter draw lowers to a **standard base draw plus a deterministic
+transform** (`unif(a,b)` → `a + (b−a)·U`; `normal(μ,σ)` → `μ + σ·Z`; `bernoulli(p)` → `U < p`;
+`exponential(r)` → `E/r`), so the sample-DAG, VM, and RNG are unchanged — it's ordinary graph nodes
+that simplify/CSE/JIT like any other. An all-constant call still uses the single efficient source
+instruction (no transform), so nothing slows down.
+
+**Hierarchical + conditioning = (rejection) Bayesian inference.** A random parameter gives you a
+*prior*; the `|` bar conditions on *data*; together they read off a *posterior*:
+
+```
+bias  ~ unif(0, 1)                       # prior over a coin's bias
+flips ~[10] bernoulli(bias)              # 10 flips at that bias
+E(bias | count(flips) == 7)              # ≈ 0.667 — posterior mean after 7 heads (= 8/12)
+```
+
+> **Status: implemented** (rejection-based). This makes priors and posteriors *expressible and
+> queryable*, but inference is still by **rejection** (keep the lanes matching the data) — great for
+> a handful of discrete observations, but it does not scale to many continuous observations or rare
+> data. Importance weighting / MCMC (so the posterior survives lots of data) is the next inference
+> step; see `GOAL.md`.
+
 ### Hazards and still-planned semantics
 
 - **Equality on a *continuous* RV is almost surely false.** `unif(a,b)` is continuous, so
@@ -371,7 +472,9 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
 - **Multiple queries do not yet share one sampling pass (TODO).** Each `P()` call currently
   samples its own cone with the default seed. The intended semantics is that all queries in
   a run share *one* batch of draws so `P(A)`, `P(B)`, `P(A && B)` are mutually consistent
-  (`P(A && B) ≤ P(A)`). Not yet implemented.
+  (`P(A && B) ≤ P(A)`). Not yet implemented. (*Within* a single conditional query the event and
+  condition **do** share one pass — see "Conditioning" — so `P(A | C) ∈ [0, 1]` and the conditional
+  quantile are internally consistent; the open item is consistency *across separate* queries.)
 - **`P()` self-rounds to confidence precision** (see above) — a lightweight, honest form of
   error reporting: the number of shown digits reflects the standard error. An explicit
   `estimate ± stderr` value and an auto-`N` convergence stop are still planned.

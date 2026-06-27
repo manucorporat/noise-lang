@@ -12,6 +12,7 @@ pub mod bytecode;
 pub mod dist;
 pub mod error;
 pub mod eval;
+pub mod introspect;
 #[cfg(feature = "jit")]
 pub mod jit;
 pub mod kernel;
@@ -30,7 +31,7 @@ pub mod value;
 
 pub use dist::RvId;
 pub use error::{NoiseError, Result};
-pub use eval::Engine;
+pub use eval::{Engine, Output};
 pub use sampler::Moments;
 pub use stats::RunStats;
 pub use value::Value;
@@ -290,6 +291,140 @@ mod tests {
             draws.iter().all(|&x| x == 0.0 || x == 1.0),
             "comparison RV must produce a strict 0/1 column"
         );
+    }
+
+    // --- conditioning: `event | given` (Bayes' rule, scoped to one query) ---
+
+    #[test]
+    fn conditional_probability_matches_bayes() {
+        // P(D==6 | D>3) = P(D==6 && D>3) / P(D>3) = (1/6)/(1/2) = 1/3.
+        let p = run_num("D ~ unif_int(1,6); P(D == 6 | D > 3)");
+        assert!((p - 1.0 / 3.0).abs() < 5e-3, "P(D==6 | D>3) = {p}");
+    }
+
+    #[test]
+    fn conditioning_agrees_with_the_ratio_form() {
+        // The new `P(A | C)` matches the hand-written `P(A && C) / P(C)` — same Bayes, less ceremony.
+        let bar = run_num("D ~ unif_int(1,6); P(D == 6 | D > 3)");
+        let ratio = run_num("D ~ unif_int(1,6); P(D == 6 && D > 3) / P(D > 3)");
+        assert!((bar - ratio).abs() < 5e-3, "bar {bar} vs ratio {ratio}");
+    }
+
+    #[test]
+    fn conditional_expectation_variance_quantile() {
+        // D | D>3 is uniform on {4,5,6}: mean 5, variance 2/3, median 5.
+        assert!((run_num("D ~ unif_int(1,6); E(D | D > 3)") - 5.0).abs() < 5e-3);
+        assert!((run_num("D ~ unif_int(1,6); Var(D | D > 3)") - 2.0 / 3.0).abs() < 5e-3);
+        assert!((run_num("D ~ unif_int(1,6); Q(D | D > 3, 0.5)") - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn conditioned_value_is_bindable_then_queryable() {
+        // `a = X | C` is a first-class value: bind it, query it later (P/E/Var/Q).
+        let p = run_num("D ~ unif_int(1,6); a = D == 6 | D > 3; P(a)");
+        assert!((p - 1.0 / 3.0).abs() < 5e-3, "P(a) = {p}");
+    }
+
+    #[test]
+    fn operations_push_into_the_conditioned_quantity() {
+        // 2*(D|D>3)+1 is (2D+1) | D>3, mean 2*5+1 = 11.
+        assert!((run_num("D ~ unif_int(1,6); b = D | D > 3; E(2*b + 1)") - 11.0).abs() < 5e-3);
+        // A comparison on a conditioned number is a conditioned event: P((D|D>3) < 5) = P(D==4 | D>3) = 1/3.
+        let p = run_num("D ~ unif_int(1,6); b = D | D > 3; P(b < 5)");
+        assert!((p - 1.0 / 3.0).abs() < 5e-3, "P(b<5) = {p}");
+        // Unary minus pushes in too: E(-(D|D>3)) = -5.
+        assert!((run_num("D ~ unif_int(1,6); E(-(D | D > 3))") + 5.0).abs() < 5e-3);
+    }
+
+    #[test]
+    fn conditioning_misuse_is_a_spanned_error() {
+        for src in [
+            // Combining two values conditioned on DIFFERENT events is ill-defined.
+            "D ~ unif_int(1,6); b = D | D > 3; c = D | D > 4; E(b + c)",
+            // P needs an event; a conditioned NUMBER is for E/Var/Q, not P.
+            "D ~ unif_int(1,6); P(D | D > 3)",
+            // The condition after `|` must be an event (bool), not a number.
+            "D ~ unif_int(1,6); P(D == 6 | D)",
+            // A condition that never occurs makes the conditional undefined (0/0).
+            "D ~ unif_int(1,6); P(D == 6 | D > 100)",
+        ] {
+            let err = run(src).expect_err(&format!("{src:?} should error"));
+            assert!(
+                matches!(err.kind, ErrorKind::Runtime(_)),
+                "{src:?} should be a Runtime error, got {:?}",
+                err.kind
+            );
+            assert_ne!(err.span, crate::error::Span::default(), "{src:?} needs a real span");
+        }
+    }
+
+    // --- hierarchical models: a random parameter feeding another distribution ---
+
+    #[test]
+    fn random_parameter_bernoulli_marginalizes() {
+        // p ~ unif(0,1); k ~ bernoulli(p): P(k) = E[p] = 0.5 (the parameter is integrated out).
+        let p = run_num("p ~ unif(0,1); k ~ bernoulli(p); P(k)");
+        assert!((p - 0.5).abs() < 5e-3, "P(k) = {p}");
+    }
+
+    #[test]
+    fn random_mean_normal_adds_variance() {
+        // mu ~ N(0,1); X ~ N(mu,1): E[X] = 0, Var[X] = Var[mu] + E[sigma^2] = 1 + 1 = 2.
+        let m = moments_of("mu ~ normal(0,1); X ~ normal(mu, 1); X", 1_000_000, 7);
+        assert!(m.mean.abs() < 5e-3, "mean = {}", m.mean);
+        assert!((m.variance - 2.0).abs() < 1e-2, "var = {}", m.variance);
+    }
+
+    #[test]
+    fn random_scale_uniform_is_drawn_per_lane() {
+        // w ~ unif(1,3); X ~ unif(0, w): E[X] = E[w]/2 = 2/2 = 1.
+        assert!((run_num("w ~ unif(1,3); X ~ unif(0, w); E(X)") - 1.0).abs() < 5e-3);
+        // rate ~ unif(1,3); T ~ exponential(rate): E[T] = E[1/rate] = (ln3 - ln1)/2 ≈ 0.5493.
+        let e = run_num("rate ~ unif(1,3); T ~ exponential(rate); E(T)");
+        assert!((e - (3.0_f64.ln() / 2.0)).abs() < 5e-3, "E(T) = {e}");
+    }
+
+    #[test]
+    fn two_draws_of_a_random_param_recipe_are_independent_given_the_param() {
+        // p ~ unif(0,1); a,b ~ bernoulli(p): a and b share p but use fresh draws, so they are
+        // correlated (independent only GIVEN p). For 0/1 indicators, E[a·b] = P(a && b) = E[p^2] =
+        // 1/3, while P(a)·P(b) = 1/4, so the covariance is 1/3 − 1/4 = 1/12 > 0.
+        let cov = run_num(
+            "p ~ unif(0,1); a ~ bernoulli(p); b ~ bernoulli(p); P(a && b) - P(a)*P(b)",
+        );
+        assert!((cov - 1.0 / 12.0).abs() < 5e-3, "cov = {cov} (expected 1/12)");
+    }
+
+    #[test]
+    fn hierarchical_plus_conditioning_is_bayesian_posterior() {
+        // Beta-Bernoulli: prior p~U(0,1), observe one head -> posterior mean E[p|k] = 2/3.
+        let post = run_num("p ~ unif(0,1); k ~ bernoulli(p); E(p | k)");
+        assert!((post - 2.0 / 3.0).abs() < 5e-3, "E(p | k) = {post}");
+        // Observe 7 heads in 10 flips -> posterior mean of the bias = (7+1)/(10+2) = 8/12.
+        let post10 = run_num(
+            "q ~ unif(0,1); flips ~[10] bernoulli(q); E(q | count(flips) == 7)",
+        );
+        assert!((post10 - 8.0 / 12.0).abs() < 1e-2, "E(q | 7/10) = {post10}");
+    }
+
+    #[test]
+    fn random_distribution_parameter_type_errors_stay_spanned() {
+        for src in [
+            // a bool RV is not a valid numeric parameter
+            "b ~ bernoulli(0.5); X ~ normal(b, 1); E(X)",
+            // an undrawn recipe as a parameter — must be drawn first
+            "k ~ bernoulli(unif(0,1)); P(k)",
+            // poisson with a random parameter is not supported yet (only unif/unif_int/normal/exp/bernoulli)
+            "L ~ unif(1,3); N ~ poisson(L); E(N)",
+        ] {
+            let err = run(src).expect_err(&format!("{src:?} should error"));
+            assert!(
+                matches!(err.kind, ErrorKind::Runtime(_)),
+                "{src:?} should be a Runtime error, got {:?}",
+                err.kind
+            );
+            assert_ne!(err.span, crate::error::Span::default(), "{src:?} needs a real span");
+        }
     }
 
     #[test]
@@ -2235,5 +2370,195 @@ mod tests {
         assert!(num("0 * (1 / 0)").is_nan());
         // the fold does NOT fire for a bool RV: `0 * event` is still a type error, not 0.
         assert!(run("B ~ rand::bernoulli(0.5); 0 * B").is_err());
+    }
+
+    // ===================== variable introspection (describe/corr/explain) =====================
+
+    use crate::introspect::{Payload, Summary, View};
+
+    /// Run a program whose last expression is an introspection and return its summary.
+    fn summary_of(src: &str) -> std::rc::Rc<Summary> {
+        match run(src).unwrap() {
+            Value::Summary(s) => s,
+            other => panic!("expected a summary, got {other:?} for {src:?}"),
+        }
+    }
+    fn one(src: &str) -> crate::introspect::Dist1 {
+        match &summary_of(src).payload {
+            Payload::One(d) => d.clone(),
+            other => panic!("expected a one-variable summary, got {other:?}"),
+        }
+    }
+
+    /// `describe(X)` recovers the marginal distribution: a uniform's mean/median are ~0.5, its
+    /// quantiles span the support, and the histogram covers `[0, 1]`.
+    #[test]
+    fn describe_recovers_the_marginal_distribution() {
+        let d = one("X ~ rand::unif(0, 1); describe(X)");
+        assert!((d.mean - 0.5).abs() < 0.01, "mean {}", d.mean);
+        assert!((d.q50 - 0.5).abs() < 0.02, "median {}", d.q50);
+        assert!(d.min >= 0.0 && d.max <= 1.0);
+        assert!(d.hist.lo >= 0.0 && d.hist.hi <= 1.0);
+    }
+
+    /// The headline: `describe(bias | data)` is the Bayesian posterior. A flat prior after 7 of 10
+    /// heads has posterior mean (h+1)/(n+2) = 8/12 ≈ 0.6667 — read straight off the conditioned
+    /// summary, no separate machinery.
+    #[test]
+    fn describe_of_a_conditioned_value_is_the_posterior() {
+        let d = one(
+            "use rand; use vec;
+             bias ~ unif(0,1); flips ~[10] bernoulli(bias); heads = count(flips);
+             describe(bias | heads == 7)",
+        );
+        assert!((d.mean - 0.6667).abs() < 0.02, "posterior mean {}", d.mean);
+        // the posterior is tighter than the flat prior (sd 1/√12 ≈ 0.289).
+        assert!(d.sd < 0.2, "posterior sd should be tight, got {}", d.sd);
+    }
+
+    /// `corr` is a *joint* (paired) statistic: two independent draws are ~uncorrelated, while a
+    /// variable correlates strongly with a sum it appears in. (Separate passes would mis-pair lanes
+    /// and break this — the same joint-sampling requirement as conditioning.)
+    #[test]
+    fn corr_is_a_correct_joint_statistic() {
+        let indep = match &summary_of("A ~ rand::unif(0,1); B ~ rand::unif(0,1); corr(A, B)").payload {
+            Payload::Two(d) => d.corr,
+            _ => panic!("expected a two-variable summary"),
+        };
+        assert!(indep.abs() < 0.02, "independent corr ~0, got {indep}");
+        let shared = match &summary_of("A ~ rand::unif(0,1); B ~ rand::unif(0,1); corr(A, A + B)").payload {
+            Payload::Two(d) => d.corr,
+            _ => panic!("expected a two-variable summary"),
+        };
+        // corr(A, A+B) = sd_A / sd_{A+B} = 1/√2 ≈ 0.707 for two iid uniforms.
+        assert!((shared - 0.707).abs() < 0.03, "corr(A, A+B) ≈ 0.707, got {shared}");
+    }
+
+    /// `explain(Y)` ranks the named upstream variables that drive `Y`. For the posterior predictive
+    /// `next | data`, the only upstream model variable is `bias`, so it is the top (and only) driver.
+    #[test]
+    fn explain_finds_the_upstream_driver() {
+        let s = summary_of(
+            "use rand; use vec;
+             bias ~ unif(0,1); flips ~[10] bernoulli(bias); next ~ bernoulli(bias);
+             heads = count(flips);
+             explain(next | heads == 7)",
+        );
+        assert_eq!(s.view, View::Explain);
+        match &s.payload {
+            Payload::Explain(e) => {
+                assert_eq!(e.drivers.first().map(|d| d.name.as_str()), Some("bias"));
+                assert!(e.drivers[0].corr > 0.1, "bias should positively drive next: {}", e.drivers[0].corr);
+            }
+            other => panic!("expected an explain summary, got {other:?}"),
+        }
+    }
+
+    /// The sidecar mechanism the playground rests on: a program's scope **persists across `run`
+    /// calls**, so a *separate* follow-up `run("describe(...)")` resolves against the live variables —
+    /// inspection without editing the source. Also checks `bindings()` reports the live RVs.
+    #[test]
+    fn introspection_resolves_against_a_retained_scope() {
+        let mut eng = Engine::new();
+        eng.run("use rand; use vec; bias ~ unif(0,1); flips ~[10] bernoulli(bias); heads = count(flips);")
+            .unwrap();
+        // bindings() surfaces the live variables (name + kind) for the picker.
+        let binds = eng.bindings();
+        assert!(binds.iter().any(|(n, k)| n == "bias" && *k == "dist<number>"));
+        assert!(binds.iter().any(|(n, _)| n == "heads"));
+        // a follow-up run sees `bias`/`heads` — no re-declaration — and yields the posterior.
+        match eng.run("describe(bias | heads == 7)").unwrap() {
+            Value::Summary(s) => match &s.payload {
+                Payload::One(d) => assert!((d.mean - 0.6667).abs() < 0.02, "posterior {}", d.mean),
+                other => panic!("expected a one-variable summary, got {other:?}"),
+            },
+            other => panic!("expected a summary, got {other:?}"),
+        }
+    }
+
+    /// A condition that never holds is a clean spanned error, not a silent NaN summary.
+    #[test]
+    fn describe_of_an_impossible_condition_errors() {
+        let err = run("X ~ rand::unif(0,1); describe(X | X > 2)").unwrap_err();
+        assert!(format!("{err}").contains("never occurred"), "got: {err}");
+    }
+
+    /// `describe` is polymorphic: a scalar estimate → a value+CI card (so `pi = 4*P(…)` is
+    /// inspectable), and an array → a per-cell grid (vector here).
+    #[test]
+    fn describe_is_polymorphic_over_value_kinds() {
+        // a scalar estimate → value card carrying its standard error
+        match &summary_of("X ~ rand::unif(-1,1); Y ~ rand::unif(-1,1); pi = 4*P(X^2+Y^2<1); describe(pi)").payload {
+            Payload::Value(v) => {
+                assert!((v.val - 3.14159).abs() < 0.02, "pi {}", v.val);
+                assert!(v.se > 0.0, "an estimate should carry uncertainty");
+            }
+            other => panic!("expected a value card, got {other:?}"),
+        }
+        // a vector → a 1×n grid of per-element moments
+        match &summary_of("xs ~[6] rand::bernoulli(0.7); describe(xs)").payload {
+            Payload::Grid(g) => {
+                assert_eq!((g.rows, g.cols), (1, 6));
+                assert!(g.mean.iter().all(|&m| (m - 0.7).abs() < 0.02), "per-element P(true)≈0.7: {:?}", g.mean);
+            }
+            other => panic!("expected a grid, got {other:?}"),
+        }
+    }
+
+    /// `corr(vec)` is the element×element correlation matrix: iid draws give an identity (1 on the
+    /// diagonal, ~0 off it).
+    #[test]
+    fn corr_of_a_vector_is_the_correlation_matrix() {
+        match &summary_of("xs ~[4] rand::normal(0,1); corr(xs)").payload {
+            Payload::CorrMatrix(c) => {
+                assert_eq!(c.n, 4);
+                for i in 0..4 {
+                    assert!((c.corr[i * 4 + i] - 1.0).abs() < 1e-6, "diagonal must be 1");
+                    for j in 0..4 {
+                        if i != j {
+                            assert!(c.corr[i * 4 + j].abs() < 0.02, "iid off-diagonal ~0: {}", c.corr[i * 4 + j]);
+                        }
+                    }
+                }
+            }
+            other => panic!("expected a correlation matrix, got {other:?}"),
+        }
+    }
+
+    /// `plot::*` captures charts (like `Print`) and yields unit — a program can ask to *see* several
+    /// things, and the host (CLI/playground) drains and renders them.
+    #[test]
+    fn plot_calls_capture_charts_and_yield_unit() {
+        let mut eng = Engine::new();
+        let last = eng
+            .run("use rand; X ~ normal(0,1); Y ~ normal(0,1); plot::histogram(X); plot::scatter(X, Y)")
+            .unwrap();
+        assert!(matches!(last, Value::Unit), "a plot is a statement, not a value");
+        let items = eng.take_output();
+        let plots: Vec<_> = items
+            .iter()
+            .filter_map(|o| match o {
+                crate::Output::Plot(s) => Some(s),
+                crate::Output::Text(_) => None,
+            })
+            .collect();
+        assert_eq!(plots.len(), 2);
+        assert!(matches!(plots[0].payload, Payload::One(_)), "histogram → Dist1");
+        assert!(matches!(plots[1].payload, Payload::Two(_)), "scatter → Dist2");
+        // drained: a second take is empty
+        assert!(eng.take_output().is_empty());
+    }
+
+    /// `describe`/`heatmap` of a 2-D draw → a rectangular grid (rows × cols), one mean per cell.
+    #[test]
+    fn describe_of_a_matrix_is_a_grid() {
+        match &summary_of("M ~[3, 4] rand::normal(0,1); describe(M)").payload {
+            Payload::Grid(g) => {
+                assert_eq!((g.rows, g.cols), (3, 4));
+                assert_eq!(g.mean.len(), 12);
+                assert!(!g.is_series(), "a matrix is not a series");
+            }
+            other => panic!("expected a grid, got {other:?}"),
+        }
     }
 }

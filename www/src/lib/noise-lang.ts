@@ -64,7 +64,7 @@ export function registerNoise(monaco: typeof Monaco): void {
     // longest-first so `**`, `==`, `..`, `::`, `&&` win over their prefixes
     operators: [
       '**', '==', '!=', '<=', '>=', '&&', '||', '..', '::',
-      '+', '-', '*', '/', '<', '>', '!', '=', '~', '@',
+      '+', '-', '*', '/', '<', '>', '!', '=', '~', '@', '|',
     ],
     symbols: /[=~!<>+\-*/&|.:@]+/,
     tokenizer: {

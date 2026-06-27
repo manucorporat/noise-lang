@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use crate::ast::*;
 use crate::builtins;
-use crate::dist::{Recipe, RvGraph, RvId, RvKind, RvNode, Source, Uniform};
+use crate::dist::{DistArg, Recipe, RvGraph, RvId, RvKind, RvNode, Source, Uniform};
 use crate::error::{NoiseError, Result, Span};
 use crate::parser::parse;
 use crate::sampler::{self, Moments};
@@ -46,10 +46,11 @@ pub struct Engine {
     /// Modules brought into unqualified scope via `use` (Rust-style). `builtin` is always active
     /// and is *not* stored here; `rand`/`math`/`vec` must be `use`d (or accessed as `mod::name`).
     used: HashSet<String>,
-    /// Captured `Print` output (newline-terminated lines). The CLI/REPL drain and print it; the
-    /// WASM playground reads it to show program output in the browser. Buffering (instead of a
-    /// bare `println!`) keeps `Print` portable to `wasm32`, where stdout goes nowhere.
-    output: String,
+    /// The program's **output stream**, in source order: `Print` lines and `plot::*` charts
+    /// interleaved (a plot is just another kind of output). The CLI/REPL drain and render it; the
+    /// WASM playground reads it to show program output (text + charts) in the browser. Buffering
+    /// (instead of a bare `println!`) keeps `Print` portable to `wasm32`, where stdout goes nowhere.
+    outputs: Vec<Output>,
     /// Default Monte Carlo budget for `P`/`E`/`Var`/`Q` when a call carries no explicit sample
     /// count. Starts at [`builtins::P_DEFAULT_N`]; a program tunes it for the whole run with
     /// `engine::set_max_samples(N)`. An explicit per-call count (`P(event, n)`) still wins over this.
@@ -67,6 +68,17 @@ pub struct Engine {
     check_mode: bool,
 }
 
+/// One item in a program's output stream — the unit `take_output` returns, in source order. `Print`
+/// pushes a [`Text`](Output::Text) line; `plot::*` pushes a [`Plot`](Output::Plot). Keeping them in
+/// one ordered vector is what lets text and charts interleave exactly as the program emitted them.
+#[derive(Debug, Clone)]
+pub enum Output {
+    /// A `Print` line (no trailing newline; the renderer adds line breaks).
+    Text(String),
+    /// A `plot::*` chart — the same summary the introspection core produces.
+    Plot(Rc<crate::introspect::Summary>),
+}
+
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
@@ -81,17 +93,31 @@ impl Engine {
             graph: RvGraph::default(),
             call_depth: 0,
             used: HashSet::new(),
-            output: String::new(),
+            outputs: Vec::new(),
             max_samples: builtins::P_DEFAULT_N,
             max_opts: builtins::MAX_OPS_DEFAULT,
             check_mode: false,
         }
     }
 
-    /// Take everything `Print` has emitted so far, clearing the buffer. The CLI/REPL call this
-    /// after a run to flush to stdout; the WASM playground calls it to display program output.
-    pub fn drain_output(&mut self) -> String {
-        std::mem::take(&mut self.output)
+    /// Take the program's whole output stream so far (`Print` lines and `plot::*` charts, in source
+    /// order), clearing the buffer. The CLI/REPL render it to the terminal; the WASM playground
+    /// serializes it to show interleaved text and charts.
+    pub fn take_output(&mut self) -> Vec<Output> {
+        std::mem::take(&mut self.outputs)
+    }
+
+    /// The text-only output so far (the concatenation of `Print` lines, charts omitted), without
+    /// clearing — a convenience for callers that only want the textual log (e.g. simple demos).
+    pub fn output_text(&self) -> String {
+        let mut s = String::new();
+        for item in &self.outputs {
+            if let Output::Text(line) = item {
+                s.push_str(line);
+                s.push('\n');
+            }
+        }
+        s
     }
 
     /// Read-only access to the sample-DAG (tests assert it stays empty for deterministic
@@ -105,6 +131,28 @@ impl Engine {
     /// program triggered. See [`crate::stats`].
     pub fn stats(&self) -> crate::stats::RunStats {
         crate::stats::snapshot()
+    }
+
+    /// The live top-level bindings after a [`run`](Engine::run), as `(name, kind)` pairs sorted by
+    /// name. `kind` is the value's type tag — `"dist<number>"` / `"dist<bool>"` for random variables,
+    /// else `"number"` / `"bool"` / `"array"` / … — so a UI (the playground variable picker) can list
+    /// what's introspectable and offer only random variables for `describe`/`corr`/`explain`. The
+    /// scope persists across `run` calls (a later `run("describe(x)")` resolves against it), which is
+    /// exactly what lets introspection requests reference a program's variables without editing it.
+    pub fn bindings(&self) -> Vec<(String, &'static str)> {
+        let mut out: Vec<(String, &'static str)> = self
+            .vars
+            .iter()
+            .map(|(name, v)| {
+                let kind = match v {
+                    Value::Dist(id) => self.graph.kind(*id).type_name(),
+                    other => other.type_name(),
+                };
+                (name.clone(), kind)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     /// Parse and evaluate a whole program, returning the value of the last statement
@@ -144,17 +192,9 @@ impl Engine {
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::Ident(name) => self.eval_ident(name, node.span),
-            Expr::Unary(op, rhs) => {
-                let v = self.eval(rhs)?;
-                forbid_recipe(&v, rhs.span)?;
-                if matches!(v, Value::Complex { .. }) {
-                    self.unary_complex(*op, v, node.span)
-                } else if is_dist(&v) {
-                    self.lift_unary(*op, v, node.span)
-                } else {
-                    eval_unary(*op, v, node.span) // deterministic fast path, unchanged
-                }
-            }
+            // Extracted into a method (like the other arms) to keep `eval`'s stack frame small for
+            // the recursion-depth budget — see `MAX_CALL_DEPTH`.
+            Expr::Unary(op, rhs) => self.eval_unary_expr(*op, rhs, node.span),
             Expr::Binary(op, l, r) => {
                 let lv = self.eval(l)?;
                 let rv = self.eval(r)?;
@@ -233,10 +273,29 @@ impl Engine {
                     arg_vals.push(self.eval(a)?);
                 }
                 let (module, base) = split_path(name);
+                // `plot::*` — the charting surface for examples. Computes a summary (reusing the
+                // introspection core) and *captures* it like `Print`, returning unit.
+                if module == Some("plot") {
+                    return self.plot_call(base, args, &arg_vals, node.span);
+                }
                 // A user function (unqualified) shadows a builtin of the same name.
                 if module.is_none() {
                     if let Some(f) = self.funcs.get(base).cloned() {
                         return self.call_user_fn(base, &f, arg_vals, node.span);
+                    }
+                    // A query over a conditioned value — `P(a)` / `E(a)` / `Var(a)` / `Q(a, q)` where
+                    // `a` is `X | C`. Fuse the condition into `select(C, quantity, NaN)` here (needs
+                    // `&mut` graph) and hand the root to the conditional estimators.
+                    if matches!(base, "P" | "E" | "Var" | "Q")
+                        && matches!(arg_vals.first(), Some(Value::Cond { .. }))
+                    {
+                        return self.query_cond(base, &arg_vals, node.span);
+                    }
+                    // Variable introspection — `describe`/`hist`/`samples`/`corr`/`scatter`/`explain`.
+                    // Always-on builtins that build sampling roots (so they need `&mut` graph) and,
+                    // for `explain`, read the variable scope; routed here before module resolution.
+                    if is_introspection(base) {
+                        return self.introspect_call(base, args, &arg_vals, node.span);
                     }
                 }
                 // Strict module scoping: a `rand`/`math`/`vec` name needs `use` or a `mod::` path.
@@ -253,8 +312,7 @@ impl Engine {
                         .map(|v| v.to_string())
                         .collect::<Vec<_>>()
                         .join(" ");
-                    self.output.push_str(&line);
-                    self.output.push('\n');
+                    self.outputs.push(Output::Text(line));
                     Ok(Value::Unit)
                 } else {
                     builtins::call(base, &arg_vals, &self.graph, self.max_samples, self.max_opts, node.span, self.check_mode)
@@ -277,6 +335,10 @@ impl Engine {
                 self.used.insert(module.clone());
                 Ok(Value::Unit)
             }
+            // `event | given` — a conditioned value (Bayes, scoped to a query). Builds a
+            // `Value::Cond` you can bind (`a = X | C`) and later query (`P(a)`), but not do
+            // arithmetic on — like a `Recipe`, it is consumed by `P`/`E`/`Var`/`Q`, not operated on.
+            Expr::Cond { event, given } => self.eval_cond(event, given),
             // The `continue` control sentinel — short-circuits the enclosing block / loop body.
             Expr::Continue => Ok(Value::Continue),
         }
@@ -699,12 +761,68 @@ impl Engine {
                 let c = self.graph.push(RvNode::ConstNum(p), RvKind::Num);
                 self.graph.push(RvNode::Binary(BinOp::Lt, u, c), RvKind::Bool)
             }
+            // --- distributions with a (possibly) random parameter: lower to a standard base draw +
+            //     a deterministic transform, so the VM/RNG never change (LANG.md "Hierarchical
+            //     distributions"). A fresh base draw per `~`, the SAME parameter node reused, gives
+            //     conditional independence given the parameter (`a ~ bernoulli(p); b ~ bernoulli(p)`
+            //     are independent given `p`). The transform nodes simplify/CSE/lower like any other.
+            Recipe::UniformDyn { lo, hi } => {
+                // lo + (hi − lo)·U,  U ~ unif(0,1).
+                let u = self.graph.push(RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })), RvKind::Num);
+                let (lo, hi) = (self.arg_id(lo), self.arg_id(hi));
+                let width = self.graph.push(RvNode::Binary(BinOp::Sub, hi, lo), RvKind::Num);
+                let scaled = self.graph.push(RvNode::Binary(BinOp::Mul, width, u), RvKind::Num);
+                self.graph.push(RvNode::Binary(BinOp::Add, lo, scaled), RvKind::Num)
+            }
+            Recipe::UniformIntDyn { lo, hi } => {
+                // lo + floor((hi − lo + 1)·U),  U ~ unif(0,1) → inclusive integers lo..=hi.
+                let u = self.graph.push(RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })), RvKind::Num);
+                let (lo, hi) = (self.arg_id(lo), self.arg_id(hi));
+                let diff = self.graph.push(RvNode::Binary(BinOp::Sub, hi, lo), RvKind::Num);
+                let one = self.graph.push(RvNode::ConstNum(1.0), RvKind::Num);
+                let width = self.graph.push(RvNode::Binary(BinOp::Add, diff, one), RvKind::Num);
+                let scaled = self.graph.push(RvNode::Binary(BinOp::Mul, u, width), RvKind::Num);
+                let floored = self.graph.push(RvNode::Unary(UnOp::Floor, scaled), RvKind::Num);
+                self.graph.push(RvNode::Binary(BinOp::Add, lo, floored), RvKind::Num)
+            }
+            Recipe::NormalDyn { mu, sigma, int } => {
+                // mu + sigma·Z,  Z ~ N(0,1); `int` rounds each lane (normal_int).
+                let z = self.graph.push(RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }), RvKind::Num);
+                let (mu, sigma) = (self.arg_id(mu), self.arg_id(sigma));
+                let scaled = self.graph.push(RvNode::Binary(BinOp::Mul, sigma, z), RvKind::Num);
+                let val = self.graph.push(RvNode::Binary(BinOp::Add, mu, scaled), RvKind::Num);
+                if int { self.graph.push(RvNode::Unary(UnOp::Round, val), RvKind::Num) } else { val }
+            }
+            Recipe::ExpDyn { rate, int } => {
+                // E / rate,  E ~ Exp(1) → Exp(rate); `int` rounds each lane (exponential_int).
+                let e = self.graph.push(RvNode::Src(Source::Exp { rate: 1.0 }), RvKind::Num);
+                let rate = self.arg_id(rate);
+                let val = self.graph.push(RvNode::Binary(BinOp::Div, e, rate), RvKind::Num);
+                if int { self.graph.push(RvNode::Unary(UnOp::Round, val), RvKind::Num) } else { val }
+            }
+            Recipe::BernoulliDyn { p } => {
+                // (U < p),  U ~ unif(0,1): a bool-RV true with the lane's probability p.
+                let u = self.graph.push(RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })), RvKind::Num);
+                let p = self.arg_id(p);
+                self.graph.push(RvNode::Binary(BinOp::Lt, u, p), RvKind::Bool)
+            }
             // Handled above with an early return (they yield arrays/complex, not a scalar `id`).
             Recipe::Rotation { .. } => unreachable!("rotation drawn via draw_rotation"),
             Recipe::Permutation { .. } => unreachable!("permutation drawn via draw_permutation"),
             Recipe::NormalComplex { .. } => unreachable!("normal_complex drawn via the complex path"),
         };
         Ok(Value::Dist(id))
+    }
+
+    /// Materialize a (possibly random) distribution parameter as a sample-DAG node: a constant folds
+    /// to a `ConstNum`; a random parameter reuses its existing node, so every `~` draw of the recipe
+    /// shares the SAME per-lane parameter value (with a fresh base draw) — conditional independence
+    /// given the parameter.
+    fn arg_id(&mut self, a: DistArg) -> RvId {
+        match a {
+            DistArg::Const(x) => self.graph.push(RvNode::ConstNum(x), RvKind::Num),
+            DistArg::Rv(id) => id,
+        }
     }
 
     /// Lift a unary op over a random variable. The operand is a `Value::Dist` (the caller's
@@ -857,12 +975,471 @@ impl Engine {
         }
     }
 
+    /// Build a conditioned value from `event | given` (LANG.md "conditioning"). It records the
+    /// quantity and the condition *separately* in a `Value::Cond` (the fusion into
+    /// `select(condition, quantity, NaN)` is deferred to the query) so operations compose:
+    /// `2*(X|C)+1` is `(2X+1) | C`. `given` must be an event (bool); `event` may be an event (for
+    /// `P`) or any numeric quantity (for `E`/`Var`/`Q`, checked at the query). A conditioned value
+    /// can be bound and queried; combining two that are conditioned on *different* events is rejected
+    /// (`binop_cond`).
+    fn eval_cond(&mut self, event: &Spanned, given: &Spanned) -> Result<Value> {
+        // The condition: a bool RV (or deterministic bool). A constant `true` is the unconditional
+        // query; a constant `false` makes the condition never hold (a 0/0, caught at the query).
+        let cond_v = self.eval(given)?;
+        forbid_recipe(&cond_v, given.span)?;
+        let (condition, cond_kind) = self.operand_to_rv(cond_v, given.span)?;
+        if cond_kind != RvKind::Bool {
+            return Err(NoiseError::runtime(
+                "the condition after `|` must be an event (bool), e.g. `X > 0`".to_string(),
+                given.span,
+            ));
+        }
+        // The quantity: an event (bool) or a number — the query (`P` vs `E`/`Var`/`Q`) decides which
+        // it accepts, using the `q_kind` recorded here.
+        let quantity_v = self.eval(event)?;
+        forbid_recipe(&quantity_v, event.span)?;
+        let (quantity, q_kind) = self.operand_to_rv(quantity_v, event.span)?;
+        Ok(Value::Cond { quantity, q_kind, condition })
+    }
+
+    /// Query a conditioned value — `P(a)`, `E(a)`, `Var(a)`, `Q(a, q)` where `a = X | C`. Fuse the
+    /// condition and quantity into the single root `select(C, quantity, NaN)` — the quantity on the
+    /// lanes where `C` holds, the NaN sentinel elsewhere — so one sampling pass draws quantity and
+    /// condition *jointly* (shared upstream draws). The conditional estimators then average / sort
+    /// over the non-NaN (in-condition) lanes. Sampling jointly is what makes `Q(a, q)` correct: two
+    /// separate passes would mis-pair the lanes. `arg_vals[0]` is the conditioned value; the rest are
+    /// the ordinary trailing arguments (an optional sample count, plus `q` for `Q`).
+    fn query_cond(&mut self, qname: &str, arg_vals: &[Value], span: Span) -> Result<Value> {
+        let (quantity, q_kind, condition) = match arg_vals[0] {
+            Value::Cond { quantity, q_kind, condition } => (quantity, q_kind, condition),
+            _ => unreachable!("query_cond called without a conditioned first argument"),
+        };
+        if qname == "P" && q_kind != RvKind::Bool {
+            return Err(NoiseError::runtime(
+                "P expects an event (bool) — a conditioned number works with E/Var/Q, e.g. `E(X | C)`"
+                    .to_string(),
+                span,
+            ));
+        }
+        let nan = self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num);
+        let root = self.graph.push(RvNode::Select { cond: condition, a: quantity, b: nan }, RvKind::Num);
+        let tail = &arg_vals[1..];
+        let (default_n, max_opts, check) = (self.max_samples, self.max_opts, self.check_mode);
+        match qname {
+            "P" => builtins::prob_cond(&self.graph, root, tail, default_n, max_opts, span, check),
+            "E" | "Var" => {
+                builtins::moment_cond(qname, &self.graph, root, tail, default_n, max_opts, span, check)
+            }
+            "Q" => builtins::quantile_cond(&self.graph, root, tail, default_n, max_opts, span, check),
+            _ => unreachable!("query_cond dispatched with an unknown name"),
+        }
+    }
+
+    /// Dispatch a variable-introspection call (`describe`/`hist`/`samples`/`corr`/`scatter`/
+    /// `explain`) to the [`crate::introspect`] core, returning a [`Value::Summary`]. `args` is the
+    /// un-evaluated argument list (for labelling a summary by its source name); `arg_vals` are the
+    /// evaluated operands. Kept its own method so `eval`'s frame stays small (recursion budget). All
+    /// six are *views/compositions* of two operations: a one-variable [`Dist1`](crate::introspect::Dist1)
+    /// and a two-variable [`Dist2`](crate::introspect::Dist2).
+    fn introspect_call(
+        &mut self,
+        name: &str,
+        args: &[Spanned],
+        arg_vals: &[Value],
+        span: Span,
+    ) -> Result<Value> {
+        use crate::introspect::{
+            dist1, dist2, Dist1, Dist2, Explain, Payload, Summary, View, INTROSPECT_N,
+            INTROSPECT_SEED,
+        };
+        // Introspection runs at its own modest, capped budget (a visual, not a probability).
+        let n = self.max_samples.min(INTROSPECT_N);
+        let seed = INTROSPECT_SEED;
+        let summary = |view, label, label_b, payload| {
+            Ok(Value::Summary(Rc::new(Summary { view, label, label_b, payload })))
+        };
+        match name {
+            "describe" | "hist" | "samples" => {
+                if arg_vals.is_empty() || arg_vals.len() > 2 || (name != "samples" && arg_vals.len() != 1)
+                {
+                    return Err(NoiseError::runtime(
+                        format!("{name} expects 1 argument (a variable to inspect){}", if name == "samples" { " and an optional count" } else { "" }),
+                        span,
+                    ));
+                }
+                let head_k = match arg_vals.get(1) {
+                    Some(v) => introspect_count(v, span)?,
+                    None => if name == "samples" { 10 } else { 8 },
+                };
+                let label = label_of(&args[0]);
+                // `describe` is polymorphic: a scalar number/estimate → a value+CI card, an array →
+                // a per-cell grid (vector series / matrix heatmap). `hist`/`samples` stay scalar-RV.
+                if name == "describe" {
+                    match &arg_vals[0] {
+                        Value::Num(_) | Value::Est { .. } | Value::Bool(_) => {
+                            return self.value_card(&arg_vals[0], label);
+                        }
+                        Value::Array(xs) => {
+                            let xs = xs.clone();
+                            return self.grid_summary(&xs, label, span);
+                        }
+                        _ => {}
+                    }
+                }
+                let view = match name {
+                    "hist" => View::Hist,
+                    "samples" => View::Samples,
+                    _ => View::Describe,
+                };
+                let (root, conditional, boolean) = self.introspect_root(&arg_vals[0], span)?;
+                if self.check_mode {
+                    return summary(view, label, None, Payload::One(Dist1::from_draws(&[0.0], boolean, 0)));
+                }
+                match dist1(&self.graph, root, boolean, conditional, n, seed, head_k) {
+                    Some(d) => summary(view, label, None, Payload::One(d)),
+                    None => Err(condition_never(n, span)),
+                }
+            }
+            "corr" | "scatter" => {
+                // `corr(vec)` — one array argument → the element×element correlation heatmap.
+                if name == "corr" && arg_vals.len() == 1 {
+                    let label = label_of(&args[0]);
+                    let xs = match &arg_vals[0] {
+                        Value::Array(xs) => xs.clone(),
+                        other => {
+                            return Err(NoiseError::runtime(
+                                format!("corr needs two variables to compare, or one vector to correlate its elements — got {}", other.type_name()),
+                                span,
+                            ))
+                        }
+                    };
+                    return self.corr_matrix_summary(&xs, label, span);
+                }
+                if arg_vals.len() != 2 {
+                    return Err(NoiseError::runtime(
+                        format!("{name} expects 2 variables to compare, got {}", arg_vals.len()),
+                        span,
+                    ));
+                }
+                let (la, lb) = (label_of(&args[0]), label_of(&args[1]));
+                let a = self.introspect_plain_root(&arg_vals[0], name, span)?;
+                let b = self.introspect_plain_root(&arg_vals[1], name, span)?;
+                let view = if name == "scatter" { View::Scatter } else { View::Corr };
+                if self.check_mode {
+                    return summary(view, la, Some(lb), Payload::Two(Dist2::from_pairs(&[(0.0, 0.0)], 1)));
+                }
+                match dist2(&self.graph, a, b, None, n, seed) {
+                    Some(d) => summary(view, la, Some(lb), Payload::Two(d)),
+                    None => Err(condition_never(n, span)),
+                }
+            }
+            "explain" => {
+                if arg_vals.len() != 1 {
+                    return Err(NoiseError::runtime(
+                        format!("explain expects 1 variable to explain, got {}", arg_vals.len()),
+                        span,
+                    ));
+                }
+                let label = label_of(&args[0]);
+                // Target quantity (+ optional condition for `explain(Y | C)`).
+                let (target, cond) = match &arg_vals[0] {
+                    Value::Cond { quantity, condition, .. } => (*quantity, Some(*condition)),
+                    other => (self.operand_to_rv(other.clone(), span)?.0, None),
+                };
+                if self.check_mode {
+                    return summary(View::Explain, label, None, Payload::Explain(Explain::from_candidates(0.0, vec![])));
+                }
+                // Candidate drivers: named random variables that are upstream of the target (and not
+                // the target itself). Collected (owned) before any `&mut self` so the scope borrow ends.
+                let anc = ancestors(&self.graph, target);
+                let mut cands: Vec<(String, RvId)> = self
+                    .vars
+                    .iter()
+                    .filter_map(|(k, v)| match v {
+                        Value::Dist(id) if *id != target && anc.contains(id) => Some((k.clone(), *id)),
+                        _ => None,
+                    })
+                    .collect();
+                cands.sort_by(|a, b| a.0.cmp(&b.0)); // deterministic ranking on ties
+                // Total spread of the target (conditional sd if `explain(Y | C)`).
+                let target_root = match cond {
+                    Some(c) => {
+                        let nan = self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num);
+                        self.graph.push(RvNode::Select { cond: c, a: target, b: nan }, RvKind::Num)
+                    }
+                    None => target,
+                };
+                let sd = dist1(&self.graph, target_root, false, cond.is_some(), n, seed, 0)
+                    .map_or(f64::NAN, |d| d.sd);
+                let mut corrs = Vec::with_capacity(cands.len());
+                for (cname, cid) in &cands {
+                    if let Some(d) = dist2(&self.graph, target, *cid, cond, n, seed) {
+                        corrs.push((cname.clone(), d.corr));
+                    }
+                }
+                summary(View::Explain, label, None, Payload::Explain(Explain::from_candidates(sd, corrs)))
+            }
+            _ => unreachable!("introspect_call dispatched with an unknown name"),
+        }
+    }
+
+    /// Build the sampling root for a one-variable introspection. A plain value lifts to its RV (a
+    /// `dist`, or a folded constant); a conditioned value `X | C` fuses to `select(C, X, NaN)` and
+    /// marks the summary `conditional` (its NaN lanes are dropped). Returns `(root, conditional,
+    /// boolean)` where `boolean` flags an event quantity (draws are 0/1).
+    fn introspect_root(&mut self, v: &Value, span: Span) -> Result<(RvId, bool, bool)> {
+        match v {
+            Value::Cond { quantity, q_kind, condition } => {
+                let nan = self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num);
+                let root =
+                    self.graph.push(RvNode::Select { cond: *condition, a: *quantity, b: nan }, RvKind::Num);
+                Ok((root, true, *q_kind == RvKind::Bool))
+            }
+            other => {
+                let (id, kind) = self.operand_to_rv(other.clone(), span)?;
+                Ok((id, false, kind == RvKind::Bool))
+            }
+        }
+    }
+
+    /// Build the root for a `corr`/`scatter` operand. These need a *joint* pass over two plain roots
+    /// (the paired-sampling machinery); a conditioned operand isn't supported yet, so it's a clear
+    /// spanned error rather than a wrong answer (condition upstream, or use `explain`).
+    fn introspect_plain_root(&mut self, v: &Value, name: &str, span: Span) -> Result<RvId> {
+        if matches!(v, Value::Cond { .. }) {
+            return Err(NoiseError::runtime(
+                format!("{name} doesn't support a conditioned value yet — condition upstream, or use `explain`"),
+                span,
+            ));
+        }
+        Ok(self.operand_to_rv(v.clone(), span)?.0)
+    }
+
+    /// `describe` of a scalar `number`/`bool`/estimate → a value-with-uncertainty card. A plain
+    /// number is an exact point; an `Est` (e.g. `4*P(…)`) carries its standard error, so even a
+    /// query result has something to look at (its confidence interval).
+    fn value_card(&self, v: &Value, label: String) -> Result<Value> {
+        use crate::introspect::{Payload, Summary, ValueCard, View};
+        let card = match v {
+            Value::Num(x) => ValueCard { val: *x, se: 0.0 },
+            Value::Est { val, se } => ValueCard { val: *val, se: *se },
+            Value::Bool(b) => ValueCard { val: f64::from(*b), se: 0.0 },
+            _ => unreachable!("value_card only reached for a scalar"),
+        };
+        Ok(Value::Summary(Rc::new(Summary {
+            view: View::Value,
+            label,
+            label_b: None,
+            payload: Payload::Value(card),
+        })))
+    }
+
+    /// `describe` of an array → a per-cell grid summary (vector series / matrix heatmap), sampled in
+    /// one joint pass.
+    fn grid_summary(&mut self, xs: &[Value], label: String, span: Span) -> Result<Value> {
+        use crate::introspect::{grid, DistGrid, Payload, Summary, View, INTROSPECT_N, INTROSPECT_SEED};
+        let wrap = |g| {
+            Value::Summary(Rc::new(Summary { view: View::Grid, label, label_b: None, payload: Payload::Grid(g) }))
+        };
+        let (roots, rows, cols) = self.array_roots(xs, span)?;
+        if self.check_mode {
+            return Ok(wrap(DistGrid { rows, cols, mean: vec![], sd: vec![] }));
+        }
+        let n = self.max_samples.min(INTROSPECT_N);
+        Ok(wrap(grid(&self.graph, &roots, rows, cols, n, INTROSPECT_SEED)))
+    }
+
+    /// `corr(vec)` → the element×element correlation heatmap, sampled in one joint pass. Restricted to
+    /// a vector (1-D) and capped in length, since the cost is O(n²) per lane.
+    fn corr_matrix_summary(&mut self, xs: &[Value], label: String, span: Span) -> Result<Value> {
+        use crate::introspect::{corr_grid, CorrMatrix, Payload, Summary, View, INTROSPECT_SEED};
+        const CORR_MAX: usize = 64;
+        let roots = self.vector_roots(xs, span)?;
+        if roots.len() > CORR_MAX {
+            return Err(NoiseError::runtime(
+                format!("corr heatmap supports up to {CORR_MAX} elements, got {} — slice the vector first", roots.len()),
+                span,
+            ));
+        }
+        let wrap = |c| {
+            Value::Summary(Rc::new(Summary { view: View::CorrMatrix, label, label_b: None, payload: Payload::CorrMatrix(c) }))
+        };
+        if self.check_mode {
+            return Ok(wrap(CorrMatrix { n: roots.len(), corr: vec![] }));
+        }
+        // The pairwise matrix needs fewer draws than a single estimate; cap it to stay snappy.
+        let n = self.max_samples.min(100_000);
+        Ok(wrap(corr_grid(&self.graph, &roots, n, INTROSPECT_SEED)))
+    }
+
+    /// Lower a vector of scalar RVs/constants to element roots (a nested array — a matrix — is a
+    /// spanned error here; `array_roots` handles the 2-D case).
+    fn vector_roots(&mut self, xs: &[Value], span: Span) -> Result<Vec<RvId>> {
+        if xs.is_empty() {
+            return Err(NoiseError::runtime("cannot inspect an empty array".to_string(), span));
+        }
+        let mut roots = Vec::with_capacity(xs.len());
+        for x in xs {
+            if matches!(x, Value::Array(_)) {
+                return Err(NoiseError::runtime(
+                    "expected a vector of variables (a 1-D array)".to_string(),
+                    span,
+                ));
+            }
+            roots.push(self.operand_to_rv(x.clone(), span)?.0);
+        }
+        Ok(roots)
+    }
+
+    /// Lower an array to `(roots, rows, cols)` (row-major) — a vector (`rows == 1`) or a rectangular
+    /// matrix of scalar RVs. Ragged/3-D/oversized arrays are spanned errors.
+    fn array_roots(&mut self, xs: &[Value], span: Span) -> Result<(Vec<RvId>, usize, usize)> {
+        const GRID_MAX: usize = 1024;
+        if xs.is_empty() {
+            return Err(NoiseError::runtime("cannot inspect an empty array".to_string(), span));
+        }
+        if let Value::Array(first) = &xs[0] {
+            let (rows, cols) = (xs.len(), first.len());
+            let mut roots = Vec::with_capacity(rows.saturating_mul(cols));
+            for row in xs {
+                let r = match row {
+                    Value::Array(r) => r,
+                    _ => {
+                        return Err(NoiseError::runtime(
+                            "a matrix needs array rows (this array mixes rows and scalars)".to_string(),
+                            span,
+                        ))
+                    }
+                };
+                if r.len() != cols {
+                    return Err(NoiseError::runtime(
+                        format!("a matrix must be rectangular; rows have lengths {cols} and {}", r.len()),
+                        span,
+                    ));
+                }
+                for cell in r.iter() {
+                    if matches!(cell, Value::Array(_)) {
+                        return Err(NoiseError::runtime("3-D arrays aren't supported".to_string(), span));
+                    }
+                    roots.push(self.operand_to_rv(cell.clone(), span)?.0);
+                }
+            }
+            if roots.len() > GRID_MAX {
+                return Err(NoiseError::runtime(
+                    format!("array too large to inspect ({} cells, max {GRID_MAX})", roots.len()),
+                    span,
+                ));
+            }
+            Ok((roots, rows, cols))
+        } else {
+            let roots = self.vector_roots(xs, span)?;
+            if roots.len() > GRID_MAX {
+                return Err(NoiseError::runtime(
+                    format!("array too large to inspect ({} elems, max {GRID_MAX})", roots.len()),
+                    span,
+                ));
+            }
+            let cols = roots.len();
+            Ok((roots, 1, cols))
+        }
+    }
+
+    /// `plot::*` — the example-facing charting surface. Each maps to the introspection core (a plot
+    /// is just a summary the program asked to *see*), captures the result in the `plots` buffer (so
+    /// the CLI/playground render it), and evaluates to unit — a statement, like `Print`. The chart
+    /// kind comes from the resulting payload, so the names are intent-revealing sugar:
+    /// `histogram`/`hist` (a distribution), `line`/`heatmap`/`value`/`show` (polymorphic `describe`
+    /// of a vector/matrix/scalar), `scatter`, `corr` (pair or element-matrix), `explain`, `samples`.
+    fn plot_call(&mut self, base: &str, args: &[Spanned], arg_vals: &[Value], span: Span) -> Result<Value> {
+        let inner = match base {
+            "histogram" | "hist" => "hist",
+            "line" | "heatmap" | "value" | "show" | "dist" | "describe" => "describe",
+            "scatter" => "scatter",
+            "corr" => "corr",
+            "explain" => "explain",
+            "samples" => "samples",
+            other => {
+                return Err(NoiseError::runtime(
+                    format!("unknown plot 'plot::{other}' (try histogram, line, heatmap, scatter, corr, explain, value)"),
+                    span,
+                ))
+            }
+        };
+        let summary = self.introspect_call(inner, args, arg_vals, span)?;
+        if let Value::Summary(s) = &summary {
+            self.outputs.push(Output::Plot(s.clone()));
+        }
+        // A plot is captured into the output stream (rendered by the host), not a value to fold — it
+        // yields unit like `Print`, and interleaves with `Print` lines in source order.
+        Ok(Value::Unit)
+    }
+
+    /// Evaluate a prefix unary op (`-x` / `!x` / the math ufuncs). A conditioned operand pushes the
+    /// op into its quantity and keeps the condition (`-(X|C)` is `(-X) | C`); otherwise the complex /
+    /// RV-lift / deterministic paths apply as before. Its own method so `eval`'s frame stays small.
+    fn eval_unary_expr(&mut self, op: UnOp, rhs: &Spanned, span: Span) -> Result<Value> {
+        let v = self.eval(rhs)?;
+        forbid_recipe(&v, rhs.span)?;
+        if let Value::Cond { quantity, condition, .. } = v {
+            let q = self.lift_unary(op, Value::Dist(quantity), span)?;
+            let (quantity, q_kind) = self.operand_to_rv(q, span)?;
+            Ok(Value::Cond { quantity, q_kind, condition })
+        } else if matches!(v, Value::Complex { .. }) {
+            self.unary_complex(op, v, span)
+        } else if is_dist(&v) {
+            self.lift_unary(op, v, span)
+        } else {
+            eval_unary(op, v, span) // deterministic fast path, unchanged
+        }
+    }
+
+    /// A binary op with at least one conditioned operand — `2*(X|C)`, `(X|C)+1`, `(X|C) < 3`, or
+    /// `(X|C)+(Y|C)`. The op pushes into the quantity and the condition rides along, so the result
+    /// is the conditioned value `(quantity ⊕ other) | C`. Two conditioned operands must share the
+    /// *same* condition node — conditioning on two different events at once is ill-defined, so it is
+    /// a spanned error (condition once, at the end: `(X + Y) | C`).
+    fn binop_cond(&mut self, op: BinOp, l: Value, r: Value, span: Span) -> Result<Value> {
+        let (quantity, condition) = match (l, r) {
+            (
+                Value::Cond { quantity: ql, condition: cl, .. },
+                Value::Cond { quantity: qr, condition: cr, .. },
+            ) => {
+                if cl != cr {
+                    return Err(NoiseError::runtime(
+                        "cannot combine two values conditioned on different events — condition once, \
+                         at the end (e.g. `(X + Y) | C`)"
+                            .to_string(),
+                        span,
+                    ));
+                }
+                (self.binop(op, Value::Dist(ql), Value::Dist(qr), span)?, cl)
+            }
+            (Value::Cond { quantity, condition, .. }, other) => {
+                (self.binop(op, Value::Dist(quantity), other, span)?, condition)
+            }
+            (other, Value::Cond { quantity, condition, .. }) => {
+                (self.binop(op, other, Value::Dist(quantity), span)?, condition)
+            }
+            _ => unreachable!("binop_cond called without a conditioned operand"),
+        };
+        // Re-wrap the transformed quantity, keeping the condition. The quantity is always an RV here
+        // (it has a `Dist` operand), so `operand_to_rv` just reads its id/kind.
+        let (quantity, q_kind) = self.operand_to_rv(quantity, span)?;
+        Ok(Value::Cond { quantity, q_kind, condition })
+    }
+
     /// Combine two element `Value`s with a binary op — the single fold primitive the library
     /// reuses (LANG.md §0). Lifts to a graph node if either side is a `Dist`, else folds
     /// deterministically. Recipes are rejected (you can't operate on an undrawn distribution).
     fn binop(&mut self, op: BinOp, l: Value, r: Value, span: Span) -> Result<Value> {
         forbid_recipe(&l, span)?;
         forbid_recipe(&r, span)?;
+        // A conditioned operand pushes the op into its quantity and carries the condition along —
+        // `2*(X|C)` is `(2X) | C`. Handle before the other paths so a conditioned value never folds
+        // or lifts as a plain RV.
+        if matches!(l, Value::Cond { .. }) || matches!(r, Value::Cond { .. }) {
+            return self.binop_cond(op, l, r, span);
+        }
         // A lazy signal defers scalar/trig ops and materializes against a sized array. Handle it
         // before the array path so `signal ⊕ array` adopts the array's length.
         if matches!(l, Value::Signal(_)) || matches!(r, Value::Signal(_)) {
@@ -2209,8 +2786,114 @@ fn is_dist(v: &Value) -> bool {
     matches!(v, Value::Dist(_))
 }
 
-/// The built-in modules. `builtin` is always active; the others need a `use`.
-const MODULES: [&str; 6] = ["rand", "math", "vec", "signal", "engine", "builtin"];
+/// The always-on variable-introspection builtins (see [`crate::introspect`]). Routed before module
+/// resolution because they need `&mut` graph (sampling roots) and the variable scope (`explain`).
+#[inline]
+fn is_introspection(name: &str) -> bool {
+    matches!(name, "describe" | "hist" | "samples" | "corr" | "scatter" | "explain")
+}
+
+/// A short label for an introspected operand, taken from its *source* expression (the evaluated
+/// `Value` has no name). An identifier is its own name; a conditioned value reads `event | given`;
+/// a call shows `name(…)`; anything else is a generic placeholder.
+fn label_of(s: &Spanned) -> String {
+    match &s.expr {
+        Expr::Ident(name) => name.clone(),
+        Expr::Cond { event, given } => format!("{} | {}", label_of(event), label_of(given)),
+        Expr::Binary(op, l, r) => format!("{} {} {}", label_of(l), binop_symbol(*op), label_of(r)),
+        Expr::Index(arr, idx) => format!("{}[{}]", label_of(arr), label_of(idx)),
+        Expr::Call(name, _) => format!("{name}(…)"),
+        Expr::Number(n) => crate::value::format_num(*n),
+        _ => "value".to_string(),
+    }
+}
+
+/// The source symbol for a binary operator — for labelling an introspection by its expression
+/// (e.g. `D > 3`). Display-only; not a parser/printer.
+fn binop_symbol(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Mod => "%",
+        BinOp::Pow => "^",
+        BinOp::Lt => "<",
+        BinOp::Gt => ">",
+        BinOp::Le => "<=",
+        BinOp::Ge => ">=",
+        BinOp::Eq => "==",
+        BinOp::Ne => "!=",
+        BinOp::And => "&&",
+        BinOp::Or => "||",
+    }
+}
+
+/// Resolve a count argument (the `k` in `samples(x, k)`) to a non-negative integer.
+fn introspect_count(v: &Value, span: Span) -> Result<usize> {
+    let n = match v {
+        Value::Num(n) | Value::Est { val: n, .. } => *n,
+        other => {
+            return Err(NoiseError::runtime(
+                format!("sample count must be a number, got {}", other.type_name()),
+                span,
+            ))
+        }
+    };
+    if n < 0.0 || n.fract() != 0.0 || !n.is_finite() {
+        return Err(NoiseError::runtime(
+            format!("sample count must be a non-negative integer, got {n}"),
+            span,
+        ));
+    }
+    Ok(n as usize)
+}
+
+/// A condition (or query) that yielded no usable draws — `describe(X | C)` / `corr`/`explain` where
+/// the condition never held in `n` samples. Mirrors `builtins`' conditional-undefined message.
+fn condition_never(n: usize, span: Span) -> NoiseError {
+    NoiseError::runtime(
+        format!(
+            "the condition after `|` never occurred in {n} samples, so there is nothing to \
+             summarize — use a more likely condition or raise the sample count"
+        ),
+        span,
+    )
+}
+
+/// The set of nodes reachable upstream from `root` (its transitive dependency cone, including
+/// `root`). Backs `explain`: a named variable can only drive the target if the target depends on it.
+fn ancestors(graph: &RvGraph, root: RvId) -> HashSet<RvId> {
+    let mut seen = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        match graph.node(id) {
+            RvNode::Unary(_, a) => stack.push(*a),
+            RvNode::Binary(_, a, b) => {
+                stack.push(*a);
+                stack.push(*b);
+            }
+            RvNode::Select { cond, a, b } => {
+                stack.push(*cond);
+                stack.push(*a);
+                stack.push(*b);
+            }
+            RvNode::Gather { elems, index } => {
+                stack.extend(elems.iter().copied());
+                stack.push(*index);
+            }
+            RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+        }
+    }
+    seen
+}
+
+/// The built-in modules. `builtin` is always active; the others need a `use`. `plot` is the charting
+/// surface (`plot::histogram(X)` …) — always reachable qualified, like a namespaced builtin.
+const MODULES: [&str; 7] = ["rand", "math", "vec", "signal", "engine", "builtin", "plot"];
 
 /// Whether `m` names a known module.
 #[inline]

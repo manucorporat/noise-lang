@@ -67,6 +67,25 @@ pub enum Source {
     Geometric { p: f64 },
 }
 
+/// A distribution **parameter that may itself be random** — the building block for hierarchical
+/// models (`p ~ unif(0,1); k ~ bernoulli(p)`). `Const` is an ordinary deterministic parameter;
+/// `Rv` is a sample-DAG node, so each Monte Carlo lane uses that lane's *draw* of the parameter.
+/// Both fields are `Copy`, so a recipe carrying these stays `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DistArg {
+    Const(f64),
+    Rv(RvId),
+}
+
+impl std::fmt::Display for DistArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DistArg::Const(x) => write!(f, "{x}"),
+            DistArg::Rv(id) => write!(f, "<dist #{}>", id.0),
+        }
+    }
+}
+
 /// An **undrawn distribution** — a *recipe*, not a random variable (LANG.md core model §2). A
 /// builtin like `unif(0,1)` produces a `Recipe`; it carries no node in the sample-DAG yet.
 /// Drawing happens only at `~` (see `Engine::draw`), which instantiates *fresh* source node(s)
@@ -100,6 +119,22 @@ pub enum Recipe {
     /// their argsort (each element is `rank(keyₖ)`), so every entry is an ordinary RV node and the
     /// `n` entries are jointly a permutation per Monte Carlo lane. See `Engine::draw_permutation`.
     Permutation { n: usize },
+    // --- distributions with a possibly-random parameter (hierarchical models) ---
+    // Each is drawn (LANG.md core model §2 / "Hierarchical distributions") by lowering to a
+    // *standard base draw + a deterministic transform* (location–scale / inverse-CDF / threshold)
+    // so the VM, `Source`, and RNG stay unchanged — `~` builds a fresh base draw and reuses the
+    // parameter node(s). The constructors emit these only when at least one parameter is an `Rv`;
+    // an all-`Const` call still uses the plain variants above. See `Engine::draw`.
+    /// `unif(lo, hi)` → `lo + (hi − lo)·U`, `U ~ unif(0,1)`.
+    UniformDyn { lo: DistArg, hi: DistArg },
+    /// `unif_int(lo, hi)` → `lo + floor((hi − lo + 1)·U)`, `U ~ unif(0,1)`.
+    UniformIntDyn { lo: DistArg, hi: DistArg },
+    /// `normal(mu, sigma)` → `mu + sigma·Z`, `Z ~ normal(0,1)`. `round` of it gives `normal_int`.
+    NormalDyn { mu: DistArg, sigma: DistArg, int: bool },
+    /// `exponential(rate)` → `E / rate`, `E ~ Exp(1)`. `round` of it gives `exponential_int`.
+    ExpDyn { rate: DistArg, int: bool },
+    /// `bernoulli(p)` → `(U < p)`, `U ~ unif(0,1)` (a bool RV true with probability `p`).
+    BernoulliDyn { p: DistArg },
 }
 
 impl std::fmt::Display for Recipe {
@@ -117,6 +152,15 @@ impl std::fmt::Display for Recipe {
             Recipe::ExpInt { rate } => write!(f, "exponential_int({rate})"),
             Recipe::Rotation { d } => write!(f, "rotation({d})"),
             Recipe::Permutation { n } => write!(f, "permutation({n})"),
+            Recipe::UniformDyn { lo, hi } => write!(f, "unif({lo}, {hi})"),
+            Recipe::UniformIntDyn { lo, hi } => write!(f, "unif_int({lo}, {hi})"),
+            Recipe::NormalDyn { mu, sigma, int } => {
+                write!(f, "{}({mu}, {sigma})", if *int { "normal_int" } else { "normal" })
+            }
+            Recipe::ExpDyn { rate, int } => {
+                write!(f, "{}({rate})", if *int { "exponential_int" } else { "exponential" })
+            }
+            Recipe::BernoulliDyn { p } => write!(f, "bernoulli({p})"),
         }
     }
 }

@@ -1,8 +1,12 @@
 # Estimate pi by Monte Carlo. A point uniform in the 2x2 square lands in the unit
 # circle with probability pi/4, so pi = 4 * P(inside).   analytic: 3.14159
-use rand;
-
-X ~ unif(-1, 1);
-Y ~ unif(-1, 1);
+X ~ rand::unif(-1, 1);
+Y ~ rand::unif(-1, 1);
 pi = 4 * P(X^2 + Y^2 < 1);
-Print("Estimated pi ~", pi)
+Print("Estimated pi ~", pi);
+
+# Each dot is one random point; together they fill the square and reveal the round circle inside.
+plot::scatter(X, Y);
+
+# The pi estimate with its error bar — how sure we are of the answer.
+plot::value(pi)
