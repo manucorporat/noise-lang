@@ -1,0 +1,75 @@
+---
+// A generic scrollytelling scaffold for blog posts: a sticky "stage" on the left and a column of
+// narrative steps on the right. As each step scrolls into view it gets `.active`, and the root
+// element fires a `scrolly:step` CustomEvent ({ detail: { step, total } }) so a post can drive any
+// visual — a canvas, an SVG, swapping a figure, running the WASM engine — without re-implementing
+// the IntersectionObserver wiring. Authored from MDX like:
+//
+//   <Scrolly>
+//     <div slot="stage" id="my-figure">…sticky visual…</div>
+//     <ScrollyStep n={0}>**First idea.** prose…</ScrollyStep>
+//     <ScrollyStep n={1}>**Second idea.** prose…</ScrollyStep>
+//   </Scrolly>
+//
+// The matching styles (`.scrolly`, `.scrolly-stage`, `.scrolly-step`, `.glass`, …) live in
+// global.css and are shared with the home-page demos.
+interface Props {
+  /** Heading shown above the sticky stage (optional). */
+  title?: string;
+  /** Figure caption shown under the sticky stage (optional; or use the `caption` slot). */
+  caption?: string;
+  /** Extra class on the root, e.g. to scope canvas sizing from a post. */
+  class?: string;
+}
+const { title, caption, class: cls } = Astro.props;
+const hasCaption = caption != null || Astro.slots.has('caption');
+---
+
+<div class:list={['scrolly', cls]} data-scrolly>
+  <div class="scrolly-grid">
+    <div class="scrolly-stage">
+      <div class="stage-inner glass">
+        {title && <h4 class="stage-title">{title}</h4>}
+        <slot name="stage" />
+      </div>
+      {hasCaption && (
+        <figcaption class="figure-caption">
+          {caption}<slot name="caption" />
+        </figcaption>
+      )}
+    </div>
+    <div class="scrolly-steps">
+      <slot />
+    </div>
+  </div>
+</div>
+
+<script>
+  // Wire every generic <Scrolly> on the page. Each is independent: its own observer, its own
+  // active step, its own `scrolly:step` event. (The home-page demos manage their own observers
+  // and are not marked `data-scrolly`, so they're untouched.)
+  for (const root of document.querySelectorAll<HTMLElement>('.scrolly[data-scrolly]')) {
+    const steps = Array.from(root.querySelectorAll<HTMLElement>('.scrolly-step'));
+    if (!steps.length) continue;
+
+    const setStep = (i: number) => {
+      steps.forEach((el, k) => el.classList.toggle('active', k === i));
+      root.dispatchEvent(
+        new CustomEvent('scrolly:step', { detail: { step: i, total: steps.length } }),
+      );
+    };
+
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting && e.intersectionRatio > 0.5) {
+            setStep(Number((e.target as HTMLElement).dataset.step ?? '0'));
+          }
+        }
+      },
+      { threshold: [0.5], rootMargin: '-18% 0px -18% 0px' },
+    );
+    for (const el of steps) io.observe(el);
+    setStep(0);
+  }
+</script>

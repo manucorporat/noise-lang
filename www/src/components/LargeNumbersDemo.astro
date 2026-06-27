@@ -1,0 +1,120 @@
+---
+// A custom scrollytelling demo built from the reusable <Scrolly> / <ScrollyStep> blocks — the
+// pattern a blog post follows when it wants a new interactive figure. The sticky stage is a canvas
+// that redraws the running proportion of heads as the sample size grows; each scrolled step bumps
+// the flip count, so you watch the law of large numbers pull a jagged line flat at ½.
+//
+// Why a component and not an inline <script> in the .mdx? MDX parses `{` and `<` inside a <script>
+// as JSX, so real JavaScript has to live in an .astro component, where Astro bundles it properly.
+// The Scrolly *structure* can still be authored directly in MDX — see the post source.
+import Scrolly from './Scrolly.astro';
+import ScrollyStep from './ScrollyStep.astro';
+---
+
+<Scrolly
+  class="lln-demo"
+  caption="Figure. The running proportion of heads. A handful of flips is noisy; a hundred thousand sits on ½."
+>
+  <div slot="stage">
+    <h4 class="stage-title">Heads, as a fraction of flips</h4>
+    <div class="stage-canvas lln-canvas-wrap">
+      <canvas class="lln-canvas" aria-label="Running proportion of heads converging to one half"></canvas>
+    </div>
+    <div class="stage-foot">
+      <span class="stat">flips <b class="lln-n">10</b></span>
+      <span class="stat key">heads ÷ flips ≈ <b class="lln-p">—</b></span>
+    </div>
+  </div>
+
+  <ScrollyStep n={0} title="Ten flips is just noise">
+    With ten coin flips the proportion of heads swings wildly — 0.3 one run, 0.7 the next. Small
+    samples don't tell you much.
+  </ScrollyStep>
+  <ScrollyStep n={1} title="A hundred flips settles down">
+    Bump it to a hundred and the line stops thrashing. It still wobbles, but it's circling ½.
+  </ScrollyStep>
+  <ScrollyStep n={2} title="A thousand tightens further">
+    A thousand flips and the wobble shrinks again. Each tenfold increase roughly halves the spread.
+  </ScrollyStep>
+  <ScrollyStep n={3} title="A hundred thousand sits on ½">
+    At a hundred thousand the proportion is glued to ½. That's the law of large numbers — and
+    exactly what a Noise query does under the hood, millions of times.
+  </ScrollyStep>
+</Scrolly>
+
+<style>
+  .lln-canvas-wrap { aspect-ratio: 2 / 1; max-width: 520px; margin: 0 auto; }
+</style>
+
+<script>
+  // Each .lln-demo on the page is wired independently and listens for the `scrolly:step` event its
+  // own <Scrolly> root dispatches.
+  for (const root of document.querySelectorAll<HTMLElement>('.lln-demo')) {
+    const canvas = root.querySelector<HTMLCanvasElement>('.lln-canvas');
+    if (!canvas) continue;
+    const ctx = canvas.getContext('2d')!;
+    const nEl = root.querySelector<HTMLElement>('.lln-n');
+    const pEl = root.querySelector<HTMLElement>('.lln-p');
+    const FLIPS = [10, 100, 1000, 100_000];
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    let W = 0, H = 0, step = 0;
+
+    function resize() {
+      const r = canvas!.getBoundingClientRect();
+      W = Math.max(1, Math.floor(r.width));
+      H = Math.max(1, Math.floor(r.height));
+      canvas!.width = Math.floor(W * dpr);
+      canvas!.height = Math.floor(H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    // Walk `n` flips, recording the running proportion of heads. Cap at ~600 evenly-spaced points
+    // so the widest sample stays cheap to draw.
+    function series(n: number) {
+      const pts: [number, number][] = [];
+      const stride = Math.max(1, Math.floor(n / 600));
+      let heads = 0;
+      for (let i = 1; i <= n; i++) {
+        if (Math.random() < 0.5) heads++;
+        if (i % stride === 0 || i === n) pts.push([i, heads / i]);
+      }
+      return { pts, final: heads / n };
+    }
+
+    function draw(n: number) {
+      const { pts, final } = series(n);
+      const padL = 34, padR = 10, padT = 12, padB = 18;
+      const x = (i: number) => padL + (Math.log10(i) / Math.log10(n)) * (W - padL - padR);
+      const y = (p: number) => padT + (1 - p) * (H - padT - padB);
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#f4f1e8';
+      ctx.fillRect(0, 0, W, H);
+      // the ½ target line
+      ctx.strokeStyle = 'rgba(138,45,74,0.55)';
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(padL, y(0.5)); ctx.lineTo(W - padR, y(0.5)); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(138,45,74,0.9)';
+      ctx.font = '11px ui-monospace, monospace';
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.fillText('0.5', padL - 5, y(0.5));
+      // the running proportion
+      ctx.strokeStyle = 'rgba(31,111,139,0.9)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      pts.forEach(([i, p], k) => { const px = x(i), py = y(p); k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
+      ctx.stroke();
+      if (nEl) nEl.textContent = n.toLocaleString();
+      if (pEl) pEl.textContent = final.toFixed(3);
+    }
+
+    new ResizeObserver(() => { resize(); draw(FLIPS[step]); }).observe(canvas);
+    root.addEventListener('scrolly:step', (e) => {
+      step = Math.min(FLIPS.length - 1, (e as CustomEvent<{ step: number }>).detail.step);
+      draw(FLIPS[step]);
+    });
+    resize();
+    draw(FLIPS[0]);
+  }
+</script>

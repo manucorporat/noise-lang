@@ -102,10 +102,10 @@ path). Start each program with the `use` lines you need.
 | Module    | `use`?   | Items |
 |-----------|----------|-------|
 | `builtin` | always   | `P`, `Q`, `E`, `Var`, `Print`, `Len` |
-| `rand`    | `use rand;` | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `exp`, `exp_int`, `poisson`, `geometric`, `rotation` |
+| `rand`    | `use rand;` | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `exp`, `exp_int`, `poisson`, `geometric`, `rotation`, `permutation` |
 | `math`    | `use math;` | `pi`, `e`, `sqrt`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign` |
-| `vec`     | `use vec;`  | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `normsq`, `norm`, `vadd`, `vsub`, `matvec`, `transpose`, `normalize`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` |
-| `signal`  | `use signal;` | `sine`, `cosine`, `noise_white`, `sample` |
+| `vec`     | `use vec;`  | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `normsq`, `norm`, `transpose`, `normalize`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` |
+| `signal`  | `use signal;` | `sine`, `cosine`, `sample`, `noise_white`, `noise_brown`, `noise_pink`, `noise_ou` |
 
 ```noise
 use rand;            # unif, unif_int, …

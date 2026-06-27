@@ -1,0 +1,41 @@
+---
+import { getCollection, render } from 'astro:content';
+import BlogPost from '../../layouts/BlogPost.astro';
+
+// Components made available to every post WITHOUT an explicit import in the .mdx file. Authors can
+// drop <CodePanel/>, build a <Scrolly>…</Scrolly> story, or embed an existing home-page demo
+// (<ConceptDemo/>, <CircleDemo/>, …) straight into prose. They can still `import` anything else.
+import CodePanel from '../../components/CodePanel.astro';
+import Scrolly from '../../components/Scrolly.astro';
+import ScrollyStep from '../../components/ScrollyStep.astro';
+import ConceptDemo from '../../components/ConceptDemo.astro';
+import CircleDemo from '../../components/CircleDemo.astro';
+import BirthdayDemo from '../../components/BirthdayDemo.astro';
+import BellDemo from '../../components/BellDemo.astro';
+import AmFmDemo from '../../components/AmFmDemo.astro';
+import PrisonersDemo from '../../components/PrisonersDemo.astro';
+import LargeNumbersDemo from '../../components/LargeNumbersDemo.astro';
+
+const components = {
+  CodePanel, Scrolly, ScrollyStep,
+  ConceptDemo, CircleDemo, BirthdayDemo, BellDemo, AmFmDemo, PrisonersDemo, LargeNumbersDemo,
+};
+
+export async function getStaticPaths() {
+  const posts = await getCollection('blog');
+  return posts.map((post) => ({ params: { slug: post.id }, props: { post } }));
+}
+
+const { post } = Astro.props;
+const { Content } = await render(post);
+---
+
+<BlogPost
+  title={post.data.title}
+  description={post.data.description}
+  date={post.data.date}
+  author={post.data.author}
+  tags={post.data.tags}
+>
+  <Content components={components} />
+</BlogPost>

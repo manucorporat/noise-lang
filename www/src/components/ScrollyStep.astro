@@ -1,0 +1,15 @@
+---
+// One narrative step inside a <Scrolly>. The `n` index must match the order of the steps (0-based)
+// — it's reported in the `scrolly:step` event so the sticky stage knows which beat to render.
+interface Props {
+  n: number;
+  /** Optional accent heading rendered above the step's prose. */
+  title?: string;
+}
+const { n, title } = Astro.props;
+---
+
+<div class="scrolly-step" data-step={n}>
+  {title && <h4>{title}</h4>}
+  <slot />
+</div>

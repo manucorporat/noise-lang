@@ -1,0 +1,108 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { getCollection } from 'astro:content';
+
+// Newest first; drafts are hidden from the listing (they still build at /blog/<slug> locally).
+const posts = (await getCollection('blog', ({ data }) => !data.draft)).sort(
+  (a, b) => b.data.date.valueOf() - a.data.date.valueOf(),
+);
+
+const fmt = (d: Date) =>
+  d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+---
+
+<Layout title="Blog — noise~lang" description="Notes on probabilistic programming, Monte Carlo, and the Noise language.">
+  <header class="topbar">
+    <div class="wide topbar-inner">
+      <a class="brand" href="/"><img class="brand-mark" src="/favicon.svg" alt="" width="24" height="24" />noise<span class="brand-tilde">~</span><span class="brand-dim">lang</span></a>
+      <nav class="topbar-links">
+        <a href="/#ideas">How it works</a>
+        <a href="/play">Playground</a>
+        <a href="/blog" aria-current="page">Blog</a>
+        <a href="/skill">Skills</a>
+        <a href="/#author">About</a>
+        <a href="https://github.com/manucorporat/noise-lang">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="measure blog-index">
+    <p class="docs-kicker">Writing</p>
+    <h1 class="blog-title">Blog</h1>
+    <p class="blog-lede">Notes on probabilistic programming, Monte Carlo, and building the Noise language — some with live, scroll-driven demos.</p>
+
+    {posts.length === 0 ? (
+      <p class="blog-empty">No posts yet. Add an <code>.mdx</code> file to <code>src/content/blog/</code>.</p>
+    ) : (
+      <ul class="post-list">
+        {posts.map((post) => (
+          <li class="post-item">
+            <a class="post-link" href={`/blog/${post.id}`}>
+              <h2 class="post-item-title">{post.data.title}</h2>
+              <p class="post-item-desc">{post.data.description}</p>
+              <p class="post-item-meta">
+                <time datetime={post.data.date.toISOString().slice(0, 10)}>{fmt(post.data.date)}</time>
+                · {post.data.author}
+              </p>
+            </a>
+          </li>
+        ))}
+      </ul>
+    )}
+  </main>
+
+  <footer class="docs-foot measure">
+    <p>Built with <a href="/play">the playground</a>. Source on <a href="https://github.com/manucorporat/noise-lang">GitHub</a>.</p>
+  </footer>
+</Layout>
+
+<style>
+  .topbar {
+    position: sticky; top: 0; z-index: 30;
+    background: rgba(251, 250, 246, 0.88);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--rule);
+  }
+  .topbar-inner {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding-top: 0.7rem; padding-bottom: 0.7rem;
+  }
+  .brand { display: inline-flex; align-items: center; font-family: var(--serif); font-weight: 700; font-size: 1.1rem; color: var(--ink); }
+  .brand:hover { text-decoration: none; }
+  .brand-mark { display: block; width: 1.4em; height: 1.4em; margin-right: 0.5rem; }
+  .brand-dim { color: var(--ink-dim); }
+  .brand-tilde {
+    font-family: var(--mono); font-weight: 500; color: var(--accent);
+    margin: 0 0.04em; vertical-align: baseline; position: relative; top: 0.02em;
+  }
+  .topbar-links { display: flex; gap: 1.3rem; }
+  .topbar-links a { color: var(--ink-dim); font-size: 0.92rem; }
+  .topbar-links a:hover { color: var(--ink); text-decoration: none; }
+  .topbar-links a[aria-current='page'] { color: var(--ink); }
+  @media (max-width: 680px) { .topbar-links a:not([aria-current='page']) { display: none; } }
+
+  .blog-index { padding-top: 2.6rem; padding-bottom: 4rem; }
+  .docs-kicker {
+    font-family: var(--sans); text-transform: uppercase; letter-spacing: 0.12em;
+    font-size: 0.72rem; color: var(--ink-faint); margin: 0 0 0.4rem;
+  }
+  .blog-title { font-size: 2.4rem; margin: 0 0 0.5rem; letter-spacing: -0.01em; }
+  .blog-lede { font-size: 1.05rem; color: var(--ink-dim); margin: 0 0 2.6rem; max-width: 36em; }
+  .blog-empty { color: var(--ink-dim); }
+  .blog-empty code { font-family: var(--mono); font-size: 0.88em; background: var(--paper-2); border: 1px solid var(--rule); border-radius: 3px; padding: 0.05em 0.3em; }
+
+  .post-list { list-style: none; margin: 0; padding: 0; }
+  .post-item { border-top: 1px solid var(--rule); }
+  .post-item:last-child { border-bottom: 1px solid var(--rule); }
+  .post-link { display: block; padding: 1.5rem 0; color: inherit; }
+  .post-link:hover { text-decoration: none; }
+  .post-item-title { font-size: 1.4rem; margin: 0 0 0.35rem; color: var(--ink); transition: color 0.15s ease; }
+  .post-link:hover .post-item-title { color: var(--link); }
+  .post-item-desc { margin: 0 0 0.5rem; color: var(--ink-dim); line-height: 1.55; }
+  .post-item-meta { margin: 0; font-family: var(--sans); font-size: 0.82rem; color: var(--ink-faint); }
+
+  .docs-foot {
+    padding-top: 1.4rem; padding-bottom: 3rem;
+    border-top: 1px solid var(--rule); color: var(--ink-faint); font-size: 0.85rem;
+  }
+</style>
