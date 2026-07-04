@@ -36,5 +36,12 @@ export default defineConfig({
     worker: {
       format: 'es',
     },
+    // @noiselang/core ships the engine .wasm and references it via `new URL(..., import.meta.url)`.
+    // Vite's dep pre-bundler (esbuild) would rewrite that reference and lose the asset, so exclude
+    // the package from optimization — Vite then processes its ESM directly and emits the .wasm as a
+    // fingerprinted asset of this build.
+    optimizeDeps: {
+      exclude: ['@noiselang/core'],
+    },
   },
 });

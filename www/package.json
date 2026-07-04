@@ -5,15 +5,15 @@
   "private": true,
   "description": "The Noise language website + in-browser playground (Astro + Monaco + WASM).",
   "scripts": {
-    "wasm": "cd .. && PATH=\"$HOME/.cargo/bin:$PATH\" wasm-pack build crates/noise-wasm --target web --out-dir ../../www/src/wasm/pkg --out-name noise --release",
-    "predev": "pnpm run wasm",
-    "prebuild": "pnpm run wasm",
+    "predev": "pnpm --filter @noiselang/core run build",
+    "prebuild": "pnpm --filter @noiselang/core run build",
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview"
   },
   "dependencies": {
     "@astrojs/mdx": "^4.3.14",
+    "@noiselang/core": "workspace:*",
     "astro": "^5.13.0",
     "monaco-editor": "^0.52.2"
   }
