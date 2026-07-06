@@ -1,13 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/noise-core", "crates/noise-cli", "crates/noise-wasm"]
-# `legacy/` is the pre-rewrite reference crate (see AGENT.md). It is intentionally
-# excluded from the workspace so its 2017-era deps never build.
-exclude = ["legacy"]
+exclude = ["packages/legacy"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Manu Mtz.-Almeida <manu.valladolid@gmail.com>"]
 license = "MIT"
 repository = "https://github.com/manucorporat/noise-lang"
