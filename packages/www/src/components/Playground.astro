@@ -35,29 +35,6 @@
         <div id="pg-output" class="pg-output"><span class="muted">Press Run to evaluate.</span></div>
         <div id="pg-metrics" class="pg-metrics" hidden></div>
       </div>
-
-      <div class="pg-inspect-wrap glass" id="pg-inspect-wrap" hidden>
-        <div class="pg-output-head">
-          <span class="dot dot-2"></span> Inspect
-          <span class="pg-inspect-hint">click a variable · two to relate</span>
-        </div>
-        <div class="pg-inspect-body">
-          <div class="pg-vars" id="pg-vars"></div>
-          <div class="pg-inspect-controls">
-            <input
-              id="pg-given"
-              class="pg-given"
-              type="text"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="condition (optional), e.g. heads == 7"
-            />
-            <button id="pg-explain" class="btn btn-ghost btn-sm" type="button" title="What drives this variable?">Explain</button>
-            <button id="pg-correlate" class="btn btn-ghost btn-sm" type="button" title="Correlation heatmap of an array's elements">Corr</button>
-          </div>
-          <div id="pg-charts" class="pg-charts"></div>
-        </div>
-      </div>
     </aside>
   </div>
 </section>
@@ -193,45 +170,7 @@
   .pg-metric.m-rate .m-val { color: var(--accent); }
   .m-sep { color: var(--ink-faint); opacity: 0.6; }
 
-  /* --- Inspect panel: the "look at a variable without editing the code" surface --- */
-  .pg-inspect-wrap { display: flex; flex-direction: column; overflow: hidden; }
-  .dot.dot-2 { background: var(--link); }
-  .pg-inspect-hint { margin-left: auto; font-variant: normal; letter-spacing: 0; text-transform: none; font-size: 0.7rem; color: var(--ink-faint); font-style: italic; }
-  .pg-inspect-body { padding: 0.7rem 0.85rem; display: flex; flex-direction: column; gap: 0.6rem; }
-
-  .pg-vars { display: flex; flex-wrap: wrap; gap: 0.35rem; }
-  .pg-var {
-    font-family: var(--mono);
-    font-size: 0.78rem;
-    padding: 0.18rem 0.5rem;
-    border: 1px solid var(--rule);
-    border-radius: 999px;
-    background: var(--paper-2);
-    color: var(--ink-dim);
-    cursor: pointer;
-    transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
-  }
-  .pg-var:hover { border-color: var(--accent); color: var(--ink); }
-  .pg-var.sel { background: var(--ink); color: var(--paper); border-color: var(--ink); }
-  .pg-var .pg-var-kind { opacity: 0.55; font-size: 0.68rem; margin-left: 0.25rem; }
-  .pg-var.bool { font-style: italic; }
-
-  .pg-inspect-controls { display: flex; gap: 0.4rem; align-items: center; }
-  .pg-given {
-    flex: 1;
-    font-family: var(--mono);
-    font-size: 0.78rem;
-    padding: 0.3rem 0.5rem;
-    border: 1px solid var(--rule);
-    border-radius: 4px;
-    background: var(--paper-2);
-    color: var(--ink);
-  }
-  .pg-given:focus-visible { outline: 2px solid var(--link); border-color: var(--link); }
-  .btn-sm { font-size: 0.78rem; padding: 0.3rem 0.6rem; }
-  .btn-ghost.active { background: var(--ink); color: var(--paper); border-color: var(--ink); }
-
-  .pg-charts { display: flex; flex-direction: column; gap: 0.7rem; }
+  /* --- Result cards (Print-stream plot:: charts rendered into the output) --- */
   .pg-card { border: 1px solid var(--rule); border-radius: 6px; background: var(--paper); padding: 0.6rem 0.7rem; }
   .pg-card-title { font-family: var(--mono); font-size: 0.82rem; color: var(--ink); font-weight: 700; margin-bottom: 0.15rem; }
   .pg-card-sub { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-dim); margin-bottom: 0.4rem; line-height: 1.5; }
@@ -277,8 +216,6 @@
     runNoiseWithIntrospection,
     type NoiseIntrospectResult,
     type Introspection,
-    type IntrospectRequest,
-    type Binding,
   } from '../lib/noise';
   // (LogItem is structural; we read res.log items inline.)
   import { examples, defaultExampleId, examplesByCategory } from '../data/examples';
@@ -294,12 +231,6 @@
   const outEl = $('pg-output');
   const metricsEl = $('pg-metrics');
   const select = $('pg-select') as HTMLSelectElement;
-  const inspectWrap = $('pg-inspect-wrap');
-  const varsEl = $('pg-vars');
-  const givenEl = $('pg-given') as HTMLInputElement;
-  const explainBtn = $('pg-explain') as HTMLButtonElement;
-  const correlateBtn = $('pg-correlate') as HTMLButtonElement;
-  const chartsEl = $('pg-charts');
 
   registerNoise(monaco);
 
@@ -320,13 +251,6 @@
 
   let currentId: string | null = defaultExampleId;
   let suppressHash = false; // guard so our own hash writes don't re-trigger a load
-
-  // --- Inspector state: which variables are selected (max 2), the optional condition, and whether
-  // we're in "explain" mode. Selection drives the introspection requests sent with every run. ---
-  let selected: string[] = [];
-  let explainMode = false;
-  let correlateMode = false;
-  let bindings: Binding[] = [];
 
   const editor = monaco.editor.create($('editor'), {
     value: byId.get(defaultExampleId)?.code ?? examples[0]?.code ?? '',
@@ -349,14 +273,6 @@
     outEl.innerHTML = '<span class="muted">Press Run to evaluate.</span>';
     metricsEl.hidden = true;
     metricsEl.innerHTML = '';
-    // Reset the inspector — a new/edited program has a fresh (unknown) scope until the next run.
-    inspectWrap.hidden = true;
-    selected = [];
-    explainMode = false;
-    correlateMode = false;
-    givenEl.value = '';
-    chartsEl.innerHTML = '';
-    varsEl.innerHTML = '';
   }
 
   function setHash(value: string) {
@@ -415,22 +331,6 @@
     if (select.value) selectExample(select.value);
   });
 
-  /** Random variables and arrays/numbers are all inspectable now (a number → value+CI, an array →
-   * grid/heatmap). Only structurally non-numeric kinds (complex, signal, …) stay disabled. */
-  const isRv = (b: Binding) => b.kind.startsWith('dist');
-  const isInspectable = (b: Binding) =>
-    b.kind.startsWith('dist') || b.kind === 'number' || b.kind === 'bool' || b.kind === 'array';
-
-  /** The introspection requests implied by the current selection (arity picks the operation). */
-  function currentRequests(): IntrospectRequest[] {
-    if (selected.length === 0) return [];
-    const given = givenEl.value.trim() || undefined;
-    if (explainMode) return [{ vars: [selected[0]], given, explain: true }];
-    if (correlateMode) return [{ vars: [selected[0]], correlate: true }];
-    if (selected.length >= 2) return [{ vars: [selected[0], selected[1]] }]; // corr (no condition yet)
-    return [{ vars: [selected[0]], given }];
-  }
-
   async function run() {
     const runBtn = $('pg-run') as HTMLButtonElement;
     runBtn.disabled = true;
@@ -438,97 +338,16 @@
     outEl.innerHTML = '<span class="muted">running…</span>';
     metricsEl.hidden = true;
     try {
-      const res = await runNoiseWithIntrospection(editor.getValue(), currentRequests());
+      const res = await runNoiseWithIntrospection(editor.getValue(), []);
       statusEl.textContent = `done in ${fmtMs(res.elapsedMs)}`;
       renderResult(res);
       renderMetrics(res);
-      syncInspector(res);
     } catch (e) {
       statusEl.textContent = 'error';
       outEl.innerHTML = `<span class="err">${escapeHtml(String(e))}</span>`;
     } finally {
       runBtn.disabled = false;
     }
-  }
-
-  /** Re-run just for the inspector (selection/condition/explain changed) — updates charts only,
-   * against the current editor source, without disturbing the output panel. */
-  async function inspect() {
-    try {
-      const res = await runNoiseWithIntrospection(editor.getValue(), currentRequests());
-      syncInspector(res);
-    } catch (e) {
-      chartsEl.innerHTML = `<div class="pg-inspect-err">${escapeHtml(String(e))}</div>`;
-    }
-  }
-
-  /** Reflect a run's bindings + introspections into the inspector: reveal the panel, render the
-   * variable chips, drop any selection that no longer exists, and draw the result cards. */
-  function syncInspector(res: NoiseIntrospectResult) {
-    bindings = res.bindings;
-    inspectWrap.hidden = bindings.length === 0;
-    const live = new Set(bindings.filter(isRv).map((b) => b.name));
-    selected = selected.filter((n) => live.has(n));
-    renderVarChips();
-    renderCharts(res.introspections);
-  }
-
-  function renderVarChips() {
-    varsEl.innerHTML = '';
-    for (const b of bindings) {
-      const chip = document.createElement('button');
-      chip.type = 'button';
-      chip.className = 'pg-var' + (selected.includes(b.name) ? ' sel' : '') + (b.kind === 'dist<bool>' ? ' bool' : '');
-      const kindShort =
-        b.kind === 'dist<number>' ? 'rv'
-        : b.kind === 'dist<bool>' ? 'event'
-        : b.kind;
-      chip.innerHTML = `${escapeHtml(b.name)}<span class="pg-var-kind">${kindShort}</span>`;
-      if (isInspectable(b)) {
-        chip.title =
-          b.kind === 'array'
-            ? `Inspect ${b.name} — per-element distribution (or "Corr" for its correlation heatmap).`
-            : b.kind === 'number' || b.kind === 'bool'
-              ? `Inspect ${b.name} — its value and confidence interval.`
-              : `Inspect ${b.name}'s distribution — click, or pick two to relate.`;
-        chip.addEventListener('click', () => toggleVar(b.name));
-      } else {
-        chip.disabled = true;
-        chip.style.opacity = '0.5';
-        chip.style.cursor = 'default';
-        chip.title = `${b.name} is a ${b.kind} — not inspectable yet.`;
-      }
-      varsEl.appendChild(chip);
-    }
-    explainBtn.classList.toggle('active', explainMode);
-    correlateBtn.classList.toggle('active', correlateMode);
-  }
-
-  /** Toggle a variable's selection. Cap at two (drop the oldest); a third click in explain mode just
-   * replaces the single explained variable. */
-  function toggleVar(name: string) {
-    if (selected.includes(name)) {
-      selected = selected.filter((n) => n !== name);
-    } else if (explainMode) {
-      selected = [name];
-    } else {
-      selected = [...selected, name].slice(-2);
-    }
-    renderVarChips();
-    inspect();
-  }
-
-  function renderCharts(items: Introspection[]) {
-    chartsEl.innerHTML = '';
-    if (selected.length === 0) {
-      chartsEl.innerHTML = '<div class="pg-inspect-empty">Click a variable above to see its distribution.</div>';
-      return;
-    }
-    if (items.length === 0) {
-      chartsEl.innerHTML = '<div class="pg-inspect-empty">Run the program (⌘↵) to inspect — or fix an error above.</div>';
-      return;
-    }
-    for (const it of items) chartsEl.appendChild(renderCard(it));
   }
 
   function renderResult(res: NoiseIntrospectResult) {
@@ -607,7 +426,7 @@
     return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]!));
   }
 
-  // --- Inspector rendering: one card per introspection result (distribution / relationship / why) ---
+  // --- Result-card rendering: one card per plot:: item in the output stream ---
 
   /** Compact number: 3 significant-ish figures, trimming float dust. */
   function fmtNum(x: number): string {
@@ -842,19 +661,6 @@
     if (t >= 0) return rgb(lerp(247, 40, t), lerp(247, 90, t), lerp(247, 160, t)); // white → blue
     return rgb(lerp(247, 200, -t), lerp(247, 40, -t), lerp(247, 50, -t)); // white → red
   }
-
-  // Inspector controls: a debounced condition field, and the explain toggle.
-  let givenTimer = 0;
-  givenEl.addEventListener('input', () => {
-    window.clearTimeout(givenTimer);
-    givenTimer = window.setTimeout(() => { if (selected.length) inspect(); }, 400);
-  });
-  explainBtn.addEventListener('click', () => {
-    explainMode = !explainMode;
-    if (explainMode && selected.length > 1) selected = selected.slice(0, 1);
-    renderVarChips();
-    if (selected.length) inspect();
-  });
 
   $('pg-run').addEventListener('click', run);
   $('pg-reset').addEventListener('click', () => {

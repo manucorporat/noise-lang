@@ -1,22 +1,27 @@
 ---
 // Demo §5 (flagship): AM vs FM as a scrollytelling explainer. A sticky stage (WebGL phasor view +
 // the program) stays pinned while five steps scroll past; each step reveals more code and changes
-// the visualization. The carrier is a phasor [I,Q]: AM writes the message into its length, FM into
-// its angle — so the same static smears AM's radius but barely moves FM's angle. The real engine
-// confirms the MSE at the end. Code shown == code run.
+// the visualization. The carrier is a phasor — one complex number per instant: AM writes the
+// message into its length, FM into its angle (Euler's e^{iθ}) — so the same static smears AM's
+// radius but barely moves FM's angle. The whole chain stays in signal land (PLAN-SIGNALS): the
+// message is a lazy waveform, the static is ONE `~`-drawn realization shared by both carriers,
+// and mse renders everything at the ambient resolution. The real engine confirms the MSE at the
+// end. Code shown == code run.
 import CodePanel from './CodePanel.astro';
 
-const code = `msg = signal::sample(0.3 * signal::sine(3), 64);
+const code = `engine::set_resolution(64);
 
-am = [1 + msg, 0 * msg];
-fm = [math::cos(3 * msg), math::sin(3 * msg)];
+msg = 0.3 * signal::sine(3);
 
-static = signal::noise_white(0.3);
+am = 1 + msg;
+fm = math::exp(math::i * 3 * msg);
+
+static ~ signal::noise_white_complex(0.4);
 rx_am = am + static;
 rx_fm = fm + static;
 
-rec_am = (rx_am[0]^2 + rx_am[1]^2)^0.5 - 1;
-rec_fm = math::atan(rx_fm[1] / rx_fm[0]) / 3;
+rec_am = math::abs(rx_am) - 1;
+rec_fm = math::arg(rx_fm) / 3;
 
 Print("AM error", E(vec::mse(rec_am, msg), 40000));
 Print("FM error", E(vec::mse(rec_fm, msg), 40000));`;
@@ -40,23 +45,23 @@ Print("FM error", E(vec::mse(rec_fm, msg), 40000));`;
     <div class="scrolly-steps" id="amfm-steps">
       <div class="scrolly-step" data-step="0">
         <h4>The message</h4>
-        <p>A batch can carry a shape, not just a count — here it's a signal. A gentle tone: 64 samples of a slow sine. This is what we want to send through a noisy channel and get back intact.</p>
+        <p>A gentle tone — <code class="code-inline">sine(3)</code> is a <em>waveform</em>, not samples. No length appears in the math; the one resolution knob sits at the top, next to the measurement. This is what we want to send through a noisy channel and get back intact.</p>
       </div>
       <div class="scrolly-step" data-step="1">
         <h4>AM — message in the amplitude</h4>
-        <p>Write the carrier as a phasor <code class="code-inline">[I, Q]</code> — a spinning arrow. <strong>AM</strong> puts the message in its <em>length</em>: the tip slides in and out, crossing the unit circle as the message rises and falls.</p>
+        <p>The carrier is a phasor — a spinning arrow, one complex number per instant. <strong>AM</strong> puts the message in its <em>length</em>: the tip slides in and out, crossing the unit circle as the message rises and falls.</p>
       </div>
       <div class="scrolly-step" data-step="2">
         <h4>FM — message in the angle</h4>
-        <p><strong>FM</strong> instead puts the message in the <em>angle</em>: the tip rides the unit circle while its length stays fixed. Same information, encoded in rotation rather than reach.</p>
+        <p><strong>FM</strong> instead puts the message in the <em>angle</em>, via Euler's <code class="code-inline">e^(i·θ)</code>: the tip rides the unit circle while its length stays fixed. Same information, encoded in rotation rather than reach.</p>
       </div>
       <div class="scrolly-step" data-step="3">
         <h4>Add the same static</h4>
-        <p>Identical noise hits both tips. It smears AM along the <em>radius</em> it reads from — but only nudges FM <em>around</em> the circle, barely changing the angle. Watch the clouds.</p>
+        <p><code class="code-inline">~</code> draws ONE realization of complex noise — every mention of <code class="code-inline">static</code> is the <em>same</em> static, so both carriers face an identical storm by construction. It smears AM along the <em>radius</em> it reads from — but only nudges FM <em>around</em> the circle. Watch the clouds.</p>
       </div>
       <div class="scrolly-step" data-step="4">
-        <h4>Recover &amp; compare</h4>
-        <p>Read the length back for AM, the angle for FM, and compare to the original. FM returns far cleaner for the very same static — the payoff of spending bandwidth on the angle.</p>
+        <h4>Demodulate &amp; compare</h4>
+        <p>Read the length back for AM, the angle for FM. Side by side — the demodulated AM on the left, FM on the right, the original tone in ink over each — the same static visibly rattles AM while FM hugs the message. That's the payoff of spending bandwidth on the angle.</p>
       </div>
     </div>
   </div>
@@ -66,7 +71,7 @@ Print("FM error", E(vec::mse(rec_fm, msg), 40000));`;
   /* layout is the shared .scrolly-* scaffold; only the canvas + code chrome are demo-specific */
   .amfm-canvas-wrap { width: 100%; height: 150px; background: #f4f1e8; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
   #amfm-canvas { width: 100%; height: 100%; display: block; }
-  /* this demo's program is the longest (14 lines), so nudge its code a touch smaller + tighter
+  /* this demo's program is the longest (16 lines), so nudge its code a touch smaller + tighter
      to fit without an inner scrollbar */
   :global(.amfm-code .code-body) { font-size: 0.9rem; line-height: 1.45; padding: 0.7rem 1rem; }
   .amfm-engine { margin: 0; font-size: 0.84rem; color: var(--ink-dim); min-height: 1.2em; font-family: var(--mono); }
@@ -83,11 +88,11 @@ Print("FM error", E(vec::mse(rec_fm, msg), 40000));`;
   const codeBody = document.querySelector('.amfm .code-body') as HTMLElement | null;
 
   const STEPS = [
-    { show: 0, add: [0], mode: 'msg' },
-    { show: 2, add: [2], mode: 'am' },
-    { show: 3, add: [3], mode: 'fm' },
-    { show: 7, add: [5, 6, 7], mode: 'noise' },
-    { show: 13, add: [9, 10, 12, 13], mode: 'compare' },
+    { show: 2, add: [0, 2], mode: 'msg' },
+    { show: 4, add: [4], mode: 'am' },
+    { show: 5, add: [5], mode: 'fm' },
+    { show: 9, add: [7, 8, 9], mode: 'noise' },
+    { show: 15, add: [11, 12, 14, 15], mode: 'compare' },
   ];
 
   // --- progressive code reveal ---
@@ -128,7 +133,8 @@ Print("FM error", E(vec::mse(rec_fm, msg), 40000));`;
         while (v === 0) v = Math.random();
         return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
       };
-      const SIGMA = 0.3;
+      // per-quadrature strength of the complex static: |z|² totals SIGMA_TOTAL², split re/im
+      const SIGMA = 0.4 / Math.SQRT2;
       let n1: number[] = [], n2: number[] = [];
       const regen = () => { n1 = msg.map(() => SIGMA * gauss()); n2 = msg.map(() => SIGMA * gauss()); };
       regen();
@@ -233,10 +239,11 @@ Print("FM error", E(vec::mse(rec_fm, msg), 40000));`;
         pts([tp[0], tp[1]], 10, col); // moving tip dot
       }
 
-      function waveform(values: number[], yc: number, ys: number, col: [number, number, number], wd: number) {
+      // draw `values` as a waveform across the clip-x range [x0, x1] (so panels can sit side by side)
+      function waveform(values: number[], x0: number, x1: number, yc: number, ys: number, col: [number, number, number], wd: number) {
         const pairs: number[][] = [];
         for (let k = 0; k < values.length; k++) {
-          const x = -0.9 + (k / (values.length - 1)) * 1.8;
+          const x = x0 + (k / (values.length - 1)) * (x1 - x0);
           pairs.push([x, yc + values[k] * ys]);
         }
         line(pairs, wd, col);
@@ -246,7 +253,7 @@ Print("FM error", E(vec::mse(rec_fm, msg), 40000));`;
         gl.clearColor(0.957, 0.945, 0.91, 1); gl.clear(gl.COLOR_BUFFER_BIT);
         if (mode === 'msg') {
           line([[-0.92, 0], [0.92, 0]], 0.002, FAINT);
-          waveform(msg, 0, 2.4, INK, 0.005);
+          waveform(msg, -0.9, 0.9, 0, 2.4, INK, 0.005);
         } else if (mode === 'am') {
           drawPlane(0, 'am', false);
         } else if (mode === 'fm') {
@@ -257,10 +264,15 @@ Print("FM error", E(vec::mse(rec_fm, msg), 40000));`;
         } else if (mode === 'compare') {
           const recAm = msg.map((m, k) => Math.sqrt((1 + m + n1[k]) ** 2 + n2[k] ** 2) - 1);
           const recFm = msg.map((m, k) => Math.atan((Math.sin(DEV * m) + n2[k]) / (Math.cos(DEV * m) + n1[k])) / DEV);
-          line([[-0.92, 0], [0.92, 0]], 0.002, FAINT);
-          waveform(recAm, 0, 2.4, MAROON, 0.0035); // AM (noisy)
-          waveform(recFm, 0, 2.4, TEAL, 0.0035);   // FM (clean)
-          waveform(msg, 0, 2.4, INK, 0.006);       // original on top
+          // side by side — AM left, FM right, the original tone in ink over each — so the
+          // rattle vs. hug reads at a glance instead of three overlaid curves
+          line([[-0.95, 0], [-0.05, 0]], 0.002, FAINT);
+          line([[0.05, 0], [0.95, 0]], 0.002, FAINT);
+          line([[0, -0.85], [0, 0.85]], 0.002, FAINT); // panel divider
+          waveform(recAm, -0.95, -0.05, 0, 2.4, MAROON, 0.0035); // AM (noisy)
+          waveform(msg, -0.95, -0.05, 0, 2.4, INK, 0.005);       // original on top
+          waveform(recFm, 0.05, 0.95, 0, 2.4, TEAL, 0.0035);     // FM (clean)
+          waveform(msg, 0.05, 0.95, 0, 2.4, INK, 0.005);         // original on top
         }
       }
 
@@ -288,14 +300,15 @@ Print("FM error", E(vec::mse(rec_fm, msg), 40000));`;
   async function engineResult() {
     engineEl.textContent = 'running the engine (40k noise realizations)…';
     try {
-      const src = `msg = signal::sample(0.3 * signal::sine(3), 64);
-am = [1 + msg, 0 * msg];
-fm = [math::cos(3 * msg), math::sin(3 * msg)];
-static = signal::noise_white(0.3);
+      const src = `engine::set_resolution(64);
+msg = 0.3 * signal::sine(3);
+am = 1 + msg;
+fm = math::exp(math::i * 3 * msg);
+static ~ signal::noise_white_complex(0.4);
 rx_am = am + static;
 rx_fm = fm + static;
-rec_am = (rx_am[0]^2 + rx_am[1]^2)^0.5 - 1;
-rec_fm = math::atan(rx_fm[1] / rx_fm[0]) / 3;
+rec_am = math::abs(rx_am) - 1;
+rec_fm = math::arg(rx_fm) / 3;
 Print("AM", E(vec::mse(rec_am, msg), 40000));
 Print("FM", E(vec::mse(rec_fm, msg), 40000));`;
       const res = await runNoise(src);

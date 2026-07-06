@@ -1,11 +1,20 @@
-//! Lazy signal generators (a DSP "signal" value).
+//! Lazy signal expressions (a DSP "signal" value).
 //!
-//! `sine(freq)` / `cosine(freq)` return a [`SignalSpec`] — a *generator*, not an array. It carries
-//! only a base waveform plus a chain of deferred elementwise operations (scalar arithmetic and the
-//! `sin`/`cos`/`atan` ufuncs), so it costs O(1) memory regardless of how many samples it will
-//! eventually produce. It materializes to a concrete array only when it meets a sized context (an
-//! array it is combined with — adopting that length) or an explicit `sample(sig, n)`. This mirrors
-//! how a random variable stays symbolic until `E`/`P` forces it.
+//! `sine(freq)` / `cosine(freq)` return a [`SigExpr`] leaf — a *waveform expression*, not an
+//! array. Deferred operations (scalar arithmetic, signal×signal arithmetic, and the
+//! `sin`/`cos`/`atan`/`exp`/… ufuncs) grow the tree, so a whole processing chain costs O(1)
+//! memory regardless of how many samples it will eventually produce. It materializes to a
+//! concrete array only when it meets a sized context (an array it is combined with — adopting
+//! that length), an explicit `signal::sample(sig, n)`, or a reducer rendering it at the engine's
+//! ambient resolution. This mirrors how a random variable stays symbolic until `E`/`P` forces it.
+//!
+//! A **drawn noise realization** (`static ~ signal::noise_white(1)`) is a [`SigExpr::Noise`]
+//! leaf: still lazy (no length yet), but *random* — materializing it consults the engine's
+//! realization cache, which pins the length at first materialization and hands every later
+//! mention the SAME RV nodes (`static - static` is exactly 0). The undrawn generator
+//! (`Value::Noise`) never enters a tree: `~` is the only way in.
+
+use std::rc::Rc;
 
 use crate::ast::{BinOp, UnOp};
 
@@ -22,6 +31,10 @@ pub enum Wave {
 pub enum NoiseKind {
     /// Flat spectrum: independent samples (`noise_white`).
     White,
+    /// Circularly-symmetric complex white noise (`noise_white_complex`): independent
+    /// `normal(0, sigma/√2)` per quadrature per sample, so `E|z|² = sigma²` (the same total-power
+    /// convention as `rand::normal_complex`). Drawing splits it into two real `White` lanes.
+    WhiteComplex,
     /// `1/f²` (red): a random walk — the cumulative sum of white (`noise_brown`).
     Brown,
     /// Colored with a single correlation time `tau` (in samples): the Ornstein–Uhlenbeck / AR(1)
@@ -31,8 +44,9 @@ pub enum NoiseKind {
     Pink,
 }
 
-/// A lazy noise generator: zero-mean noise of strength `sigma` and spectral color `kind`, with no
-/// length yet (like a `SignalSpec`, but *random* — it materializes into RV nodes, not floats).
+/// An **undrawn** noise generator: zero-mean noise of strength `sigma` and spectral color `kind`,
+/// with no length and no realization yet. Like `normal(0, 1)` it is a recipe, not a value —
+/// arithmetic on it is an error; `~` (or `~[n]`) is the only way to a usable realization.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NoiseSpec {
     pub sigma: f64,
@@ -43,80 +57,108 @@ impl std::fmt::Display for NoiseSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = crate::value::format_num(self.sigma);
         match self.kind {
-            NoiseKind::White => write!(f, "<noise_white({s})>"),
-            NoiseKind::Brown => write!(f, "<noise_brown({s})>"),
-            NoiseKind::Ou { tau } => write!(f, "<noise_ou({s}, {})>", crate::value::format_num(tau)),
-            NoiseKind::Pink => write!(f, "<noise_pink({s})>"),
+            NoiseKind::White => write!(f, "noise_white({s})"),
+            NoiseKind::WhiteComplex => write!(f, "noise_white_complex({s})"),
+            NoiseKind::Brown => write!(f, "noise_brown({s})"),
+            NoiseKind::Ou { tau } => write!(f, "noise_ou({s}, {})", crate::value::format_num(tau)),
+            NoiseKind::Pink => write!(f, "noise_pink({s})"),
         }
     }
 }
 
-/// A deferred elementwise step applied during sampling.
+/// Identity of one **drawn noise realization** — allocated by the `~` draw, carried by a
+/// [`SigExpr::Noise`] leaf, and resolved through the engine's realization cache so every
+/// materialization of the same draw sees the same RV nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RealizationId(pub usize);
+
+/// A deferred unary op in a signal tree: the VM ufuncs, plus `exp` (which has no VM node — it is
+/// legal only on the deterministic part of a tree and folds to `f64::exp` at materialization).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SigOp {
-    /// A scalar arithmetic op with a constant, e.g. `0.3 * x` or `x + 1`. `scalar_on_left`
-    /// distinguishes `c - x` from `x - c`.
-    Scalar { op: BinOp, c: f64, scalar_on_left: bool },
-    /// A transcendental ufunc applied elementwise (`sin`/`cos`/`atan`).
-    Unary(UnOp),
+pub enum SigUnOp {
+    /// One of the ordinary ufuncs (`neg`/`sin`/`cos`/`atan`/`sign`/`round`/`floor`/`ceil`).
+    Un(UnOp),
+    /// `math::exp` deferred into the tree.
+    Exp,
 }
 
-/// A lazy signal: a base waveform of `freq` cycles over the (as-yet-unknown) sample window, plus a
-/// pipeline of deferred elementwise ops. Sampling at length `n` runs the pipeline per sample.
+/// A lazy signal: an expression **tree** over waveform leaves, promoted scalars, and drawn noise
+/// realizations (PLAN-SIGNALS §3). `Rc` keeps the lazy builder cheap; `Value::Signal` holds
+/// `Rc<SigExpr>`. Materializing at length `n` walks the tree per sample index — deterministic
+/// subtrees fold as `f64`s, a `Noise` leaf switches the walk to ordinary RV lifting.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SignalSpec {
-    pub wave: Wave,
-    pub freq: f64,
-    pub ops: Vec<SigOp>,
+pub enum SigExpr {
+    /// A `sine`/`cosine` leaf: `freq` cycles over the (as-yet-unknown) sample window.
+    Wave { wave: Wave, freq: f64 },
+    /// A scalar constant promoted into signal land (`0.3 * sine(3)` carries a `Konst(0.3)`).
+    Konst(f64),
+    /// A **drawn noise realization** (see [`RealizationId`]). The `spec` says how to render it
+    /// the first time; the cache guarantees every mention after that is the same noise.
+    Noise { id: RealizationId, spec: NoiseSpec },
+    /// A deferred elementwise unary op.
+    Unary(SigUnOp, Rc<SigExpr>),
+    /// A deferred elementwise binary op — signal×signal arithmetic (`sine(3) + sine(7)`),
+    /// comparisons, and the scalar ops (the scalar side is a `Konst` leaf).
+    Binop(BinOp, Rc<SigExpr>, Rc<SigExpr>),
+    /// Quadrant-correct `atan2(y, x)` over two signals — the phase read-out `math::arg` defers.
+    Atan2(Rc<SigExpr>, Rc<SigExpr>),
 }
 
-impl SignalSpec {
-    pub fn base(wave: Wave, freq: f64) -> Self {
-        SignalSpec { wave, freq, ops: Vec::new() }
+impl SigExpr {
+    pub fn wave(wave: Wave, freq: f64) -> Rc<Self> {
+        Rc::new(SigExpr::Wave { wave, freq })
     }
 
-    /// Return a copy with one more deferred op appended (the lazy builder).
-    pub fn push(&self, op: SigOp) -> Self {
-        let mut next = self.clone();
-        next.ops.push(op);
-        next
+    /// Whether the tree contains a drawn-noise leaf (⇒ materializes into RV nodes, needs the
+    /// engine; a noise-free tree folds to plain `f64`s via [`SigExpr::sample_f64`]).
+    pub fn has_noise(&self) -> bool {
+        match self {
+            SigExpr::Wave { .. } | SigExpr::Konst(_) => false,
+            SigExpr::Noise { .. } => true,
+            SigExpr::Unary(_, a) => a.has_noise(),
+            SigExpr::Binop(_, a, b) | SigExpr::Atan2(a, b) => a.has_noise() || b.has_noise(),
+        }
     }
 
-    /// Materialize `n` samples: the base waveform over `n` points, then the deferred pipeline.
-    pub fn sample(&self, n: usize) -> Vec<f64> {
-        (0..n)
-            .map(|k| {
-                let phase = std::f64::consts::TAU * self.freq * (k as f64) / (n as f64);
-                let mut x = match self.wave {
+    /// Materialize `n` samples of a **deterministic** tree (no `Noise` leaves — the caller
+    /// checks [`SigExpr::has_noise`]; a noise leaf here is a bug, not user error).
+    pub fn sample_f64(&self, n: usize) -> Vec<f64> {
+        (0..n).map(|k| self.eval_at(k, n)).collect()
+    }
+
+    /// One deterministic sample: the tree folded at index `k` of an `n`-sample window.
+    fn eval_at(&self, k: usize, n: usize) -> f64 {
+        match self {
+            SigExpr::Wave { wave, freq } => {
+                let phase = std::f64::consts::TAU * freq * (k as f64) / (n as f64);
+                match wave {
                     Wave::Sine => phase.sin(),
                     Wave::Cosine => phase.cos(),
-                };
-                for op in &self.ops {
-                    x = apply(*op, x);
                 }
-                x
-            })
-            .collect()
+            }
+            SigExpr::Konst(c) => *c,
+            SigExpr::Noise { .. } => unreachable!("sample_f64 on a noise-bearing tree"),
+            SigExpr::Unary(op, a) => apply_unary(*op, a.eval_at(k, n)),
+            SigExpr::Binop(op, a, b) => scalar_binop(*op, a.eval_at(k, n), b.eval_at(k, n)),
+            SigExpr::Atan2(y, x) => y.eval_at(k, n).atan2(x.eval_at(k, n)),
+        }
     }
 }
 
-/// Apply one deferred step to a single sample value.
+/// Apply one deferred unary step to a single sample value.
 #[inline]
-fn apply(op: SigOp, x: f64) -> f64 {
+pub fn apply_unary(op: SigUnOp, x: f64) -> f64 {
     match op {
-        SigOp::Scalar { op, c, scalar_on_left } => {
-            let (a, b) = if scalar_on_left { (c, x) } else { (x, c) };
-            scalar_binop(op, a, b)
-        }
-        SigOp::Unary(UnOp::Neg) => -x,
-        SigOp::Unary(UnOp::Sin) => x.sin(),
-        SigOp::Unary(UnOp::Cos) => x.cos(),
-        SigOp::Unary(UnOp::Atan) => x.atan(),
-        SigOp::Unary(UnOp::Sign) => (x > 0.0) as i32 as f64 - (x < 0.0) as i32 as f64,
-        SigOp::Unary(UnOp::Round) => x.round(),
-        SigOp::Unary(UnOp::Floor) => x.floor(),
-        SigOp::Unary(UnOp::Ceil) => x.ceil(),
-        SigOp::Unary(UnOp::Not) => {
+        SigUnOp::Exp => x.exp(),
+        SigUnOp::Un(UnOp::Neg) => -x,
+        SigUnOp::Un(UnOp::Sin) => x.sin(),
+        SigUnOp::Un(UnOp::Cos) => x.cos(),
+        SigUnOp::Un(UnOp::Atan) => x.atan(),
+        SigUnOp::Un(UnOp::Sign) => (x > 0.0) as i32 as f64 - (x < 0.0) as i32 as f64,
+        SigUnOp::Un(UnOp::Round) => x.round(),
+        SigUnOp::Un(UnOp::Floor) => x.floor(),
+        SigUnOp::Un(UnOp::Ceil) => x.ceil(),
+        SigUnOp::Un(UnOp::Not) => {
             if x == 0.0 {
                 1.0
             } else {
@@ -126,9 +168,10 @@ fn apply(op: SigOp, x: f64) -> f64 {
     }
 }
 
-/// Scalar binary kernel for the deferred arithmetic (matches the evaluator's IEEE-754 behaviour).
+/// Scalar binary kernel for the deferred arithmetic (matches the evaluator's IEEE-754 behaviour;
+/// comparisons yield 0/1 like every signal-land boolean).
 #[inline]
-fn scalar_binop(op: BinOp, a: f64, b: f64) -> f64 {
+pub fn scalar_binop(op: BinOp, a: f64, b: f64) -> f64 {
     match op {
         BinOp::Add => a + b,
         BinOp::Sub => a - b,
@@ -147,17 +190,70 @@ fn scalar_binop(op: BinOp, a: f64, b: f64) -> f64 {
     }
 }
 
-impl std::fmt::Display for SignalSpec {
+impl std::fmt::Display for SigExpr {
+    /// `<signal 1 + 0.3*sine(3)>` — the tree in infix form, so a printed signal reads like the
+    /// expression that built it.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let base = match self.wave {
-            Wave::Sine => "sine",
-            Wave::Cosine => "cosine",
-        };
-        if self.ops.is_empty() {
-            write!(f, "<signal {base}({})>", self.freq)
-        } else {
-            // A transformed signal — show the base and how many deferred ops are pending.
-            write!(f, "<signal {base}({}) +{} op(s)>", self.freq, self.ops.len())
+        write!(f, "<signal ")?;
+        fmt_expr(self, f)?;
+        write!(f, ">")
+    }
+}
+
+fn fmt_expr(e: &SigExpr, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match e {
+        SigExpr::Wave { wave: Wave::Sine, freq } => write!(f, "sine({})", crate::value::format_num(*freq)),
+        SigExpr::Wave { wave: Wave::Cosine, freq } => {
+            write!(f, "cosine({})", crate::value::format_num(*freq))
+        }
+        SigExpr::Konst(c) => write!(f, "{}", crate::value::format_num(*c)),
+        SigExpr::Noise { spec, .. } => write!(f, "~{spec}"),
+        SigExpr::Unary(op, a) => {
+            let name = match op {
+                SigUnOp::Exp => "exp",
+                SigUnOp::Un(UnOp::Neg) => "neg",
+                SigUnOp::Un(UnOp::Not) => "not",
+                SigUnOp::Un(UnOp::Sin) => "sin",
+                SigUnOp::Un(UnOp::Cos) => "cos",
+                SigUnOp::Un(UnOp::Atan) => "atan",
+                SigUnOp::Un(UnOp::Sign) => "sign",
+                SigUnOp::Un(UnOp::Round) => "round",
+                SigUnOp::Un(UnOp::Floor) => "floor",
+                SigUnOp::Un(UnOp::Ceil) => "ceil",
+            };
+            write!(f, "{name}(")?;
+            fmt_expr(a, f)?;
+            write!(f, ")")
+        }
+        SigExpr::Binop(op, a, b) => {
+            write!(f, "(")?;
+            fmt_expr(a, f)?;
+            let sym = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
+                BinOp::Pow => "^",
+                BinOp::Lt => "<",
+                BinOp::Gt => ">",
+                BinOp::Le => "<=",
+                BinOp::Ge => ">=",
+                BinOp::Eq => "==",
+                BinOp::Ne => "!=",
+                BinOp::And => "&&",
+                BinOp::Or => "||",
+            };
+            write!(f, " {sym} ")?;
+            fmt_expr(b, f)?;
+            write!(f, ")")
+        }
+        SigExpr::Atan2(y, x) => {
+            write!(f, "atan2(")?;
+            fmt_expr(y, f)?;
+            write!(f, ", ")?;
+            fmt_expr(x, f)?;
+            write!(f, ")")
         }
     }
 }

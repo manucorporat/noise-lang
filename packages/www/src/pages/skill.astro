@@ -4,7 +4,7 @@ import ShaderFigure from '../components/ShaderFigure.astro';
 // Single source of truth: the agent skill IS the docs. Astro renders the markdown at build
 // time, so editing .claude/skills/noise-lang/SKILL.md updates this page. ```noise fences are
 // highlighted with the shared TextMate grammar (see astro.config.mjs).
-import { Content, frontmatter } from '../../../.claude/skills/noise-lang/SKILL.md';
+import { Content, frontmatter } from '../../../../.claude/skills/noise-lang/SKILL.md';
 ---
 
 <Layout title="Noise skill — the language guide" description={frontmatter.description}>
@@ -14,7 +14,6 @@ import { Content, frontmatter } from '../../../.claude/skills/noise-lang/SKILL.m
       <nav class="topbar-links">
         <a href="/#ideas">How it works</a>
         <a href="/play">Playground</a>
-        <a href="/blog">Blog</a>
         <a href="/skill">Skills</a>
         <a href="/#author">About</a>
         <a href="https://github.com/manucorporat/noise-lang">GitHub</a>
@@ -29,8 +28,14 @@ import { Content, frontmatter } from '../../../.claude/skills/noise-lang/SKILL.m
       <ShaderFigure
         n={0}
         install="npx skills add manucorporat/noise-lang"
-        caption="This page is a skill — install it into your coding agent (Claude Code, Cursor, Codex, Copilot, Windsurf…) with one command. Click to copy."
+        caption="This page is a skill — install it into your coding agent (Claude Code, Cursor, Codex, Copilot, Windsurf…) with one command. Click to copy, or pick another install target."
       />
+      <p class="skill-alt">
+        Not wiring up an agent? The same engine ships on npm as
+        <a href="https://www.npmjs.com/package/@noiselang/core"><code>@noiselang/core</code></a>
+        (WebAssembly, typed API — see <a href="/play">the playground page</a> for a drop-in
+        snippet) and as a CLI via <code>cargo install noise-cli</code>.
+      </p>
     </div>
 
     <Content />
@@ -81,6 +86,15 @@ import { Content, frontmatter } from '../../../.claude/skills/noise-lang/SKILL.m
 
   /* The install card (shader + copy pill) gets breathing room before the guide starts. */
   .skill-install { margin-bottom: 2.6rem; }
+  .skill-alt {
+    margin: 0.9rem 0 0; font-size: 0.9rem; color: var(--ink-dim); line-height: 1.6;
+  }
+  .skill-alt code {
+    font-family: var(--mono); font-size: 0.88em;
+    background: var(--paper-2); border: 1px solid var(--rule);
+    border-radius: 3px; padding: 0.05em 0.3em;
+  }
+  .skill-alt a { color: var(--link); }
 
   /* Prose — document-like, matching the paper aesthetic. */
   .docs { padding-top: 2.4rem; padding-bottom: 4rem; }

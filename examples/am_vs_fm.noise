@@ -1,55 +1,46 @@
-# Why FM radio shrugs off static better than AM — by actually simulating it end to end.
+# Ever wonder why FM sounds better than AM radio? Let's simulate both and find out.
 #
-# We take a message, MODULATE it onto a carrier, add the SAME random static, then DEMODULATE and
-# measure how mangled the message came out:  mse(recovered, original).
-#
-# A carrier is a spinning arrow (a "phasor"), written as [I, Q] = [length*cos(angle),
-# length*sin(angle)]. AM writes the message into the arrow's LENGTH; FM writes it into its ANGLE.
-# Static is noise added to the arrow's tip. If FM makes the angle swing far (a big "deviation"),
-# the same tip-noise barely moves the message — that's the trick: spend bandwidth to buy quiet.
-use math;   # cos, sin, atan, round
+# A radio carrier is a spinning arrow: AM stores the sound in the arrow's LENGTH, FM stores it in
+# the arrow's ANGLE. Static knocks the arrow's tip around — which ruins a length far more than an
+# angle. We send the same tone both ways, add the same static, and measure what comes back.
+use math;
+use vec;
 
-engine::set_max_samples(40000);   # Monte Carlo budget for every E() below — set once, not per query
+engine::set_max_samples(40000);   # how many noise realizations to average over
+engine::set_resolution(64);       # how many points per waveform
 
-# ---- a little radio library, written in Noise itself ----
-# Modulators: take a message vector m, return the carrier as a phasor [I, Q].
-am_modulate(m)      = [1 + m, 0 * m];                # message in the LENGTH  (I = 1+m, Q = 0)
-fm_modulate(m, dev) = [cos(dev * m), sin(dev * m)];  # message in the ANGLE   (dev = how far it swings)
+# Modulators: message -> complex carrier.  Demodulators: (noisy) carrier -> message.
+am_modulate(msg)              = 1 + msg;               # message in the LENGTH (the angle stays 0)
+fm_modulate(msg, swing)       = exp(i * swing * msg);  # message in the ANGLE
+am_demodulate(carrier)        = abs(carrier) - 1;      # read the arrow's LENGTH, drop the carrier
+fm_demodulate(carrier, swing) = arg(carrier) / swing;  # read the arrow's ANGLE, undo the swing
 
-# Demodulators: read the message back out of a (noisy) phasor [I, Q].
-am_demodulate(iq)      = (iq[0] ^ 2 + iq[1] ^ 2) ^ 0.5 - 1;  # arrow LENGTH, minus the carrier
-fm_demodulate(iq, dev) = atan(iq[1] / iq[0]) / dev;            # arrow ANGLE, undo the deviation
+fm_swing       = 3;     # how far FM swings the angle: bigger = wider band = more noise-immune
+noise_strength = 0.4;
 
-# ---- the experiment ----
-dev   = 3;     # FM deviation (modulation index): bigger = wider band = more noise-immune
-sigma = 0.3;   # static (noise) strength
+# A gentle 3-cycle tone, kept small so the FM angle never wraps past +/- 90 degrees.
+msg = 0.3 * signal::sine(3);
 
-# The message: a gentle 3-cycle tone. `sine(3)` is a LAZY signal (a frequency, no length); `sample`
-# is the ONE place we pick a resolution — 64 points, comfortably above the tone's Nyquist rate. (The
-# amplitude is kept small so the FM angle never wraps past +/- 90 degrees.)
-msg = signal::sample(0.3 * signal::sine(3), 64);
+# ONE draw of complex static. Every mention of `static` below is this same draw, so AM and FM
+# face the exact same storm — a perfectly fair fight.
+static ~ signal::noise_white_complex(noise_strength);
 
-# `noise_white(sigma)` is LAZY too — zero-mean static with no length. Added to the sized carrier
-# below it draws fresh iid noise per sample, and an independent set for EACH of the I and Q
-# quadratures, so AM and FM face statistically identical static for a fair fight.
-static = signal::noise_white(sigma);
+recovered_am = am_demodulate(am_modulate(msg)           + static);
+recovered_fm = fm_demodulate(fm_modulate(msg, fm_swing) + static, fm_swing);
 
-# modulate -> add static -> demodulate -> compare to the original.
-# Two different averages live here: `mse` averages the error over the message SAMPLES (space), and
-# because the static is random that per-run mse is itself a random variable, so wrapping it in `E(...)`
-# averages it over many noise realizations (the ensemble — the sample budget set above).
-am_err = E(vec::mse(am_demodulate(am_modulate(msg)      + static),      msg));
-fm_err = E(vec::mse(fm_demodulate(fm_modulate(msg, dev) + static, dev), msg));
-
+# How mangled did each message come back? mse averages over the waveform's points; E averages
+# that over many realizations of the static.
+am_err = E(mse(recovered_am, msg));
+fm_err = E(mse(recovered_fm, msg));
 Print("AM recovered-message error (MSE) =", am_err);
 Print("FM recovered-message error (MSE) =", fm_err);
-# The advantage GROWS with the deviation; in the small-signal limit it approaches dev^2. The real
-# simulation lands a bit under that ideal because at finite noise the angle reading degrades on the
-# wider swings — exactly the kind of honest detail a closed-form 'dev^2' hides.
-Print("FM is", round(am_err / fm_err, 1), "x cleaner for the same static  (small-signal ideal: dev^2 =", dev ^ 2, ")");
 
-# See it, don't just measure it: the original tone, then what each scheme drags back out of the static.
-# FM's recovered wave hugs the message; AM's is visibly rattled by the same noise.
+# In the small-signal limit the advantage approaches swing^2; the simulation lands a bit under
+# that ideal because at finite noise the angle reading degrades on the wider swings.
+Print("FM is", am_err / fm_err, "x cleaner for the same static  (ideal: swing^2 =", fm_swing ^ 2, ")");
+
+# The original tone, then what each scheme drags back out of the static: FM's recovered wave
+# hugs the message; AM's is visibly rattled by the same noise.
 plot::line(msg);
-plot::line(am_demodulate(am_modulate(msg) + static));
-plot::line(fm_demodulate(fm_modulate(msg, dev) + static, dev))
+plot::line(recovered_am);
+plot::line(recovered_fm)

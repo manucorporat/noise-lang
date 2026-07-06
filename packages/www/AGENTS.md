@@ -1,12 +1,12 @@
-# AGENTS.md — the Noise website (`www/`)
+# AGENTS.md — the Noise website (`packages/www/`)
 
 The marketing + learning site for the Noise probabilistic language, and the in-browser
 playground. It runs the **real** Noise engine, compiled to WebAssembly, entirely client-side.
-This file is the single source of truth for working on `www/`. Read it before editing; update it
+This file is the single source of truth for working on `packages/www/`. Read it before editing; update it
 when you change architecture or add patterns.
 
 > Sibling context: the repo root has `AGENT.md` (engine state), `LANG.md` (language spec),
-> `PLAN.md` (roadmap). This file is **only** about the website.
+> `plans/PLAN.md` (roadmap). This file is **only** about the website.
 
 ---
 
@@ -63,7 +63,7 @@ rebuild with **`pnpm exec astro dev`** / **`pnpm exec astro build`** directly. O
 ```
 crates/noise-core  (the language: lexer→parser→eval, Print buffered via Engine::drain_output)
         │
-crates/noise-wasm  (wasm-bindgen bindings)  ──wasm-pack──▶  www/src/wasm/pkg/  (gitignored)
+crates/noise-wasm  (wasm-bindgen bindings)  ──wasm-pack──▶  packages/www/src/wasm/pkg/  (gitignored)
         │                                                         │
         │  exports:  run(src) -> JSON string                      │
         │            version() -> string                          ▼
@@ -86,7 +86,7 @@ crates/noise-wasm  (wasm-bindgen bindings)  ──wasm-pack──▶  www/src/wa
 ## 4. Directory map
 
 ```
-www/
+packages/www/
   astro.config.mjs        # static site; vite.server.fs.allow:['..'] so we can ?raw-import repo examples
   package.json            # scripts (incl. the wasm build), deps: astro, monaco-editor
   src/
@@ -278,7 +278,7 @@ contour shading + cursor `u_mouse` swirl). Reuse its snoise/fbm GLSL if you need
 5. **`line()` must aspect-correct** or steep segments look chunky on wide canvases (see §7).
 6. **No inner scroll in code panels** — size to fit instead (see §6).
 7. **wasm-pack `--out-dir` is relative to the crate dir**, not the cwd — the `wasm` script path is
-   `../../www/src/wasm/pkg` for that reason.
+   `../../packages/www/src/wasm/pkg` for that reason.
 8. **`Print` is captured, not printed** — relies on the core `Engine::drain_output` change; the
    WASM `run` returns it in `output`.
 9. The agent-browser test window defaults to ~577px tall (unusually short). Layout that "tucks under

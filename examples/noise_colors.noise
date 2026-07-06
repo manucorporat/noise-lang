@@ -1,4 +1,4 @@
-# The "colors" of noise: same lazy generator, same sample(...) — only the SPECTRUM differs.
+# The "colors" of noise: same `~` draw, same length — only the SPECTRUM differs.
 #
 # White noise is jagged: each sample is independent of the last (a flat spectrum). "Redder" noise
 # is smoother, because nearby samples are correlated. We measure that with the lag-1
@@ -10,29 +10,39 @@
 # exp(-1/tau), so a bigger correlation time `tau` means a redder, smoother signal.
 use math;     # round
 
-n = 256;   # render each lazy noise at the same resolution
+n = 256;   # every color drawn at the same resolution
 engine::set_max_samples(3000);   # Monte Carlo budget for the E()s inside neighbor_corr — set once, not per query
 
-# Lag-1 autocorrelation of a rendered noise vector, averaged over many realizations. Built from
-# the raw spatial sums so it's E[<x_k x_{k+1}>] / E[<x_k^2>] — a clean ratio of means.
+# Lag-1 autocorrelation of a noise vector, averaged over many realizations. Built from the raw
+# spatial sums so it's E[<x_k x_{k+1}>] / E[<x_k^2>] — a clean ratio of means.
 pair_sum(x) = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i+1] }; acc };
 sq_sum(x)   = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i]   }; acc };
 neighbor_corr(x) = E(pair_sum(x)) / E(sq_sum(x));
 
-# The headline trio: the spectrum reddens, the neighbor correlation climbs toward 1.
-Print("white  (flat 1/f^0):", round(neighbor_corr(signal::sample(signal::noise_white(1), n)), 3), " jagged hiss");
-Print("pink   (~1/f)      :", round(neighbor_corr(signal::sample(signal::noise_pink(1),  n)), 3));
-Print("brown  (1/f^2)     :", round(neighbor_corr(signal::sample(signal::noise_brown(1), n)), 3), " smooth wander");
+# The headline trio: n samples of each color.
+white ~[n] signal::noise_white(1);
+pink  ~[n] signal::noise_pink(1);
+brown ~[n] signal::noise_brown(1);
+
+# The spectrum reddens, the neighbor correlation climbs toward 1.
+Print("white  (flat 1/f^0):", round(neighbor_corr(white), 3), " jagged hiss");
+Print("pink   (~1/f)      :", round(neighbor_corr(pink),  3));
+Print("brown  (1/f^2)     :", round(neighbor_corr(brown), 3), " smooth wander");
 
 # OU is the knob: correlation = exp(-1/tau), checkable in closed form.
+ou_short ~[n] signal::noise_ou(1, 4);
+ou_long  ~[n] signal::noise_ou(1, 32);
 Print("");
 Print("OU colored noise — neighbor corr should track exp(-1/tau):");
-Print("  tau = 4 :", round(neighbor_corr(signal::sample(signal::noise_ou(1, 4),  n)), 3), " vs exp(-1/4)  = 0.779");
-Print("  tau = 32:", round(neighbor_corr(signal::sample(signal::noise_ou(1, 32), n)), 3), " vs exp(-1/32) = 0.969");
+Print("  tau = 4 :", round(neighbor_corr(ou_short), 3), " vs exp(-1/4)  = 0.779");
+Print("  tau = 32:", round(neighbor_corr(ou_long),  3), " vs exp(-1/32) = 0.969");
 
 # See the color: white noise is a jagged hiss, brown noise is a smooth wandering walk.
-plot::line(signal::sample(signal::noise_white(1), n));
-plot::line(signal::sample(signal::noise_brown(1), n));
-# And the structure behind it: white has no neighbor memory, brown's samples stay correlated for a long stretch.
-plot::corr(signal::sample(signal::noise_white(1), 64));
-plot::corr(signal::sample(signal::noise_brown(1), 64))
+plot::line(white);
+plot::line(brown);
+# And the structure behind it: white has no neighbor memory, brown's samples stay correlated
+# for a long stretch.
+white_64 ~[64] signal::noise_white(1);
+brown_64 ~[64] signal::noise_brown(1);
+plot::corr(white_64);
+plot::corr(brown_64)

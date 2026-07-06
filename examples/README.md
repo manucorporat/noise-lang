@@ -82,7 +82,7 @@ and a derived value like `4 * P(C)` or a ratio rounds itself correctly.
 ## Where the language hits its ceiling (honest limits)
 
 These are *not* expressible today, by design — they need features beyond the static
-random-variable algebra (see the "dynamics fork" in `../PLAN.md`):
+random-variable algebra (see the "dynamics fork" in `../plans/PLAN.md`):
 
 - **Sequential / stateful processes.** A random walk, a Markov chain, or an **M/M/1 queue**
   (`W_{n+1} = max(0, W_n + S_n − A_{n+1})`) needs per-step state — the columnar engine samples

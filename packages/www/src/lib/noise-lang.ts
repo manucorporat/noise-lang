@@ -19,10 +19,12 @@ const BUILTINS = [
   'sum', 'count', 'any', 'all', 'max', 'min', 'mean', 'dot', 'vdot', 'normsq', 'norm',
   'transpose', 'adjoint', 'normalize', 'outer', 'quantize', 'has_duplicate', 'mse',
   'ones', 'zeros', 'iota', 'vsign', 'scale',
-  'sine', 'cosine', 'noise_white', 'sample',
+  'sine', 'cosine', 'noise_white', 'noise_white_complex', 'noise_brown', 'noise_pink',
+  'noise_ou', 'sample',
+  'set_max_samples', 'set_max_opts', 'set_resolution',
 ];
 const CONSTANTS = ['pi', 'e', 'i', 'j'];
-const MODULES = ['builtin', 'rand', 'math', 'vec', 'signal'];
+const MODULES = ['builtin', 'rand', 'math', 'vec', 'signal', 'engine'];
 
 let registered = false;
 

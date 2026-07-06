@@ -11,7 +11,7 @@ use std::rc::Rc;
 use crate::dist::{DistArg, Recipe, RvGraph, RvId, RvKind};
 use crate::error::{NoiseError, Result, Span};
 use crate::sampler;
-use crate::signal::{SignalSpec, Wave};
+use crate::signal::{SigExpr, Wave};
 use crate::value::Value;
 
 /// Default Monte Carlo budget for a language-surface `P`/`E`/`Var`/`Q` when the call carries no
@@ -26,6 +26,11 @@ pub const P_DEFAULT_N: usize = 1_000_000;
 /// even at millions of draws, are never clamped; only genuinely large models are. A program raises
 /// it with `engine::set_max_samples`'s sibling `engine::set_max_opts(N)`.
 pub const MAX_OPS_DEFAULT: u64 = 1_000_000_000;
+/// Default **sampling resolution** (`engine::set_resolution`, PLAN-SIGNALS §1.2): the length at
+/// which reducers (`mse`/`mean`/`sum`/…) render a lazy signal that never met an explicit length.
+/// The time-axis twin of [`P_DEFAULT_N`] — a measurement knob, not part of the question — sized
+/// so toy programs never need to mention it.
+pub const RESOLUTION_DEFAULT: usize = 256;
 /// A fixed seed keeps a run reproducible; threading an explicit seed through `P` is a later
 /// refinement.
 const P_DEFAULT_SEED: u64 = 0;
@@ -250,9 +255,9 @@ pub fn call(
         "ones" => filled(name, arg_vals, 1.0, span),
         "zeros" => filled(name, arg_vals, 0.0, span),
         "transpose" => transpose(name, arg_vals, span),
-        // signal generators (lazy) + materialization
+        // signal generators (lazy). `sample` is intercepted in `eval.rs` (materializing may draw
+        // noise RV nodes and read the realization cache, so it needs `&mut Engine`).
         "sine" | "cosine" => wave(name, arg_vals, span),
-        "sample" => sample(name, arg_vals, span),
         // `Print` is intercepted in `eval.rs` (it needs `&mut self` to append to the capture
         // buffer), so it never reaches here; this arm is unreachable and kept only for clarity.
         "Print" => Ok(Value::Unit),
@@ -636,43 +641,23 @@ fn filled(name: &str, args: &[Value], fill: f64, span: Span) -> Result<Value> {
     Ok(Value::Array(Rc::new(vec![Value::Num(fill); n])))
 }
 
-/// `sine(freq)` / `cosine(freq)` — a **lazy signal generator** of `freq` cycles over its (not yet
-/// chosen) window. It costs O(1) until materialized — by meeting a sized array (adopting its
-/// length) or `sample(sig, n)`. The two-argument form `sine(n, freq)` is the **eager** shorthand:
-/// it materializes `n` samples immediately (handy for a quick concrete waveform).
+/// `sine(freq)` / `cosine(freq)` — a **lazy signal** of `freq` cycles over its (not yet chosen)
+/// window. It costs O(1) until materialized — by meeting a sized array (adopting its length),
+/// `signal::sample(sig, n)`, or a reducer rendering at the ambient resolution. The two-argument
+/// form `sine(n, freq)` is the **eager** shorthand: it materializes `n` samples immediately
+/// (handy for a quick concrete waveform).
 fn wave(name: &str, args: &[Value], span: Span) -> Result<Value> {
     let w = if name == "cosine" { Wave::Cosine } else { Wave::Sine };
     match args {
-        [freq] => Ok(Value::Signal(Rc::new(SignalSpec::base(w, as_num(freq, span)?)))),
+        [freq] => Ok(Value::Signal(SigExpr::wave(w, as_num(freq, span)?))),
         [_n, freq] => {
             let n = count_arg(name, &args[..1], span)?;
             Ok(Value::Array(Rc::new(
-                SignalSpec::base(w, as_num(freq, span)?).sample(n).into_iter().map(Value::Num).collect(),
+                SigExpr::wave(w, as_num(freq, span)?).sample_f64(n).into_iter().map(Value::Num).collect(),
             )))
         }
         _ => Err(NoiseError::runtime(
             format!("{name} expects (freq) for a lazy signal or (samples, freq) for an array, got {} args", args.len()),
-            span,
-        )),
-    }
-}
-
-/// `sample(sig, n)` — materialize a lazy signal to a concrete `n`-sample array. This is the knob
-/// the Nyquist–Shannon theorem turns: sample a `freq`-cycle signal below vs. above `2*freq` points.
-fn sample(name: &str, args: &[Value], span: Span) -> Result<Value> {
-    if args.len() != 2 {
-        return Err(NoiseError::runtime(
-            format!("{name} expects 2 arguments (signal, samples), got {}", args.len()),
-            span,
-        ));
-    }
-    let n = count_arg(name, &args[1..], span)?;
-    match &args[0] {
-        Value::Signal(s) => {
-            Ok(Value::Array(Rc::new(s.sample(n).into_iter().map(Value::Num).collect())))
-        }
-        other => Err(NoiseError::runtime(
-            format!("{name} expects a signal, got {}", other.type_name()),
             span,
         )),
     }

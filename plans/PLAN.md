@@ -18,7 +18,7 @@ the code see `AGENT.md`.
    set, fast compiles, no grammar-regeneration step, easy for agents to extend. `lalrpop`
    is dropped.
 4. **WASM via `wasm-bindgen` / `wasm-pack`** targeting `wasm32-unknown-unknown`. The old
-   Emscripten `www/` artifacts are replaced.
+   Emscripten `packages/www/` artifacts are replaced.
 5. **The core model (2026-06-25, official — see `LANG.md` "The core model").** Two ideas:
    (a) *everything is a distribution* — a `number` is a point mass; `number`/`bool`/`dist`/
    `estimate` unify into one distribution notion (constants stay constant-folded for speed);
@@ -116,7 +116,7 @@ crates/
                   # #![no_std]-friendly where practical; no OS/threads in the hot path.
   noise-cli/      # REPL + file runner binary (native). Depends on noise-core.
   noise-wasm/     # wasm-bindgen bindings exposing run/eval/sample/plot-data to JS.
-www/              # browser playground (editor + run + plot rendering) on the wasm build.
+packages/www/              # browser playground (editor + run + plot rendering) on the wasm build.
 LANG.md           # the language spec — single source of truth for parser & engine.
 ```
 
@@ -419,7 +419,7 @@ the reduction rewrite captured the real SIMD win.)
 
 ### Phase 5 — Browser playground
 - Real web UI on the `noise-wasm` build: code editor, run button, distribution/plot
-  rendering, shareable examples. Replaces the legacy Emscripten `www/`.
+  rendering, shareable examples. Replaces the legacy Emscripten `packages/www/`.
 - **Done when:** the π and dice programs are runnable and visualized entirely in the
   browser.
 

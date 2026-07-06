@@ -1,11 +1,11 @@
 ---
 name: noise-demos
-description: Build "cool demos" for the Noise website (www/) — scroll-driven, self-animating visualizations that turn a probability idea into a sticky canvas + narrated steps + a real-engine confirmation. Use when creating or editing a demo component in www/src/components, embedding one in a blog post, or designing a new interactive figure for the landing page.
+description: Build "cool demos" for the Noise website (packages/www/) — scroll-driven, self-animating visualizations that turn a probability idea into a sticky canvas + narrated steps + a real-engine confirmation. Use when creating or editing a demo component in packages/www/src/components or designing a new interactive figure for the landing page.
 ---
 
 # Building Noise demos
 
-The www/ site teaches probability through **scrollytelling demos**: a sticky visual on the left, a
+The packages/www/ site teaches probability through **scrollytelling demos**: a sticky visual on the left, a
 column of short narrated steps on the right. As you scroll, the visual animates itself and the
 matching Noise code reveals line by line — then the *real* WASM engine runs the same program and
 confirms the number. No buttons, no "click to play": the story plays as you read.
@@ -34,7 +34,7 @@ If an idea doesn't have a number that converges and a 4-beat story, it's a stati
 ## The anatomy (don't reinvent this)
 
 The layout, sticky behavior, step fading, code-reveal styling, and responsive collapse are **already
-solved** in `www/src/styles/global.css` under `--- shared scrollytelling demo scaffold ---`. Reuse
+solved** in `packages/www/src/styles/global.css` under `--- shared scrollytelling demo scaffold ---`. Reuse
 these classes; never re-implement the grid/sticky/observer geometry:
 
 ```
@@ -190,32 +190,16 @@ can be unavailable.
 
 ### On the landing page
 
-1. Create `www/src/components/MyDemo.astro` (frontmatter `code`, the `.scrolly` markup, scoped
+1. Create `packages/www/src/components/MyDemo.astro` (frontmatter `code`, the `.scrolly` markup, scoped
    `<style>` for canvas size, the `<script>`). Give the root a unique class and ids.
-2. Import and place it in `www/src/pages/index.astro` inside the tour section. Bump the figure
+2. Import and place it in `packages/www/src/pages/index.astro` inside the tour section. Bump the figure
    number in your `figcaption`.
-
-### In a blog post (MDX)
-
-Two ways, both already supported (see the blog skill / `hello-noise.mdx`):
-
-- **Embed an existing demo:** just write `<ConceptDemo />` — every demo component is auto-provided
-  to posts, no import needed.
-- **Author a new scrolly inline** with the reusable `<Scrolly>` + `<ScrollyStep>` shell. The
-  `<Scrolly>` root dispatches a `scrolly:step` CustomEvent (`{detail:{step,total}}`) you hook to
-  drive the stage.
-
-⚠️ **MDX `<script>` gotcha:** MDX parses `{` and `<` *inside* a `<script>` as JSX, so raw JS in a
-`.mdx` file breaks the build (`Unexpected end of file in expression`). The Scrolly *structure* is
-authorable in MDX, but the interactive JavaScript **must live in a small `.astro` component**
-(where Astro bundles it). `LargeNumbersDemo.astro` is exactly this: a custom demo built from
-`<Scrolly>`/`<ScrollyStep>` whose canvas logic listens for `scrolly:step`.
 
 ## Build & verify
 
 ```sh
-cd www
-./node_modules/.bin/astro build        # skips the wasm rebuild; catches MDX/type errors
+cd packages/www
+./node_modules/.bin/astro build        # skips the wasm rebuild; catches type errors
 ```
 
 Then preview and **actually scroll it**: confirm steps fade in/out, code reveals line by line, the

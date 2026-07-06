@@ -787,7 +787,7 @@ mod tests {
     }
 
     /// Dump an emitted kernel to disk so the JS host protocol can be validated against real bytes in
-    /// a JS engine (see `www`/the Node check). Ignored — run with an explicit out path:
+    /// a JS engine (see `packages/www`/the Node check). Ignored — run with an explicit out path:
     /// `NOISE_KERNEL_OUT=/tmp/k.wasm cargo test -p noise-core --release -- --ignored dump_kernel`
     #[test]
     #[ignore]

@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use crate::dist::{Recipe, RvId, RvKind};
 use crate::introspect::Summary;
-use crate::signal::{NoiseSpec, SignalSpec};
+use crate::signal::{NoiseSpec, SigExpr};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -36,15 +36,17 @@ pub enum Value {
     /// arbitrary `Value`s (`Num`, `Dist`, `Bool`, or nested `Array` for matrices). A vector of
     /// random variables is just an array of `Dist`. `Rc` keeps `push`/clone cheap.
     Array(Rc<Vec<Value>>),
-    /// A **lazy signal generator** (a continuous waveform described by frequency). It stays
-    /// symbolic — O(1) memory — through scalar/trig ops, and materializes to an `Array` only when
-    /// combined with a sized array (adopting its length) or via `signal::sample(sig, n)`.
-    Signal(Rc<SignalSpec>),
-    /// A **lazy noise generator** (`signal::noise_white`/`noise_brown`/`noise_ou`/`noise_pink`):
-    /// zero-mean noise of a given spectral color, with no length yet. Like a signal it stays
-    /// symbolic until it meets a sized context, but it is *random* — it materializes into fresh
-    /// `normal` RV nodes (so `E` can average over realizations), one independent draw stream per
-    /// leaf-vector lane. The `NoiseSpec` carries the strength and color.
+    /// A **lazy signal expression** (PLAN-SIGNALS §3): a waveform tree over `sine`/`cosine`
+    /// leaves, promoted scalars, and **drawn noise realizations**. It stays symbolic — O(1)
+    /// memory — through arithmetic (signal×signal included) and the ufuncs, and materializes to
+    /// an `Array` when combined with a sized array (adopting its length), via
+    /// `signal::sample(sig, n)`, or when a reducer renders it at the engine's ambient resolution.
+    Signal(Rc<SigExpr>),
+    /// An **undrawn noise generator** (`signal::noise_white`/`_white_complex`/`noise_brown`/
+    /// `noise_ou`/`noise_pink`): a recipe for zero-mean noise of a given spectral color. Like
+    /// `Value::Recipe` it is *not* a value — arithmetic on it is an error; `~` draws ONE lazy
+    /// realization (a `Signal` noise leaf) and `~[n]` draws a realization pinned to length `n`
+    /// (an ordinary array of RVs). The `NoiseSpec` carries the strength and color.
     Noise(NoiseSpec),
     /// A **complex scalar** (PLAN-COMPLEX). `re`/`im` are each a *real* scalar `Value` —
     /// `Num`/`Est` for a constant complex (`2 + 3i`), or `Dist` for a complex random variable
@@ -53,7 +55,9 @@ pub enum Value {
     /// (`binop_complex` decomposes `* / ^` into real ops on the channels), so the sample-DAG and
     /// VM stay strictly `f64` — no complex value-channel was added there. A complex value emerges
     /// only from `math::i`/`j` (the unit `0 + 1i`) or a complex distribution; pure-real
-    /// expressions stay `Num`. Invariant: `re`/`im` are always real scalars (`Num`/`Est`/`Dist`).
+    /// expressions stay `Num`. Invariant: `re`/`im` are always *real* values — scalars
+    /// (`Num`/`Est`/`Dist`) or, for a **complex signal** (PLAN-SIGNALS §1.3), lazy `Signal`s
+    /// (a complex signal is `Complex { re: Signal, im: Signal }` by composition, no new kind).
     Complex { re: Box<Value>, im: Box<Value> },
     /// A **conditioned value** — `event | given` (Bayes, scoped to a query). `quantity` is the RV
     /// being measured (an event for `P`, any number for `E`/`Var`/`Q`; its kind is `q_kind`),
@@ -181,6 +185,7 @@ impl fmt::Display for Value {
                 write!(f, "]")
             }
             Value::Signal(s) => write!(f, "{s}"),
+            // An undrawn generator prints as its recipe, like `Value::Recipe`.
             Value::Noise(spec) => write!(f, "{spec}"),
             // Constant channels render as `2 + 3i`; random channels fall back to `<re> + <im>i`.
             Value::Complex { re, im } => {

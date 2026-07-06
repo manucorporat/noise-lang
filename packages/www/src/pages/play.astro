@@ -1,6 +1,19 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import Playground from '../components/Playground.astro';
+
+// The embed snippet is plain text (TS, not Noise) — kept in frontmatter so no braces/backticks
+// need escaping in the template.
+const EMBED_SNIPPET = `import { run } from '@noiselang/core';
+
+const result = await run(\`
+  X ~ rand::unif(-1, 1);
+  Y ~ rand::unif(-1, 1);
+  4 * P(X^2 + Y^2 < 1)
+\`);
+
+console.log(result.value);   // "3.1415…" — the last statement's value
+console.log(result.output);  // everything Print(...) emitted`;
 ---
 
 <Layout
@@ -13,7 +26,6 @@ import Playground from '../components/Playground.astro';
       <nav class="topbar-links">
         <a href="/#ideas">How it works</a>
         <a href="/play" aria-current="page">Playground</a>
-        <a href="/blog">Blog</a>
         <a href="/skill">Skills</a>
         <a href="/#author">About</a>
         <a href="https://github.com/manucorporat/noise-lang">GitHub</a>
@@ -25,6 +37,32 @@ import Playground from '../components/Playground.astro';
     <div class="play-host">
       <Playground />
     </div>
+
+    <section class="measure embed">
+      <h2 class="embed-title">Put Noise in your own site</h2>
+      <p>
+        Everything above runs on
+        <a href="https://www.npmjs.com/package/@noiselang/core"><code>@noiselang/core</code></a> —
+        the Noise engine compiled to WebAssembly behind a small typed API. The <code>.wasm</code>
+        ships inside the package and bundles into your build (Vite, Rollup, webpack&nbsp;5,
+        esbuild), so embedding the same engine takes two steps:
+      </p>
+      <div class="embed-code">
+        <div class="embed-code-head"><span>terminal</span></div>
+        <pre><code>npm add @noiselang/core</code></pre>
+      </div>
+      <div class="embed-code">
+        <div class="embed-code-head"><span>app.ts</span></div>
+        <pre><code>{EMBED_SNIPPET}</code></pre>
+      </div>
+      <p class="embed-foot">
+        <code>run</code> never throws — failures come back on <code>result.error</code> with a
+        source span. There's also <code>runWithIntrospection</code> for programmatically
+        inspecting a program's variables. Full API and bundler notes in the
+        <a href="https://github.com/manucorporat/noise-lang/tree/master/packages/core">package README</a>;
+        the language itself is documented in <a href="/skill">the guide</a>.
+      </p>
+    </section>
   </main>
 
   <footer class="doc-footer measure">
@@ -70,6 +108,34 @@ import Playground from '../components/Playground.astro';
   .play-main { padding: 1.6rem 0 1rem; }
   /* the playground claims most of the viewport width (wider than the prose `.wide` column) */
   .play-host { max-width: min(1640px, 95vw); margin: 0 auto; padding: 0 1.5rem; }
+
+  /* "Put Noise in your own site" — quiet prose column under the playground. */
+  .embed { padding: 2.8rem 0 0.5rem; }
+  .embed-title {
+    font-size: 1.35rem; margin: 0 0 0.8rem; padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .embed p { line-height: 1.65; }
+  .embed p code {
+    font-family: var(--mono); font-size: 0.88em;
+    background: var(--paper-2); border: 1px solid var(--rule);
+    border-radius: 3px; padding: 0.05em 0.3em;
+  }
+  .embed-code {
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden;
+    background: var(--paper-2); margin: 1rem 0;
+  }
+  .embed-code-head {
+    font-family: var(--mono); font-size: 0.82rem; color: var(--ink-dim);
+    padding: 0.45rem 0.9rem; border-bottom: 1px solid var(--rule);
+    background: rgba(0, 0, 0, 0.025);
+  }
+  .embed-code-head span::before { content: '›\00a0'; color: var(--accent); }
+  .embed-code pre {
+    margin: 0; padding: 0.9rem 1rem; overflow-x: auto;
+    font-family: var(--mono); font-size: 0.88rem; line-height: 1.55; color: var(--ink);
+  }
+  .embed-foot { font-size: 0.95rem; color: var(--ink-dim); }
 
   .doc-footer { padding: 2.5rem 0 3rem; }
   .doc-footer p { font-size: 0.92rem; }

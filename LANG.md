@@ -5,7 +5,7 @@ official target**; `crates/noise-core` is being brought into line with it. Where
 implementation currently lags, a **Status:** note says so — when the code and this document
 disagree on the *model*, the document wins (the code is the thing being fixed). For everything
 else, the golden tests enforce the spec: fix the bug or fix the spec, never let them drift.
-Sections marked *(Phase N)* are not implemented yet (see PLAN.md).
+Sections marked *(Phase N)* are not implemented yet (see plans/PLAN.md).
 
 ## The core model (official semantics)
 
@@ -207,7 +207,7 @@ family into separate runtime types.
 
 Runtime values: `number` (`f64`, a point mass), `bool` (a point mass on `{T,F}` — i.e. a
 Bernoulli; see core model §1), `string`, `unit` (`()`), `array` (a fixed-length, build-time
-sequence of values — see "Collections"), `signal` (a **lazy waveform generator** — see
+sequence of values — see "Collections"), `signal` (a **lazy waveform expression** — see
 "Signals"), and **`complex`** (a complex scalar — see "Complex numbers"). An **`estimate`** is a
 `number` carrying a standard error (produced by `P`); it
 behaves like a number in arithmetic (propagating the error) and displays rounded to its
@@ -364,7 +364,7 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
     `if D == 6 { D } else { 0 }` yields `6` exactly on the lanes where `D` rolled a 6.
   - This gives `max`/`min`/`abs` over RVs for free, e.g. `if A > B { A } else { B }`.
   It is **not** sequential branching — the engine still samples independent lanes; a lifted `if`
-  cannot carry state across a time step (that's the dynamics fork in `PLAN.md`).
+  cannot carry state across a time step (that's the dynamics fork in `plans/PLAN.md`).
 
 ### Conditioning: `event | given`
 
@@ -499,8 +499,8 @@ The modules:
 | `rand`    | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `normal_complex`, `exponential`, `exponential_int`, `poisson`, `geometric`, `categorical`, `rotation`, `permutation` (batched sampling is the `~[shape]` operator, not a builtin) | needs `use rand;` |
 | `math`    | `pi`, `e`, `i`/`j` (imaginary unit), `sqrt`, `exp`, `abs`, `arg`, `conj`, `re`, `im`, `floor`, `ceil`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign`, `gcd`, `modpow` | needs `use math;` |
 | `vec`     | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` (vector `+`/`-` and `@` cover add/sub/matvec) | needs `use vec;` |
-| `signal`  | `sine`, `cosine` (lazy waveforms), `noise_white` (lazy white noise), `sample` | needs `use signal;` |
-| `engine`  | `set_max_samples`, `set_max_opts` (run-time evaluator knobs) | needs `use engine;` |
+| `signal`  | `sine`, `cosine` (lazy waveforms), `noise_white`, `noise_white_complex`, `noise_brown`, `noise_pink`, `noise_ou` (undrawn noise generators — drawn with `~`), `sample` | needs `use signal;` |
+| `engine`  | `set_max_samples`, `set_max_opts`, `set_resolution` (run-time evaluator knobs) | needs `use engine;` |
 
 **`engine::set_max_samples(N)`** sets the default Monte Carlo budget — the sample count `P`/`E`/
 `Var`/`Q` use when called *without* an explicit count — to `N` (an integer `>= 1`) for the rest of
@@ -519,6 +519,12 @@ the smaller of the two budgets, so `set_max_samples` still bounds light cones an
 bounds heavy ones. Defaults to a built-in ceiling of `1e9` ops per query — high enough that ordinary
 small-cone queries (even at millions of draws) are never clamped, so only very large models feel it.
 Returns `unit` — it's a setting, not a value.
+
+**`engine::set_resolution(N)`** sets the ambient **sampling resolution** — the length at which
+reducers (`mse`, `mean`, `sum`, `dot`, …) render a lazy signal that never met an explicit length
+(default `256`). It is the time-axis twin of `set_max_samples`: one measurement knob per axis, both
+set once at the top instead of threaded through the math. `signal::sample(sig, n)` remains the
+explicit per-site override. Returns `unit` — it's a setting, not a value. See "Signals".
 
 Rules:
 - **`builtin` is active by default**; `rand`/`math`/`vec`/`signal`/`engine` are **strict** — a
@@ -620,33 +626,70 @@ P(clt > 1)                           # ≈ 0.159, agreeing with normal(0, 1)
 > **Status: implemented.** A user definition shadows a library name (your `sum` wins). Deferred:
 > first-class functions / `map` (element-wise ops are explicit loops/builtins for now), random
 > indexing / random-length loops, and a native columnar vector representation (so a `d×d` mat·vec
-> builds `O(d²)` nodes — fine for `d ≤ ~64`). See `PLAN-COLLECTIONS.md` §1.
+> builds `O(d²)` nodes — fine for `d ≤ ~64`). See `plans/PLAN-COLLECTIONS.md` §1.
 
-### Signals (lazy waveforms)
+### Signals (lazy waveform expressions)
 
-A **signal** is a waveform described by *frequency*, not yet by samples — a lazy generator.
+A **signal** is a waveform described by *frequency*, not yet by samples — a lazy expression.
 `signal::sine(f)` / `cosine(f)` produce `f` cycles over an as-yet-unknown window and cost O(1)
-memory. Scalar arithmetic and the `sin`/`cos`/`atan`/`sign` ufuncs **defer** into the signal (it
-stays a generator), and it **materializes** to a concrete array only when:
+memory. Operations **defer** into the signal's expression tree — scalar arithmetic
+(`1 + 0.3*sine(3)`), **signal×signal arithmetic** (`sine(3) + sine(7)` is a two-tone chord), the
+`sin`/`cos`/`atan`/`sign`/`floor`/`ceil` ufuncs, prefix `-`, and `math::exp` — so a whole
+processing chain stays symbolic. A signal **materializes** to a concrete array when:
 
 - it meets a sized array (broadcast), adopting that array's length — e.g. `0.3 * sine(3) + xs`
-  samples the tone to `Len(xs)`; or
-- you call `signal::sample(sig, n)` to take `n` samples explicitly.
+  samples the tone to `Len(xs)`;
+- you call `signal::sample(sig, n)` to take `n` samples explicitly (Nyquist's knob); or
+- a **reducer** (`mse`, `mean`, `sum`, `dot`, …) or `plot::line` meets it, rendering it at the
+  **ambient resolution** — `engine::set_resolution(N)`, default `256`. The resolution is a
+  measurement knob (the time-axis twin of the Monte-Carlo budget), so it lives next to the
+  measurement, not inside the math.
 
-**`signal::noise_white(sigma)`** is a lazy generator too, but **random**: zero-mean white noise
-with no length yet. Unlike the deterministic waveforms it materializes into `n` fresh
-iid `normal(0, sigma)` **random variables** (so `E`/`P`/`Var` average over realizations), one
-independent draw per leaf-vector lane — so adding it to an `[I, Q]` carrier gives I and Q *distinct*
-noise. It pins its length the same way: meeting a sized array, or `sample(noise_white(s), n)`.
+One honest asterisk: `E`'s reported digits reflect *measured* Monte-Carlo error; resolution bias
+(aliasing, under-resolved nonlinearities) is **not** in those error bars. If the answer depends on
+the resolution, raise `set_resolution` until it stops moving.
+
+**Noise generators are undrawn distributions.** `signal::noise_white(sigma)` (and
+`noise_brown`/`noise_pink`/`noise_ou(sigma, tau)`/`noise_white_complex`) are subject to the same
+core rule as `normal(0, 1)`: you cannot operate on them — **`~` is the only way in**.
 
 ```
-msg = sample(0.3 * sine(3), 64);     # render the lazy tone at 64 points (the one resolution choice)
-rx  = msg + noise_white(s);          # noise adopts length 64 here, as 64 fresh iid normal RVs
-sample(cosine(7), 10)                # explicit: 10 samples of a 7-cycle wave (Nyquist's knob)
+static ~ signal::noise_white(sigma);   # ONE realization; length still lazy
+w ~[n] signal::noise_white(1);         # realization pinned to n, materialized eagerly (an array of RVs)
+noise_white(1) + msg                   # error: undrawn distribution — draw it first with `~`
+sample(noise_white(1), n)              # error: same (drawing is `~`'s job, not sample's)
+```
+
+A `~`-bound noise is a **drawn realization**: every mention is the *same* noise — `static - static`
+is exactly `0`, and re-materializing it (two `sample` calls, two carriers) reuses the same RV
+nodes, so "both sides see the same static" is a property of `~`, not of program ordering. Each
+sample is `normal(0, sigma)` (the strength is **per-sample**, matching `normal`; there is no
+power-spectral-density convention). The plain-`~` form stays length-lazy and **pins its length at
+first materialization**; a later mention at a *different* length is an error naming the pinned one
+(white noise has no finer version of itself, so a silent re-render would be a lie). The `~[n]` form
+pins up front. An `=`-bound generator stays a recipe: each `~` of it draws an independent
+realization.
+
+**`signal::noise_white_complex(sigma)`** is the complex (circularly-symmetric) white noise —
+radio static. Drawing it yields a **complex signal** whose two channels are independent
+`normal(0, sigma/√2)` lanes per sample, so `E|z|² = sigma²` (the same total-power convention as
+`rand::normal_complex`).
+
+**Complex signals** need no new type: a real signal meeting `math::i` (or a drawn complex noise)
+gives `complex` with lazy channels. `math::exp(i*θ)` (Euler), `abs`, `arg`, and complex `+ - * /`
+all defer; `signal::sample` of a complex signal yields an array of complex. `plot::line` of a
+complex signal is an error — take `re`/`im`/`abs` first (a complex wave has no single trace).
+
+```
+engine::set_resolution(64);            # the one resolution choice, next to the measurement
+msg    = 0.3 * signal::sine(3);        # lazy — a waveform, not yet samples
+static ~ signal::noise_white_complex(0.4);
+rx     = math::exp(math::i * 3 * msg) + static;   # FM-modulate, add static — still lazy
+err    = E(vec::mse(math::arg(rx) / 3, msg));     # mse renders both at the ambient resolution
 ```
 
 The two-argument `sine(n, f)` is an eager shorthand for `sample(sine(f), n)`. This mirrors the rest
-of the language: a signal is symbolic until a sized context (or `sample`) forces it, just as a
+of the language: a signal is symbolic until a sized context (or a measurement) forces it, just as a
 random variable is symbolic until `E`/`P` forces it.
 
 ### Complex numbers
@@ -698,7 +741,7 @@ A program is a sequence of statements; its value is the value of the **last** st
 (or `unit` if empty). The CLI prints that value; the REPL evaluates one line at a time
 against a persistent environment.
 
-## Not yet implemented (see PLAN.md / GOAL.md)
+## Not yet implemented (see plans/PLAN.md / GOAL.md)
 
 - *(Phase 3)* the remaining builtins — `P`, `plot`, `explain` — the `===` description
   operator, and user-defined functions (`f(x) ~ { ... }`). `unif` is live; other call names

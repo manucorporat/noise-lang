@@ -7,7 +7,7 @@ A feasibility analysis of using Noise to **empirically reproduce** the central c
 The question the maintainer asked: *is Noise expressive enough to demonstrate that the
 technique causes the error it claims, and would such a proof be easy to write?* Short answer:
 **Noise is the right kind of tool, but not expressive enough today.** The gap is well-defined,
-additive, and — importantly — does **not** require the "dynamics fork" (PLAN.md Phase 3.5).
+additive, and — importantly — does **not** require the "dynamics fork" (plans/PLAN.md Phase 3.5).
 
 > **Update (2026-06-25): BUILT.** Steps 4–5 closed every gap below. The proof now lives in
 > [`examples/turboquant.noise`](examples/turboquant.noise) and runs today. It reproduces both the
@@ -80,7 +80,7 @@ The key architectural finding: **TurboQuant is feed-forward (spatial), not seque
 (temporal).** A single Monte Carlo sample draws a Gaussian matrix and a vector, does
 matrix–vector products and reductions over the `d` coordinates, and yields scalars (inner
 products) whose distribution we study. There is **no recurrence** — step `t+1` never depends on
-step `t`. So, unlike the M/M/1 queue (which genuinely needs PLAN.md's Phase-3.5 second
+step `t`. So, unlike the M/M/1 queue (which genuinely needs plans/PLAN.md's Phase-3.5 second
 execution mode), TurboQuant fits the **existing columnar VM**: a length-`d` vector is just `d`
 scalar RV nodes, and a dot product is a build-time-unrolled chain of `Add`/`Mul` nodes
 collapsing `d` columns into one scalar column. **All of it is data-parallel feed-forward — the
@@ -139,7 +139,7 @@ print("prod E[est]/true =", E(dot(y, xhat_p) / dot(y, x)));  # -> ~1.0, unbiased
 | # | Capability | Why TurboQuant needs it | Kind | Effort |
 |---|---|---|---|---|
 | 1 | **`normal(μ,σ)` distribution** | every matrix/projection is Gaussian; the coordinate law is `N(0,1/d)` | **primitive** (new `Source` + Gaussian RNG, e.g. Box–Muller/ziggurat) | small |
-| 2 | **Vectors/arrays** (fixed, build-time length) + literals, indexing, `len`, `range`, `iid(dist,n[,m])`, `for` | `x,y ∈ R^d`, the `d×d` matrices `S,Π` | **primitive** (this *is* PLAN.md Step 4) | medium |
+| 2 | **Vectors/arrays** (fixed, build-time length) + literals, indexing, `len`, `range`, `iid(dist,n[,m])`, `for` | `x,y ∈ R^d`, the `d×d` matrices `S,Π` | **primitive** (this *is* plans/PLAN.md Step 4) | medium |
 | 3 | **Reduction** (`sum`/fold over an array within one sample) | `⟨y,x⟩ = Σ yᵢxᵢ`, `‖r‖² = Σ rᵢ²` — the cross-coordinate collapse | **primitive-ish**: a `for` accumulator that unrolls into `Add` nodes (no new VM node needed) | small–medium |
 | 4 | **Expectation/variance of a numeric RV**: `E(expr)`, `var(expr)` → `Est` | every claim is `E[...]` / `Var[...]`; today only `P` (bool mean) is exposed | **primitive** (surface the existing Rust `moments`) | small |
 | 5 | `sqrt`, `pi` | scaling constants `√(2/(πd))`, `√(π/2)/d` | **primitive** (trivial; `sqrt` ≈ `**0.5`) | trivial |
@@ -159,7 +159,7 @@ Gaussian-projection route to the `2/π` bias avoids QR, and you can skip the Bet
 
 1. **`normal` + `sqrt`/`pi`** (primitives 1, 5) — independently useful; unblocks the CLT example
    too (replaces the 12-uniform fake in `examples/clt_normal.noise`).
-2. **Collections** (primitive 2 = PLAN.md Step 4) — arrays, `iid`, `for`, indexing, `len`.
+2. **Collections** (primitive 2 = plans/PLAN.md Step 4) — arrays, `iid`, `for`, indexing, `len`.
 3. **Build-time `sum`/reduce** (primitive 3) — lower a `for`-accumulator into unrolled `Add`s.
 4. **`E(expr)` / `var(expr)`** (primitive 4) — expose `sampler::moments` to the surface.
 5. **Linear-algebra prelude** (§6) — `dot`, `norm`, `matvec`, `sign`, … written in Noise.

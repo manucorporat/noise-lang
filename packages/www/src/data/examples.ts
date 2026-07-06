@@ -2,7 +2,7 @@
 // (so the site never drifts from what the CLI runs); the curated metadata below adds a title,
 // a one-line blurb, and a plain-language "what's going on" explanation for each.
 
-const rawFiles = import.meta.glob("../../../examples/*.noise", {
+const rawFiles = import.meta.glob("../../../../examples/*.noise", {
   query: "?raw",
   import: "default",
   eager: true,
@@ -228,8 +228,8 @@ const meta: Omit<Example, "code" | "category">[] = [
     title: "AM vs FM",
     blurb: "Why FM survives noise better than AM.",
     explanation:
-      "A full modulate → add static → demodulate pipeline for both AM (message in the amplitude) and FM (message in the angle). Given the same noise, FM recovers the signal several times cleaner. Uses lazy signals, the sin/cos/atan ufuncs, and array broadcasting.",
-    tags: ["signals", "dsp"],
+      "A full modulate → add static → demodulate pipeline for both AM (message in the carrier's length) and FM (message in its angle, via e^{iθ}). One ~-drawn complex static hits both carriers — the same storm by construction — and FM comes back several times cleaner. The whole chain is written on waveforms; the resolution is one knob at the top.",
+    tags: ["signals", "dsp", "complex"],
   },
   {
     id: "nyquist",

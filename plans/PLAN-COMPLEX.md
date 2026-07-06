@@ -104,6 +104,12 @@ clashes with current/index). Provide both names for the same constant.
 
 ## 5. `rand::normal_complex`
 
+> **Superseded in part by `PLAN-SIGNALS.md` (implemented):** the "no `noise_white_complex` until a
+> lazy complex-signal example needs one" deferral below is over — `signal::noise_white_complex(σ)`
+> now exists as an undrawn generator drawn with `~`/`~[n]` (per-quadrature `normal(0, σ/√2)`,
+> `E|z|² = σ²`, matching this section's total-power convention), and `am_vs_fm.noise` is written
+> entirely in signal land. `rand::normal_complex` itself is unchanged.
+
 Circularly-symmetric complex Gaussian (CSCG) — the textbook model for radio static, thermal noise,
 and Rayleigh fading. Mean 0; `re` and `im` each `~ N(0, σ/√2)`, independent ⇒ **`E|z|² = σ²`** and
 `|z|` is Rayleigh(scale σ/√2). Drawn with `~` / `~[n]`.

@@ -21,7 +21,7 @@ const ideas = [
     code: 'A ~ unif_int(1, 6)\nB ~ unif_int(1, 6)   # two independent dice\nA + B                # a genuine 2d6 distribution',
   },
   {
-    k: 'Queries: P, E, Var, Q',
+    k: 'Lazy until queried: P, E, Var, Q',
     d: 'Nothing is sampled until you ask. A query runs a fast columnar Monte-Carlo pass and reports an honest estimate — the printed digits reflect the standard error, and that error propagates through arithmetic, so 4·P(C) rounds itself correctly.',
     code: 'C = X^2 + Y^2 < 1\n4 * P(C)   # ≈ 3.14',
   },
@@ -31,9 +31,9 @@ const ideas = [
     code: 'days ~[23] unif_int(1, 365)\nP(has_duplicates(days))   # ≈ 0.51',
   },
   {
-    k: 'if is a value, not a branch',
+    k: 'Branches are random variables',
     d: 'When the condition is random, if c { a } else { b } does not take a path — it builds a new random variable, choosing a or b per sample. That single rule hands you max, min, abs, clamps and payoffs over distributions for free.',
-    code: 'higher = if A > B { A } else { B }   # the larger of two dice',
+    code: 'RandomVariableToo = if A > B { A } else { B }   # the larger of two dice',
   },
 ];
 ---
@@ -45,7 +45,6 @@ const ideas = [
       <nav class="topbar-links">
         <a href="#ideas">How it works</a>
         <a href="/play">Playground</a>
-        <a href="/blog">Blog</a>
         <a href="/skill">Skills</a>
         <a href="#author">About</a>
         <a href="https://github.com/manucorporat/noise-lang">GitHub</a>
@@ -232,7 +231,7 @@ const ideas = [
 
           <div class="author-body">
             <p class="author-lede">
-              <span class="author-name">Manu Mtz.-Almeida.</span>
+              <a href="https://manualmeida.dev/"><span class="author-name">Manu Mtz.-Almeida.</span></a>
               Creator of <a href="https://github.com/gin-gonic/gin">Gin</a>, core contributor to <a href="https://ionicframework.com/">Ionic</a>,
               <a href="https://stenciljs.com/">Stencil</a> and <a href="https://qwik.dev/">Qwik</a>. Principal engineer at
               <a href="https://www.builder.io/">Builder.io</a>, working on compilers,
@@ -242,7 +241,7 @@ const ideas = [
               I started Noise nine years ago and never quite finished it. The idea grew out of
               my telecommunications degree — a world of signals, noise, and probability — where
               I kept wishing for a language that could express uncertainty as naturally as it
-              expresses arithmetic. This is that wish, picked up again all these years later.
+              expresses arithmetic. This is that wish.
             </p>
             <p class="author-links">
               <a href="https://github.com/manucorporat">github.com/manucorporat</a>

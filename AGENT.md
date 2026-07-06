@@ -3,7 +3,7 @@
 Guidance for an AI agent (or any new contributor) working in this repo. Records
 **verified facts about the code as it exists today**. For the language's intent see
 `GOAL.md`; for the exact syntax/semantics see `LANG.md`; for the roadmap and locked
-architecture decisions see `PLAN.md`. Facts below confirmed by running `cargo test` /
+architecture decisions see `plans/PLAN.md`. Facts below confirmed by running `cargo test` /
 `cargo run` on Rust 1.89.
 
 ## What this is
@@ -12,9 +12,9 @@ architecture decisions see `PLAN.md`. Facts below confirmed by running `cargo te
 meant to hold *probability distributions*, so mathematicians can write Monte Carlo /
 queueing simulations idiomatically.
 
-The repo was **re-architected from scratch** (PLAN.md decisions: clean rewrite,
+The repo was **re-architected from scratch** (plans/PLAN.md decisions: clean rewrite,
 hand-written Pratt parser, bytecode + batched/SIMD sampler, `wasm-bindgen`). The current
-state is **Phases 0–3 plus core-model-rework Steps 1–4 complete** (see `PLAN.md`):
+state is **Phases 0–3 plus core-model-rework Steps 1–4 complete** (see `plans/PLAN.md`):
 - the deterministic calculator, the random-variable runtime (bytecode + batched columnar
   sampler), and the Phase-3 probability surface (`P`, `unif_int`, `bernoulli`, `&&`/`||`,
   lifted `if`, strings, `print`/`round`);
@@ -47,16 +47,30 @@ state is **Phases 0–3 plus core-model-rework Steps 1–4 complete** (see `PLAN
   `rotation` is a built-in rather than the earlier Gaussian shortcut. It is a **recipe** drawn with
   `~` (`Pi ~ rotation(d)`) like any distribution — a structured multivariate draw whose
   Gram–Schmidt source nodes are built in `Engine::draw_rotation` (`eval.rs`).
-- **Signal modeling + telecom/DSP examples:** `math::sin`/`cos`/`atan` are **ufuncs** (scalar /
-  lifted over RVs / elementwise over arrays — `UnOp::Sin`/`Cos`/`Atan` in the VM), and **arithmetic
-  broadcasts over arrays** (`binop_broadcast` in `eval.rs`: array⊕array length-matched, array⊕scalar,
-  nesting for `[I,Q]` pairs). The **`signal` module** adds **lazy waveform generators**:
-  `signal::sine(f)`/`cosine(f)` return a `Value::Signal(Rc<SignalSpec>)` (a `signal.rs` generator
-  that defers scalar/trig ops, O(1) memory) which materializes against a sized array (adopting its
-  length, via `binop_signal`) or `signal::sample(sig, n)`. `examples/am_vs_fm.noise` is a full
-  `mse(demodulate(modulate(msg) + static), msg)` pipeline (FM beats AM, emergent); `examples/
-  nyquist.noise` shows aliasing below `2·f`. Also `math::log`/`log10` (dB), `vec::mse` (signal
-  compare), and `Value::Num` Display now trims float dust (`format_num` in `value.rs`).
+- **Engine knobs:** `engine::set_max_samples(N)` (Monte-Carlo budget), `engine::set_max_opts(N)`
+  (per-query op ceiling), and `engine::set_resolution(N)` (ambient signal resolution, default 256 —
+  the time-axis twin of the budget).
+- **Signal modeling + telecom/DSP examples (PLAN-SIGNALS, done):** `math::sin`/`cos`/`atan` are
+  **ufuncs** (scalar / lifted over RVs / elementwise over arrays — `UnOp::Sin`/`Cos`/`Atan` in the
+  VM), and **arithmetic broadcasts over arrays** (`binop_broadcast` in `eval.rs`). The **`signal`
+  module** provides **lazy signal expressions**: `signal::sine(f)`/`cosine(f)` return a
+  `Value::Signal(Rc<SigExpr>)` — an expression **tree** (`signal.rs`) that defers scalar ops,
+  **signal×signal arithmetic** (`sine(3)+sine(7)`), the ufuncs, `math::exp`, and `atan2`, O(1)
+  memory. It materializes against a sized array (adopting its length, `binop_signal`), via
+  `signal::sample(sig, n)` (`Engine::lib_sample`), or when a **reducer**/`plot::line` renders it at
+  the **ambient resolution** (`engine::set_resolution(N)`, default 256 — the `expect_array` funnel
+  in `eval.rs`). **Noise generators are undrawn distributions**: `noise_white`/`noise_brown`/
+  `noise_pink`/`noise_ou`/`noise_white_complex` return `Value::Noise` and obey the `~`-only rule
+  (`forbid_undrawn`). `static ~ noise_white(s)` draws ONE lazy realization (`SigExpr::Noise` leaf +
+  `Engine.realizations` cache: length pins at first materialization, every mention is the same RV
+  nodes, `static - static == 0`); `w ~[n] noise_white(s)` pins eagerly to an array of RVs
+  (`draw_noise_shaped`). **Complex signals** are pure composition — `Complex{re: Signal, im:
+  Signal}` (complex `exp`/`abs`/`arg` defer; `noise_white_complex(σ)` splits into two
+  `normal(0, σ/√2)` lanes, `E|z|² = σ²`). `examples/am_vs_fm.noise` is the flagship — the whole
+  modulate → add static → demodulate chain in signal land, no lengths in the math;
+  `examples/nyquist.noise` shows aliasing below `2·f`; `examples/noise_colors.noise` draws the
+  colored noises with `~[n]`. Also `math::log`/`log10` (dB), `vec::mse` (signal compare), and
+  `Value::Num` Display trims float dust (`format_num` in `value.rs`).
 - **Complex numbers (PLAN-COMPLEX, done):** `Value::Complex { re: Box<Value>, im: Box<Value> }` — a
   complex scalar whose two channels are *real* `Value`s (`Num`/`Est`/`Dist`), so complex arithmetic
   reuses the whole real lifting machinery (`binop_complex` decomposes `* / ^` into real ops) and
@@ -67,7 +81,8 @@ state is **Phases 0–3 plus core-model-rework Steps 1–4 complete** (see `PLAN
   `math_ufunc` (dispatched from `lib_call`). `vec` made complex-correct (§7): `normsq`/`norm`/`mse`
   magnitude-based (real out), `dot` bilinear + new `vdot` (Hermitian)/`adjoint`/`outer`; `max`/`min`
   error. **`rand::exp` was renamed `rand::exponential`** (and `exp_int`→`exponential_int`) to free
-  `exp` for the math function. Examples: `am_vs_fm_complex.noise` (the radio win), `shor_period.noise`
+  `exp` for the math function. Examples: `am_vs_fm.noise` (the radio win, now fully in signal land —
+  PLAN-SIGNALS), `shor_period.noise`
   (faithful quantum period-finding — complex inverse-QFT interference comb + `rand::categorical`).
 - **General surface (PLAN-COMPLEX §8):** the `%` operator (`BinOp::Mod`, floored, real-only, all
   backends), `math::floor`/`ceil` (`UnOp::Floor`/`Ceil`, native cranelift/wasm instructions), and
@@ -79,7 +94,7 @@ state is **Phases 0–3 plus core-model-rework Steps 1–4 complete** (see `PLAN
   deterministic integer builtins **`math::gcd`** / **`math::modpow`** (square-and-multiply in `i128`,
   exact past `2^53`; `builtins.rs`). `examples/shor_period.noise` is `shor(N)` → the factors of N.
 
-**Next up:** optional perf fast-follow — the fused `Reduce` VM instruction (`PLAN-COLLECTIONS.md`
+**Next up:** optional perf fast-follow — the fused `Reduce` VM instruction (`plans/PLAN-COLLECTIONS.md`
 §3.5) to collapse the `O(d²)` matvec DAG and reach larger `d`. The dynamics fork (sequential/
 stateful processes, e.g. M/M/1) remains the separate Phase-3.5 execution mode.
 
@@ -95,8 +110,9 @@ crates/
 legacy/         # the PRE-REWRITE crate, parked & excluded from the workspace (reference
                 # only; old lalrpop 0.13/regex 0.2, committed-generated parser). Do not
                 # build on it; it exists to preserve the original tests/behavior.
-www/            # stale Emscripten asm.js/wasm playground — to be replaced in Phase 5.
-GOAL.md LANG.md PLAN.md README.md
+packages/www/   # the website + in-browser playground (Astro + Monaco + WASM).
+plans/          # PLAN.md (roadmap) + PLAN-COLLECTIONS/PLAN-COMPLEX/PLAN-SIGNALS sub-plans.
+GOAL.md LANG.md README.md
 ```
 
 ### noise-core modules
@@ -106,8 +122,8 @@ GOAL.md LANG.md PLAN.md README.md
 | `lexer.rs` | Hand-written lexer → `Vec<Token>` ending in `Eof`. Token set is a superset of what Phase 0 evaluates (comparisons, `^`, `!`, `if/else`, strings all tokenize). |
 | `ast.rs` | `Expr` (Number/**Bool**/Str/Ident/Unary/Binary/Bind/**FnDef**/Call/Block/If/**Array**/**Index**/**For**/**Use**), `BinOp`, `UnOp`, `BindKind` (Assign=`=`, Sample=`~`), `Spanned`, `Program`, **`split_path`** (splits `mod::name`; qualified names ride inside `Ident`/`Call` name strings). |
 | `parser.rs` | Pratt / precedence-climbing parser; `infix_op` precedence table. Disambiguates `f(x)=…`/`f()~…` function defs from calls via `matching_paren_after`. In-module `mod tests`. |
-| `value.rs` | `Value`: Num/Bool/Str/Unit/**Recipe(Recipe)** (undrawn distribution)/**Dist(RvId)**/**Est{val,se}** (Monte Carlo estimate; displays rounded to its standard error)/**Array(Rc<Vec<Value>>)** (fixed-length, build-time)/**Signal(Rc<SignalSpec>)** (lazy waveform generator). `format_num` trims float dust from `Num` Display. |
-| `signal.rs` | `SignalSpec` (lazy waveform: `wave` + `freq` + a deferred `SigOp` pipeline of scalar/`Unary` ops), `Wave{Sine,Cosine}`, `SigOp`. `sample(n)` materializes. |
+| `value.rs` | `Value`: Num/Bool/Str/Unit/**Recipe(Recipe)** (undrawn distribution)/**Dist(RvId)**/**Est{val,se}** (Monte Carlo estimate; displays rounded to its standard error)/**Array(Rc<Vec<Value>>)** (fixed-length, build-time)/**Signal(Rc<SigExpr>)** (lazy signal expression)/**Noise(NoiseSpec)** (undrawn noise generator — `~`-only, like a recipe). `format_num` trims float dust from `Num` Display. |
+| `signal.rs` | `SigExpr` (lazy signal **tree**: `Wave`/`Konst`/`Noise{RealizationId}`/`Unary(SigUnOp)`/`Binop`/`Atan2`), `Wave{Sine,Cosine}`, `NoiseSpec`/`NoiseKind` (incl. `WhiteComplex`), `RealizationId`. `sample_f64(n)` folds a deterministic tree; noise-bearing trees materialize in `Engine::materialize_sig` through the realization cache. |
 | `rng.rs` | Hand-rolled xoshiro256++ PRNG, SplitMix64-seeded. No OS entropy/time/threads — WASM-clean, deterministic. `fill_uniform`/`fill_uniform_int`/**`fill_normal`** (Box–Muller) fill a whole column. |
 | `dist.rs` | `RvId` handle; `Distribution` trait + `Uniform`; `RvKind{Num,Bool}`; `Source{Uniform,UniformInt,**Normal**}`; **`Recipe{Uniform,UniformInt,Bernoulli,Normal}`** (undrawn dists); `RvNode{Src,ConstNum,ConstBool,Unary,Binary,Select}`; append-only `RvGraph` (structural sharing). |
 | `bytecode.rs` | `compile` (DAG→flat bytecode, CSE via `HashMap<RvId,Reg>`) + the columnar VM `run_batch`; `Inst` (incl. `Normal`, `Select`, And/Or); `BATCH = 1024`. In-module `mod tests`. |
@@ -169,7 +185,7 @@ git-ignored.
 - `;`-separated statements; trailing `;` optional (improvement over the legacy grammar).
 - Typed, spanned errors for undefined vars, type mismatches, and parse failures.
 
-## What is NOT built yet (the gap — see PLAN.md / PLAN-COLLECTIONS.md)
+## What is NOT built yet (the gap — see plans/PLAN.md / plans/PLAN-COLLECTIONS.md)
 
 - **TurboQuant capstone (Step 5, next).** Needs `transpose` and `examples/turboquant.noise` — the
   d-dim bias proof. The collections core it builds on (Step 4) is done.
@@ -215,16 +231,15 @@ git-ignored.
   deferred to Phase 4.
 - **Keep `noise-core` free of OS/threads** so the wasm32 path stays clean.
 
-## Status snapshot (2026-06-25)
+## Status snapshot (2026-07-06)
 
-- Deterministic core + RV runtime + Phase-3 probability surface + core-model rework Steps 1–4
-  (recipes/`~`-drawing, user functions, `normal`/`E`/`var`/`sqrt`/`pi`, **collections**: arrays,
-  indexing, `for`, `true`/`false`, the `~[shape]` draw, the `@` product, the `sum`/`dot`/`has_duplicates`/… library) **plus a
-  Rust-style module system** (`rand`/`math`/`vec` strict, `builtin` default; `use mod;` or
-  `mod::name` paths) complete and green (**130 tests**, clippy clean). 21 runnable examples in
-  `examples/` (each checks an analytic value), all carrying their `use` lines.
-- **Uncommitted:** Steps 1–4 and the new tests/examples are in the working tree but not yet
-  committed — a fresh session sees them in the tree, not in `git log`.
-- **Next up: Step 5 — `transpose` + `examples/turboquant.noise`** (the d-dim bias capstone;
-  `TURBOQUANT.md`). Optional perf fast-follow: the fused `Reduce` VM instruction
-  (`PLAN-COLLECTIONS.md` §3.5).
+- Deterministic core + RV runtime + Phase-3 probability surface + core-model rework Steps 1–5
+  (recipes/`~`-drawing, user functions, collections, the `~[shape]` draw, the `@` product, the
+  module system, TurboQuant capstone), **complex numbers** (PLAN-COMPLEX), and **signals as drawn
+  values** (PLAN-SIGNALS: the `SigExpr` tree, `~`-only noise drawing + the realization cache,
+  complex signals + `noise_white_complex`, `engine::set_resolution` + reducer materialization)
+  complete and green (**253 lib tests**, clippy clean). Runnable examples in `examples/` (each
+  checks an analytic value), all carrying their `use` lines; `am_vs_fm.noise` is the signal-land
+  flagship (`am_vs_fm_complex.noise` was folded into it and deleted).
+- Optional perf fast-follow: the fused `Reduce` VM instruction (`plans/PLAN-COLLECTIONS.md` §3.5). The
+  dynamics fork (sequential/stateful processes) remains the separate Phase-3.5 execution mode.

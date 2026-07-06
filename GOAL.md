@@ -19,7 +19,7 @@ simulations** trivial to express.
 These examples come from `README.md`. **The probabilistic features below do not work yet** —
 they describe the destination, not the current state. The deterministic surface they rest on
 (arithmetic, comparisons, `if/else`, blocks, `=`/`~` bindings) *is* implemented today. See
-`AGENT.md` for the precise current state and `PLAN.md` for the build order.
+`AGENT.md` for the precise current state and `plans/PLAN.md` for the build order.
 
 ### Random-variable assignment with `~`
 ```
@@ -111,7 +111,7 @@ exists — is unbuilt**:
   `plot`/`explain`, no `===` description operator.
 - `Call(name, args)` parses, but evaluating any call returns "builtins arrive in Phase 3".
 
-Closing that gap is the goal. Milestones in dependency order (see `PLAN.md` for the full
+Closing that gap is the goal. Milestones in dependency order (see `plans/PLAN.md` for the full
 phased roadmap and definitions of done):
 
 1. **Deterministic core** *(done)* — floats & negatives, `**`, comparisons, `if/else`,
@@ -124,6 +124,6 @@ phased roadmap and definitions of done):
 4. **Builtins & ergonomics** — `unif`, `plot`, `explain`, the `===` description operator,
    user-defined functions.
 5. **Browser playground** — a `wasm-bindgen` build plus a real web UI, replacing the legacy
-   Emscripten `www/` artifacts.
+   Emscripten `packages/www/` artifacts.
 
 See `AGENT.md` for the precise current state of each of these.

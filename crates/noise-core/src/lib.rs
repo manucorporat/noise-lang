@@ -1340,38 +1340,201 @@ mod tests {
         assert_eq!(num("Len(sine(2) + zeros(6))"), 6.0);
         // the eager 2-arg form equals sampling the lazy 1-arg form.
         assert_eq!(display_of("sample(sine(3), 8)"), display_of("sine(8, 3)"));
-        // two bare signals can't combine without a length; an RV operand likewise.
-        assert!(run("sine(1) + sine(2)").is_err());
+        // signal×signal arithmetic DEFERS too (PLAN-SIGNALS §3): a two-tone chord stays lazy…
+        assert_eq!(run("sine(3) + sine(7)").unwrap().type_name(), "signal");
+        // …and materializes to the sum of the two rendered tones.
+        assert_eq!(
+            display_of("sample(sine(3) + sine(7), 16)"),
+            display_of("a = sample(sine(3), 16); b = sample(sine(7), 16); a + b")
+        );
+        // math::exp defers into a signal (the deterministic FM building block).
+        assert_eq!(run("use math; exp(0.5 * sine(3))").unwrap().type_name(), "signal");
+        let e0 = run_num("use math; sample(exp(0.5 * sine(3)), 4)[0]");
+        assert!((e0 - 1.0).abs() < 1e-12, "exp(0.5·sin(0)) = {e0} (want 1)");
+        // prefix negation defers as well.
+        assert_eq!(display_of("sample(-sine(4), 4)"), display_of("0 - sine(4, 4)"));
         assert!(run("sample(5, 8)").is_err()); // sample needs a signal
     }
 
     #[test]
     fn lazy_noise_colors_materialize_to_correlated_normals() {
-        // noise_*(…) are lazy, RANDOM generators — type "noise", no length yet.
+        // noise_*(…) are UNDRAWN generators — recipes, like normal(0, 1); `~` is the only way in.
         assert_eq!(run("noise_white(0.5)").unwrap().type_name(), "noise");
         assert_eq!(run("noise_brown(1)").unwrap().type_name(), "noise");
         assert_eq!(run("noise_ou(1, 8)").unwrap().type_name(), "noise");
-        // sample(noise, n) draws an n-vector of zero-mean normals; white has variance sigma^2.
-        assert_eq!(num("Len(sample(noise_pink(1), 16))"), 16.0);
-        assert!(run_num("z = sample(noise_white(2), 6); E(mean(z), 40000)").abs() < 0.05);
-        let v = run_num("z = sample(noise_white(2), 6); Var(z[0], 80000)");
+        // `w ~[n] noise` pins one realization to length n — an ordinary array of zero-mean
+        // normals; white has variance sigma^2.
+        assert_eq!(num("w ~[16] noise_pink(1); Len(w)"), 16.0);
+        assert!(run_num("z ~[6] noise_white(2); E(mean(z), 40000)").abs() < 0.05);
+        let v = run_num("z ~[6] noise_white(2); Var(z[0], 80000)");
         assert!((v - 4.0).abs() < 0.2, "white Var = {v} (want sigma^2 = 4)");
         // The spectral COLOR is the lag-1 autocorrelation E[x_k x_{k+1}] / E[x_k^2]:
         // white ~ 0, OU = exp(-1/tau), brown ~ 1. We assert the ordering and the OU closed form.
         let corr = "pair(x) = { a = 0; for i in 0..Len(x)-1 { a = a + x[i]*x[i+1] }; a }; \
                     sq(x)   = { a = 0; for i in 0..Len(x)-1 { a = a + x[i]*x[i]   }; a }; \
                     c(x)    = E(pair(x), 4000) / E(sq(x), 4000); ";
-        let white = run_num(&format!("{corr} c(sample(noise_white(1), 200))"));
-        let ou = run_num(&format!("{corr} c(sample(noise_ou(1, 8), 200))"));
-        let brown = run_num(&format!("{corr} c(sample(noise_brown(1), 200))"));
+        let white = run_num(&format!("{corr} w ~[200] noise_white(1); c(w)"));
+        let ou = run_num(&format!("{corr} w ~[200] noise_ou(1, 8); c(w)"));
+        let brown = run_num(&format!("{corr} w ~[200] noise_brown(1); c(w)"));
         assert!(white.abs() < 0.05, "white neighbor corr = {white} (want ~0)");
         assert!((ou - (-1.0f64 / 8.0).exp()).abs() < 0.05, "OU corr = {ou} (want exp(-1/8))");
         assert!(brown > 0.9, "brown neighbor corr = {brown} (want ~1)");
         assert!(white < ou && ou < brown, "color should redden: {white} < {ou} < {brown}");
-        // bare noise with no length, or bad params, are errors.
-        assert!(run("noise_pink(0.5) * 2").is_err()); // needs a sized context
+        // an UNDRAWN generator in arithmetic or `sample` is the recipe error, pointing at `~`.
+        let e = run("noise_pink(0.5) * 2").unwrap_err().to_string();
+        assert!(e.contains("undrawn distribution") && e.contains('~'), "got: {e}");
+        let e = run("sample(noise_white(1), 8)").unwrap_err().to_string();
+        assert!(e.contains("undrawn distribution"), "got: {e}");
+        // bad params are still errors.
         assert!(run("noise_ou(1, 0)").is_err()); // tau must be > 0
         assert!(run("noise_brown(0 - 1)").is_err()); // sigma must be >= 0
+    }
+
+    #[test]
+    fn drawn_noise_is_one_realization() {
+        // A `~`-drawn noise is ONE realization: every mention is the same noise. Two `sample`
+        // calls reuse the same RV nodes, so a[0] - b[0] is exactly 0 (PLAN-SIGNALS §1.1) — this
+        // is the hidden-re-draw defect the plan closes (it used to be Var = 2·sigma^2).
+        let v = run_num(
+            "static ~ noise_white(1); a = sample(static, 4); b = sample(static, 4); \
+             Var(a[0] - b[0], 20000)",
+        );
+        assert!(v.abs() < 1e-9, "same realization must cancel exactly, got Var = {v}");
+        // …and `static - static` is a zero signal, not "two samples".
+        let z = run_num("static ~ noise_white(1); Var(sample(static - static, 8)[0], 20000)");
+        assert!(z.abs() < 1e-12, "static - static = {z} (want exactly 0)");
+        // The plain `~` form stays length-lazy and PINS at first materialization: a later mention
+        // at a different length is the length-clash error naming the pinned length.
+        let e = run("static ~ noise_white(1); a = sample(static, 8); sample(static, 16)")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("realized at length 8") && e.contains("16"), "got: {e}");
+        // A drawn realization composes lazily: signal arithmetic over it defers, and reducers
+        // see the same noise both times.
+        let v = run_num(
+            "static ~ noise_white(1); rx = 2 * static; \
+             a = sample(rx, 4); b = sample(rx, 4); Var(a[2] - b[2], 20000)",
+        );
+        assert!(v.abs() < 1e-9, "derived signals share the realization, got Var = {v}");
+        // An `=`-bound generator stays a recipe: each `~` draw of it is independent.
+        let v = run_num(
+            "G = noise_white(1); x ~[4] G; y ~[4] G; Var(x[0] - y[0], 60000)",
+        );
+        assert!((v - 2.0).abs() < 0.15, "independent draws should give Var 2, got {v}");
+    }
+
+    #[test]
+    fn reducers_render_at_the_ambient_resolution() {
+        // A reducer meeting a lazy signal renders it at the ambient resolution (PLAN-SIGNALS
+        // §1.2) — no inline length anywhere. mean(sin²) over whole cycles is 1/2.
+        let m = run_num("mean(sine(3) ^ 2)");
+        assert!((m - 0.5).abs() < 1e-9, "mean(sine²) = {m} (want 0.5)");
+        // mse renders BOTH sides at the same ambient length (two-tone vs silence).
+        let e = run_num("mse(sine(3) + sine(7), 0 * sine(3))");
+        assert!((e - 1.0).abs() < 1e-9, "mse(two-tone, 0) = {e} (want 1)");
+        // The default resolution is 256: a drawn noise rendered by a reducer pins at 256…
+        assert_eq!(
+            num("static ~ noise_white(1); x = E(mean(static), 100); Len(sample(static, 256))"),
+            256.0
+        );
+        // …and `engine::set_resolution(N)` changes what reducers use (the realization pins at 8,
+        // so re-rendering at 256 is now the length clash).
+        let ok = run(
+            "engine::set_resolution(8); static ~ noise_white(1); \
+             x = E(mean(static), 100); Len(sample(static, 8))",
+        );
+        assert_eq!(ok.unwrap(), Value::Num(8.0));
+        let e = run(
+            "engine::set_resolution(8); static ~ noise_white(1); \
+             x = E(mean(static), 100); sample(static, 256)",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("realized at length 8"), "got: {e}");
+        // set_resolution validates its argument like the other engine knobs.
+        assert!(run("engine::set_resolution(0)").is_err());
+        assert!(run("engine::set_resolution(2.5)").is_err());
+    }
+
+    #[test]
+    fn complex_signals_by_composition() {
+        // signal + i·signal is a COMPLEX SIGNAL — Complex{re: Signal, im: Signal}, no new kind.
+        let z = run("sine(3) + math::i * sine(7)").unwrap();
+        assert_eq!(z.type_name(), "complex");
+        // sample of a complex signal → an array of complex, channels rendered consistently.
+        assert_eq!(num("Len(sample(sine(3) + math::i * sine(7), 8))"), 8.0);
+        let im1 = run_num("im(sample(sine(2) + math::i, 4)[1])");
+        assert!((im1 - 1.0).abs() < 1e-12, "constant im channel = {im1} (want 1)");
+        // abs/arg of a complex signal stay lazy and demodulate correctly:
+        // |e^{i·θ(t)}| = 1 and arg(e^{i·θ(t)}) = θ(t) for a small angle.
+        assert_eq!(run("abs(exp(i * 0.3 * sine(3)))").unwrap().type_name(), "signal");
+        let m = run_num("mse(arg(exp(i * 0.3 * sine(3))), 0.3 * sine(3))");
+        assert!(m < 1e-18, "lossless FM round-trip, got mse = {m}");
+        let a = run_num("mean(abs(exp(i * 0.3 * sine(3))))");
+        assert!((a - 1.0).abs() < 1e-12, "unit carrier magnitude, got {a}");
+        // plotting a complex signal is a teaching error (no single trace).
+        let e = run("plot::line(sine(3) + math::i * sine(7))").unwrap_err().to_string();
+        assert!(e.contains("no single trace"), "got: {e}");
+    }
+
+    #[test]
+    fn noise_white_complex_is_a_drawn_cscg() {
+        // noise_white_complex(σ) is undrawn like the rest; `~` draws a lazy complex realization.
+        assert_eq!(run("noise_white_complex(1)").unwrap().type_name(), "noise");
+        assert!(run("noise_white_complex(1) + math::i").is_err());
+        assert_eq!(run("z ~ noise_white_complex(1); z").unwrap().type_name(), "complex");
+        // Total-power convention matches rand::normal_complex: E|z|² = σ² (σ = 2 ⇒ 4),
+        // split evenly across the quadratures.
+        let p = run_num("z ~[64] noise_white_complex(2); E(normsq(z) / 64, 20000)");
+        assert!((p - 4.0).abs() < 0.2, "E|z|² = {p} (want σ² = 4)");
+        let re_var = run_num("z ~[8] noise_white_complex(2); Var(re(z[0]), 40000)");
+        assert!((re_var - 2.0).abs() < 0.15, "per-quadrature var = {re_var} (want σ²/2 = 2)");
+        // ONE realization: both channels re-render consistently across two samples.
+        let v = run_num(
+            "z ~ noise_white_complex(1); a = sample(z, 4); b = sample(z, 4); \
+             Var(re(a[0]) - re(b[0]) + im(a[1]) - im(b[1]), 20000)",
+        );
+        assert!(v.abs() < 1e-9, "complex realization must be shared, got Var = {v}");
+    }
+
+    #[test]
+    fn am_vs_fm_all_in_signal_land() {
+        // The PLAN-SIGNALS §2 flagship: the whole modulate → add static → demodulate chain stays
+        // lazy; the two measurement knobs sit at the top, one per axis. The numbers must land on
+        // the sampled-first pipeline's (AM ≈ σ²/2 + a small demod bias, FM ≈ AM/dev² in the
+        // small-signal limit — measured 0.0777 / 0.0099 at these settings).
+        let src = "
+            engine::set_max_samples(8000);
+            engine::set_resolution(64);
+            am_modulate(m)        = 1 + m;
+            fm_modulate(m, dev)   = exp(i * dev * m);
+            am_demodulate(z)      = abs(z) - 1;
+            fm_demodulate(z, dev) = arg(z) / dev;
+            dev   = 3;
+            sigma = 0.4;
+            msg    = 0.3 * sine(3);
+            static ~ noise_white_complex(sigma);
+            rec_am = am_demodulate(am_modulate(msg)      + static);
+            rec_fm = fm_demodulate(fm_modulate(msg, dev) + static, dev);
+            [E(mse(rec_am, msg)), E(mse(rec_fm, msg))]
+        ";
+        let (am, fm) = match run(src).unwrap() {
+            Value::Array(xs) => {
+                let get = |v: &Value| match v {
+                    Value::Num(n) | Value::Est { val: n, .. } => *n,
+                    other => panic!("expected number, got {other:?}"),
+                };
+                (get(&xs[0]), get(&xs[1]))
+            }
+            other => panic!("expected array, got {other:?}"),
+        };
+        assert!((am - 0.0777).abs() < 0.01, "AM err = {am} (want ≈ 0.0777)");
+        assert!((fm - 0.0099).abs() < 0.003, "FM err = {fm} (want ≈ 0.0099)");
+        let ratio = am / fm;
+        assert!(
+            ratio > 5.0 && ratio < 9.5,
+            "FM advantage ≈ dev² = 9 (a bit under at finite noise), got {ratio}"
+        );
     }
 
     #[test]
@@ -2312,9 +2475,12 @@ mod tests {
 
     #[test]
     fn complex_mixing_errors_cleanly() {
-        // complex can't combine with a signal / lazy noise / bool / undrawn recipe
-        assert!(run("signal::sine(3) + math::i").is_err());
-        assert!(run("signal::noise_white(1) + math::i").is_err());
+        // a signal + complex is now a COMPLEX SIGNAL (PLAN-SIGNALS §1.3) — the channels stay lazy
+        let z = run("signal::sine(3) + math::i").unwrap();
+        assert_eq!(z.type_name(), "complex");
+        // an UNDRAWN noise generator is still rejected (the message now points at `~`)
+        let e = run("signal::noise_white(1) + math::i").unwrap_err().to_string();
+        assert!(e.contains("undrawn distribution"), "got: {e}");
         assert!(run("math::i + true").is_err());
         assert!(run("math::i + rand::unif(0, 1)").is_err());
         // complex can't be an array index, a counted event, or an ordered extremum
@@ -2490,7 +2656,7 @@ mod tests {
         // a scalar estimate → value card carrying its standard error
         match &summary_of("X ~ rand::unif(-1,1); Y ~ rand::unif(-1,1); pi = 4*P(X^2+Y^2<1); describe(pi)").payload {
             Payload::Value(v) => {
-                assert!((v.val - 3.14159).abs() < 0.02, "pi {}", v.val);
+                assert!((v.val - std::f64::consts::PI).abs() < 0.02, "pi {}", v.val);
                 assert!(v.se > 0.0, "an estimate should carry uncertainty");
             }
             other => panic!("expected a value card, got {other:?}"),

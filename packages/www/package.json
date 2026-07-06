@@ -12,7 +12,6 @@
     "preview": "astro preview"
   },
   "dependencies": {
-    "@astrojs/mdx": "^4.3.14",
     "@noiselang/core": "workspace:*",
     "astro": "^5.13.0",
     "monaco-editor": "^0.52.2"

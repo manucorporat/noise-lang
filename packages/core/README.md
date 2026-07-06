@@ -21,7 +21,7 @@ npm add @noiselang/core   # or: pnpm add / yarn add
 import { run } from '@noiselang/core';
 
 const result = await run(`
-  let coin = flip(0.5)
+  coin ~ rand::bernoulli(0.5);
   P(coin)
 `);
 

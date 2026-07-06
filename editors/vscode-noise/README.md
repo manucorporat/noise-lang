@@ -4,7 +4,7 @@ Syntax highlighting for the [Noise](../../LANG.md) probabilistic language (`.noi
 
 It's a pure [TextMate grammar](./syntaxes/noise.tmLanguage.json) — no build step, no
 dependencies, no language server. Token categories mirror the website palette in
-`www/src/lib/highlight.ts`: keywords, module namespaces (`rand::`, `vec::`, …),
+`packages/www/src/lib/highlight.ts`: keywords, module namespaces (`rand::`, `vec::`, …),
 distributions (`unif`, `normal`, `rotation`, …), queries/builtins (`P`, `E`, `Print`, …),
 the stochastic-bind operator `~`, comments (`#` and `//`), numbers, and strings.
 

@@ -1,15 +1,15 @@
-# Netlify deploy config for the Noise website (www/).
+# Netlify deploy config for the Noise website (packages/www/).
 #
 # The site embeds the real Noise engine compiled to WebAssembly. The `prebuild`
-# hook in www/package.json runs `wasm-pack`, which is NOT present in Netlify's
+# hook in packages/www/package.json runs `wasm-pack`, which is NOT present in Netlify's
 # build image — so we install it (and ensure the Rust toolchain) before building.
 # The wasm-pack installer drops a prebuilt binary into $HOME/.cargo/bin, which
 # the `wasm` npm script already prepends to PATH.
 
 [build]
-  base = "www"
+  base = "packages/www"
   publish = "dist"
-  command = "../netlify/install-wasm-pack.sh && pnpm build"
+  command = "../../netlify/install-wasm-pack.sh && pnpm build"
 
 [build.environment]
   # Toolchain for the install script. Use "stable" (some deps require a recent

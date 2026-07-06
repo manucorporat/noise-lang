@@ -1,12 +1,12 @@
 {
   "name": "@noiselang/core",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "The Noise probabilistic language engine, compiled to WebAssembly. Parse and run .noise programs (with variable introspection) from any JS/TS project — the .wasm ships in the package and bundles into your build.",
   "license": "MIT",
   "author": "Manu Mtz.-Almeida <manu.valladolid@gmail.com>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/manucorporat/noise-lang",
+    "url": "git+https://github.com/manucorporat/noise-lang.git",
     "directory": "packages/core"
   },
   "type": "module",
@@ -24,7 +24,7 @@
     "wasm"
   ],
   "scripts": {
-    "build:wasm": "cd ../.. && PATH=\"$HOME/.cargo/bin:$PATH\" wasm-pack build crates/noise-wasm --target web --out-dir ../../packages/core/wasm --out-name noise --release",
+    "build:wasm": "cd ../.. && PATH=\"$HOME/.cargo/bin:$PATH\" wasm-pack build crates/noise-wasm --target web --out-dir ../../packages/core/wasm --out-name noise --release && rm -f packages/core/wasm/.gitignore",
     "build:ts": "tsc -p tsconfig.json",
     "build": "pnpm run build:wasm && pnpm run build:ts",
     "prepublishOnly": "pnpm run build"

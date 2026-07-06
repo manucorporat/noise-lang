@@ -105,7 +105,8 @@ path). Start each program with the `use` lines you need.
 | `rand`    | `use rand;` | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `normal_complex`, `exponential`, `exponential_int`, `poisson`, `geometric`, `categorical`, `rotation`, `permutation` |
 | `math`    | `use math;` | `pi`, `e`, `i`/`j` (imaginary unit), `sqrt`, `exp`, `abs`, `arg`, `conj`, `re`, `im`, `floor`, `ceil`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign`, `gcd`, `modpow` |
 | `vec`     | `use vec;`  | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` |
-| `signal`  | `use signal;` | `sine`, `cosine`, `sample`, `noise_white`, `noise_brown`, `noise_pink`, `noise_ou` |
+| `signal`  | `use signal;` | `sine`, `cosine`, `sample`, `noise_white`, `noise_white_complex`, `noise_brown`, `noise_pink`, `noise_ou` |
+| `engine`  | `use engine;` (or path) | `set_max_samples`, `set_max_opts`, `set_resolution` |
 
 ```noise
 use rand;            # unif, unif_int, …
@@ -252,14 +253,27 @@ Print("E(roll | >3)  =", E(hi), " median:", Q(hi, 0.5))   # 5, 5
 ```
 
 **Signals (lazy waveforms).** `signal::sine(f)` / `cosine(f)` describe a waveform by frequency
-(O(1) memory). Scalar/trig ops defer into the signal; it **materializes** to an array when it meets
-a sized array (adopting its length) or via `signal::sample(sig, n)`. `noise_white(sigma)` is a lazy
-*random* generator (materializes to fresh iid `normal(0, sigma)` draws). `sine(n, f)` is shorthand
-for `sample(sine(f), n)`.
+(O(1) memory). Arithmetic (scalar AND signal×signal, e.g. `sine(3) + sine(7)`), trig ufuncs, and
+`math::exp` defer into the signal; it **materializes** to an array when it meets a sized array
+(adopting its length), via `signal::sample(sig, n)`, or when a reducer (`mse`/`mean`/`sum`/…) or
+`plot::line` renders it at the **ambient resolution** (`engine::set_resolution(N)`, default 256).
+`sine(n, f)` is shorthand for `sample(sine(f), n)`.
+
+**Noise generators are undrawn distributions** — `noise_white(sigma)` (`noise_brown`/`noise_pink`/
+`noise_ou`/`noise_white_complex`) obey the same rule as `normal(0, 1)`: **draw with `~` first**.
+`static ~ noise_white(s)` is ONE realization (every mention is the same noise; `static - static`
+is exactly 0); it pins its length at first materialization — re-rendering at another length is an
+error. `w ~[n] noise_white(s)` pins to `n` up front (an ordinary array of RVs). `sample(noise, n)`
+and `noise + x` are errors on the undrawn generator. `noise_white_complex(sigma)` draws complex
+static with `E|z|² = sigma²` — combine with `math::exp(i*θ)`/`abs`/`arg` for a fully lazy
+modulate → demodulate chain.
 
 ```noise
 use signal;
-msg = sample(0.3 * sine(3), 64);   # render the lazy tone at 64 points
+engine::set_resolution(64);        # the one resolution knob — set once, next to the budget
+msg = 0.3 * sine(3);               # a waveform (no length anywhere in the math)
+static ~ noise_white_complex(0.4); # ONE drawn realization of complex static
+err = E(vec::mse(math::abs(1 + msg + static) - 1, msg));   # reducers render at the knob
 ```
 
 **Complex numbers.** `complex` is a first-class scalar. There's no literal — it **emerges** from

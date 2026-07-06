@@ -16,7 +16,7 @@ use crate::dist::{DistArg, Recipe, RvGraph, RvId, RvKind, RvNode, Source, Unifor
 use crate::error::{NoiseError, Result, Span};
 use crate::parser::parse;
 use crate::sampler::{self, Moments};
-use crate::signal::{NoiseKind, NoiseSpec, SigOp, SignalSpec};
+use crate::signal::{NoiseKind, NoiseSpec, RealizationId, SigExpr, SigUnOp};
 use crate::value::Value;
 
 /// A user-defined function (LANG.md §4). `Assign` is deterministic (`f(a)=…`); `Sample` draws a
@@ -66,6 +66,18 @@ pub struct Engine {
     /// program is still parsed, evaluated, and graph-built (so type/shape/scope errors surface),
     /// but no draws happen, so a check finishes fast regardless of the configured sample budget.
     check_mode: bool,
+    /// Drawn-noise **realization cache** (PLAN-SIGNALS §3). A `~`-drawn noise pins its rendered
+    /// RV lanes here at first materialization; every later mention gets the SAME nodes (so
+    /// `static - static` is exactly 0 and two `sample`s see one noise), and a different requested
+    /// length is a teaching error. Lives next to `vars` so the playground's introspection sidecar
+    /// (which relies on Engine state persisting across `run()`) keeps working unchanged.
+    realizations: HashMap<RealizationId, Vec<Value>>,
+    /// Next fresh [`RealizationId`] (unique per engine; allocated by the `~` draw).
+    next_realization: usize,
+    /// Ambient **sampling resolution** (`engine::set_resolution(N)`, default
+    /// [`builtins::RESOLUTION_DEFAULT`]): the length at which reducers render a lazy signal that
+    /// never met an explicit length — the time-axis twin of `max_samples`.
+    resolution: usize,
 }
 
 /// One item in a program's output stream — the unit `take_output` returns, in source order. `Print`
@@ -97,6 +109,9 @@ impl Engine {
             max_samples: builtins::P_DEFAULT_N,
             max_opts: builtins::MAX_OPS_DEFAULT,
             check_mode: false,
+            realizations: HashMap::new(),
+            next_realization: 0,
+            resolution: builtins::RESOLUTION_DEFAULT,
         }
     }
 
@@ -198,8 +213,8 @@ impl Engine {
             Expr::Binary(op, l, r) => {
                 let lv = self.eval(l)?;
                 let rv = self.eval(r)?;
-                forbid_recipe(&lv, l.span)?;
-                forbid_recipe(&rv, r.span)?;
+                forbid_undrawn(&lv, l.span)?;
+                forbid_undrawn(&rv, r.span)?;
                 self.binop(*op, lv, rv, node.span)
             }
             Expr::Bind(kind, name, rhs) => {
@@ -244,7 +259,7 @@ impl Engine {
             }
             Expr::If(cond, then_b, else_b) => {
                 let c = self.eval(cond)?;
-                forbid_recipe(&c, cond.span)?;
+                forbid_undrawn(&c, cond.span)?;
                 match c {
                     // Deterministic condition: take exactly one branch (short-circuit).
                     Value::Bool(true) => self.eval(then_b),
@@ -458,7 +473,7 @@ impl Engine {
         let mut out = Vec::with_capacity(elems.len());
         for e in elems {
             let v = self.eval(e)?;
-            forbid_recipe(&v, e.span)?;
+            forbid_undrawn(&v, e.span)?;
             out.push(v);
         }
         Ok(Value::Array(Rc::new(out)))
@@ -489,7 +504,7 @@ impl Engine {
     /// an error — a range needs concrete endpoints).
     fn range_bound(&mut self, e: &Spanned) -> Result<f64> {
         let v = self.eval(e)?;
-        forbid_recipe(&v, e.span)?;
+        forbid_undrawn(&v, e.span)?;
         match v {
             Value::Num(n) | Value::Est { val: n, .. } if n.is_finite() => Ok(n),
             other => Err(NoiseError::runtime(
@@ -612,7 +627,7 @@ impl Engine {
             if matches!(v, Value::Continue) {
                 continue;
             }
-            forbid_recipe(&v, body.span)?;
+            forbid_undrawn(&v, body.span)?;
             out.push(v);
         }
         Ok(Value::Array(Rc::new(out)))
@@ -662,15 +677,56 @@ impl Engine {
         }
     }
 
-    /// `~` semantics in one place: a recipe is drawn into a fresh RV; anything else (a point
-    /// mass, an already-drawn RV) binds as-is, since there is nothing new to draw. Fallible because
-    /// a structured recipe (`rotation`) builds a whole matrix and could surface a shape error;
-    /// scalar recipe draws never fail.
+    /// `~` semantics in one place: a recipe is drawn into a fresh RV; an undrawn noise generator
+    /// is drawn into ONE lazy **realization** (a `Signal` noise leaf — length still lazy);
+    /// anything else (a point mass, an already-drawn RV) binds as-is, since there is nothing new
+    /// to draw. Fallible because a structured recipe (`rotation`) builds a whole matrix and could
+    /// surface a shape error; scalar recipe and noise draws never fail.
     fn draw_if_recipe(&mut self, v: Value) -> Result<Value> {
         match v {
             Value::Recipe(r) => self.draw(r),
+            Value::Noise(spec) => Ok(self.draw_noise(spec)),
             other => Ok(other),
         }
+    }
+
+    /// Draw one lazy noise **realization** (PLAN-SIGNALS §1.1): allocate a fresh
+    /// [`RealizationId`] and wrap it in a signal leaf. The length stays lazy — the realization
+    /// pins it at first materialization (see [`Engine::realization`]). The complex generator
+    /// splits into two independent real lanes of strength `sigma/√2` (per-quadrature CSCG, so
+    /// `E|z|² = sigma²` like `rand::normal_complex`).
+    fn draw_noise(&mut self, spec: NoiseSpec) -> Value {
+        if let NoiseKind::WhiteComplex = spec.kind {
+            let lane = NoiseSpec { sigma: spec.sigma / std::f64::consts::SQRT_2, kind: NoiseKind::White };
+            let re = self.draw_noise(lane);
+            let im = self.draw_noise(lane);
+            return Value::complex(re, im);
+        }
+        let id = RealizationId(self.next_realization);
+        self.next_realization += 1;
+        Value::Signal(Rc::new(SigExpr::Noise { id, spec }))
+    }
+
+    /// `~[n] noise` / `~[m, n] noise` — an **eager** realization pinned up front: the last
+    /// dimension is the realization length, outer dimensions draw independent realizations. This
+    /// is the old `sample(noise_*(…), n)`, now spelled as a draw; it materializes directly to an
+    /// ordinary array of RVs (no cache entry needed — the value IS the realization).
+    fn draw_noise_shaped(&mut self, dims: &[usize], spec: NoiseSpec) -> Value {
+        if let [n] = dims {
+            let vals = match spec.kind {
+                NoiseKind::WhiteComplex => {
+                    let lane =
+                        NoiseSpec { sigma: spec.sigma / std::f64::consts::SQRT_2, kind: NoiseKind::White };
+                    let re = self.materialize_noise(lane, *n);
+                    let im = self.materialize_noise(lane, *n);
+                    re.into_iter().zip(im).map(|(a, b)| Value::complex(a, b)).collect()
+                }
+                _ => self.materialize_noise(spec, *n),
+            };
+            return Value::Array(Rc::new(vals));
+        }
+        let (m, rest) = (dims[0], &dims[1..]);
+        Value::Array(Rc::new((0..m).map(|_| self.draw_noise_shaped(rest, spec)).collect()))
     }
 
     /// The prefix draw operator `~[shape]? body` (LANG.md §2). Evaluate the operand once to a
@@ -686,6 +742,11 @@ impl Engine {
         for dim in shape {
             let dv = self.eval(dim)?;
             dims.push(self.count_arg("~", &dv, dim.span)?);
+        }
+        // `~[n]` on a noise generator pins ONE realization to length `n` (the shape is the time
+        // axis), not `n` independent realizations — so it gets its own arm.
+        if let Value::Noise(spec) = v {
+            return Ok(self.draw_noise_shaped(&dims, spec));
         }
         self.draw_shaped(&dims, &v)
     }
@@ -986,7 +1047,7 @@ impl Engine {
         // The condition: a bool RV (or deterministic bool). A constant `true` is the unconditional
         // query; a constant `false` makes the condition never hold (a 0/0, caught at the query).
         let cond_v = self.eval(given)?;
-        forbid_recipe(&cond_v, given.span)?;
+        forbid_undrawn(&cond_v, given.span)?;
         let (condition, cond_kind) = self.operand_to_rv(cond_v, given.span)?;
         if cond_kind != RvKind::Bool {
             return Err(NoiseError::runtime(
@@ -997,7 +1058,7 @@ impl Engine {
         // The quantity: an event (bool) or a number — the query (`P` vs `E`/`Var`/`Q`) decides which
         // it accepts, using the `q_kind` recorded here.
         let quantity_v = self.eval(event)?;
-        forbid_recipe(&quantity_v, event.span)?;
+        forbid_undrawn(&quantity_v, event.span)?;
         let (quantity, q_kind) = self.operand_to_rv(quantity_v, event.span)?;
         Ok(Value::Cond { quantity, q_kind, condition })
     }
@@ -1082,6 +1143,16 @@ impl Engine {
                         Value::Array(xs) => {
                             let xs = xs.clone();
                             return self.grid_summary(&xs, label, span);
+                        }
+                        // A lazy signal renders at the ambient resolution — `plot::line(msg)`
+                        // works without an inline length, like the reducers.
+                        Value::Signal(s) => {
+                            let n = self.resolution;
+                            let xs = self.materialize_sig(&s.clone(), n, span)?;
+                            return self.grid_summary(&xs, label, span);
+                        }
+                        Value::Complex { .. } => {
+                            return Err(complex_has_no_trace(span));
                         }
                         _ => {}
                     }
@@ -1286,6 +1357,9 @@ impl Engine {
                     span,
                 ));
             }
+            if matches!(x, Value::Complex { .. }) {
+                return Err(complex_has_no_trace(span));
+            }
             roots.push(self.operand_to_rv(x.clone(), span)?.0);
         }
         Ok(roots)
@@ -1379,13 +1453,16 @@ impl Engine {
     /// RV-lift / deterministic paths apply as before. Its own method so `eval`'s frame stays small.
     fn eval_unary_expr(&mut self, op: UnOp, rhs: &Spanned, span: Span) -> Result<Value> {
         let v = self.eval(rhs)?;
-        forbid_recipe(&v, rhs.span)?;
+        forbid_undrawn(&v, rhs.span)?;
         if let Value::Cond { quantity, condition, .. } = v {
             let q = self.lift_unary(op, Value::Dist(quantity), span)?;
             let (quantity, q_kind) = self.operand_to_rv(q, span)?;
             Ok(Value::Cond { quantity, q_kind, condition })
         } else if matches!(v, Value::Complex { .. }) {
             self.unary_complex(op, v, span)
+        } else if let Value::Signal(s) = v {
+            // A prefix op on a lazy signal defers into the tree (`-sine(3)` stays a signal).
+            Ok(Value::Signal(Rc::new(SigExpr::Unary(SigUnOp::Un(op), s))))
         } else if is_dist(&v) {
             self.lift_unary(op, v, span)
         } else {
@@ -1432,23 +1509,19 @@ impl Engine {
     /// reuses (LANG.md §0). Lifts to a graph node if either side is a `Dist`, else folds
     /// deterministically. Recipes are rejected (you can't operate on an undrawn distribution).
     fn binop(&mut self, op: BinOp, l: Value, r: Value, span: Span) -> Result<Value> {
-        forbid_recipe(&l, span)?;
-        forbid_recipe(&r, span)?;
+        forbid_undrawn(&l, span)?;
+        forbid_undrawn(&r, span)?;
         // A conditioned operand pushes the op into its quantity and carries the condition along —
         // `2*(X|C)` is `(2X) | C`. Handle before the other paths so a conditioned value never folds
         // or lifts as a plain RV.
         if matches!(l, Value::Cond { .. }) || matches!(r, Value::Cond { .. }) {
             return self.binop_cond(op, l, r, span);
         }
-        // A lazy signal defers scalar/trig ops and materializes against a sized array. Handle it
-        // before the array path so `signal ⊕ array` adopts the array's length.
+        // A lazy signal defers ops (growing its expression tree) and materializes against a sized
+        // array. Handle it before the array path so `signal ⊕ array` adopts the array's length.
+        // (An undrawn noise generator never reaches here — `forbid_undrawn` above rejects it.)
         if matches!(l, Value::Signal(_)) || matches!(r, Value::Signal(_)) {
             return self.binop_signal(op, l, r, span);
-        }
-        // Lazy white noise materializes against a sized array (into iid normal RV nodes), one
-        // independent draw per leaf-vector lane. Handle it before the array path, like a signal.
-        if matches!(l, Value::Noise(_)) || matches!(r, Value::Noise(_)) {
-            return self.binop_noise(op, l, r, span);
         }
         // Arrays broadcast elementwise (NumPy-style): array⊕array (length-matched) and
         // array⊕scalar both map the op over the elements — so `signal + noise`, `1 + m`, and
@@ -1553,68 +1626,42 @@ impl Engine {
         Ok(Value::Array(Rc::new(out)))
     }
 
-    /// Combine a lazy signal with another operand. A scalar **defers** (the op joins the signal's
-    /// pipeline, staying O(1) memory); a sized **array materializes** the signal to that length and
-    /// then broadcasts. Two bare signals (no length) is an error — `sample` one first.
+    /// Combine a lazy signal with another operand. A scalar or another signal **defers** (the op
+    /// grows the expression tree, staying O(1) memory — `sine(3) + sine(7)` is a two-tone
+    /// signal); a **complex** operand routes to the complex path (the signal promotes to
+    /// `sig + 0i`); a sized **array materializes** the signal to that length and then broadcasts.
     fn binop_signal(&mut self, op: BinOp, l: Value, r: Value, span: Span) -> Result<Value> {
+        // Complex first: `signal ⊕ complex` decomposes into channel ops, which land back here as
+        // plain signal arithmetic.
+        if matches!(l, Value::Complex { .. }) || matches!(r, Value::Complex { .. }) {
+            return self.binop_complex(op, l, r, span);
+        }
         match (l, r) {
-            (Value::Signal(s), rhs) if scalar_const(&rhs).is_some() => {
-                let c = scalar_const(&rhs).unwrap();
-                Ok(Value::Signal(Rc::new(s.push(SigOp::Scalar { op, c, scalar_on_left: false }))))
+            (Value::Signal(a), Value::Signal(b)) => {
+                Ok(Value::Signal(Rc::new(SigExpr::Binop(op, a, b))))
             }
-            (lhs, Value::Signal(s)) if scalar_const(&lhs).is_some() => {
-                let c = scalar_const(&lhs).unwrap();
-                Ok(Value::Signal(Rc::new(s.push(SigOp::Scalar { op, c, scalar_on_left: true }))))
+            (Value::Signal(a), rhs) if scalar_const(&rhs).is_some() => {
+                let c = Rc::new(SigExpr::Konst(scalar_const(&rhs).unwrap()));
+                Ok(Value::Signal(Rc::new(SigExpr::Binop(op, a, c))))
+            }
+            (lhs, Value::Signal(b)) if scalar_const(&lhs).is_some() => {
+                let c = Rc::new(SigExpr::Konst(scalar_const(&lhs).unwrap()));
+                Ok(Value::Signal(Rc::new(SigExpr::Binop(op, c, b))))
             }
             // A sized array fixes the sample count: materialize the signal, then broadcast.
             (Value::Signal(s), arr @ Value::Array(_)) => {
-                let n = array_len(&arr);
-                let mat = materialize_signal(&s, n);
+                let mat = Value::Array(Rc::new(self.materialize_sig(&s, array_len(&arr), span)?));
                 self.binop(op, mat, arr, span)
             }
             (arr @ Value::Array(_), Value::Signal(s)) => {
-                let n = array_len(&arr);
-                let mat = materialize_signal(&s, n);
+                let mat = Value::Array(Rc::new(self.materialize_sig(&s, array_len(&arr), span)?));
                 self.binop(op, arr, mat, span)
             }
-            (Value::Signal(_), Value::Signal(_)) => Err(NoiseError::runtime(
-                "cannot combine two lazy signals without a sample length — `signal::sample(s, n)` one first"
-                    .to_string(),
-                span,
-            )),
             (l, r) => {
                 let other = if matches!(l, Value::Signal(_)) { r } else { l };
                 Err(NoiseError::runtime(
                     format!(
                         "cannot combine a signal with {} — `signal::sample(sig, n)` it to an array first",
-                        other.type_name()
-                    ),
-                    span,
-                ))
-            }
-        }
-    }
-
-    /// Combine lazy white noise with another operand. Only a **sized array** gives it a length:
-    /// the noise materializes into a matching shape of fresh iid normal RV nodes (independent per
-    /// leaf lane — so I/Q get distinct noise), then broadcasts. A scalar/signal/another-noise has
-    /// no length — `signal::sample(noise_white(s), n)` it first.
-    fn binop_noise(&mut self, op: BinOp, l: Value, r: Value, span: Span) -> Result<Value> {
-        match (l, r) {
-            (Value::Noise(spec), arr @ Value::Array(_)) => {
-                let mat = self.materialize_noise_like(spec, &arr, span)?;
-                self.binop(op, mat, arr, span)
-            }
-            (arr @ Value::Array(_), Value::Noise(spec)) => {
-                let mat = self.materialize_noise_like(spec, &arr, span)?;
-                self.binop(op, arr, mat, span)
-            }
-            (l, r) => {
-                let other = if matches!(l, Value::Noise(_)) { r } else { l };
-                Err(NoiseError::runtime(
-                    format!(
-                        "noise needs a sized context, but met {} — add it to a sized signal/array, \
-                         or `signal::sample(noise_*(…), n)` it first",
                         other.type_name()
                     ),
                     span,
@@ -1756,6 +1803,9 @@ impl Engine {
             Value::Dist(id) if self.graph.kind(id) == RvKind::Num => {
                 Ok((Value::Dist(id), Value::Num(0.0)))
             }
+            // A real lazy signal promotes to `sig + 0i` — this is what makes a complex signal
+            // pure composition (`Complex { re: Signal, im: Signal }`, PLAN-SIGNALS §1.3).
+            v @ Value::Signal(_) => Ok((v, Value::Num(0.0))),
             other => Err(NoiseError::runtime(
                 format!("cannot use {} in a complex expression", other.type_name()),
                 span,
@@ -1763,28 +1813,99 @@ impl Engine {
         }
     }
 
-    /// Build a value with the *same nested shape* as `arr` but every leaf vector replaced by a fresh
-    /// length-matched draw of `spec` (its color). Nesting recurses (a 2×n carrier yields two
-    /// independent n-vectors), so broadcasting noise onto an `[I, Q]` pair gives I and Q distinct
-    /// noise — each an independent realization of the same generator.
-    fn materialize_noise_like(&mut self, spec: NoiseSpec, arr: &Value, span: Span) -> Result<Value> {
-        let xs = match arr {
-            Value::Array(xs) => xs,
-            other => return Err(NoiseError::runtime(
-                format!("internal: noise can only materialize against an array, got {}", other.type_name()),
+    /// Materialize a lazy signal tree to `n` element `Value`s (PLAN-SIGNALS §3). A deterministic
+    /// tree folds straight to `f64`s ([`SigExpr::sample_f64`] — the fast path `nyquist.noise`
+    /// rides); once a subtree carries a drawn-noise leaf the walk switches to per-element `Value`
+    /// combination through the ordinary [`Self::binop`] lifting, with the **realization cache**
+    /// guaranteeing every mention of the same draw yields the same RV nodes.
+    fn materialize_sig(&mut self, expr: &SigExpr, n: usize, span: Span) -> Result<Vec<Value>> {
+        if !expr.has_noise() {
+            return Ok(expr.sample_f64(n).into_iter().map(Value::Num).collect());
+        }
+        match expr {
+            SigExpr::Noise { id, spec } => self.realization(*id, *spec, n, span),
+            SigExpr::Unary(op, a) => {
+                let xs = self.materialize_sig(a, n, span)?;
+                let mut out = Vec::with_capacity(n);
+                for x in xs {
+                    out.push(self.sig_unary(*op, x, span)?);
+                }
+                Ok(out)
+            }
+            SigExpr::Binop(op, a, b) => {
+                let ls = self.materialize_sig(a, n, span)?;
+                let rs = self.materialize_sig(b, n, span)?;
+                let mut out = Vec::with_capacity(n);
+                for (l, r) in ls.into_iter().zip(rs) {
+                    out.push(self.binop(*op, l, r, span)?);
+                }
+                Ok(out)
+            }
+            SigExpr::Atan2(y, x) => {
+                let ys = self.materialize_sig(y, n, span)?;
+                let xs = self.materialize_sig(x, n, span)?;
+                let mut out = Vec::with_capacity(n);
+                for (yv, xv) in ys.into_iter().zip(xs) {
+                    out.push(self.complex_atan2(yv, xv, span)?);
+                }
+                Ok(out)
+            }
+            // `has_noise` is true here, so the deterministic leaves are unreachable.
+            SigExpr::Wave { .. } | SigExpr::Konst(_) => {
+                unreachable!("deterministic leaf under a noise-bearing walk")
+            }
+        }
+    }
+
+    /// One deferred unary step applied to a materialized element: a constant folds with the same
+    /// kernel the deterministic walk uses; an RV lifts (`exp` of an RV is rejected exactly like
+    /// `math::exp` of one — the VM has no exp node).
+    fn sig_unary(&mut self, op: SigUnOp, x: Value, span: Span) -> Result<Value> {
+        match (op, x) {
+            (op, Value::Num(v)) => Ok(Value::Num(crate::signal::apply_unary(op, v))),
+            (op, Value::Est { val, .. }) => Ok(Value::Num(crate::signal::apply_unary(op, val))),
+            (SigUnOp::Un(u), x @ Value::Dist(_)) => self.lift_unary(u, x, span),
+            (SigUnOp::Exp, Value::Dist(_)) => Err(NoiseError::runtime(
+                "math::exp of a random real value is not supported (the VM has no exp node); exp of a complex angle e^{i·θ} works because it lowers to cos/sin".to_string(),
                 span,
             )),
-        };
-        // A vector of sub-arrays (a matrix) → recurse per row; a leaf vector → draw `len` samples.
-        if matches!(xs.first(), Some(Value::Array(_))) {
-            let mut out = Vec::with_capacity(xs.len());
-            for e in xs.iter() {
-                out.push(self.materialize_noise_like(spec, e, span)?);
-            }
-            Ok(Value::Array(Rc::new(out)))
-        } else {
-            Ok(Value::Array(Rc::new(self.materialize_noise(spec, xs.len()))))
+            (_, other) => Err(NoiseError::runtime(
+                format!("cannot apply a signal op to {}", other.type_name()),
+                span,
+            )),
         }
+    }
+
+    /// Resolve a drawn-noise leaf through the **realization cache**: the first materialization
+    /// renders the spec at length `n` and pins it; every later mention gets the SAME `Value`s
+    /// (the same RV nodes — that is what makes `static - static` exactly 0 and re-rendering the
+    /// same draw at two carriers a fair fight). A different `n` is a teaching error: white noise
+    /// has no finer version of itself, so a silent re-render would be a lie (PLAN-SIGNALS §1.1).
+    fn realization(
+        &mut self,
+        id: RealizationId,
+        spec: NoiseSpec,
+        n: usize,
+        span: Span,
+    ) -> Result<Vec<Value>> {
+        if let Some(vals) = self.realizations.get(&id) {
+            if vals.len() != n {
+                return Err(NoiseError::runtime(
+                    format!(
+                        "this drawn noise was realized at length {} and cannot be re-rendered at {n} — \
+                         noise has no finer version of itself; keep one resolution across its uses, \
+                         or pin it with `~[{}]`",
+                        vals.len(),
+                        vals.len()
+                    ),
+                    span,
+                ));
+            }
+            return Ok(vals.clone());
+        }
+        let vals = self.materialize_noise(spec, n);
+        self.realizations.insert(id, vals.clone());
+        Ok(vals)
     }
 
     /// `cond ? a : b` as a value: a deterministic bool picks a branch; a bool-RV builds a
@@ -1859,9 +1980,20 @@ impl Engine {
     }
 
     /// Extract the elements of an `Array` value, or a spanned error naming the actual type.
-    fn expect_array(&self, name: &str, v: &Value, span: Span) -> Result<Rc<Vec<Value>>> {
+    ///
+    /// This is the reducers' single funnel (PLAN-SIGNALS §1.2): a **lazy signal** handed to a
+    /// reducer (`mse`/`mean`/`sum`/`dot`/…) renders here at the **ambient resolution**
+    /// (`engine::set_resolution`, default [`builtins::RESOLUTION_DEFAULT`]) — the resolution is a
+    /// measurement knob, so it applies at the measurement. `signal::sample(sig, n)` remains the
+    /// explicit override; a drawn noise realization pins its length at first materialization, so
+    /// changing the resolution between uses of one realization errors instead of lying.
+    fn expect_array(&mut self, name: &str, v: &Value, span: Span) -> Result<Rc<Vec<Value>>> {
         match v {
             Value::Array(xs) => Ok(xs.clone()),
+            Value::Signal(s) => {
+                let n = self.resolution;
+                Ok(Rc::new(self.materialize_sig(&s.clone(), n, span)?))
+            }
             other => Err(NoiseError::runtime(
                 format!("{name} expects an array, got {}", other.type_name()),
                 span,
@@ -1933,17 +2065,13 @@ impl Engine {
     /// library function, so the caller falls through to the pure builtins. These live here (not in
     /// `builtins.rs`) because they build graph nodes and/or draw — they need `&mut self` (§0).
     fn lib_call(&mut self, name: &str, args: &[Value], span: Span) -> Option<Result<Value>> {
-        // `sample(noise_white(s), n)` draws RV nodes (needs `&mut self`), so it can't ride the pure
-        // signal `sample` in `builtins::call`. Intercept just the noise case; signals fall through.
-        if name == "sample" {
-            return match args.first() {
-                Some(Value::Noise(sigma)) => Some(self.lib_sample_noise(*sigma, args, span)),
-                _ => None,
-            };
-        }
         let r = match name {
             "set_max_samples" => self.lib_set_max_samples(args, span),
             "set_max_opts" => self.lib_set_max_opts(args, span),
+            "set_resolution" => self.lib_set_resolution(args, span),
+            // materializing a signal may draw noise RV nodes / read the realization cache, so
+            // `sample` needs `&mut self` and can't live in the pure `builtins::call`.
+            "sample" => self.lib_sample(args, span),
             "quantize" => self.lib_quantize(args, span),
             "sum" => self.lib_sum(args, span),
             "count" => self.lib_count(args, span),
@@ -1972,6 +2100,7 @@ impl Engine {
             }
             "categorical" => self.lib_categorical(args, span),
             "noise_white" => self.lib_noise(NoiseKind::White, args, span),
+            "noise_white_complex" => self.lib_noise(NoiseKind::WhiteComplex, args, span),
             "noise_brown" => self.lib_noise(NoiseKind::Brown, args, span),
             "noise_pink" => self.lib_noise(NoiseKind::Pink, args, span),
             "noise_ou" => self.lib_noise_ou(args, span),
@@ -1980,10 +2109,11 @@ impl Engine {
         Some(r)
     }
 
-    /// `signal::noise_white|brown|pink(sigma)` — a **lazy** zero-mean noise generator of a given
-    /// spectral color (`Value::Noise`). Pure here (no draw): it only becomes `normal` RV nodes when
-    /// it meets a sized array (see `binop_noise`) or `sample(...)`. Lives in `lib_call` (not
-    /// `builtins.rs`) so it sits beside the noise materialization paths.
+    /// `signal::noise_white|white_complex|brown|pink(sigma)` — an **undrawn** zero-mean noise
+    /// generator of a given spectral color (`Value::Noise`). A recipe, not a value: `~` draws one
+    /// lazy realization, `~[n]` a length-pinned one; anything else is the undrawn-distribution
+    /// error (PLAN-SIGNALS §1.1). Lives in `lib_call` (not `builtins.rs`) so it sits beside the
+    /// noise materialization paths.
     fn lib_noise(&mut self, kind: NoiseKind, args: &[Value], span: Span) -> Result<Value> {
         let [s] = arity1("noise", args, span)?;
         let sigma = self.noise_sigma(s, span)?;
@@ -2023,15 +2153,67 @@ impl Engine {
         Ok(n)
     }
 
-    /// `sample(noise, n)` — materialize a lazy noise generator to a length-`n` array of RV nodes.
-    /// (Deterministic signals materialize via the pure `builtins::call` path; noise draws, so it
-    /// lands here.)
-    fn lib_sample_noise(&mut self, spec: NoiseSpec, args: &[Value], span: Span) -> Result<Value> {
+    /// `signal::sample(sig, n)` — the explicit resolution override: materialize a lazy signal to
+    /// a concrete `n`-sample array. A **complex signal** samples each channel (through the
+    /// realization cache, so the quadratures stay consistent) and zips into an array of complex.
+    /// An **undrawn noise generator** is rejected — `~` is the only way in (PLAN-SIGNALS §1.1).
+    fn lib_sample(&mut self, args: &[Value], span: Span) -> Result<Value> {
         if args.len() != 2 {
-            return Err(arity_err("sample", 2, args.len(), span));
+            return Err(NoiseError::runtime(
+                format!("sample expects 2 arguments (signal, samples), got {}", args.len()),
+                span,
+            ));
         }
         let n = self.count_arg("sample", &args[1], span)?;
-        Ok(Value::Array(Rc::new(self.materialize_noise(spec, n))))
+        match &args[0] {
+            Value::Signal(s) => Ok(Value::Array(Rc::new(self.materialize_sig(&s.clone(), n, span)?))),
+            Value::Complex { re, im } if matches!(&**re, Value::Signal(_)) || matches!(&**im, Value::Signal(_)) => {
+                let res = self.sample_channel(re, n, span)?;
+                let ims = self.sample_channel(im, n, span)?;
+                Ok(Value::Array(Rc::new(
+                    res.into_iter().zip(ims).map(|(a, b)| Value::complex(a, b)).collect(),
+                )))
+            }
+            noise @ Value::Noise(_) => {
+                // The undrawn-distribution error — `sample` was the old sanctioned drawer.
+                forbid_undrawn(noise, span)?;
+                unreachable!("forbid_undrawn rejects every Noise")
+            }
+            other => Err(NoiseError::runtime(
+                format!("sample expects a signal, got {}", other.type_name()),
+                span,
+            )),
+        }
+    }
+
+    /// Materialize one channel of a complex signal: a lazy `Signal` renders at `n`; a real scalar
+    /// broadcasts (a constant channel is `n` copies).
+    fn sample_channel(&mut self, v: &Value, n: usize, span: Span) -> Result<Vec<Value>> {
+        match v {
+            Value::Signal(s) => self.materialize_sig(&s.clone(), n, span),
+            Value::Num(_) | Value::Est { .. } | Value::Dist(_) => Ok(vec![v.clone(); n]),
+            other => Err(NoiseError::runtime(
+                format!("cannot sample a complex signal with a {} channel", other.type_name()),
+                span,
+            )),
+        }
+    }
+
+    /// `engine::set_resolution(N)` — set the ambient **sampling resolution**: the length reducers
+    /// (`mse`/`mean`/`sum`/…) use to render a lazy signal that never met an explicit length. The
+    /// time-axis twin of `set_max_samples` (PLAN-SIGNALS §1.2): a measurement knob, set once, not
+    /// threaded through the math. `signal::sample(sig, n)` remains the explicit override.
+    fn lib_set_resolution(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [n] = arity1("set_resolution", args, span)?;
+        let n = self.count_arg("set_resolution", n, span)?;
+        if n < 1 {
+            return Err(NoiseError::runtime(
+                "set_resolution(N) needs N >= 1 (a signal renders to at least one sample)".to_string(),
+                span,
+            ));
+        }
+        self.resolution = n;
+        Ok(Value::Unit)
     }
 
     /// Materialize a noise generator to `n` zero-mean `normal` RV nodes of the requested color.
@@ -2044,6 +2226,9 @@ impl Engine {
             NoiseKind::Brown => self.brown_ids(spec.sigma, n),
             NoiseKind::Ou { tau } => self.ou_ids(spec.sigma, tau, n),
             NoiseKind::Pink => self.pink_ids(spec.sigma, n),
+            // The complex generator splits into two real White lanes at draw time
+            // (`draw_noise`/`draw_noise_shaped`), so it never reaches a single-lane render.
+            NoiseKind::WhiteComplex => unreachable!("white_complex splits into two real lanes at draw"),
         };
         ids.into_iter().map(Value::Dist).collect()
     }
@@ -2521,8 +2706,10 @@ impl Engine {
             Value::Num(n) => Ok(Value::Num(apply_unop_f64(op, *n))),
             Value::Est { val, .. } => Ok(Value::Num(apply_unop_f64(op, *val))),
             Value::Dist(_) => self.lift_unary(op, x.clone(), span),
-            // A lazy signal defers the ufunc into its pipeline (stays a generator).
-            Value::Signal(s) => Ok(Value::Signal(Rc::new(s.push(SigOp::Unary(op))))),
+            // A lazy signal defers the ufunc into its expression tree (stays a signal).
+            Value::Signal(s) => {
+                Ok(Value::Signal(Rc::new(SigExpr::Unary(SigUnOp::Un(op), s.clone()))))
+            }
             Value::Array(xs) => {
                 let mut out = Vec::with_capacity(xs.len());
                 for e in xs.iter() {
@@ -2590,34 +2777,29 @@ impl Engine {
         }
     }
 
-    /// `exp(z)` — `e^z`. Real `x` → `e^x`; complex `z = a + bi` → Euler `e^a·(cos b + i·sin b)`.
-    /// The imaginary part may be an RV (cos/sin lift); the **real part must be a constant** — there
-    /// is no `exp` node in the VM, so a random real part (`math::exp` of a real RV) is rejected. In
-    /// practice the complex `exp` is always applied to a purely-imaginary angle (`e^{iθ}`), where
-    /// `a = 0`.
+    /// `exp(z)` — `e^z`. Real `x` → `e^x` (a lazy signal **defers** `exp` into its tree — legal
+    /// on the deterministic part of a chain); complex `z = a + bi` → Euler `e^a·(cos b + i·sin b)`.
+    /// The imaginary part may be an RV (cos/sin lift); the **real part must be deterministic** —
+    /// there is no `exp` node in the VM, so a random real part (`math::exp` of a real RV) is
+    /// rejected, at build time for a scalar and at materialization for a noisy signal. In practice
+    /// the complex `exp` is always applied to a purely-imaginary angle (`e^{iθ}`), where `a = 0`.
     fn cufunc_exp(&mut self, x: Value, span: Span) -> Result<Value> {
         match x {
             Value::Num(n) => Ok(Value::Num(n.exp())),
             Value::Est { val, .. } => Ok(Value::Num(val.exp())),
+            Value::Signal(s) => Ok(Value::Signal(Rc::new(SigExpr::Unary(SigUnOp::Exp, s)))),
             Value::Dist(_) => Err(NoiseError::runtime(
                 "math::exp of a random real value is not supported (the VM has no exp node); exp of a complex angle e^{i·θ} works because it lowers to cos/sin".to_string(),
                 span,
             )),
             Value::Complex { re, im } => {
-                let a = match scalar_const(&re) {
-                    Some(a) => a,
-                    None => {
-                        return Err(NoiseError::runtime(
-                            "math::exp needs a constant real part (e^a); only the imaginary angle may be random".to_string(),
-                            span,
-                        ))
-                    }
-                };
-                let ea = a.exp();
+                // The magnitude factor e^a: folds for a constant, defers for a signal, and
+                // errors for a random real part (the recursive call enforces all three).
+                let ea = self.cufunc_exp(*re, span)?;
                 let cos = self.lib_ufunc(UnOp::Cos, std::slice::from_ref(&im), span)?;
                 let sin = self.lib_ufunc(UnOp::Sin, std::slice::from_ref(&im), span)?;
-                let re_out = self.binop(BinOp::Mul, Value::Num(ea), cos, span)?;
-                let im_out = self.binop(BinOp::Mul, Value::Num(ea), sin, span)?;
+                let re_out = self.binop(BinOp::Mul, ea.clone(), cos, span)?;
+                let im_out = self.binop(BinOp::Mul, ea, sin, span)?;
                 Ok(Value::complex(re_out, im_out))
             }
             other => Err(NoiseError::runtime(
@@ -2637,6 +2819,8 @@ impl Engine {
             Value::Dist(id) if self.graph.kind(id) == RvKind::Num => {
                 self.binop(BinOp::Pow, Value::Dist(id), Value::Num(0.5), span)
             }
+            // A lazy signal defers as `x ^ 0.5` (the same lowering the RV path uses).
+            sig @ Value::Signal(_) => self.binop(BinOp::Pow, sig, Value::Num(0.5), span),
             Value::Complex { re, im } => match (scalar_const(&re), scalar_const(&im)) {
                 (Some(a), Some(b)) => {
                     let r = (a * a + b * b).sqrt();
@@ -2672,6 +2856,11 @@ impl Engine {
                 let neg = self.binop(BinOp::Lt, Value::Dist(id), Value::Num(0.0), span)?;
                 self.select(neg, Value::Num(std::f64::consts::PI), Value::Num(0.0), span)
             }
+            // A real lazy signal defers as `π·(x < 0)` (signal comparisons are 0/1).
+            sig @ Value::Signal(_) => {
+                let neg = self.binop(BinOp::Lt, sig, Value::Num(0.0), span)?;
+                self.binop(BinOp::Mul, Value::Num(std::f64::consts::PI), neg, span)
+            }
             other => Err(NoiseError::runtime(
                 format!("math::arg expects a number or complex value, got {}", other.type_name()),
                 span,
@@ -2679,13 +2868,20 @@ impl Engine {
         }
     }
 
-    /// `atan2(y, x)` over real-scalar channels (constant or RV). Folds to `f64::atan2` when both are
-    /// constant; otherwise builds the quadrant-correct form `atan(y/x) + adj`, where `adj` shifts by
-    /// `±π` in the left half-plane (`x < 0`). The `x = 0` axis is measure-zero for the continuous RVs
-    /// this is used on, so it isn't special-cased in the lifted path.
+    /// `atan2(y, x)` over real channels (constant, RV, or lazy signal). Folds to `f64::atan2`
+    /// when both are constant; a **signal** channel defers to a [`SigExpr::Atan2`] node (the
+    /// phase read-out of a complex signal stays lazy); otherwise builds the quadrant-correct form
+    /// `atan(y/x) + adj`, where `adj` shifts by `±π` in the left half-plane (`x < 0`). The `x = 0`
+    /// axis is measure-zero for the continuous RVs this is used on, so it isn't special-cased in
+    /// the lifted path.
     fn complex_atan2(&mut self, y: Value, x: Value, span: Span) -> Result<Value> {
         if let (Some(yc), Some(xc)) = (scalar_const(&y), scalar_const(&x)) {
             return Ok(Value::Num(yc.atan2(xc)));
+        }
+        if matches!(y, Value::Signal(_)) || matches!(x, Value::Signal(_)) {
+            let ye = sig_operand(&y, span)?;
+            let xe = sig_operand(&x, span)?;
+            return Ok(Value::Signal(Rc::new(SigExpr::Atan2(ye, xe))));
         }
         let pi = std::f64::consts::PI;
         let yx = self.binop(BinOp::Div, y.clone(), x.clone(), span)?;
@@ -2706,6 +2902,8 @@ impl Engine {
             Value::Dist(id) if self.graph.kind(id) == RvKind::Num => {
                 self.lift_unary(op, Value::Dist(id), span)
             }
+            // A lazy signal defers the rounding into its tree.
+            Value::Signal(s) => Ok(Value::Signal(Rc::new(SigExpr::Unary(SigUnOp::Un(op), s)))),
             Value::Complex { .. } => Err(NoiseError::runtime(
                 format!("{} is real-only — it has no meaning on a complex number", unop_name(op)),
                 span,
@@ -2849,6 +3047,17 @@ fn introspect_count(v: &Value, span: Span) -> Result<usize> {
     Ok(n as usize)
 }
 
+/// The teaching error for plotting a complex signal/array (PLAN-SIGNALS §4): a complex wave has
+/// no single trace — the caller must pick a real view first.
+fn complex_has_no_trace(span: Span) -> NoiseError {
+    NoiseError::runtime(
+        "a complex signal has no single trace to plot — take `math::re(z)`, `math::im(z)`, or \
+         `math::abs(z)` first"
+            .to_string(),
+        span,
+    )
+}
+
 /// A condition (or query) that yielded no usable draws — `describe(X | C)` / `corr`/`explain` where
 /// the condition never held in `n` samples. Mirrors `builtins`' conditional-undefined message.
 fn condition_never(n: usize, span: Span) -> NoiseError {
@@ -2930,11 +3139,11 @@ fn module_of(name: &str) -> Option<&'static str> {
         | "norm" | "transpose" | "adjoint" | "normalize" | "has_duplicates" | "count_duplicates"
         | "mse" | "ones" | "zeros" | "iota" | "outer" | "quantize" => "vec",
         // signal generation (DSP waveforms) + colored noise + materialization
-        "sine" | "cosine" | "sample" | "noise_white"
+        "sine" | "cosine" | "sample" | "noise_white" | "noise_white_complex"
         | "noise_brown" | "noise_pink" | "noise_ou" => "signal",
-        // run-time knobs: tune the evaluator itself (e.g. the Monte Carlo budget). Capital-only,
-        // no lowercase alias — these are imperative settings, not value-producing builtins.
-        "set_max_samples" | "set_max_opts" => "engine",
+        // run-time knobs: tune the evaluator itself (e.g. the Monte Carlo budget and the signal
+        // resolution). Imperative settings, not value-producing builtins.
+        "set_max_samples" | "set_max_opts" | "set_resolution" => "engine",
         // always-on core: probability/expectation, IO, array length. These are **capital-only** (no
         // lowercase alias). Arrays are fixed-size: the half-open range has dedicated `a..b` syntax
         // (not a `range` builtin), and there is no `Push` (arrays are never grown).
@@ -2965,19 +3174,28 @@ fn math_const_complex(name: &str) -> bool {
 
 /// Enforce the load-bearing rule "you cannot do arithmetic on an undrawn distribution"
 /// (LANG.md §2). A recipe (`unif(0,1)`, or a name bound to one with `=`) has no draw to operate
-/// on; using it in an expression is an error that points at `~`.
+/// on; using it in an expression is an error that points at `~`. An undrawn **noise generator**
+/// (`noise_white(1)`) is equally random and subject to the same rule (PLAN-SIGNALS §1.1) — its
+/// message additionally offers the length-pinning `~[n]` form.
 #[inline]
-fn forbid_recipe(v: &Value, span: Span) -> Result<()> {
-    if let Value::Recipe(r) = v {
-        return Err(NoiseError::runtime(
+fn forbid_undrawn(v: &Value, span: Span) -> Result<()> {
+    match v {
+        Value::Recipe(r) => Err(NoiseError::runtime(
             format!(
                 "`{r}` is an undrawn distribution, not a value — draw it first with `~` \
                  (e.g. `X ~ {r}`) and use `X`"
             ),
             span,
-        ));
+        )),
+        Value::Noise(spec) => Err(NoiseError::runtime(
+            format!(
+                "`{spec}` is an undrawn distribution, not a value — draw it first with `~` \
+                 (e.g. `static ~ signal::{spec}`), or pin a length with `~[n]`"
+            ),
+            span,
+        )),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Extract a constant scalar (`Num`/`Est`) for deferring into a signal's pipeline; `None` for
@@ -3012,9 +3230,18 @@ fn array_len(v: &Value) -> usize {
     }
 }
 
-/// Materialize a lazy signal to a concrete `n`-sample array of numbers.
-fn materialize_signal(s: &SignalSpec, n: usize) -> Value {
-    Value::Array(Rc::new(s.sample(n).into_iter().map(Value::Num).collect()))
+/// Coerce a value to a signal-tree operand: a signal hands over its tree, a constant scalar
+/// promotes to a `Konst` leaf. Backs the deferred `atan2` (and any future binary signal node).
+fn sig_operand(v: &Value, span: Span) -> Result<Rc<SigExpr>> {
+    match v {
+        Value::Signal(s) => Ok(s.clone()),
+        Value::Num(n) => Ok(Rc::new(SigExpr::Konst(*n))),
+        Value::Est { val, .. } => Ok(Rc::new(SigExpr::Konst(*val))),
+        other => Err(NoiseError::runtime(
+            format!("cannot combine a signal with {} — `signal::sample(sig, n)` it to an array first", other.type_name()),
+            span,
+        )),
+    }
 }
 
 /// Display name for a transcendental unary op (for errors and dispatch).
