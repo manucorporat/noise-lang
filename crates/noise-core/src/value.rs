@@ -171,8 +171,9 @@ impl fmt::Display for Value {
             Value::Recipe(r) => write!(f, "{r}"),
             // No sampling on Display — keep it pure/cheap.
             Value::Dist(id) => write!(f, "<dist #{}>", id.0),
-            // Show only the digits the standard error justifies.
-            Value::Est { val, se } => write!(f, "{}", round_to_se(*val, *se)),
+            // Show only the digits the standard error justifies. An exact result (`se == 0`,
+            // e.g. from enumeration) prints like a plain number — dust-trimmed, not 17 digits.
+            Value::Est { val, se } => write!(f, "{}", format_num(round_to_se(*val, *se))),
             // `[a, b, c]` — comma-joined elements via their own Display.
             Value::Array(xs) => {
                 write!(f, "[")?;

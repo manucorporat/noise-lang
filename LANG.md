@@ -340,8 +340,9 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
   - **`P` returns an *estimate*** — a number that carries its standard error
     `se = sqrt(p(1-p)/n)` (a *deterministic* event is exact, `se = 0`). The value keeps full
     precision; it **displays rounded to the digits the error justifies** (`floor(-log10(se))`
-    decimals). More samples → smaller error → more digits (`P(D==4, 1000)` → `0.2`;
-    `P(D==4, 1e8)` → `0.1666`), with no manual rounding.
+    decimals). More samples → smaller error → more digits (`P(X*X < 1/36, 1000)` → `0.2`;
+    at `1e8` → `0.1667`), with no manual rounding. (A finite-discrete event like `P(D == 4)`
+    doesn't sample at all — see **Exact answers** below.)
   - **The error propagates through arithmetic** (first order): `+ - * /` on estimates combine
     their errors, so a *derived* result self-rounds too. `4 * P(C)` has 4× the error of `P(C)`,
     so it correctly shows one fewer digit (`3.141`, not a spurious `3.1412`); a ratio
@@ -366,6 +367,31 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
   It is **not** sequential branching — the engine still samples independent lanes; a lifted `if`
   cannot carry state across a time step (that's the dynamics fork in `plans/PLAN.md`).
 
+### Exact answers for finite-discrete queries
+
+When **every source feeding a query is finite-discrete**, the answer is a finite sum — so
+`P`/`E`/`Var`/`Q` (and their conditional forms) **enumerate the joint state space and answer
+exactly** (`se = 0`) instead of sampling. `P(D == 4)` is `0.166666666667`, `P(X == X)` is exactly
+`1`, and `P(D == 6 | D > 3)` is exactly `1/3` — no Monte Carlo error, no sample count.
+
+- **What enumerates:** `unif_int`, `bernoulli`, `categorical`, and anything built from them with
+  arithmetic, comparisons, logical ops, lifted `if`, arrays, and random indexing. (`bernoulli` and
+  `categorical` lower to a continuous uniform used *only through comparisons against constants*;
+  the comparison cut points partition its support into finitely many intervals, which is still an
+  exact finite sum.)
+- **What doesn't:** a continuous source whose *value* is read (`normal`, `exponential`, a `unif`
+  in arithmetic), an unbounded discrete source (`poisson`, `geometric`), a random parameter
+  (hierarchical models), or a state space over budget (more than `2^20` joint states, or past the
+  `engine::set_max_opts` ceiling — enumeration never costs more than the sampling run it
+  replaces). These fall back to the ordinary Monte Carlo estimate, silently.
+- An exact result still displays as an estimate does — full precision, dust-trimmed — and an
+  explicit sample count (`P(D == 4, 1000)`) is validated but not used: there is nothing to sample.
+- `Q` over an enumerated quantity returns the **true discrete inverse CDF** (the smallest value
+  whose cumulative probability reaches `q`), not an interpolated sample statistic.
+- A conditional whose condition is enumerated to probability **exactly 0** is an error that says
+  so (`P(D == 4 | D > 6)` — "the condition has probability 0"), distinct from the Monte Carlo
+  "never occurred in n samples" error, because more samples cannot fix it.
+
 ### Conditioning: `event | given`
 
 The **`|` bar** conditions a query on an event — Bayes' rule written the way mathematicians write
@@ -375,7 +401,7 @@ mutation: a `|` changes *that* `P`/`E`/`Var`/`Q` and nothing else.
 
 ```
 D ~ unif_int(1, 6)
-P(D == 6 | D > 3)        # ≈ 0.3333 — given the roll beat 3, how often a 6? (= (1/6)/(1/2))
+P(D == 6 | D > 3)        # 1/3 exactly (finite-discrete, so it enumerates — see above)
 E(D | D > 3)             # 5 — the mean roll among {4, 5, 6}
 Q(D | D > 3, 0.5)        # 5 — the conditional median
 ```

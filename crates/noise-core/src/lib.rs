@@ -10,6 +10,7 @@ pub mod backend;
 pub mod builtins;
 pub mod bytecode;
 pub mod dist;
+pub mod enumerate;
 pub mod error;
 pub mod eval;
 pub mod introspect;
@@ -554,12 +555,48 @@ mod tests {
     #[test]
     fn p_display_precision_scales_with_samples() {
         // Displayed to confidence precision: at N=1000 the standard error (~0.012) only
-        // justifies one decimal -> "0.2"; far more samples reveal more digits.
-        assert_eq!(display_of("D ~ unif_int(1,6); P(D == 4, 1000)"), "0.2");
-        let fine = display_of("D ~ unif_int(1,6); P(D == 4, 100000000)");
+        // justifies one decimal -> "0.2"; far more samples reveal more digits. The event uses
+        // the uniform in arithmetic (X*X) so it is NOT enumerable and stays a Monte Carlo
+        // estimate — a finite-discrete event like `D == 4` is now answered exactly instead.
+        assert_eq!(display_of("X ~ unif(0,1); P(X*X < 1/36, 1000)"), "0.2");
+        let fine = display_of("X ~ unif(0,1); P(X*X < 1/36, 100000000)");
         assert!(fine.len() > 5, "fine should show ~4 digits, got {fine}");
         // The underlying value stays full precision and accurate (rounding is display-only).
-        assert!((num("D ~ unif_int(1,6); P(D == 4, 100000000)") - 1.0 / 6.0).abs() < 5e-4);
+        assert!((num("X ~ unif(0,1); P(X*X < 1/36, 100000000)") - 1.0 / 6.0).abs() < 5e-4);
+    }
+
+    #[test]
+    fn finite_discrete_queries_are_exact() {
+        // A die is a finite sum, not a Monte Carlo run: the enumeration path answers with
+        // se = 0, so the display shows the full dust-trimmed value, not sampled digits.
+        assert_eq!(display_of("D ~ unif_int(1,6); P(D == 4)"), "0.166666666667");
+        assert_eq!(num("D ~ unif_int(1,6); E(D)"), 3.5);
+        assert!((num("D ~ unif_int(1,6); Var(D)") - 35.0 / 12.0).abs() < 1e-12);
+        assert_eq!(num("D ~ unif_int(1,6); Q(D, 0.5)"), 3.0);
+        // Two dice enumerate jointly: P(sum == 7) = 6/36.
+        let p7 = num("a ~ unif_int(1,6); b ~ unif_int(1,6); P(a + b == 7)");
+        assert!((p7 - 1.0 / 6.0).abs() < 1e-12);
+        // bernoulli(p) lowers to (U < p); the threshold-atom rule makes it exact.
+        assert_eq!(num("k ~ bernoulli(0.3); P(k)"), 0.3);
+        // Ten flips: P(#heads == 7) = C(10,7)/2^10 = 120/1024 — exact (powers of two, no drift).
+        assert_eq!(num("flips ~[10] bernoulli(0.5); P(count(flips) == 7)"), 120.0 / 1024.0);
+        // A certain event is exactly 1, an impossible one exactly 0 — not 1 ± ulp.
+        assert_eq!(num("D ~ unif_int(1,6); P(D == D)"), 1.0);
+        assert_eq!(num("D ~ unif_int(1,6); P(D == 7)"), 0.0);
+    }
+
+    #[test]
+    fn finite_discrete_conditionals_are_exact_bayes() {
+        // P(D == 6 | D > 3) = 1/3 and E(D | D > 3) = 5, by renormalizing the in-condition mass.
+        assert!((num("D ~ unif_int(1,6); P(D == 6 | D > 3)") - 1.0 / 3.0).abs() < 1e-12);
+        assert!((num("D ~ unif_int(1,6); E(D | D > 3)") - 5.0).abs() < 1e-12);
+        assert_eq!(num("D ~ unif_int(1,6); Q(D | D > 3, 0.5)"), 5.0);
+        // An impossible condition is named as such — probability 0, not "raise the sample count".
+        let err = run("D ~ unif_int(1,6); P(D == 4 | D > 6)").unwrap_err();
+        assert!(
+            err.to_string().contains("probability 0"),
+            "impossible condition should be a probability-0 error, got: {err}"
+        );
     }
 
     #[test]
@@ -589,15 +626,19 @@ mod tests {
         // `engine::set_max_samples(N)` is the global default for P/E/Var/Q — equivalent to passing N
         // as the explicit count, but once, up front. At a small budget the standard error is wide,
         // so the estimate displays to few digits; bumping the budget reveals more.
-        let coarse = display_of("engine::set_max_samples(1000); D ~ unif_int(1,6); P(D == 4)");
+        // (The event uses the uniform in arithmetic so it is not enumerable — the budget knob
+        // only governs Monte Carlo queries; finite-discrete ones are answered exactly.)
+        let coarse = display_of("engine::set_max_samples(1000); X ~ unif(0,1); P(X*X < 1/36)");
         assert_eq!(coarse, "0.2", "1000 draws justifies one decimal, got {coarse}");
-        let fine = display_of("engine::set_max_samples(100000000); D ~ unif_int(1,6); P(D == 4)");
+        let fine =
+            display_of("engine::set_max_samples(100000000); X ~ unif(0,1); P(X*X < 1/36)");
         assert!(fine.len() > 5, "1e8 draws should reveal ~4 digits, got {fine}");
 
         // An explicit per-call count still overrides the engine default (here: tighten back up
         // despite the coarse global setting).
-        let overridden =
-            display_of("engine::set_max_samples(1000); D ~ unif_int(1,6); P(D == 4, 100000000)");
+        let overridden = display_of(
+            "engine::set_max_samples(1000); X ~ unif(0,1); P(X*X < 1/36, 100000000)",
+        );
         assert!(overridden.len() > 5, "explicit count should override, got {overridden}");
     }
 

@@ -325,6 +325,10 @@ fn prob(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, sp
             if check {
                 return Ok(Value::Est { val: 0.5, se: 0.0 });
             }
+            // A finite-discrete event is a finite sum — answer exactly (se = 0), no sampling.
+            if let Some(ex) = crate::enumerate::try_enumerate(graph, *id, max_opts) {
+                return Ok(Value::Est { val: ex.mean(), se: 0.0 });
+            }
             let n = clamp_to_op_budget(n, graph, *id, max_opts);
             let p_hat = sampler::moments(graph, *id, n, P_DEFAULT_SEED).mean;
             // Standard error of a Monte Carlo probability estimate; rule-of-three floor keeps
@@ -385,6 +389,11 @@ fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, default_n: usize, max
             // Validate-only mode: the quantity's graph is built and type-checked; skip sampling.
             if check {
                 return Ok(Value::Est { val: 0.0, se: 0.0 });
+            }
+            // A finite-discrete quantity has exact moments — a finite sum, no sampling.
+            if let Some(ex) = crate::enumerate::try_enumerate(graph, *id, max_opts) {
+                let val = if want_var { ex.variance() } else { ex.mean() };
+                return Ok(Value::Est { val, se: 0.0 });
             }
             let n = clamp_to_op_budget(n, graph, *id, max_opts);
             let m = sampler::moments(graph, *id, n, P_DEFAULT_SEED);
@@ -457,6 +466,10 @@ fn quantile(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64
             if check {
                 return Ok(Value::Num(0.0));
             }
+            // A finite-discrete quantity has an exact inverse CDF — no sampling, no interpolation.
+            if let Some(ex) = crate::enumerate::try_enumerate(graph, *id, max_opts) {
+                return Ok(Value::Num(ex.quantile(q)));
+            }
             let n = clamp_to_op_budget(n, graph, *id, max_opts);
             let mut draws = sampler::sample_n(graph, *id, n, P_DEFAULT_SEED);
             draws.sort_by(f64::total_cmp);
@@ -483,6 +496,17 @@ fn cond_never(n: usize, span: Span) -> NoiseError {
             "the condition after `|` never occurred in {n} samples, so the conditional is undefined \
              — use a more likely condition or raise the sample count"
         ),
+        span,
+    )
+}
+
+/// Exact enumeration proved the condition after `|` has probability 0 — not "rare", impossible.
+/// More samples can't fix this one, so the message doesn't suggest them.
+fn cond_impossible(span: Span) -> NoiseError {
+    NoiseError::runtime(
+        "the condition after `|` has probability 0 (it can never hold), so the conditional is \
+         undefined"
+            .to_string(),
         span,
     )
 }
@@ -528,6 +552,11 @@ pub fn prob_cond(
         return Ok(Value::Est { val: 0.5, se: 0.0 });
     }
     let n = opt_count("P", tail.first(), default_n, span)?;
+    // A finite-discrete conditional is exact Bayes: renormalize the non-NaN (in-condition) mass.
+    if let Some(ex) = crate::enumerate::try_enumerate(graph, root, max_opts) {
+        let given = ex.condition().ok_or_else(|| cond_impossible(span))?;
+        return Ok(Value::Est { val: given.mean(), se: 0.0 });
+    }
     let n = clamp_to_op_budget(n, graph, root, max_opts);
     let (m, count) = sampler::cond_moments(graph, root, n, P_DEFAULT_SEED);
     if count == 0 {
@@ -562,6 +591,12 @@ pub fn moment_cond(
         return Ok(Value::Est { val: 0.0, se: 0.0 });
     }
     let n = opt_count(name, tail.first(), default_n, span)?;
+    // A finite-discrete conditional has exact moments over the renormalized in-condition mass.
+    if let Some(ex) = crate::enumerate::try_enumerate(graph, root, max_opts) {
+        let given = ex.condition().ok_or_else(|| cond_impossible(span))?;
+        let val = if name == "Var" { given.variance() } else { given.mean() };
+        return Ok(Value::Est { val, se: 0.0 });
+    }
     let n = clamp_to_op_budget(n, graph, root, max_opts);
     let (m, count) = sampler::cond_moments(graph, root, n, P_DEFAULT_SEED);
     if count == 0 {
@@ -607,6 +642,11 @@ pub fn quantile_cond(
         return Ok(Value::Num(0.0));
     }
     let n = opt_count("Q", tail.get(1), default_n, span)?;
+    // A finite-discrete conditional has an exact inverse CDF over the in-condition mass.
+    if let Some(ex) = crate::enumerate::try_enumerate(graph, root, max_opts) {
+        let given = ex.condition().ok_or_else(|| cond_impossible(span))?;
+        return Ok(Value::Num(given.quantile(q)));
+    }
     let n = clamp_to_op_budget(n, graph, root, max_opts);
     let mut draws = sampler::cond_sample_n(graph, root, n, P_DEFAULT_SEED);
     if draws.is_empty() {

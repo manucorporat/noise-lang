@@ -257,9 +257,10 @@ pub fn run_batch(program: &Program, regs: &mut [Box<[f64]>], rng: &mut crate::rn
     }
 }
 
-/// Scalar unary op. `Not` is logical not over a 0/1 bool column.
+/// Scalar unary op. `Not` is logical not over a 0/1 bool column. Shared with
+/// [`crate::enumerate`], so enumeration and sampling agree on one semantics.
 #[inline]
-fn apply_un(op: UnOp, x: f64) -> f64 {
+pub(crate) fn apply_un(op: UnOp, x: f64) -> f64 {
     match op {
         UnOp::Neg => -x,
         UnOp::Not => {
@@ -282,8 +283,9 @@ fn apply_un(op: UnOp, x: f64) -> f64 {
 
 /// Scalar binary op. Matches the deterministic evaluator's IEEE-754 behavior; comparisons
 /// produce 0.0/1.0 columns (the bool convention from PLAN.md, pre-wiring Phase 3's `P()`).
+/// Shared with [`crate::enumerate`], so enumeration and sampling agree on one semantics.
 #[inline]
-fn apply_bin(op: BinOp, a: f64, b: f64) -> f64 {
+pub(crate) fn apply_bin(op: BinOp, a: f64, b: f64) -> f64 {
     match op {
         BinOp::Add => a + b,
         BinOp::Sub => a - b,
