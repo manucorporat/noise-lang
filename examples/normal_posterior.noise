@@ -1,0 +1,22 @@
+# Observing a continuous measurement — Bayesian inference with `| Y == v`.
+#
+# A continuous equality has probability 0, so rejection could never satisfy it. When the
+# condition observes a draw directly, the engine clamps the draw and weights each lane by the
+# observed density (likelihood weighting) — the textbook conjugate-normal posterior, no
+# inference ceremony.
+#
+# Prior mu ~ N(0,1), measurement Y ~ N(mu,1), observe Y = 1:
+# posterior is N(1/2, 1/2)  ->  E = 0.5, Var = 0.5, P(mu > 0) = Phi(1/sqrt(2)) ~= 0.760.
+use rand;
+
+mu ~ normal(0, 1)          # prior belief about the quantity
+Y  ~ normal(mu, 1)         # one noisy measurement of it
+
+Print("prior mean          =", E(mu))
+Print("posterior mean      =", E(mu | Y == 1))        # ~ 0.5
+Print("posterior variance  =", Var(mu | Y == 1))      # ~ 0.5
+Print("P(mu > 0 | Y == 1)  =", P(mu > 0 | Y == 1))    # ~ 0.760
+Print("posterior median    =", Q(mu | Y == 1, 0.5))   # ~ 0.5
+
+# Observation composes with ordinary rejection conditions in one query:
+Print("E(mu | Y == 1, mu>0) =", E(mu | Y == 1 && mu > 0))  # ~ 0.789 (truncated posterior)

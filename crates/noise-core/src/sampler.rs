@@ -83,6 +83,98 @@ pub fn cond_sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f6
     out
 }
 
+/// Self-normalized weighted moments — the forcing path behind a **density-weighted** conditional
+/// (`E(mu | Y == 2.5)`, see [`crate::observe`]). One joint pass over `(quantity, weight)`
+/// ([`compile_roots`], shared upstream draws); a NaN quantity lane (the residual-condition
+/// sentinel) or a non-finite/zero weight contributes nothing. Mean and variance are the
+/// weighted averages `Σwx/Σw` and `Σwx²/Σw − mean²`; `ess = (Σw)²/Σw²` is the effective sample
+/// size the standard error uses (with all-equal weights it equals the lane count, matching the
+/// unweighted formula). A single ordered RNG stream keeps the (quantity, weight) pairing exact.
+#[derive(Debug, Clone, Copy)]
+pub struct WeightedMoments {
+    pub mean: f64,
+    pub variance: f64,
+    /// Effective sample size `(Σw)²/Σw²`; `0` when no lane carried weight.
+    pub ess: f64,
+    /// Lanes with a positive, finite weight (and a non-NaN quantity).
+    pub count: u64,
+}
+
+pub fn weighted_cond_moments(
+    graph: &RvGraph,
+    quantity: RvId,
+    weight: RvId,
+    n: usize,
+    seed: u64,
+) -> WeightedMoments {
+    // Accumulate deviations from the first draw (`Σw·(x−x0)`), not raw `Σw·x`: a clamped
+    // (constant) quantity then comes out *exactly* — the deviation sum is exactly zero — and
+    // the cancellation error of `E[X²] − E[X]²` shrinks for everything else.
+    let (mut x0, mut w_sum, mut w_sq, mut wd, mut wd2, mut count) =
+        (None, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0u64);
+    for_each_weighted(graph, quantity, weight, n, seed, |x, w| {
+        let origin = *x0.get_or_insert(x);
+        let d = x - origin;
+        w_sum += w;
+        w_sq += w * w;
+        wd += w * d;
+        wd2 += w * d * d;
+        count += 1;
+    });
+    let (Some(x0), true) = (x0, w_sum > 0.0) else {
+        return WeightedMoments { mean: 0.0, variance: 0.0, ess: 0.0, count: 0 };
+    };
+    let dmean = wd / w_sum;
+    let variance = (wd2 / w_sum - dmean * dmean).max(0.0);
+    WeightedMoments { mean: x0 + dmean, variance, ess: w_sum * w_sum / w_sq, count }
+}
+
+/// The in-weight `(quantity, weight)` draws, for a weighted conditional quantile (unsorted).
+pub fn weighted_cond_draws(
+    graph: &RvGraph,
+    quantity: RvId,
+    weight: RvId,
+    n: usize,
+    seed: u64,
+) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    for_each_weighted(graph, quantity, weight, n, seed, |x, w| out.push((x, w)));
+    out
+}
+
+/// Drive one joint pass over `(quantity, weight)`, calling `sink` for every usable lane —
+/// non-NaN quantity, positive finite weight. Interpreter path (like [`sample_pairs`]): the
+/// conditioning budget is modest and the two-column read needs the raw register file.
+fn for_each_weighted(
+    graph: &RvGraph,
+    quantity: RvId,
+    weight: RvId,
+    n: usize,
+    seed: u64,
+    mut sink: impl FnMut(f64, f64),
+) {
+    if n == 0 {
+        return;
+    }
+    let (prog, regs) = compile_roots(graph, &[quantity, weight]);
+    let (rq, rw) = (regs[0] as usize, regs[1] as usize);
+    let mut buf: Vec<Box<[f64]>> =
+        (0..prog.n_regs).map(|_| vec![0.0f64; BATCH].into_boxed_slice()).collect();
+    let mut rng = Rng::seed_from_u64(seed);
+    let mut remaining = n;
+    while remaining > 0 {
+        run_batch(&prog, &mut buf, &mut rng);
+        let take = remaining.min(BATCH);
+        for k in 0..take {
+            let (x, w) = (buf[rq][k], buf[rw][k]);
+            if !x.is_nan() && w.is_finite() && w > 0.0 {
+                sink(x, w);
+            }
+        }
+        remaining -= take;
+    }
+}
+
 /// Joint draws of two roots — the forcing path behind `corr`/`scatter` (relationship
 /// introspection). `a` and `b` are sampled in **one** pass over a shared instruction stream
 /// ([`compile_roots`]), so each returned `(aᵢ, bᵢ)` is one lane's *paired* draw (shared upstream

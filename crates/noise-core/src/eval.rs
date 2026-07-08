@@ -1082,10 +1082,40 @@ impl Engine {
                 span,
             ));
         }
-        let nan = self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num);
-        let root = self.graph.push(RvNode::Select { cond: condition, a: quantity, b: nan }, RvKind::Num);
         let tail = &arg_vals[1..];
         let (default_n, max_opts, check) = (self.max_samples, self.max_opts, self.check_mode);
+        // Density-weighted observation (see `crate::observe`): when the condition contains a
+        // clampable equality on a continuous draw (`Y == 2.5`), rejection would reject every
+        // lane (measure zero). Instead clamp the draw, weight lanes by the observed density, and
+        // reject only on the residual (unrecognized) conjuncts. When nothing is clampable,
+        // `analyze` returns `None` and the rejection path below runs unchanged.
+        if let Some(plan) = crate::observe::analyze(&mut self.graph, condition) {
+            let quantity = plan.rewrite(&mut self.graph, quantity);
+            let weight = plan.rewrite(&mut self.graph, plan.weight);
+            let root = match plan.residual {
+                Some(residual) => {
+                    let residual = plan.rewrite(&mut self.graph, residual);
+                    let nan = self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num);
+                    self.graph
+                        .push(RvNode::Select { cond: residual, a: quantity, b: nan }, RvKind::Num)
+                }
+                None => quantity,
+            };
+            return match qname {
+                "P" => builtins::prob_cond_weighted(
+                    &self.graph, root, weight, tail, default_n, max_opts, span, check,
+                ),
+                "E" | "Var" => builtins::moment_cond_weighted(
+                    qname, &self.graph, root, weight, tail, default_n, max_opts, span, check,
+                ),
+                "Q" => builtins::quantile_cond_weighted(
+                    &self.graph, root, weight, tail, default_n, max_opts, span, check,
+                ),
+                _ => unreachable!("query_cond dispatched with an unknown name"),
+            };
+        }
+        let nan = self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num);
+        let root = self.graph.push(RvNode::Select { cond: condition, a: quantity, b: nan }, RvKind::Num);
         match qname {
             "P" => builtins::prob_cond(&self.graph, root, tail, default_n, max_opts, span, check),
             "E" | "Var" => {

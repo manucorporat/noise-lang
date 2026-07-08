@@ -616,6 +616,144 @@ pub fn quantile_cond(
     Ok(Value::Num(empirical_quantile(&draws, q)))
 }
 
+// --- density-weighted conditional queries (see `crate::observe`): the condition contained an
+//     observation `Y == v` of a continuous draw, so lanes are *weighted* by the observed density
+//     instead of rejected. `quantity` is the (already clamp-rewritten) quantity — wrapped in the
+//     usual `select(residual, quantity, NaN)` when unrecognized conjuncts remain — and `weight`
+//     is the density root. Estimates are self-normalized; standard errors use the effective
+//     sample size `ess = (Σw)²/Σw²`.
+
+/// No lane carried weight: the observed value may lie outside its distribution's support (zero
+/// density), or the residual condition never held.
+fn cond_no_weight(n: usize, span: Span) -> NoiseError {
+    NoiseError::runtime(
+        format!(
+            "the condition after `|` carried no weight in {n} samples — the observed value may \
+             have zero density (outside its distribution's support), or the accompanying \
+             condition never occurred"
+        ),
+        span,
+    )
+}
+
+/// `P(event | … Y == v …)` — the weighted conditional probability.
+pub fn prob_cond_weighted(
+    graph: &RvGraph,
+    quantity: RvId,
+    weight: RvId,
+    tail: &[Value],
+    default_n: usize,
+    max_opts: u64,
+    span: Span,
+    check: bool,
+) -> Result<Value> {
+    if tail.len() > 1 {
+        return Err(NoiseError::runtime(
+            format!("P(event | cond) takes an optional sample count, got {} extra argument(s)", tail.len()),
+            span,
+        ));
+    }
+    let n = opt_count("P", tail.first(), default_n, span)?;
+    if check {
+        return Ok(Value::Est { val: 0.5, se: 0.0 });
+    }
+    let n = clamp_to_op_budget(n, graph, quantity, max_opts);
+    let n = clamp_to_op_budget(n, graph, weight, max_opts);
+    let m = sampler::weighted_cond_moments(graph, quantity, weight, n, P_DEFAULT_SEED);
+    if m.count == 0 {
+        return Err(cond_no_weight(n, span));
+    }
+    let p_hat = m.mean;
+    let se = (p_hat * (1.0 - p_hat) / m.ess).sqrt().max(0.5 / m.ess);
+    Ok(Value::Est { val: p_hat, se })
+}
+
+/// `E(x | … Y == v …)` / `Var(x | … Y == v …)` — weighted conditional moments.
+pub fn moment_cond_weighted(
+    name: &str,
+    graph: &RvGraph,
+    quantity: RvId,
+    weight: RvId,
+    tail: &[Value],
+    default_n: usize,
+    max_opts: u64,
+    span: Span,
+    check: bool,
+) -> Result<Value> {
+    if tail.len() > 1 {
+        return Err(NoiseError::runtime(
+            format!("{name}(x | cond) takes an optional sample count, got {} extra argument(s)", tail.len()),
+            span,
+        ));
+    }
+    let n = opt_count(name, tail.first(), default_n, span)?;
+    if check {
+        return Ok(Value::Est { val: 0.0, se: 0.0 });
+    }
+    let n = clamp_to_op_budget(n, graph, quantity, max_opts);
+    let n = clamp_to_op_budget(n, graph, weight, max_opts);
+    let m = sampler::weighted_cond_moments(graph, quantity, weight, n, P_DEFAULT_SEED);
+    if m.count == 0 {
+        return Err(cond_no_weight(n, span));
+    }
+    if name == "Var" {
+        Ok(Value::Est { val: m.variance, se: m.variance.abs() * (2.0 / m.ess).sqrt() })
+    } else {
+        Ok(Value::Est { val: m.mean, se: (m.variance / m.ess).sqrt() })
+    }
+}
+
+/// `Q(x | … Y == v …, q[, n])` — the weighted conditional quantile: sort the in-weight draws and
+/// take the smallest value whose cumulative weight reaches `q` of the total.
+pub fn quantile_cond_weighted(
+    graph: &RvGraph,
+    quantity: RvId,
+    weight: RvId,
+    tail: &[Value],
+    default_n: usize,
+    max_opts: u64,
+    span: Span,
+    check: bool,
+) -> Result<Value> {
+    if tail.is_empty() || tail.len() > 2 {
+        return Err(NoiseError::runtime(
+            format!(
+                "Q(x | cond, q[, n]) needs a quantile level q in [0,1] (and an optional sample count), got {} argument(s) after the condition",
+                tail.len()
+            ),
+            span,
+        ));
+    }
+    let q = as_num(&tail[0], span)?;
+    if !(0.0..=1.0).contains(&q) {
+        return Err(NoiseError::runtime(
+            format!("Q needs a quantile level q in [0, 1], got {q}"),
+            span,
+        ));
+    }
+    let n = opt_count("Q", tail.get(1), default_n, span)?;
+    if check {
+        return Ok(Value::Num(0.0));
+    }
+    let n = clamp_to_op_budget(n, graph, quantity, max_opts);
+    let n = clamp_to_op_budget(n, graph, weight, max_opts);
+    let mut draws = sampler::weighted_cond_draws(graph, quantity, weight, n, P_DEFAULT_SEED);
+    if draws.is_empty() {
+        return Err(cond_no_weight(n, span));
+    }
+    draws.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total: f64 = draws.iter().map(|&(_, w)| w).sum();
+    let target = q * total;
+    let mut cum = 0.0;
+    for &(x, w) in &draws {
+        cum += w;
+        if cum >= target {
+            return Ok(Value::Num(x));
+        }
+    }
+    Ok(Value::Num(draws.last().unwrap().0))
+}
+
 /// Linear-interpolated empirical quantile of a **sorted, non-empty** sample (the `type-7` rule,
 /// numpy's default): position `q*(len-1)`, blended between its floor/ceil order statistics.
 fn empirical_quantile(sorted: &[f64], q: f64) -> f64 {

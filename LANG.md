@@ -410,9 +410,35 @@ two separate passes would mis-pair the lanes.
 > **Status: implemented** for `P`/`E`/`Var`/`Q`, including bound conditioned values and operations
 > on them. The estimate uses the *in-condition* sample size `m ≈ n·P(C)` for its standard error, so
 > a rarer condition self-reports a looser estimate. Conditioning is **rejection-based** (it keeps the
-> lanes where `C` happened): excellent when `P(C)` is not tiny, but it does **not** do importance
-> weighting or posterior/MCMC inference — observing a *continuous* measurement (`X == 4.7`) or a
-> rare/high-dimensional event is the separate inference track (see `GOAL.md`).
+> lanes where `C` happened) — except for **observations**, below. Rare/high-dimensional events and
+> MCMC-style posterior inference remain the separate inference track (see `GOAL.md`).
+
+**Observing a continuous draw: `| Y == v` (density weighting).** A continuous equality is
+measure-zero, so rejection alone could never satisfy it — but when the condition contains
+`Y == v` where `Y` **is a draw** (`Y ~ normal(mu, sigma)`, `~ exponential(rate)`, `~ unif(a, b)`
+— parameters may be constant or random), the query treats it as an *observation*: the draw is
+**clamped** to `v` and every lane is **weighted by the density** of `Y` at `v` (likelihood
+weighting — exact in expectation, self-normalized). This is Bayesian inference on continuous
+data:
+
+```
+mu ~ normal(0, 1)          # prior
+Y  ~ normal(mu, 1)         # one measurement
+E(mu | Y == 1)             # ≈ 0.5   — the conjugate posterior N(1/2, 1/2)
+Var(mu | Y == 1)           # ≈ 0.5
+E(mu | Y == 1 && mu > 0)   # observation + ordinary rejection conjunct, in one query
+```
+
+- The equality must observe **the drawn variable itself** (or, internally, its lowered
+  location–scale form). A *transform* (`X + Y == v`, `2*Y == v`, `count(flips) == 7`) is not
+  recognized and falls back to rejection — for a continuous transform that is the usual
+  "condition never occurred" error.
+- The `_int` families and discrete draws are *not* weighted: a discrete equality has positive
+  probability, so rejection already answers it.
+- Observing a value **outside the support** (`E(X | X == -1)` for an exponential) has zero
+  density everywhere — an error that says the condition carried no weight.
+- The standard error uses the **effective sample size** `(Σw)²/Σw²`, so unequal weights
+  self-report a looser estimate, exactly as a rare rejection condition does.
 
 ### Hierarchical distributions (a random parameter)
 
@@ -465,10 +491,13 @@ E(bias | count(flips) == 7)              # ≈ 0.667 — posterior mean after 7 
 
 ### Hazards and still-planned semantics
 
-- **Equality on a *continuous* RV is almost surely false.** `unif(a,b)` is continuous, so
-  `X == c` (and any `==` between continuous RVs) has probability ~0 — e.g. `unif(1,6) == 4`
-  is essentially never true. Use a discrete distribution (`unif_int`, `bernoulli`). A
-  **warning** on `==`/`!=` over a continuous RV is still TODO.
+- **Equality on a *continuous* RV is almost surely false** — *except after `|`*. `unif(a,b)` is
+  continuous, so `X == c` (and any `==` between continuous RVs) has probability ~0 — e.g.
+  `P(unif(1,6) == 4)` is essentially never true; use a discrete distribution (`unif_int`,
+  `bernoulli`) for equality *events*. But as a **condition** (`E(mu | Y == 2.5)`) a continuous
+  equality on a draw is a well-defined *observation*, answered by density weighting — see
+  "Conditioning". A **warning** on `==`/`!=` over a continuous RV outside a condition is still
+  TODO.
 - **Multiple queries do not yet share one sampling pass (TODO).** Each `P()` call currently
   samples its own cone with the default seed. The intended semantics is that all queries in
   a run share *one* batch of draws so `P(A)`, `P(B)`, `P(A && B)` are mutually consistent

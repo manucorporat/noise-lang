@@ -17,6 +17,7 @@ pub mod introspect;
 pub mod jit;
 pub mod kernel;
 pub mod lexer;
+pub mod observe;
 pub mod parser;
 pub mod reduce;
 pub mod rng;
@@ -316,6 +317,62 @@ mod tests {
         assert!((run_num("D ~ unif_int(1,6); E(D | D > 3)") - 5.0).abs() < 5e-3);
         assert!((run_num("D ~ unif_int(1,6); Var(D | D > 3)") - 2.0 / 3.0).abs() < 5e-3);
         assert!((run_num("D ~ unif_int(1,6); Q(D | D > 3, 0.5)") - 5.0).abs() < 1e-9);
+    }
+
+    // --- density-weighted observation: `| Y == v` on a continuous draw (see `observe.rs`) ---
+
+    #[test]
+    fn observing_a_continuous_draw_clamps_it() {
+        // A measure-zero condition that rejection can never satisfy: clamp + weight answers it.
+        assert_eq!(num("Z ~ normal(0,1); E(Z | Z == 1.5)"), 1.5);
+        assert_eq!(display_of("Z ~ normal(0,1); E(Z | Z == 1.5)"), "1.5");
+        assert!((num("X ~ exponential(2); E(X | X == 0.7)") - 0.7).abs() < 1e-9);
+        assert_eq!(num("U ~ unif(0,1); E(U | U == 0.3)"), 0.3);
+    }
+
+    #[test]
+    fn observing_a_hierarchical_normal_gives_the_conjugate_posterior() {
+        // mu ~ N(0,1), Y ~ N(mu,1), observe Y = 1: posterior is N(1/2, 1/2) (conjugate).
+        let m = "mu ~ normal(0,1); Y ~ normal(mu,1);";
+        assert!((num(&format!("{m} E(mu | Y == 1)")) - 0.5).abs() < 0.01);
+        assert!((num(&format!("{m} Var(mu | Y == 1)")) - 0.5).abs() < 0.01);
+        // P(mu > 0 | Y = 1) = Phi(0.5/sqrt(0.5)) ~= 0.760250.
+        assert!((num(&format!("{m} P(mu > 0 | Y == 1)")) - 0.760250).abs() < 0.01);
+        // Weighted conditional median of N(1/2, 1/2) is 1/2.
+        assert!((num(&format!("{m} Q(mu | Y == 1, 0.5)")) - 0.5).abs() < 0.01);
+        // A bound conditioned value takes the same weighted path.
+        assert!((num(&format!("{m} post = mu | Y == 1; E(post)")) - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn observation_mixes_with_rejection_conjuncts() {
+        // E(mu | Y == 1 && mu > 0): posterior N(1/2, 1/2) truncated to mu > 0, whose mean is
+        // 1/2 + sqrt(1/2)·phi(-1/sqrt(2))/Phi(1/sqrt(2)) ~= 0.78901.
+        let e = num("mu ~ normal(0,1); Y ~ normal(mu,1); E(mu | Y == 1 && mu > 0)");
+        assert!((e - 0.78901).abs() < 0.02, "truncated posterior mean = {e}");
+    }
+
+    #[test]
+    fn observing_a_hierarchical_uniform_weights_by_lane_density() {
+        // w ~ unif(0,1), Y ~ unif(0, w), observe Y = 0.2: posterior over w has density
+        // proportional to [w > 0.2]/w, so E(w | Y == 0.2) = 0.8/ln(5) ~= 0.49707.
+        let e = num("w ~ unif(0,1); Y ~ unif(0, w); E(w | Y == 0.2)");
+        assert!((e - 0.8 / 5.0f64.ln()).abs() < 0.01, "E(w | Y == 0.2) = {e}");
+    }
+
+    #[test]
+    fn observing_outside_the_support_is_a_zero_weight_error() {
+        // exponential draws are never negative: the observed density is exactly 0.
+        let err = run("X ~ exponential(1); E(X | X == -1)").unwrap_err();
+        assert!(err.to_string().contains("no weight"), "got: {err}");
+    }
+
+    #[test]
+    fn non_invertible_observation_still_takes_the_rejection_path() {
+        // X + Y == 1.5 is not a recognized clamp shape — it falls back to rejection, which
+        // (correctly, for now) reports the measure-zero condition as never occurring.
+        let err = run("X ~ normal(0,1); Y ~ normal(0,1); E(X | X + Y == 1.5)").unwrap_err();
+        assert!(err.to_string().contains("never occurred"), "got: {err}");
     }
 
     #[test]
