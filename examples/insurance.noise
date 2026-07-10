@@ -1,10 +1,17 @@
-# Insurance with a $200 deductible on a loss uniform over $0..$1000.
+---
+title: "Insurance deductible"
+knobs:
+  deductible: { type: float, min: 0,   max: 1000, step: 50,  default: 200 }
+  max_loss:   { type: float, min: 100, max: 5000, step: 100, default: 1000 }
+---
+# Insurance with a `deductible` on a loss uniform over $0..$max_loss.
 # The insurer's claim payout is a random variable shaped by a lifted `if`.
-# P(the insurer pays anything) = P(loss > 200) = 0.8
+# P(the insurer pays anything) = P(loss > deductible) = 1 - deductible/max_loss
+# (with the defaults, that's 1 - 200/1000 = 0.8).
 use rand;
 
-loss ~ unif(0, 1000);
-claim = if loss > 200 { loss - 200 } else { 0 };
+loss ~ unif(0, max_loss);
+claim = if loss > deductible { loss - deductible } else { 0 };
 p = P(claim > 0);
 Print("P(insurer pays a claim) =", p)
 

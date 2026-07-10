@@ -241,10 +241,30 @@ const meta: Omit<Example, "code" | "category">[] = [
   },
 ];
 
+/**
+ * Pull a `title:` out of a file's `---` frontmatter fence, if present. A light build-time read (the
+ * engine's `meta()` is the runtime source of truth); this only needs the title so the gallery can
+ * prefer what the *file* declares over the curated `meta` below — the code can't drift from the
+ * title once it lives in the file. Only a fence at byte 0 counts, matching the engine.
+ */
+function frontmatterTitle(src: string): string | undefined {
+  if (!src.startsWith("---")) return undefined;
+  const end = src.indexOf("\n---", 3);
+  if (end === -1) return undefined;
+  const block = src.slice(3, end);
+  for (const line of block.split("\n")) {
+    const m = line.match(/^\s*title:\s*(.+?)\s*$/);
+    if (m) return m[1].replace(/^["']|["']$/g, "");
+  }
+  return undefined;
+}
+
 export const examples: Example[] = meta
   .filter((m) => codeByName[m.id])
   .map((m) => ({
     ...m,
+    // The file's frontmatter title wins when present; otherwise the curated title stands.
+    title: frontmatterTitle(codeByName[m.id]) ?? m.title,
     category: categoryOf[m.id] ?? "Basics",
     code: codeByName[m.id],
   }));

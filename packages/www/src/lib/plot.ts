@@ -9,7 +9,8 @@
 //   4. paints them with the site's palette.
 //
 // Steps 2–3 are Flint's own recipe for a composite chart: compile each spec, then edit the backend
-// JSON minimally. Step 4 is a Vega config overlay, not chart design.
+// JSON minimally. Step 4 is a Vega config overlay, not chart design. `reconcileDomain` is the one
+// place we work around a library bug; it is documented at its definition.
 //
 // The whole module is loaded lazily (`import()` from the playground on its first plot), so a
 // text-only run never pays for ~350 kB of chart libraries.
@@ -63,12 +64,23 @@ function compile(assemble: Libs['assembleVegaLite'], chart: ChartSpec, width: nu
 }
 
 /**
- * Flint computes an explicit, padded `domain` for a scale **and** leaves `zero: true` on it when the
- * mark is bar-like. Vega honors both, so `zero` silently widens the domain Flint just chose — a
- * histogram of prices around 100 gets an axis starting at 0, with half the canvas empty. The
- * explicit domain is the more specific statement (a histogram's x is a coordinate, not a magnitude),
- * so it wins. Scales without a pinned domain — a bar chart's count axis, a driver chart's share
- * axis — keep their zero baseline, which is exactly where a baseline belongs.
+ * Work around a `flint-chart@0.2.0` bug: it pins an explicit `domain` on a scale **and** leaves
+ * `zero: true` on it whenever the mark is bar-like. Vega honors both, and `zero` silently widens the
+ * domain Flint just chose — so a histogram of prices around 100 gets an axis starting at 0, wasting
+ * half the canvas. The explicit domain is the more specific of the two contradictory statements (a
+ * histogram's x is a *coordinate*; only a bar's length is measured from zero), so it wins.
+ *
+ * Root cause, for whoever revisits this: `resolveFieldSemantics` computes an annotation-aware
+ * `zeroClass` — its own docstring says a domain starting above 0 makes zero arbitrary "regardless of
+ * what the base type says" — but `resolveChannelSemantics` never copies that `zeroClass` onto the
+ * channel, so `computeZeroDecision` re-derives it from the bare semantic type and forces
+ * `zero: true` for every bar-like mark. `resolveZeroClassFromAnnotation` is therefore dead code on
+ * all three backends, and no input (`intrinsicDomain`, `includeZero_x`, an explicit `scale`) can
+ * reach the decision. Delete this function once that is fixed upstream.
+ *
+ * Narrow by construction: it only fires where Flint contradicted itself. A scale with no pinned
+ * domain — a bar chart's count axis, a driver chart's share axis — keeps its zero baseline, which is
+ * exactly where a baseline belongs.
  */
 function reconcileDomain(encoding: VlSpec | undefined): void {
   for (const channel of ['x', 'y'] as const) {

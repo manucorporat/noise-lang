@@ -340,6 +340,11 @@ impl Parser {
                 self.bump();
                 Ok(Spanned::new(Expr::Str(s), tok.span))
             }
+            TokKind::Template { body, syntax, body_offset } => {
+                self.bump();
+                let parts = parse_template_parts(&body, body_offset)?;
+                Ok(Spanned::new(Expr::Template { parts, syntax }, tok.span))
+            }
             TokKind::True => {
                 self.bump();
                 Ok(Spanned::new(Expr::Bool(true), tok.span))
@@ -596,6 +601,194 @@ fn infix_op(k: &TokKind) -> Option<(BinOp, u8, u8)> {
         TokKind::Caret => (Pow, 14, 13),
         _ => return None,
     })
+}
+
+// === Template parsing (PLAN-LITERATE §D3) ========================================================
+
+/// Split a template `body` into literal/hole parts. `body_offset` is where `body` begins in the
+/// original source, so each hole's sub-parsed expression carries true byte spans. Literal text is
+/// normalized: the shared leading indentation is stripped and a single blank opening/closing line
+/// (the ones adjacent to the fences) is removed.
+fn parse_template_parts(body: &str, body_offset: usize) -> Result<Vec<TemplatePart>> {
+    let bytes = body.as_bytes();
+    // 1. Segment into literal ranges and hole (expression) ranges, both byte ranges within `body`.
+    enum Seg {
+        Lit(usize, usize),
+        Hole(usize, usize),
+    }
+    let mut segs: Vec<Seg> = Vec::new();
+    let mut lit_start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            segs.push(Seg::Lit(lit_start, i));
+            let expr_start = i + 2;
+            // Find the matching `}` — track brace depth and skip `}` inside string literals.
+            let mut depth = 1i32;
+            let mut j = expr_start;
+            let mut in_str = false;
+            while j < bytes.len() {
+                let b = bytes[j];
+                if in_str {
+                    if b == b'"' {
+                        in_str = false;
+                    }
+                } else {
+                    match b {
+                        b'"' => in_str = true,
+                        b'`' => {
+                            return Err(NoiseError::parse(
+                                "a nested template inside a `${…}` hole is not supported in v1",
+                                Span::new(body_offset + j, body_offset + j + 1),
+                            ))
+                        }
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                j += 1;
+            }
+            if j >= bytes.len() {
+                return Err(NoiseError::parse(
+                    "unterminated `${…}` interpolation in template",
+                    Span::new(body_offset + i, body_offset + bytes.len()),
+                ));
+            }
+            segs.push(Seg::Hole(expr_start, j));
+            i = j + 1;
+            lit_start = i;
+        } else {
+            i += 1;
+        }
+    }
+    segs.push(Seg::Lit(lit_start, bytes.len()));
+
+    // 2. Extract literal strings + parse holes.
+    let indent = common_indent(body);
+    let lit_count = segs.iter().filter(|s| matches!(s, Seg::Lit(..))).count();
+    let mut lits: Vec<String> = Vec::new();
+    let mut parts: Vec<TemplatePart> = Vec::new();
+    // Placeholder markers let us fill dedented literals back in the right slots after computing
+    // which literal is first/last (for the blank-line trim).
+    enum Slot {
+        LitIdx(usize),
+        Hole(Spanned),
+    }
+    let mut slots: Vec<Slot> = Vec::new();
+    for seg in &segs {
+        match *seg {
+            Seg::Lit(a, b) => {
+                slots.push(Slot::LitIdx(lits.len()));
+                lits.push(body[a..b].to_string());
+            }
+            Seg::Hole(a, b) => {
+                let expr = parse_expr_str(&body[a..b], body_offset + a)?;
+                slots.push(Slot::Hole(expr));
+            }
+        }
+    }
+
+    // 3. Normalize literals: trim the opening/closing blank line, then dedent.
+    if let Some(first) = lits.first_mut() {
+        *first = trim_leading_blank_line(first);
+    }
+    if let Some(last) = lits.last_mut() {
+        *last = trim_trailing_blank_line(last);
+    }
+    for (idx, lit) in lits.iter_mut().enumerate() {
+        *lit = dedent(lit, indent, idx == 0);
+    }
+    let _ = lit_count;
+
+    // 4. Reassemble in source order, dropping empty literals (they render to nothing).
+    for slot in slots {
+        match slot {
+            Slot::LitIdx(k) => {
+                if !lits[k].is_empty() {
+                    parts.push(TemplatePart::Lit(std::mem::take(&mut lits[k])));
+                }
+            }
+            Slot::Hole(e) => parts.push(TemplatePart::Hole(e)),
+        }
+    }
+    Ok(parts)
+}
+
+/// The shared leading-whitespace width across `body`'s non-blank physical lines (0 if none).
+fn common_indent(body: &str) -> usize {
+    let mut min: Option<usize> = None;
+    for line in body.split('\n') {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let w = line.len() - line.trim_start_matches([' ', '\t']).len();
+        min = Some(min.map_or(w, |m| m.min(w)));
+    }
+    min.unwrap_or(0)
+}
+
+/// Remove up to `d` leading whitespace chars after each newline (and, when `at_start`, at the very
+/// beginning) — the dedent that strips a template's shared indentation.
+fn dedent(s: &str, d: usize, at_start: bool) -> String {
+    if d == 0 {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut skip = if at_start { d } else { 0 };
+    for ch in s.chars() {
+        if ch == '\n' {
+            out.push(ch);
+            skip = d;
+        } else if skip > 0 && (ch == ' ' || ch == '\t') {
+            skip -= 1;
+        } else {
+            skip = 0;
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// If everything before the first newline is whitespace, drop through that newline (the blank
+/// opening line next to the fence). Otherwise leave the string unchanged.
+fn trim_leading_blank_line(s: &str) -> String {
+    if let Some(nl) = s.find('\n') {
+        if s[..nl].trim().is_empty() {
+            return s[nl + 1..].to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// If everything after the last newline is whitespace, drop from that newline (the blank closing
+/// line next to the fence). Otherwise leave the string unchanged.
+fn trim_trailing_blank_line(s: &str) -> String {
+    if let Some(nl) = s.rfind('\n') {
+        if s[nl + 1..].trim().is_empty() {
+            return s[..nl].to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// Parse a single expression from `src`, shifting all spans by `base_offset` so diagnostics point at
+/// the original source (used for `${…}` template holes). The whole slice must be one expression.
+fn parse_expr_str(src: &str, base_offset: usize) -> Result<Spanned> {
+    let mut tokens = tokenize(src)?;
+    let newlines = newline_flags(src, &tokens);
+    for t in &mut tokens {
+        t.span = Span::new(t.span.start + base_offset, t.span.end + base_offset);
+    }
+    let mut p = Parser { tokens, newlines, pos: 0 };
+    let e = p.parse_expr()?;
+    p.expect(TokKind::Eof)?;
+    Ok(e)
 }
 
 #[cfg(test)]

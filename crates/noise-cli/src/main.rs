@@ -4,6 +4,7 @@
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
+use noise_core::frontmatter::KnobValue;
 use noise_core::Engine;
 
 /// The VS Code / Cursor syntax extension, baked into the binary so `ide-integration`
@@ -28,9 +29,81 @@ fn main() {
                 std::process::exit(1);
             }
         },
-        Some(path) => run_file(path),
+        Some(_) => run_cli(&args),
         None => repl(),
     }
+}
+
+/// Parse the `noise <file> [--knob k=v]...` invocation, then run it. Splits `--knob name=value`
+/// flags (repeatable) from the single positional file path.
+fn run_cli(args: &[String]) {
+    let mut path: Option<&str> = None;
+    let mut knobs: Vec<(String, KnobValue)> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--knob" || a == "-k" {
+            match args.get(i + 1) {
+                Some(kv) => match parse_knob_arg(kv) {
+                    Ok(pair) => knobs.push(pair),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => {
+                    eprintln!("error: `--knob` needs a `name=value` argument");
+                    std::process::exit(1);
+                }
+            }
+            i += 2;
+        } else if let Some(kv) = a.strip_prefix("--knob=") {
+            match parse_knob_arg(kv) {
+                Ok(pair) => knobs.push(pair),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            i += 1;
+        } else if path.is_none() {
+            path = Some(a);
+            i += 1;
+        } else {
+            eprintln!("error: unexpected argument {a:?}");
+            std::process::exit(1);
+        }
+    }
+    match path {
+        Some(p) => run_file(p, &knobs),
+        None => {
+            eprintln!("error: no file to run");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Parse a `name=value` knob override. `true`/`false` become bools; everything else parses as a
+/// number (the engine type-checks it against the knob's declared kind).
+fn parse_knob_arg(kv: &str) -> std::result::Result<(String, KnobValue), String> {
+    let (name, value) = kv
+        .split_once('=')
+        .ok_or_else(|| format!("bad --knob {kv:?}: expected name=value"))?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(format!("bad --knob {kv:?}: empty knob name"));
+    }
+    let value = value.trim();
+    let v = match value {
+        "true" => KnobValue::Bool(true),
+        "false" => KnobValue::Bool(false),
+        _ => KnobValue::Num(
+            value
+                .parse::<f64>()
+                .map_err(|_| format!("bad --knob {kv:?}: {value:?} is not a number or bool"))?,
+        ),
+    };
+    Ok((name.to_string(), v))
 }
 
 fn print_help() {
@@ -38,6 +111,7 @@ fn print_help() {
     println!("usage:");
     println!("  noise                   start a REPL");
     println!("  noise <file>            run a program file");
+    println!("  noise <file> --knob k=v tune a frontmatter knob (repeatable)");
     println!("  noise validate <file>   parse and build the graph without producing output");
     println!("  noise ide-integration   install the VS Code / Cursor syntax extension");
 }
@@ -107,7 +181,7 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn run_file(path: &str) {
+fn run_file(path: &str, knobs: &[(String, KnobValue)]) {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -116,7 +190,7 @@ fn run_file(path: &str) {
         }
     };
     let mut engine = Engine::new();
-    let result = engine.run(&src);
+    let result = engine.run_with_knobs(&src, knobs);
     // Render the output stream in source order: `Print` lines and `plot::*` charts (as their
     // one-line text cards), interleaved exactly as the program emitted them, then the final value.
     print_output(engine.take_output());
@@ -195,6 +269,7 @@ fn print_output(items: Vec<noise_core::Output>) {
     for item in items {
         match item {
             noise_core::Output::Text(line) => println!("{line}"),
+            noise_core::Output::Note { text, .. } => println!("{text}"),
             noise_core::Output::Plot(plot) => println!("{plot}"),
         }
     }

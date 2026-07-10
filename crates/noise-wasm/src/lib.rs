@@ -7,10 +7,41 @@
 //! shows (samples / operations / random draws); the JS side measures wall-clock to derive ops/sec.
 
 use noise_core::flint::to_flint;
+use noise_core::frontmatter::KnobValue;
 use noise_core::introspect::Summary;
 use noise_core::{Engine, Output, RunStats, Value};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
+
+/// Run options a host may pass alongside the source: knob overrides for now (`{ "knobs": { name:
+/// value, … } }`), sample budget/seed later. Absent or empty → the program runs at knob defaults.
+#[derive(Deserialize, Default)]
+struct Opts {
+    #[serde(default)]
+    knobs: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Parse the optional `opts_json` into engine knob overrides. Returns an error string (surfaced as a
+/// failed run) if the JSON or a knob value is malformed.
+fn parse_opts(opts_json: Option<String>) -> Result<Vec<(String, KnobValue)>, String> {
+    let json = match opts_json {
+        Some(j) if !j.trim().is_empty() => j,
+        _ => return Ok(Vec::new()),
+    };
+    let opts: Opts = serde_json::from_str(&json).map_err(|e| format!("invalid opts JSON: {e}"))?;
+    let mut out = Vec::with_capacity(opts.knobs.len());
+    for (name, v) in opts.knobs {
+        let kv = match v {
+            serde_json::Value::Bool(b) => KnobValue::Bool(b),
+            serde_json::Value::Number(n) => {
+                KnobValue::Num(n.as_f64().ok_or_else(|| format!("knob `{name}` is not a number"))?)
+            }
+            _ => return Err(format!("knob `{name}` override must be a number or bool")),
+        };
+        out.push((name, kv));
+    }
+    Ok(out)
+}
 
 /// One entry in the program's output stream, tagged for the JS renderer: a `Print` line (`text`) or
 /// a `plot::*` chart (`plot`). Keeping these in one ordered list is what lets the playground show
@@ -33,6 +64,13 @@ fn split_output(items: Vec<Output>) -> (String, Vec<LogItem>) {
                 text.push_str(&line);
                 text.push('\n');
                 log.push(LogItem::Text { text: line });
+            }
+            // LT2: an emitted template renders as text alongside `Print` lines. LT3 promotes this to
+            // a distinct `note` block (carrying the syntax tag) in the `Document` contract.
+            Output::Note { text: t, .. } => {
+                text.push_str(&t);
+                text.push('\n');
+                log.push(LogItem::Text { text: t });
             }
             Output::Plot(s) => log.push(LogItem::Plot(PlotOut::from(&*s))),
         }
@@ -77,12 +115,17 @@ struct RunResult {
     log: Vec<LogItem>,
 }
 
-/// Run a Noise program. Always returns a JSON string (never throws); the JS side reads
+/// Run a Noise program. `opts_json` (optional) carries knob overrides — `{ "knobs": { name: value,
+/// … } }`. Always returns a JSON string (never throws); the JS side reads
 /// `ok`/`value`/`output`/`error`/`stats`/`log`.
 #[wasm_bindgen]
-pub fn run(src: &str) -> String {
+pub fn run(src: &str, opts_json: Option<String>) -> String {
+    let overrides = match parse_opts(opts_json) {
+        Ok(o) => o,
+        Err(e) => return run_error(e),
+    };
     let mut engine = Engine::new();
-    let result = engine.run(src);
+    let result = engine.run_with_knobs(src, &overrides);
     let (output, log) = split_output(engine.take_output());
     let stats: Stats = engine.stats().into();
     let payload = match result {
@@ -96,6 +139,44 @@ pub fn run(src: &str) -> String {
     serde_json::to_string(&payload).unwrap_or_else(|_| {
         r#"{"ok":false,"value":null,"output":"","error":"internal serialization error","log":[]}"#.into()
     })
+}
+
+/// A failed run (bad opts) as the same `RunResult` shape, so the JS side never needs a second error
+/// channel.
+fn run_error(message: String) -> String {
+    let payload = RunResult {
+        ok: false,
+        value: None,
+        output: String::new(),
+        error: Some(message),
+        stats: Stats { forcings: 0, samples: 0, ops: 0, rng_draws: 0 },
+        log: Vec::new(),
+    };
+    serde_json::to_string(&payload).unwrap_or_else(|_| {
+        r#"{"ok":false,"value":null,"output":"","error":"internal serialization error","log":[]}"#.into()
+    })
+}
+
+/// Read a program's frontmatter *without running it* — the pure entry a host calls to build a knob
+/// UI (PLAN-LITERATE §D2). Returns `{ ok, title, knobs, extra }` on success (`knobs` is an ordered
+/// array of `{ name, type, min?, max?, step?, default, label? }`), or `{ ok: false, error }` if the
+/// fence is malformed. A file with no frontmatter is `ok: true` with a null title and empty knobs.
+#[wasm_bindgen]
+pub fn meta(src: &str) -> String {
+    let value = match noise_core::frontmatter::parse(src) {
+        Ok(Some((fm, _span))) => {
+            let mut m = match fm.to_json() {
+                serde_json::Value::Object(m) => m,
+                _ => serde_json::Map::new(),
+            };
+            m.insert("ok".into(), serde_json::json!(true));
+            serde_json::Value::Object(m)
+        }
+        Ok(None) => serde_json::json!({ "ok": true, "knobs": [], "extra": {} }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    serde_json::to_string(&value)
+        .unwrap_or_else(|_| r#"{"ok":false,"error":"internal serialization error"}"#.into())
 }
 
 /// The crate version, surfaced in the playground footer ("Noise vX.Y.Z").
@@ -213,9 +294,13 @@ struct IntrospectResult {
 /// per-request results let the playground show a variable's distribution, two variables' relationship,
 /// or what drives a variable — all without the source containing a single `describe`/`corr` call.
 #[wasm_bindgen]
-pub fn run_with_introspection(src: &str, requests_json: &str) -> String {
+pub fn run_with_introspection(src: &str, requests_json: &str, opts_json: Option<String>) -> String {
+    let overrides = match parse_opts(opts_json) {
+        Ok(o) => o,
+        Err(e) => return run_error(e),
+    };
     let mut engine = Engine::new();
-    let result = engine.run(src);
+    let result = engine.run_with_knobs(src, &overrides);
     // Capture the program's own output stream (Print + plot::*) now — before the follow-up runs.
     let (output, log) = split_output(engine.take_output());
     let stats: Stats = engine.stats().into();

@@ -7,6 +7,7 @@
 import init, {
   run as wasmRun,
   run_with_introspection as wasmRunIntrospect,
+  meta as wasmMeta,
   version as wasmVersion,
 } from '../wasm/noise.js';
 
@@ -56,16 +57,81 @@ export interface NoiseResult {
 
 const ZERO_STATS: NoiseStats = { forcings: 0, samples: 0, ops: 0, rng_draws: 0 };
 
-/** Parse + evaluate a Noise program. Never throws — failures come back in `error`. */
-export async function run(src: string): Promise<NoiseResult> {
+/** A concrete knob value a host passes as an override — a number (int/float) or a bool. */
+export type KnobValue = number | boolean;
+
+/** Knob overrides keyed by knob name. Values are clamped/snapped by the engine. */
+export type KnobOverrides = Record<string, KnobValue>;
+
+/** Run options: knob overrides for now, sample budget/seed later. */
+export interface RunOpts {
+  knobs?: KnobOverrides;
+}
+
+/** Serialize `RunOpts` to the JSON the WASM boundary expects (or `undefined` when empty). */
+function optsToJson(opts?: RunOpts): string | undefined {
+  if (!opts?.knobs || Object.keys(opts.knobs).length === 0) return undefined;
+  return JSON.stringify({ knobs: opts.knobs });
+}
+
+/** Parse + evaluate a Noise program. `opts.knobs` tunes frontmatter knobs. Never throws — failures
+ * come back in `error`. */
+export async function run(src: string, opts?: RunOpts): Promise<NoiseResult> {
   await load();
   // Time only the engine call (module load is excluded — it's a one-off, not per-run cost).
   const t0 = performance.now();
-  const raw = wasmRun(src);
+  const raw = wasmRun(src, optsToJson(opts));
   const elapsedMs = performance.now() - t0;
   const parsed = JSON.parse(raw) as Omit<NoiseResult, 'elapsedMs'>;
   // The defensive serialization-error fallback omits `stats`; default it so callers needn't guard.
   return { ...parsed, stats: parsed.stats ?? ZERO_STATS, elapsedMs };
+}
+
+// --- frontmatter + knobs (the "read metadata without running" path) --------------------------
+
+/** A knob's declared type. `choice` is reserved for a later phase. */
+export type KnobKind = 'int' | 'float' | 'bool' | 'choice';
+
+/** A typed, host-tunable global declared in a file's frontmatter (PLAN-LITERATE §D2). */
+export interface Knob {
+  name: string;
+  type: KnobKind;
+  min?: number;
+  max?: number;
+  step?: number;
+  default: KnobValue;
+  /** Optional human label for the UI (falls back to `name`). */
+  label?: string;
+}
+
+/** A file's parsed frontmatter — what `meta` returns. */
+export interface NoiseMeta {
+  ok: boolean;
+  /** The document title, if declared. */
+  title?: string;
+  /** Declared knobs, in source order (render sliders top-to-bottom). */
+  knobs: Knob[];
+  /** Unknown frontmatter keys, preserved verbatim (blurb, category, …). */
+  extra: Record<string, unknown>;
+  /** Set when the fence is malformed. */
+  error?: string;
+}
+
+/**
+ * Read a file's frontmatter **without running it** — the pure call a host uses to build a knob UI.
+ * A file with no frontmatter returns `{ ok: true, knobs: [], extra: {} }`; a malformed fence returns
+ * `{ ok: false, error }`.
+ */
+export async function meta(src: string): Promise<NoiseMeta> {
+  await load();
+  const parsed = JSON.parse(wasmMeta(src)) as Partial<NoiseMeta>;
+  return {
+    ok: parsed.ok ?? false,
+    title: parsed.title,
+    knobs: parsed.knobs ?? [],
+    extra: parsed.extra ?? {},
+    error: parsed.error,
+  };
 }
 
 /** The engine (crate) version, e.g. `"0.1.1"`. */
@@ -146,10 +212,11 @@ export interface NoiseIntrospectResult extends NoiseResult {
 export async function runWithIntrospection(
   src: string,
   requests: IntrospectRequest[],
+  opts?: RunOpts,
 ): Promise<NoiseIntrospectResult> {
   await load();
   const t0 = performance.now();
-  const raw = wasmRunIntrospect(src, JSON.stringify(requests));
+  const raw = wasmRunIntrospect(src, JSON.stringify(requests), optsToJson(opts));
   const elapsedMs = performance.now() - t0;
   const parsed = JSON.parse(raw) as Omit<NoiseIntrospectResult, 'elapsedMs'>;
   return {

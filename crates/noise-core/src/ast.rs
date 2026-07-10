@@ -130,11 +130,29 @@ pub enum Expr {
         event: Box<Spanned>,
         given: Box<Spanned>,
     },
+    /// A fenced **template** (PLAN-LITERATE §D3): raw multi-line text with `${expr}` interpolation.
+    /// Evaluates to a `string` (each hole rendered via its display form, like `Print`). At **root
+    /// statement position** it emits an `Output::Note` instead of becoming the program value; nested
+    /// anywhere else it is just a string value. `syntax` is the triple-fence info tag (e.g. `md`),
+    /// carried so a host can render the note as markdown vs preformatted text.
+    Template {
+        parts: Vec<TemplatePart>,
+        syntax: Option<String>,
+    },
     /// `continue` — skip the rest of the enclosing loop body (PLAN-COMPLEX §8). Evaluating it
     /// short-circuits the current `{ block }` (later statements don't run); a `for` loop discards
     /// that iteration's side effects, and a comprehension *omits* that element. This is how a
     /// comprehension expresses a filter (`if bad(x) { continue }; f(x)`) without special syntax.
     Continue,
+}
+
+/// One segment of a [`Template`](Expr::Template): literal text, or an interpolation hole. Holes are
+/// full expressions carrying their **original source span** (so an error inside `${…}` points at the
+/// real byte location, not a re-based one).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TemplatePart {
+    Lit(String),
+    Hole(Spanned),
 }
 
 /// A qualified or bare name (`rand::unif`, `pi`). Modules are single-level for now. Qualified

@@ -1,10 +1,20 @@
-# Roll one fair six-sided die; how often do you get a 4? One face in six, so 1/6 = 0.16667.
+---
+title: "Roll a die"
+knobs:
+  dice_sides:    { type: int, min: 1, max: 100, step: 1, default: 6 }
+  target_number: { type: int, min: 1, max: 100, step: 1, default: 4 }
+---
+# Roll one fair die; how often do you get the target face? One face in `dice_sides`
+# (with the default six-sided die and target 4, that's 1/6 = 0.16667).
 # A die is DISCRETE, so we use unif_int (with the continuous unif, P(== 4) would be exactly 0).
 use rand;
 
-Dice ~ unif_int(1, 6);
-p = P(Dice == 4);
-Print("P(rolling a 4) =", p)
+Dice ~ unif_int(1, dice_sides);
+p = P(Dice == target_number);
 
-# See it for real: every face 1..6 shows up about equally often.
+`
+P(rolling a ${target_number}) = ${p}
+`
+
+# See it for real: every face 1..dice_sides shows up about equally often.
 plot::histogram(Dice)

@@ -14,6 +14,15 @@ pub enum TokKind {
     Str(String),
     True,
     False,
+    /// A fenced **template** body (PLAN-LITERATE §D3). The lexer captures the raw text between the
+    /// fences as one token; the parser splits `${…}` holes and sub-parses each at its true offset.
+    /// `body_offset` is the byte position where `body` begins in the original source. `syntax` is
+    /// the triple-fence info tag (`md`), `None` for a single-backtick template.
+    Template {
+        body: String,
+        syntax: Option<String>,
+        body_offset: usize,
+    },
     // operators
     Plus,
     Minus,
@@ -63,7 +72,11 @@ pub struct Token {
 
 pub fn tokenize(src: &str) -> Result<Vec<Token>> {
     let bytes = src.as_bytes();
-    let mut i = 0;
+    // A `---`-fenced frontmatter block at byte 0 is trivia: skip it *in place* so every token span
+    // keeps pointing into the original source (error messages and the doc model rely on it). Only
+    // a fence at the very start counts; `---` anywhere else stays three unary minuses.
+    // See `crate::frontmatter`.
+    let mut i = crate::frontmatter::block_end(src)?.unwrap_or(0);
     let mut out = Vec::new();
     let n = bytes.len();
 
@@ -135,6 +148,77 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
             };
             out.push(Token { kind, span: Span::new(start, i) });
             continue;
+        }
+
+        // templates: backtick-fenced (PLAN-LITERATE §D3). Two weights:
+        //   `` `…` ``      — single backtick, plain body; the body cannot contain a backtick.
+        //   ` ```tag…``` ` — triple fence carrying an optional syntax tag; body may hold backticks.
+        if c == '`' {
+            let triple = i + 2 < n && bytes[i + 1] == b'`' && bytes[i + 2] == b'`';
+            if triple {
+                // Info tag runs from just past the ``` to end of that line.
+                let tag_start = i + 3;
+                let tag_end = match src[tag_start..].find('\n') {
+                    Some(rel) => tag_start + rel,
+                    None => {
+                        return Err(NoiseError {
+                            kind: ErrorKind::Parse("unterminated template: ``` has no closing ```".into()),
+                            span: Span::new(start, n),
+                        })
+                    }
+                };
+                let tag = src[tag_start..tag_end].trim();
+                let syntax = if tag.is_empty() { None } else { Some(tag.to_string()) };
+                let body_offset = tag_end + 1; // just past the newline after the info line
+                // Find a closing line that is exactly ``` (after trimming surrounding whitespace).
+                let mut line_start = body_offset;
+                let close_body_end;
+                let close_fence_end;
+                loop {
+                    let line_end = match src[line_start..].find('\n') {
+                        Some(rel) => line_start + rel,
+                        None => bytes.len(),
+                    };
+                    if src[line_start..line_end].trim() == "```" {
+                        close_body_end = line_start;
+                        close_fence_end = line_end;
+                        break;
+                    }
+                    if line_end >= bytes.len() {
+                        return Err(NoiseError {
+                            kind: ErrorKind::Parse("unterminated template: ``` has no closing ```".into()),
+                            span: Span::new(start, n),
+                        });
+                    }
+                    line_start = line_end + 1;
+                }
+                let body = src[body_offset..close_body_end].to_string();
+                i = close_fence_end;
+                out.push(Token {
+                    kind: TokKind::Template { body, syntax, body_offset },
+                    span: Span::new(start, i),
+                });
+                continue;
+            } else {
+                let body_offset = i + 1;
+                let mut j = body_offset;
+                while j < n && bytes[j] != b'`' {
+                    j += 1;
+                }
+                if j >= n {
+                    return Err(NoiseError {
+                        kind: ErrorKind::Parse("unterminated template: `` ` `` has no closing backtick".into()),
+                        span: Span::new(start, n),
+                    });
+                }
+                let body = src[body_offset..j].to_string();
+                i = j + 1; // past the closing backtick
+                out.push(Token {
+                    kind: TokKind::Template { body, syntax: None, body_offset },
+                    span: Span::new(start, i),
+                });
+                continue;
+            }
         }
 
         // strings: double-quoted, no escapes yet (matches the legacy grammar).
@@ -274,6 +358,36 @@ mod tests {
                 Ident("x1".into()), Eof,
             ]
         );
+    }
+
+    #[test]
+    fn templates_lex_single_and_triple_fence() {
+        // Single backtick: raw body, no syntax tag, `body_offset` past the backtick.
+        let toks = tokenize("`hi ${x}`").unwrap();
+        match &toks[0].kind {
+            TokKind::Template { body, syntax, body_offset } => {
+                assert_eq!(body, "hi ${x}");
+                assert_eq!(*syntax, None);
+                assert_eq!(*body_offset, 1);
+            }
+            other => panic!("expected a template token, got {other:?}"),
+        }
+        // Triple fence: info tag captured, body is the raw text between the fences (the parser
+        // normalizes — dedents and trims the fence-adjacent blank lines — later).
+        let toks = tokenize("```md\nhello\n```").unwrap();
+        match &toks[0].kind {
+            TokKind::Template { body, syntax, .. } => {
+                assert_eq!(body, "hello\n");
+                assert_eq!(syntax.as_deref(), Some("md"));
+            }
+            other => panic!("expected a template token, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unterminated_template_is_an_error() {
+        assert!(tokenize("`no close").is_err());
+        assert!(tokenize("```md\nno close").is_err());
     }
 
     #[test]

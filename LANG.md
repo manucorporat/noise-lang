@@ -130,6 +130,9 @@ symbolic (a distribution) until then.
   `bernoulli(1)` and `bernoulli(0)`; see core model §1).
 - **Strings**: double-quoted, no escape sequences yet (`"like this"`). A newline or EOF
   before the closing quote is an error.
+- **Templates**: backtick-fenced multi-line text with `${expr}` interpolation (see "Templates"
+  below). A single backtick `` `…` `` delimits a plain body; a triple fence ` ```tag … ``` ` carries
+  a syntax tag (e.g. ` ```md `). Unterminated fences are an error.
 
 ### Tokens
 
@@ -145,11 +148,78 @@ symbolic (a distribution) until then.
 ( ) { }                   grouping, blocks
 [ ]                       array literal / indexing
 ..                        half-open integer range (0..n)
+`…`  ```tag…```           template (interpolated text; `${expr}` holes)
 ::                        module path separator (rand::unif)
 ,  ;                      argument sep, statement separator (or use a newline)
 if else for in use        keywords
 true false                boolean literals
 ```
+
+## Frontmatter and knobs (literate files)
+
+A `.noise` file may open with a `---`-fenced **frontmatter** block that turns it into a
+self-describing document: a title and a set of typed, tunable **knobs**. The fence is recognized
+**only at byte 0** — line 1 must be exactly `---`, and the block runs to the next line that is
+exactly `---`. Anywhere else in a file, `---` keeps meaning three unary minuses, so no ordinary
+program is affected. The engine treats the whole block as trivia (it never becomes a token), so
+error spans still point at the original source.
+
+```
+---
+title: "Roll a die"
+knobs:
+  dice_sides:    { type: int, min: 1, max: 100, step: 1, default: 6 }
+  target_number: { type: int, min: 1, max: 100, step: 1, default: 4 }
+---
+Dice ~ rand::unif_int(1, dice_sides);
+p = P(Dice == target_number);
+Print("P(rolling a", target_number, ") =", p)
+```
+
+- **Syntax**: the block is **YAML** (a `{ … }` JSON block also works, since JSON is valid YAML).
+  Unknown top-level keys (a `blurb`, a `category`, …) are preserved verbatim for hosts and ignored
+  by the engine.
+- **Knobs** are `name: { type, … }` maps. `type` is `int`, `float`, or `bool`. Numeric knobs take
+  optional `min`, `max`, and `step`; every knob needs a `default`. An optional `label` names it in a
+  UI. Each knob binds as a plain **deterministic global** (a point mass) *before the first
+  statement* — exactly like writing `dice_sides = 6` — so the program reads it like any variable and
+  may shadow it with a normal rebind.
+- **Overrides**: a host may retune a knob (the CLI's `noise file.noise --knob dice_sides=20`, the
+  playground's sliders). The engine type-checks the override, clamps it to `[min, max]`, and snaps
+  it to `step` — one implementation, so every host behaves identically. An override naming a knob the
+  file doesn't declare is an error.
+- **Validation**: `default` must sit within `[min, max]`, `min <= max`, and types must be coherent.
+  `noise validate file.noise` reports frontmatter errors alongside the usual checks.
+
+## Templates
+
+A **template** is backtick-fenced multi-line text with `${expr}` interpolation — the
+`Print`-without-`Print`. Two fence weights, identical body semantics:
+
+```
+`
+P(rolling a ${target_number}) = ${p}
+`
+```
+```md
+## Result
+The probability is **${p}**.
+```
+
+- **Single backtick** `` `…` `` — a plain body; it cannot contain a backtick.
+- **Triple fence** ` ```tag … ``` ` — carries a syntax tag (e.g. `md`) so a host can render the note
+  as markdown vs preformatted text; the body may contain single backticks. A bare ` ``` ` (no tag)
+  is just the plain template.
+- **Body**: raw text with `${expr}` holes. The shared leading indentation is stripped and the blank
+  opening/closing lines next to the fences are removed, so a template indented inside code still
+  renders flush-left. A hole renders via its value's **display form** (an `Est` self-rounds to its
+  standard error, exactly like `Print`); holes are **deterministic-only** (an undrawn recipe is an
+  error — draw it with `~` first). A hole ends at its *matching* `}` (so `${ if c { a } else { b }}`
+  works); errors inside a hole point at the real source location. No `${{`-style escape in v1.
+- **Emission**: at **root statement position** a template *emits* (like `Print`) and yields unit.
+  Anywhere else — inside a function, as an argument, in an expression — it is just a `string` value
+  (usable with `+`, as a `Print` argument, etc.). To emit from inside a function, pass a template to
+  `Print`.
 
 ## Grammar (informal)
 

@@ -13,6 +13,7 @@ pub mod dist;
 pub mod error;
 pub mod eval;
 pub mod flint;
+pub mod frontmatter;
 pub mod introspect;
 #[cfg(feature = "jit")]
 pub mod jit;
@@ -33,6 +34,7 @@ pub mod value;
 pub use dist::RvId;
 pub use error::{NoiseError, Result};
 pub use eval::{Engine, Output};
+pub use frontmatter::{Frontmatter, Knob, KnobKind, KnobValue};
 pub use sampler::Moments;
 pub use stats::RunStats;
 pub use value::Value;
@@ -3010,7 +3012,7 @@ mod tests {
             .iter()
             .filter_map(|o| match o {
                 crate::Output::Plot(s) => Some(s),
-                crate::Output::Text(_) => None,
+                crate::Output::Text(_) | crate::Output::Note { .. } => None,
             })
             .collect();
         assert_eq!(plots.len(), 2);
@@ -3348,5 +3350,114 @@ mod tests {
         let shape = nums(&eng.check(&src).unwrap());
         assert_eq!(shape, vec![7.0, 7.0, 2.0, 5.0, 6.0, 5.0, 3.0, 3.0]);
         assert_eq!(eng.stats().samples, 0, "check mode must not draw");
+    }
+
+    // --- frontmatter knobs (PLAN-LITERATE LT1) ---
+
+    /// A knob binds as a point-mass global before statement 1, at its default, and the program
+    /// reads it like any variable. The fence is skipped as trivia, so the error-free run needs no
+    /// prelude tweak.
+    #[test]
+    fn knob_default_binds_as_global() {
+        let src = "---\nknobs:\n  sides: { type: int, min: 1, max: 100, default: 6 }\n---\nsides + 1\n";
+        assert_eq!(super::run(src).unwrap(), Value::Num(7.0));
+    }
+
+    /// A host override wins over the default and is clamped/snapped by the engine.
+    #[test]
+    fn knob_override_clamped() {
+        use crate::frontmatter::KnobValue;
+        let src = "---\nknobs:\n  sides: { type: int, min: 1, max: 20, default: 6 }\n---\nsides\n";
+        let mut eng = Engine::new();
+        // 999 clamps to the max (20).
+        let v = eng.run_with_knobs(src, &[("sides".into(), KnobValue::Num(999.0))]).unwrap();
+        assert_eq!(v, Value::Num(20.0));
+    }
+
+    /// An override naming a knob the file doesn't declare is a clear error, not a silent no-op.
+    #[test]
+    fn unknown_knob_override_errors() {
+        use crate::frontmatter::KnobValue;
+        let src = "---\nknobs:\n  sides: { type: int, default: 6 }\n---\nsides\n";
+        let mut eng = Engine::new();
+        let err = eng
+            .run_with_knobs(src, &[("nope".into(), KnobValue::Num(1.0))])
+            .unwrap_err();
+        assert!(format!("{err}").contains("unknown knob"), "{err}");
+    }
+
+    /// A program may shadow a knob with a normal rebind.
+    #[test]
+    fn knob_can_be_shadowed() {
+        let src = "---\nknobs:\n  n: { type: int, default: 3 }\n---\nn = 10\nn\n";
+        assert_eq!(super::run(src).unwrap(), Value::Num(10.0));
+    }
+
+    // --- template blocks (PLAN-LITERATE LT2) ---
+
+    /// A root-position template emits a Note (rendered text) and yields unit; holes render via each
+    /// value's display form. Dedent strips the shared indentation and the blank fence-adjacent lines.
+    #[test]
+    fn template_emits_as_note() {
+        let mut eng = Engine::new();
+        let src = "x = 42\n`\nanswer = ${x}\ntwo = ${1 + 1}\n`\n";
+        let last = eng.run(src).unwrap();
+        assert!(matches!(last, Value::Unit), "a root template yields unit");
+        let notes: Vec<String> = eng
+            .take_output()
+            .into_iter()
+            .filter_map(|o| match o {
+                crate::Output::Note { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notes, vec!["answer = 42\ntwo = 2".to_string()]);
+    }
+
+    /// The triple fence carries a syntax tag; the single backtick does not.
+    #[test]
+    fn template_triple_fence_carries_syntax_tag() {
+        let mut eng = Engine::new();
+        eng.run("x = 1\n```md\nhi ${x}\n```\n").unwrap();
+        match eng.take_output().into_iter().next().unwrap() {
+            crate::Output::Note { text, syntax } => {
+                assert_eq!(text, "hi 1");
+                assert_eq!(syntax.as_deref(), Some("md"));
+            }
+            other => panic!("expected a note, got {other:?}"),
+        }
+    }
+
+    /// Nested (non-root) a template is just a string value — usable with `+`, as a `Print` arg, etc.
+    #[test]
+    fn template_as_value_is_a_string() {
+        assert_eq!(super::run("x = 5\n`v=${x}` + \"!\"").unwrap(), Value::Str("v=5!".into()));
+    }
+
+    /// An error inside a `${…}` hole points at the *original* byte offset, not a re-based one.
+    #[test]
+    fn template_hole_error_span_is_absolute() {
+        let src = "y = `val ${nope}`";
+        let err = super::run(src).unwrap_err();
+        let at = src.find("nope").unwrap();
+        assert_eq!(err.span.start, at, "{err}");
+    }
+
+    /// An undrawn recipe in a hole is the same error `+` raises — holes are deterministic-only.
+    #[test]
+    fn template_hole_rejects_undrawn_recipe() {
+        let err = super::run("d = rand::unif(0,1)\n`x=${d}`").unwrap_err();
+        assert!(format!("{err}").contains("undrawn distribution"), "{err}");
+    }
+
+    /// The fence is trivia: a runtime error *after* the block still points at the original byte
+    /// offset (spans are not shifted by frontmatter).
+    #[test]
+    fn spans_survive_the_fence() {
+        let src = "---\ntitle: t\n---\nundefined_name\n";
+        let err = super::run(src).unwrap_err();
+        // `undefined_name` starts at byte 15 in the original source.
+        let at = src.find("undefined_name").unwrap();
+        assert_eq!(err.span.start, at, "{err}");
     }
 }

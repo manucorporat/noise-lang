@@ -91,6 +91,10 @@ pub struct Engine {
 pub enum Output {
     /// A `Print` line (no trailing newline; the renderer adds line breaks).
     Text(String),
+    /// An emitted **template** (PLAN-LITERATE §D3): a root-position template statement renders to
+    /// this rather than becoming the program value. `syntax` is the triple-fence info tag (`md`, …)
+    /// so a host renders markdown vs preformatted text; the CLI prints the raw text either way.
+    Note { text: String, syntax: Option<String> },
     /// A `plot::*` chart — the same summary the introspection core produces.
     Plot(Rc<crate::introspect::Summary>),
 }
@@ -176,16 +180,80 @@ impl Engine {
     }
 
     /// Parse and evaluate a whole program, returning the value of the last statement
-    /// (or `Unit` for an empty program).
+    /// (or `Unit` for an empty program). Frontmatter knobs (if any) bind at their defaults.
     pub fn run(&mut self, src: &str) -> Result<Value> {
+        self.run_with_knobs(src, &[])
+    }
+
+    /// Like [`run`](Engine::run), but with host-supplied **knob overrides** (PLAN-LITERATE §D2).
+    /// Each frontmatter knob binds as a plain deterministic global (a point mass) *before* the first
+    /// statement — its default, or the override when one is supplied, type-checked and clamped/snapped
+    /// here (one implementation, so every host clamps identically). An override naming a knob the
+    /// file doesn't declare is a spanned error. A program may shadow a knob name with a normal rebind.
+    pub fn run_with_knobs(
+        &mut self,
+        src: &str,
+        overrides: &[(String, crate::frontmatter::KnobValue)],
+    ) -> Result<Value> {
         // Fresh run-time counters for this program (the playground reads them after `run`).
         crate::stats::reset();
+        self.inject_knobs(src, overrides)?;
         let program = parse(src)?;
         let mut last = Value::Unit;
         for stmt in &program.stmts {
-            last = self.eval(stmt)?;
+            // A template at **root statement position** emits an `Output::Note` and yields unit —
+            // the `Print`-without-`Print` (PLAN-LITERATE §D3). Anywhere else it is a string value.
+            if let Expr::Template { parts, syntax } = &stmt.expr {
+                let text = self.render_template(parts)?;
+                self.outputs.push(Output::Note { text, syntax: syntax.clone() });
+                last = Value::Unit;
+            } else {
+                last = self.eval(stmt)?;
+            }
         }
         Ok(last)
+    }
+
+    /// Bind each declared knob as a point-mass global. Called before statement 1 by
+    /// [`run_with_knobs`](Engine::run_with_knobs).
+    fn inject_knobs(
+        &mut self,
+        src: &str,
+        overrides: &[(String, crate::frontmatter::KnobValue)],
+    ) -> Result<()> {
+        use crate::frontmatter::KnobValue;
+        let fm = match crate::frontmatter::parse(src)? {
+            Some((fm, _span)) => fm,
+            None => {
+                // No frontmatter: any override has nothing to bind to → a clear error.
+                if let Some((name, _)) = overrides.first() {
+                    return Err(NoiseError::runtime(
+                        format!("override for unknown knob `{name}` (file declares no knobs)"),
+                        Span::new(0, 0),
+                    ));
+                }
+                return Ok(());
+            }
+        };
+        // Every override must name a declared knob.
+        for (name, _) in overrides {
+            if !fm.knobs.iter().any(|k| &k.name == name) {
+                return Err(NoiseError::runtime(
+                    format!("override for unknown knob `{name}`"),
+                    Span::new(0, 0),
+                ));
+            }
+        }
+        for knob in &fm.knobs {
+            let over = overrides.iter().find(|(n, _)| n == &knob.name).map(|(_, v)| *v);
+            let resolved = knob.resolve(over)?;
+            let value = match resolved {
+                KnobValue::Num(n) => Value::Num(n),
+                KnobValue::Bool(b) => Value::Bool(b),
+            };
+            self.vars.insert(knob.name.clone(), value);
+        }
+        Ok(())
     }
 
     /// Convenience alias of [`Engine::run`]: the last statement's value is the RV.
@@ -363,9 +431,33 @@ impl Engine {
             // `Value::Cond` you can bind (`a = X | C`) and later query (`P(a)`), but not do
             // arithmetic on — like a `Recipe`, it is consumed by `P`/`E`/`Var`/`Q`, not operated on.
             Expr::Cond { event, given } => self.eval_cond(event, given),
+            // A template (PLAN-LITERATE §D3). Evaluated as a *value* here — it renders to a string
+            // (each hole via its display form). Root-position emission (pushing `Output::Note`) is
+            // handled in the run loop, which sees the top-level statement; nested anywhere else, a
+            // template is just this string.
+            Expr::Template { parts, .. } => Ok(Value::Str(self.render_template(parts)?)),
             // The `continue` control sentinel — short-circuits the enclosing block / loop body.
             Expr::Continue => Ok(Value::Continue),
         }
+    }
+
+    /// Render a template's parts to a string: literal text verbatim, each hole via its value's
+    /// display form (an `Est` self-rounds to its standard error, exactly like `Print`). Holes are
+    /// deterministic-only — an undrawn recipe is the same error string `+` raises.
+    fn render_template(&mut self, parts: &[crate::ast::TemplatePart]) -> Result<String> {
+        use crate::ast::TemplatePart;
+        let mut out = String::new();
+        for part in parts {
+            match part {
+                TemplatePart::Lit(s) => out.push_str(s),
+                TemplatePart::Hole(expr) => {
+                    let v = self.eval(expr)?;
+                    forbid_undrawn(&v, expr.span)?;
+                    out.push_str(&v.to_string());
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Resolve an identifier — a variable, or a constant (`pi`/`e`) gated by module scope. A

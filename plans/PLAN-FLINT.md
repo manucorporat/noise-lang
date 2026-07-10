@@ -246,13 +246,32 @@ it never lays out a chart.
 
 ## Open questions
 
-- **Flint forces `zero: true` on a bar chart's x.** `computeZeroDecision` calls `isBarLike` on the
-  *mark*, so a pre-binned histogram's x — a coordinate, not a magnitude — is anchored at 0, wasting
-  half the canvas for a price around 100. Flint *also* computes the correct explicit `domain` for
-  that scale, and Vega lets `zero` silently widen it: the two outputs contradict each other. Neither
-  `intrinsicDomain` (which `resolveFieldSemantics` derives a zero-class from, then throws away) nor
-  `includeZero_x` (position-mark templates only) reaches it. `plot.ts::reconcileDomain` drops the
-  redundant `zero`; **file this upstream** and delete that shim when it lands.
+- **Flint forces `zero: true` on a bar chart's x** (`flint-chart@0.2.0`). A pre-binned histogram's x
+  is a *coordinate*, not a magnitude, but `computeZeroDecision` keys `isBarLike` off the mark and
+  anchors **both** positional channels at 0 — wasting half the canvas for a price around 100. Flint
+  *also* pins the correct explicit `domain` on that scale, and Vega lets `zero` silently widen it:
+  its two outputs contradict each other.
+
+  *Root cause (traced 2026-07-10, `src/` ships with the package).* `resolveFieldSemantics` computes
+  an annotation-aware `zeroClass` via `resolveZeroClassFromAnnotation`, whose docstring reads: "If
+  annotation provides a domain starting above 0 (e.g., Rating [1, 5]), zero is arbitrary regardless
+  of what the base type says." But `resolveChannelSemantics` **never copies `fc.zeroClass` onto the
+  channel object**, so `cs.zeroClass` is `undefined`; `assemble.ts` then calls
+  `computeZeroDecision(cs.semanticAnnotation.semanticType, …)`, which re-derives the class from the
+  bare type. `resolveZeroClassFromAnnotation` is therefore dead code on all three backends, and no
+  input — `intrinsicDomain`, `includeZero_x` (position-mark templates only), an explicit `scale`
+  override — can reach the decision.
+
+  *Verified fix* (three edits, backwards-compatible): carry `zeroClass: fc.zeroClass` in the `cs`
+  literal; give `computeZeroDecision` an optional `resolvedZeroClass` param defaulting to
+  `getZeroClass(semanticType)`; pass `cs.zeroClass` at the three `assemble.ts` call sites. With it,
+  a histogram annotated `intrinsicDomain: [lo, hi]` gets `zero: false` on x and keeps `zero: true` on
+  the count axis. A local `pnpm patch` was prototyped and **deliberately reverted** — we do not fork
+  a dependency to make one axis prettier.
+
+  *What we ship instead:* `plot.ts::reconcileDomain` drops the redundant `zero` wherever Flint pinned
+  a `domain`, which is exactly and only where it contradicted itself. Version-independent, ~3 lines.
+  **File the bug upstream**; delete the workaround when it lands.
 - ~~**Pin flint-chart.**~~ Done: `packages/www/scripts/check-flint-names.mjs` asserts the emitted
   chart-type names against the registry, from `prebuild`.
 - **Where does `assemble*` run?** Browser for now (playground). If we ever want

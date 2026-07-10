@@ -7,6 +7,7 @@
 export {
   load as loadNoise,
   run as runNoise,
+  meta as noiseMeta,
   version as noiseVersion,
   runWithIntrospection as runNoiseWithIntrospection,
 } from '@noiselang/core';
@@ -19,6 +20,12 @@ export type {
   IntrospectRequest,
   LogItem,
   NoiseIntrospectResult,
+  Knob,
+  KnobKind,
+  KnobValue,
+  KnobOverrides,
+  RunOpts,
+  NoiseMeta,
 } from '@noiselang/core';
 
 import type { NoiseResult } from '@noiselang/core';
