@@ -107,6 +107,7 @@ path). Start each program with the `use` lines you need.
 | `vec`     | `use vec;`  | `sum`, `prod`, `count`, `any`, `all`, `max`, `min`, `mean`, `cumsum`, `cumprod`, `cummax`, `cummin`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` |
 | `signal`  | `use signal;` | `sine`, `cosine`, `sample`, `noise_white`, `noise_white_complex`, `noise_brown`, `noise_pink`, `noise_ou` |
 | `plot`    | path-only | `histogram`, `line`, `scatter`, `heatmap`, `corr`, `fan` (quantile-band cone of a path), `explain`, `value` — write the path (`plot::fan(...)`); charts are pushed to the output stream like `Print` |
+| `stats`   | path-only | `histogram(x[, bins])` → `[[midpoints],[counts]]`, `quantiles(x, [q…])`, `moments(x)` → `[n, mean, sd, min, max]`, `fan(path)` → 6×cols (`q05,q25,q50,q75,q95,mean`), `corr(a, b)` → number / `corr(v)` → n×n matrix. The numbers behind the `plot::` charts — same computation, so `stats::quantiles(x, [0.05])[0]` *is* the `q05` the card prints. Forces sampling; takes `x | cond`. |
 | `engine`  | `use engine;` (or path) | `set_max_samples`, `set_max_opts`, `set_resolution` |
 
 ```noise
@@ -227,6 +228,7 @@ final = path[251];
 var = Q(final, 0.05);                       # VaR — Q returns a plain number...
 Print("VaR95 =", var, " ES95 =", E(final | final < var));  # ...so it feeds ES/CVaR
 plot::fan(path)                             # the cone: q05/25/50/75/95 bands over the index
+bands = stats::fan(path);                   # ...and the same bands as a 6×252 matrix
 ```
 
 `vec::prod` is the product reducer (`prod([]) == 1`). Scans work on any process whose **length

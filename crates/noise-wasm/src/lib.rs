@@ -6,7 +6,8 @@
 //! stdout that does not exist on `wasm32`. `stats` carries the run-time counters the playground
 //! shows (samples / operations / random draws); the JS side measures wall-clock to derive ops/sec.
 
-use noise_core::introspect::{Payload, Summary};
+use noise_core::flint::to_flint;
+use noise_core::introspect::Summary;
 use noise_core::{Engine, Output, RunStats, Value};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -18,7 +19,7 @@ use wasm_bindgen::prelude::*;
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum LogItem {
     Text { text: String },
-    Plot { plot: IntrospectionOut },
+    Plot(PlotOut),
 }
 
 /// Split an engine output stream into the text-only log (for simple demos that want a plain string)
@@ -33,7 +34,7 @@ fn split_output(items: Vec<Output>) -> (String, Vec<LogItem>) {
                 text.push('\n');
                 log.push(LogItem::Text { text: line });
             }
-            Output::Plot(s) => log.push(LogItem::Plot { plot: summary_out(&s) }),
+            Output::Plot(s) => log.push(LogItem::Plot(PlotOut::from(&*s))),
         }
     }
     (text, log)
@@ -160,153 +161,34 @@ impl Request {
     }
 }
 
-/// A histogram payload for the browser to draw (equal-width buckets over `[lo, hi]`).
+/// A plot, as the browser receives it: a heading, a one-line text fallback, and the Flint
+/// `ChartAssemblyInput` specs to render. There is exactly **one** plot shape — no per-payload union
+/// — because the engine already decided which chart a histogram, a fan, or a correlation matrix is
+/// (see `noise_core::flint`). The renderer compiles `charts` with a stock Flint backend and, when
+/// there is more than one, layers them (that is the fan: two bands + a median line).
+///
+/// `error` is set instead of `charts` when an introspection *request* failed — one bad request from
+/// the sidecar never sinks the batch.
 #[derive(Serialize)]
-struct HistOut {
-    lo: f64,
-    hi: f64,
-    bins: Vec<u64>,
+struct PlotOut {
+    title: String,
+    text: String,
+    charts: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
-/// One introspection result, tagged by `type` so the JS side renders it (distribution / relationship
-/// / explanation / a per-request error — one bad request never sinks the batch).
-#[derive(Serialize)]
-#[serde(tag = "type")]
-enum IntrospectionOut {
-    #[serde(rename = "dist1")]
-    Dist1 {
-        label: String,
-        n: u64,
-        mean: f64,
-        sd: f64,
-        min: f64,
-        max: f64,
-        q05: f64,
-        q25: f64,
-        q50: f64,
-        q75: f64,
-        q95: f64,
-        boolean: bool,
-        hist: HistOut,
-        head: Vec<f64>,
-    },
-    #[serde(rename = "dist2")]
-    Dist2 {
-        label: String,
-        label_b: String,
-        n: u64,
-        corr: f64,
-        cov: f64,
-        mean_a: f64,
-        mean_b: f64,
-        sd_a: f64,
-        sd_b: f64,
-        points: Vec<[f64; 2]>,
-    },
-    #[serde(rename = "explain")]
-    Explain { label: String, sd: f64, drivers: Vec<DriverOut> },
-    #[serde(rename = "value")]
-    Value { label: String, val: f64, se: f64 },
-    #[serde(rename = "grid")]
-    Grid {
-        label: String,
-        rows: usize,
-        cols: usize,
-        /// `true` for a vector (series view), `false` for a matrix (heatmap view).
-        series: bool,
-        mean: Vec<f64>,
-        sd: Vec<f64>,
-    },
-    #[serde(rename = "corrmatrix")]
-    CorrMatrix { label: String, n: usize, corr: Vec<f64> },
-    /// A fan chart: per-index quantile bands of a simulated path (all vectors have length `cols`).
-    #[serde(rename = "fan")]
-    Fan {
-        label: String,
-        cols: usize,
-        n: u64,
-        q05: Vec<f64>,
-        q25: Vec<f64>,
-        q50: Vec<f64>,
-        q75: Vec<f64>,
-        q95: Vec<f64>,
-        mean: Vec<f64>,
-    },
-    #[serde(rename = "error")]
-    Error { error: String },
+impl From<&Summary> for PlotOut {
+    fn from(s: &Summary) -> PlotOut {
+        let p = to_flint(s);
+        PlotOut { title: p.title, text: p.text, charts: p.charts, error: None }
+    }
 }
 
-#[derive(Serialize)]
-struct DriverOut {
-    name: String,
-    corr: f64,
-    share: f64,
-}
-
-/// Map an engine [`Summary`] to its serializable form (the CLI-only `view`/rendering is dropped —
-/// the browser gets the full payload and picks its own view).
-fn summary_out(s: &Summary) -> IntrospectionOut {
-    match &s.payload {
-        Payload::One(d) => IntrospectionOut::Dist1 {
-            label: s.label.clone(),
-            n: d.n,
-            mean: d.mean,
-            sd: d.sd,
-            min: d.min,
-            max: d.max,
-            q05: d.q05,
-            q25: d.q25,
-            q50: d.q50,
-            q75: d.q75,
-            q95: d.q95,
-            boolean: d.boolean,
-            hist: HistOut { lo: d.hist.lo, hi: d.hist.hi, bins: d.hist.bins.clone() },
-            head: d.head.clone(),
-        },
-        Payload::Two(d) => IntrospectionOut::Dist2 {
-            label: s.label.clone(),
-            label_b: s.label_b.clone().unwrap_or_default(),
-            n: d.n,
-            corr: d.corr,
-            cov: d.cov,
-            mean_a: d.mean_a,
-            mean_b: d.mean_b,
-            sd_a: d.sd_a,
-            sd_b: d.sd_b,
-            points: d.points.iter().map(|&(x, y)| [x, y]).collect(),
-        },
-        Payload::Explain(e) => IntrospectionOut::Explain {
-            label: s.label.clone(),
-            sd: e.sd,
-            drivers: e
-                .drivers
-                .iter()
-                .map(|d| DriverOut { name: d.name.clone(), corr: d.corr, share: d.share })
-                .collect(),
-        },
-        Payload::Value(v) => IntrospectionOut::Value { label: s.label.clone(), val: v.val, se: v.se },
-        Payload::Grid(g) => IntrospectionOut::Grid {
-            label: s.label.clone(),
-            rows: g.rows,
-            cols: g.cols,
-            series: g.is_series(),
-            mean: g.mean.clone(),
-            sd: g.sd.clone(),
-        },
-        Payload::CorrMatrix(c) => {
-            IntrospectionOut::CorrMatrix { label: s.label.clone(), n: c.n, corr: c.corr.clone() }
-        }
-        Payload::Fan(c) => IntrospectionOut::Fan {
-            label: s.label.clone(),
-            cols: c.cols,
-            n: c.n,
-            q05: c.q05.clone(),
-            q25: c.q25.clone(),
-            q50: c.q50.clone(),
-            q75: c.q75.clone(),
-            q95: c.q95.clone(),
-            mean: c.mean.clone(),
-        },
+impl PlotOut {
+    /// A failed introspection request, rendered as a card that says why.
+    fn failed(error: String) -> PlotOut {
+        PlotOut { title: "—".into(), text: error.clone(), charts: vec![], error: Some(error) }
     }
 }
 
@@ -321,7 +203,7 @@ struct IntrospectResult {
     /// The program's live top-level variables (name + kind), for the picker.
     bindings: Vec<Binding>,
     /// One entry per request, in request order.
-    introspections: Vec<IntrospectionOut>,
+    introspections: Vec<PlotOut>,
     /// The output stream in source order: `Print` lines and `plot::*` charts, interleaved.
     log: Vec<LogItem>,
 }
@@ -346,11 +228,11 @@ pub fn run_with_introspection(src: &str, requests_json: &str) -> String {
     if result.is_ok() {
         for req in &requests {
             let out = match req.to_call() {
-                None => IntrospectionOut::Error { error: "empty request".into() },
+                None => PlotOut::failed("empty request".into()),
                 Some(call) => match engine.run(&call) {
-                    Ok(Value::Summary(s)) => summary_out(&s),
-                    Ok(_) => IntrospectionOut::Error { error: "not a random variable".into() },
-                    Err(e) => IntrospectionOut::Error { error: e.to_string() },
+                    Ok(Value::Summary(s)) => PlotOut::from(&*s),
+                    Ok(_) => PlotOut::failed("not a random variable".into()),
+                    Err(e) => PlotOut::failed(e.to_string()),
                 },
             };
             engine.take_output(); // discard any stray output from a resolved expression

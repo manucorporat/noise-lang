@@ -70,7 +70,7 @@ pub enum Value {
     Cond { quantity: RvId, q_kind: RvKind, condition: RvId },
     /// An **introspection summary** — what `describe`/`hist`/`samples`/`corr`/`scatter`/`explain`
     /// evaluate to (see [`crate::introspect`]). It is a *value*: it binds, flows through, and
-    /// `Display`s as an ASCII block in the CLI (the playground serializes its `payload` instead).
+    /// `Display`s as its one-line text card (`crate::flint`, which also turns it into chart specs).
     /// `Rc` keeps it cheap to clone.
     Summary(Rc<Summary>),
     /// The **`continue` control sentinel** (PLAN-COMPLEX §8). Produced by evaluating `continue`; it

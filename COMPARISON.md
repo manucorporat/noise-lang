@@ -177,10 +177,11 @@ flips ~[10] bernoulli(bias)
 plot::histogram(bias)                  # the flat prior
 plot::histogram(bias | count(flips) == 7)   # the peaked posterior — before/after, side by side
 ```
-That's the whole program. The charts render inline (SVG in the browser playground, ASCII in the
-CLI), so the prior→posterior story is *visible* the moment you run it. The same surface covers
-`plot::scatter`, `plot::value` (a point estimate with its error bar), `plot::line`, and
-`plot::heatmap` (matrices / correlation), and the chart kind is inferred from what you hand it.
+That's the whole program. Each `plot::` emits a chart *spec*, so the prior→posterior story is
+*visible* the moment you run it: real charts in the browser playground, a one-line summary card in
+the CLI. The same surface covers `plot::scatter`, `plot::value` (a point estimate with its error
+bar), `plot::line`, and `plot::heatmap` (matrices / correlation), and the chart kind is inferred
+from what you hand it.
 
 **PyMC** — the model is compact, but seeing it means a separate library, a sampler, and plot calls:
 ```python

@@ -117,8 +117,8 @@ fn run_file(path: &str) {
     };
     let mut engine = Engine::new();
     let result = engine.run(&src);
-    // Render the output stream in source order: `Print` lines and `plot::*` charts (as ASCII),
-    // interleaved exactly as the program emitted them, then the final value.
+    // Render the output stream in source order: `Print` lines and `plot::*` charts (as their
+    // one-line text cards), interleaved exactly as the program emitted them, then the final value.
     print_output(engine.take_output());
     match result {
         // Don't echo a trailing `unit` (e.g. when the program ends in `print(...)`).
@@ -189,7 +189,8 @@ fn repl() {
 }
 
 /// Render a program's output stream to stdout in source order — `Print` lines as text and `plot::*`
-/// charts as ASCII (each via its `Display`), interleaved exactly as emitted.
+/// charts as the one-line text card their `Display` builds (`crate` has no chart code; the picture
+/// is a host's job, from the Flint specs `noise_core::flint` emits), interleaved exactly as emitted.
 fn print_output(items: Vec<noise_core::Output>) {
     for item in items {
         match item {

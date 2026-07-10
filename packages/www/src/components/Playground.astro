@@ -170,53 +170,32 @@
   .pg-metric.m-rate .m-val { color: var(--accent); }
   .m-sep { color: var(--ink-faint); opacity: 0.6; }
 
-  /* --- Result cards (Print-stream plot:: charts rendered into the output) --- */
+  /* --- Result cards (one per `plot::*` item in the output stream) --- */
   .pg-card { border: 1px solid var(--rule); border-radius: 6px; background: var(--paper); padding: 0.6rem 0.7rem; }
-  .pg-card-title { font-family: var(--mono); font-size: 0.82rem; color: var(--ink); font-weight: 700; margin-bottom: 0.15rem; }
-  .pg-card-sub { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-dim); margin-bottom: 0.4rem; line-height: 1.5; }
-  .pg-card-sub .k { color: var(--ink-faint); }
-  .pg-card-sub .v { color: var(--ink); font-weight: 600; }
-  .pg-chart-svg { width: 100%; height: auto; display: block; }
-  .pg-chart-svg .bar { fill: var(--accent); }
-  .pg-chart-svg .bar-bool { fill: var(--link); }
-  .pg-chart-svg .mean-line { stroke: var(--ink); stroke-width: 1; stroke-dasharray: 3 2; opacity: 0.7; }
-  .pg-chart-svg .pt { fill: var(--link); opacity: 0.5; }
-  .pg-chart-svg .axis { stroke: var(--rule); stroke-width: 1; }
-
-  .pg-driver { display: flex; align-items: center; gap: 0.5rem; font-family: var(--mono); font-size: 0.76rem; margin: 0.18rem 0; }
-  .pg-driver-name { width: 5.5rem; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pg-driver-bar { flex: 1; height: 0.7rem; background: var(--paper-2); border-radius: 3px; overflow: hidden; }
-  .pg-driver-fill { height: 100%; background: var(--accent); border-radius: 3px; }
-  .pg-driver-pct { width: 3rem; text-align: right; color: var(--ink-dim); }
+  /* The text card: one self-contained line — the same one the CLI prints — with its leading
+     `hist(st):` heading emphasized. It is the whole card when there is nothing to draw (a scalar)
+     or no renderer, and the chart's caption otherwise. */
+  .pg-card-text { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-dim); line-height: 1.5; overflow-wrap: anywhere; }
+  .pg-card-title { color: var(--ink); font-weight: 700; }
+  /* Charts are sized to this box's measured width; the overflow guard catches a chart that
+     nonetheless renders wider (a long axis label) rather than letting the page scroll sideways. */
+  .pg-chart { margin-top: 0.4rem; overflow-x: auto; }
+  .pg-chart:empty { display: none; }
+  .pg-chart .vega-embed { width: 100%; }
+  .pg-chart summary { display: none; }
   .pg-inspect-err { font-family: var(--mono); font-size: 0.76rem; color: #a4262c; }
-  .pg-inspect-empty { font-size: 0.78rem; color: var(--ink-faint); font-style: italic; }
 
   /* --- Plots panel (program-driven `plot::*` charts) --- */
   .pg-plots-wrap { display: flex; flex-direction: column; overflow: hidden; }
   .dot.dot-3 { background: #9a5b00; }
   #pg-plots { padding: 0.7rem 0.85rem; }
-
-  /* Value + CI card */
-  .pg-chart-svg .ci-line { stroke: var(--ink-dim); stroke-width: 1.5; }
-  .pg-chart-svg .ci-cap { stroke: var(--ink-dim); stroke-width: 1.5; }
-  .pg-chart-svg .ci-dot { fill: var(--accent); }
-  /* Series error bars */
-  .pg-chart-svg .series-bar { stroke: var(--link); stroke-width: 1.5; opacity: 0.55; }
-  .pg-chart-svg .series-dot { fill: var(--link); }
-  /* Heatmap cells use inline fill (data-driven), so no class rule needed. */
-  .pg-heat-legend { font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint); margin-top: 0.25rem; display: flex; align-items: center; gap: 0.3rem; }
-  .pg-heat-swatch { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 2px; }
 </style>
 
 <script>
   import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
   import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
   import { registerNoise, LANGUAGE_ID, THEME_ID } from '../lib/noise-lang';
-  import {
-    runNoiseWithIntrospection,
-    type NoiseIntrospectResult,
-    type Introspection,
-  } from '../lib/noise';
+  import { runNoiseWithIntrospection, type NoiseIntrospectResult, type Plot } from '../lib/noise';
   // (LogItem is structural; we read res.log items inline.)
   import { examples, defaultExampleId, examplesByCategory } from '../data/examples';
   import { parseHash, encodeCode } from '../lib/share';
@@ -352,6 +331,7 @@
 
   function renderResult(res: NoiseIntrospectResult) {
     outEl.innerHTML = '';
+    liveCards.length = 0;
     const addText = (html: string, cls = 'out-text') => {
       const el = document.createElement('div');
       el.className = cls;
@@ -361,7 +341,7 @@
     // The output stream: Print lines and plot:: charts, interleaved in source order.
     for (const item of res.log) {
       if (item.kind === 'text') addText(escapeHtml(item.text));
-      else outEl.appendChild(renderCard(item.plot));
+      else outEl.appendChild(renderCard(item));
     }
     if (res.ok) {
       if (res.value !== null) {
@@ -426,241 +406,65 @@
     return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]!));
   }
 
-  // --- Result-card rendering: one card per plot:: item in the output stream ---
+  // --- Result cards: one per `plot::*` item in the output stream ---
+  //
+  // There is one card renderer, not one per chart kind. The engine ships a `Plot` — a title, a
+  // one-line text card, and zero or more Flint chart specs — and `../lib/plot` compiles them. Both
+  // streams (the program's own `plot::*` calls and the introspection sidecar) come through here.
 
-  /** Compact number: 3 significant-ish figures, trimming float dust. */
-  function fmtNum(x: number): string {
-    if (!isFinite(x)) return String(x);
-    if (x === 0) return '0';
-    const a = Math.abs(x);
-    const s = a >= 100 ? x.toFixed(0) : a >= 1 ? x.toFixed(2) : x.toFixed(4);
-    return s.replace(/\.?0+$/, '');
+  /** Live plot cards, so a resized output panel re-renders its charts at the new width. */
+  const liveCards: { mount: HTMLElement; charts: Plot['charts'] }[] = [];
+
+  // A plot's `text` is one self-contained line — `"hist(st): n=… mean=…"` — exactly what the CLI
+  // prints. The card shows that same line, with the leading heading emphasized rather than repeated
+  // on a row of its own.
+  function headline(plot: Plot): string {
+    const prefix = `${plot.title}: `;
+    if (!plot.text.startsWith(prefix)) return escapeHtml(plot.text);
+    const detail = plot.text.slice(prefix.length);
+    return `<span class="pg-card-title">${escapeHtml(plot.title)}</span>: ${escapeHtml(detail)}`;
   }
 
-  function card(title: string, sub: string, body: string): HTMLElement {
+  function renderCard(plot: Plot): HTMLElement {
     const el = document.createElement('div');
     el.className = 'pg-card';
-    el.innerHTML = `<div class="pg-card-title">${escapeHtml(title)}</div>` +
-      (sub ? `<div class="pg-card-sub">${sub}</div>` : '') + body;
+    const cls = plot.error ? 'pg-inspect-err' : 'pg-card-text';
+    el.innerHTML = `<div class="${cls}">${headline(plot)}</div>`;
+    if (plot.charts.length === 0) return el;
+
+    const mount = document.createElement('div');
+    mount.className = 'pg-chart';
+    el.appendChild(mount);
+    liveCards.push({ mount, charts: plot.charts });
+    // Deferred: the card must be in the document before its width can be measured.
+    queueMicrotask(() => drawCard(mount, plot.charts));
     return el;
   }
 
-  function renderCard(it: Introspection): HTMLElement {
-    if (it.type === 'error') return card('—', '', `<div class="pg-inspect-err">${escapeHtml(it.error)}</div>`);
-    if (it.type === 'dist1') return renderDist1(it);
-    if (it.type === 'dist2') return renderDist2(it);
-    if (it.type === 'explain') return renderExplain(it);
-    if (it.type === 'value') return renderValue(it);
-    if (it.type === 'grid') return renderGrid(it);
-    return renderCorrMatrix(it);
-  }
-
-  function renderValue(v: Extract<Introspection, { type: 'value' }>): HTMLElement {
-    if (!(v.se > 0)) return card(v.label, '', `<div class="pg-card-sub"><span class="v">${fmtNum(v.val)}</span> (exact)</div>`);
-    const half = 1.96 * v.se;
-    const sub = `<span class="v">${fmtNum(v.val)}</span> ± ${fmtNum(v.se)} · <span class="k">95% CI</span> ${fmtNum(v.val - half)} … ${fmtNum(v.val + half)}`;
-    return card(v.label, sub, ciSvg(v.val, v.se));
-  }
-
-  function renderGrid(g: Extract<Introspection, { type: 'grid' }>): HTMLElement {
-    const sub = `<span class="k">${g.series ? 'vector' : 'matrix'}</span> ${g.rows}×${g.cols} · per-cell mean`;
-    return card(g.label, sub, g.series ? seriesSvg(g.mean, g.sd) : heatmapSvg(g.mean, g.rows, g.cols));
-  }
-
-  function renderCorrMatrix(c: Extract<Introspection, { type: 'corrmatrix' }>): HTMLElement {
-    const sub = `<span class="k">corr</span> ${c.n}×${c.n} · element vs element`;
-    const legend =
-      `<div class="pg-heat-legend"><span class="pg-heat-swatch" style="background:${corrColor(-1)}"></span>-1` +
-      `<span class="pg-heat-swatch" style="background:${corrColor(0)}"></span>0` +
-      `<span class="pg-heat-swatch" style="background:${corrColor(1)}"></span>+1</div>`;
-    return card(`corr(${c.label})`, sub, gridSvg(c.corr, c.n, c.n, corrColor) + legend);
-  }
-
-  function renderDist1(d: Extract<Introspection, { type: 'dist1' }>): HTMLElement {
-    if (d.boolean) {
-      // An event: the informative readout is P(true), drawn as two bars.
-      const pTrue = d.mean;
-      const sub = `<span class="k">P(true)</span> <span class="v">${fmtNum(pTrue)}</span> · <span class="k">n</span> <span class="v">${fmtCount(d.n)}</span>`;
-      const body = barsSvg([1 - pTrue, pTrue], ['false', 'true'], true);
-      return card(d.label, sub, body);
+  /** Compile + embed a card's charts at its current width. A failure leaves the text card standing. */
+  async function drawCard(mount: HTMLElement, charts: Plot['charts']) {
+    const width = Math.max(240, Math.round(mount.clientWidth));
+    try {
+      const { renderCharts } = await import('../lib/plot');
+      await renderCharts(mount, charts, width);
+    } catch (e) {
+      mount.innerHTML = `<div class="pg-inspect-err">chart error: ${escapeHtml(String(e))}</div>`;
     }
-    const sub =
-      `<span class="k">mean</span> <span class="v">${fmtNum(d.mean)}</span> · ` +
-      `<span class="k">sd</span> <span class="v">${fmtNum(d.sd)}</span> · ` +
-      `<span class="k">med</span> <span class="v">${fmtNum(d.q50)}</span> · ` +
-      `<span class="k">90%</span> <span class="v">${fmtNum(d.q05)}…${fmtNum(d.q95)}</span> · ` +
-      `<span class="k">n</span> <span class="v">${fmtCount(d.n)}</span>`;
-    return card(d.label, sub, histSvg(d.hist, d.mean));
   }
 
-  function renderDist2(d: Extract<Introspection, { type: 'dist2' }>): HTMLElement {
-    const sub =
-      `<span class="k">corr</span> <span class="v">${fmtNum(d.corr)}</span> · ` +
-      `<span class="k">cov</span> <span class="v">${fmtNum(d.cov)}</span> · ` +
-      `<span class="k">n</span> <span class="v">${fmtCount(d.n)}</span>`;
-    return card(`${d.label} vs ${d.label_b}`, sub, scatterSvg(d.points));
-  }
-
-  function renderExplain(e: Extract<Introspection, { type: 'explain' }>): HTMLElement {
-    const sub = `<span class="k">sd</span> <span class="v">${fmtNum(e.sd)}</span> · what drives it`;
-    if (e.drivers.length === 0) {
-      return card(`explain ${e.label}`, sub, '<div class="pg-inspect-empty">no named upstream variables</div>');
-    }
-    const rows = e.drivers
-      .map(
-        (d) =>
-          `<div class="pg-driver"><span class="pg-driver-name" title="${escapeHtml(d.name)}">${escapeHtml(d.name)}</span>` +
-          `<span class="pg-driver-bar"><span class="pg-driver-fill" style="width:${(d.share * 100).toFixed(0)}%"></span></span>` +
-          `<span class="pg-driver-pct">${(d.share * 100).toFixed(0)}%</span></div>`,
-      )
-      .join('');
-    return card(`explain ${e.label}`, sub, rows);
-  }
-
-  // --- tiny SVG chart builders (no chart lib; crisp, themeable, copy-free) ---
-  const W = 300;
-
-  function histSvg(h: { lo: number; hi: number; bins: number[] }, mean: number): string {
-    const H = 110;
-    const max = Math.max(1, ...h.bins);
-    const n = h.bins.length;
-    const bw = W / n;
-    const bars = h.bins
-      .map((c, i) => {
-        const bh = (c / max) * (H - 8);
-        return `<rect class="bar" x="${(i * bw + 0.5).toFixed(1)}" y="${(H - bh).toFixed(1)}" width="${(bw - 1).toFixed(1)}" height="${bh.toFixed(1)}"/>`;
-      })
-      .join('');
-    const span = h.hi - h.lo || 1;
-    const mx = ((mean - h.lo) / span) * W;
-    const meanLine =
-      mean >= h.lo && mean <= h.hi
-        ? `<line class="mean-line" x1="${mx.toFixed(1)}" y1="0" x2="${mx.toFixed(1)}" y2="${H}"/>`
-        : '';
-    return (
-      `<svg class="pg-chart-svg" viewBox="0 0 ${W} ${H + 16}" preserveAspectRatio="none" role="img">` +
-      bars + meanLine +
-      `<text x="2" y="${H + 13}" font-size="9" fill="currentColor" opacity="0.6">${fmtNum(h.lo)}</text>` +
-      `<text x="${W - 2}" y="${H + 13}" font-size="9" text-anchor="end" fill="currentColor" opacity="0.6">${fmtNum(h.hi)}</text>` +
-      `</svg>`
-    );
-  }
-
-  function barsSvg(fracs: number[], labels: string[], bool: boolean): string {
-    const H = 70;
-    const n = fracs.length;
-    const bw = W / n;
-    const bars = fracs
-      .map((fr, i) => {
-        const bh = fr * (H - 8);
-        return (
-          `<rect class="${bool ? 'bar-bool' : 'bar'}" x="${(i * bw + bw * 0.2).toFixed(1)}" y="${(H - bh).toFixed(1)}" width="${(bw * 0.6).toFixed(1)}" height="${bh.toFixed(1)}"/>` +
-          `<text x="${(i * bw + bw / 2).toFixed(1)}" y="${H + 12}" font-size="10" text-anchor="middle" fill="currentColor" opacity="0.7">${labels[i]}</text>`
-        );
-      })
-      .join('');
-    return `<svg class="pg-chart-svg" viewBox="0 0 ${W} ${H + 16}" role="img">${bars}</svg>`;
-  }
-
-  function scatterSvg(points: [number, number][]): string {
-    const H = 160;
-    const pad = 6;
-    if (points.length === 0) return '<div class="pg-inspect-empty">no points</div>';
-    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-    for (const [x, y] of points) {
-      x0 = Math.min(x0, x); x1 = Math.max(x1, x);
-      y0 = Math.min(y0, y); y1 = Math.max(y1, y);
-    }
-    const dx = x1 - x0 || 1, dy = y1 - y0 || 1;
-    const sx = (x: number) => pad + ((x - x0) / dx) * (W - 2 * pad);
-    const sy = (y: number) => H - pad - ((y - y0) / dy) * (H - 2 * pad);
-    const dots = points
-      .map(([x, y]) => `<circle class="pt" cx="${sx(x).toFixed(1)}" cy="${sy(y).toFixed(1)}" r="1.6"/>`)
-      .join('');
-    return `<svg class="pg-chart-svg" viewBox="0 0 ${W} ${H}" role="img">${dots}</svg>`;
-  }
-
-  /** A value with its 95% CI as a point and whiskers, on a padded value axis. */
-  function ciSvg(val: number, se: number): string {
-    const H = 44;
-    const pad = 30;
-    const half = 1.96 * se;
-    const lo = val - half, hi = val + half;
-    const span = (hi - lo) * 1.5 || 1;
-    const cx = (x: number) => pad + ((x - (lo - (hi - lo) * 0.25)) / span) * (W - 2 * pad);
-    const y = H / 2;
-    return (
-      `<svg class="pg-chart-svg" viewBox="0 0 ${W} ${H}" role="img">` +
-      `<line class="ci-line" x1="${cx(lo).toFixed(1)}" y1="${y}" x2="${cx(hi).toFixed(1)}" y2="${y}"/>` +
-      `<line class="ci-cap" x1="${cx(lo).toFixed(1)}" y1="${y - 5}" x2="${cx(lo).toFixed(1)}" y2="${y + 5}"/>` +
-      `<line class="ci-cap" x1="${cx(hi).toFixed(1)}" y1="${y - 5}" x2="${cx(hi).toFixed(1)}" y2="${y + 5}"/>` +
-      `<circle class="ci-dot" cx="${cx(val).toFixed(1)}" cy="${y}" r="3.5"/>` +
-      `<text x="${cx(lo).toFixed(1)}" y="${y + 18}" font-size="9" text-anchor="middle" fill="currentColor" opacity="0.6">${fmtNum(lo)}</text>` +
-      `<text x="${cx(hi).toFixed(1)}" y="${y + 18}" font-size="9" text-anchor="middle" fill="currentColor" opacity="0.6">${fmtNum(hi)}</text>` +
-      `</svg>`
-    );
-  }
-
-  /** A per-index mean±sd series (forest/trace): dot at the mean, whisker at ±sd. */
-  function seriesSvg(mean: number[], sd: number[]): string {
-    const H = 120;
-    const pad = 6;
-    const n = mean.length;
-    let lo = Infinity, hi = -Infinity;
-    for (let i = 0; i < n; i++) {
-      lo = Math.min(lo, mean[i] - sd[i]);
-      hi = Math.max(hi, mean[i] + sd[i]);
-    }
-    if (!(hi > lo)) { hi = lo + 1; lo -= 1; }
-    const sx = (i: number) => pad + (n <= 1 ? (W - 2 * pad) / 2 : (i / (n - 1)) * (W - 2 * pad));
-    const sy = (v: number) => H - pad - ((v - lo) / (hi - lo)) * (H - 2 * pad);
-    let s = '';
-    for (let i = 0; i < n; i++) {
-      const x = sx(i).toFixed(1);
-      s += `<line class="series-bar" x1="${x}" y1="${sy(mean[i] - sd[i]).toFixed(1)}" x2="${x}" y2="${sy(mean[i] + sd[i]).toFixed(1)}"/>`;
-      s += `<circle class="series-dot" cx="${x}" cy="${sy(mean[i]).toFixed(1)}" r="2"/>`;
-    }
-    return `<svg class="pg-chart-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img">${s}</svg>`;
-  }
-
-  /** A heatmap of `rows×cols` cell values, colored low→high by the sequential ramp. */
-  function heatmapSvg(vals: number[], rows: number, cols: number): string {
-    let lo = Infinity, hi = -Infinity;
-    for (const v of vals) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
-    const span = hi - lo || 1;
-    const color = (v: number) => seqColor((v - lo) / span);
-    const svg = gridSvg(vals, rows, cols, color);
-    const legend =
-      `<div class="pg-heat-legend"><span class="pg-heat-swatch" style="background:${seqColor(0)}"></span>${fmtNum(lo)}` +
-      `<span class="pg-heat-swatch" style="background:${seqColor(1)}"></span>${fmtNum(hi)}</div>`;
-    return svg + legend;
-  }
-
-  /** Generic colored-cell grid: `rows×cols` rects, `color(value)` → fill. Square-ish, fits W. */
-  function gridSvg(vals: number[], rows: number, cols: number, color: (v: number) => string): string {
-    const cell = Math.max(6, Math.min(28, Math.floor(W / Math.max(cols, 1))));
-    const w = cols * cell, h = rows * cell;
-    let s = '';
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        s += `<rect x="${c * cell}" y="${r * cell}" width="${cell - 0.5}" height="${cell - 0.5}" fill="${color(vals[r * cols + c])}"/>`;
-      }
-    }
-    return `<svg class="pg-chart-svg" viewBox="0 0 ${w} ${h}" style="max-width:${w}px" role="img">${s}</svg>`;
-  }
-
-  // Color ramps. Sequential: light paper → accent (amber). Diverging (corr): blue ← white → red.
-  function lerp(a: number, b: number, t: number) { return Math.round(a + (b - a) * t); }
-  function rgb(r: number, g: number, b: number) { return `rgb(${r},${g},${b})`; }
-  function seqColor(t: number): string {
-    const u = Math.max(0, Math.min(1, t));
-    return rgb(lerp(245, 154, u), lerp(238, 91, u), lerp(220, 0, u)); // #f5eedc → #9a5b00
-  }
-  function corrColor(c: number): string {
-    const t = Math.max(-1, Math.min(1, c));
-    if (t >= 0) return rgb(lerp(247, 40, t), lerp(247, 90, t), lerp(247, 160, t)); // white → blue
-    return rgb(lerp(247, 200, -t), lerp(247, 40, -t), lerp(247, 50, -t)); // white → red
-  }
+  // Charts are rendered at a fixed pixel width, so a resized panel needs them redrawn. Debounced,
+  // and skipped while the width is unchanged (a height-only resize must not re-embed every chart).
+  let lastWidth = 0;
+  let resizeTimer = 0;
+  new ResizeObserver(() => {
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(() => {
+      const width = outEl.clientWidth;
+      if (width === lastWidth || liveCards.length === 0) return;
+      lastWidth = width;
+      for (const card of liveCards) drawCard(card.mount, card.charts);
+    }, 180);
+  }).observe(outEl);
 
   $('pg-run').addEventListener('click', run);
   $('pg-reset').addEventListener('click', () => {

@@ -83,64 +83,35 @@ export interface Binding {
   kind: string;
 }
 
-/** A histogram to draw: equal-width buckets `bins` spanning `[lo, hi]`. */
-export interface Hist {
-  lo: number;
-  hi: number;
-  bins: number[];
-}
+/**
+ * A [Flint](https://github.com/microsoft/flint-chart) `ChartAssemblyInput` — a *semantic* chart
+ * description (`{ data, semantic_types, chart_spec }`) that `flint-chart`'s `assembleVegaLite` /
+ * `assembleECharts` / `assembleChartjs` compiles into a renderable backend spec. Opaque here: the
+ * engine produces it, a renderer consumes it, and nothing in between needs to look inside.
+ */
+export type ChartSpec = Record<string, unknown>;
 
-/** One introspection result, tagged by `type` (mirrors the Rust `IntrospectionOut`). */
-export type Introspection =
-  | {
-      type: 'dist1';
-      label: string;
-      n: number;
-      mean: number;
-      sd: number;
-      min: number;
-      max: number;
-      q05: number;
-      q25: number;
-      q50: number;
-      q75: number;
-      q95: number;
-      boolean: boolean;
-      hist: Hist;
-      head: number[];
-    }
-  | {
-      type: 'dist2';
-      label: string;
-      label_b: string;
-      n: number;
-      corr: number;
-      cov: number;
-      mean_a: number;
-      mean_b: number;
-      sd_a: number;
-      sd_b: number;
-      points: [number, number][];
-    }
-  | {
-      type: 'explain';
-      label: string;
-      sd: number;
-      drivers: { name: string; corr: number; share: number }[];
-    }
-  | { type: 'value'; label: string; val: number; se: number }
-  | {
-      type: 'grid';
-      label: string;
-      rows: number;
-      cols: number;
-      /** true → vector (series view); false → matrix (heatmap view). */
-      series: boolean;
-      mean: number[];
-      sd: number[];
-    }
-  | { type: 'corrmatrix'; label: string; n: number; corr: number[] }
-  | { type: 'error'; error: string };
+/**
+ * One plot — what `plot::*` emits and what an introspection request resolves to.
+ *
+ * There is a single plot shape, not a union per chart kind: the engine already decided which chart
+ * a histogram, a fan, or a correlation matrix is. Render `charts` by compiling each spec with a
+ * stock Flint backend; when there is more than one, **layer them** (that is the fan — two quantile
+ * bands with a median line on top, sharing an x scale by construction).
+ *
+ * `charts` may be empty (an exact scalar has nothing to draw). `text` always holds every number the
+ * charts encode, so a text-only host loses the picture and nothing else.
+ */
+export interface Plot {
+  /** The card heading, e.g. `hist(st)` or `fan(path)`. */
+  title: string;
+  /** One-line summary — the fallback when there is no renderer, and what the CLI prints. */
+  text: string;
+  /** Flint chart specs, back-to-front. Compile each; layer them if there is more than one. */
+  charts: ChartSpec[];
+  /** Set (with empty `charts`) when an introspection *request* failed — one bad request, one bad card. */
+  error?: string;
+}
 
 /** A request: one variable (`describe`/`explain`) or two (`corr`), with an optional condition. */
 export interface IntrospectRequest {
@@ -155,13 +126,13 @@ export interface IntrospectRequest {
 }
 
 /** One item in the program's output stream: a `Print` line or a `plot::*` chart, in source order. */
-export type LogItem = { kind: 'text'; text: string } | { kind: 'plot'; plot: Introspection };
+export type LogItem = ({ kind: 'text' } & { text: string }) | ({ kind: 'plot' } & Plot);
 
 export interface NoiseIntrospectResult extends NoiseResult {
   /** The program's live top-level variables (for a picker). */
   bindings: Binding[];
   /** One result per request, in request order. */
-  introspections: Introspection[];
+  introspections: Plot[];
   /** The output stream in source order: `Print` lines and `plot::*` charts, interleaved. */
   log: LogItem[];
 }

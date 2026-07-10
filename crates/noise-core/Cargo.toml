@@ -17,6 +17,11 @@ cranelift-module = { version = "0.127.4", optional = true }
 cranelift-native = { version = "0.127.4", optional = true }
 wasm-encoder = "0.252"
 
+# The plot payload is a Flint `ChartAssemblyInput` — JSON by definition (see `flint.rs`). Building
+# it as a `serde_json::Value` is what lets every host (CLI, wasm, a future HTML writer) hand the
+# same bytes to the same stock chart compiler.
+serde_json = "1"
+
 # Browser-only: the WASM-emitter's host seam (`wasm_host`) calls into JS (`WebAssembly.instantiate`
 # the emitted kernel + run it) via wasm-bindgen. Native builds never compile that module, so this
 # dependency is wasm32-gated and keeps the native crate wasm-bindgen-free.

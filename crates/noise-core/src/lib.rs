@@ -12,6 +12,7 @@ pub mod bytecode;
 pub mod dist;
 pub mod error;
 pub mod eval;
+pub mod flint;
 pub mod introspect;
 #[cfg(feature = "jit")]
 pub mod jit;
@@ -3071,8 +3072,7 @@ mod tests {
     }
 
     /// A plain numeric array is the degenerate fan: every band (and the mean) equals the values —
-    /// accepted rather than erroring, so `plot::fan` works on data too. The CLI rendering carries
-    /// the quantile row labels and the global range legend.
+    /// accepted rather than erroring, so `plot::fan` works on data too.
     #[test]
     fn fan_of_a_deterministic_array_is_the_degenerate_fan() {
         let s = fan_plot_of("plot::fan([1, 2, 3])");
@@ -3087,8 +3087,8 @@ mod tests {
             }
         }
         let shown = s.to_string();
-        assert!(shown.contains("q95") && shown.contains("q50") && shown.contains("q05"), "{shown}");
-        assert!(shown.contains("1 … 3"), "global range legend missing: {shown}");
+        // An array literal has no source name, so the card falls back to the generic `value`.
+        assert_eq!(shown, "fan(value): 3 steps n=200000 final q05=3 med=3 q95=3");
     }
 
     /// A scalar or a matrix has no single index to fan over → a friendly spanned error.
@@ -3103,17 +3103,250 @@ mod tests {
     }
 
     /// End-to-end: a GBM-style program with `plot::fan(path)` runs, captures an `Output::Plot`, and
-    /// its Display is the stacked-band chart (header + labeled quantile sparklines).
+    /// that summary emits the three layerable Flint specs the cone is made of — the whole contract
+    /// between the engine and any renderer.
     #[test]
-    fn plot_fan_of_a_gbm_path_renders_the_band_chart() {
+    fn plot_fan_of_a_gbm_path_emits_the_layered_cone_spec() {
         let s = fan_plot_of(
             "zs ~[8] normal(0, 1);
              path = 100 * exp(cumsum(0.01 * zs - 0.005));
              plot::fan(path)",
         );
-        let shown = s.to_string();
-        assert!(shown.starts_with("fan path"), "labeled header: {shown}");
-        assert!(shown.contains("q95") && shown.contains("q05"), "quantile rows: {shown}");
-        assert!(shown.contains("8 elems"), "element count in the legend: {shown}");
+        let plot = crate::flint::to_flint(&s);
+        assert_eq!(plot.title, "fan(path)");
+        assert_eq!(plot.charts.len(), 3, "two bands + a median line");
+        assert!(plot.text.starts_with("fan(path): 8 steps"), "text fallback: {}", plot.text);
+        // The median line's y is the source variable, so the merged chart's y axis is titled `path`.
+        assert_eq!(plot.charts[2]["chart_spec"]["encodings"]["y"], "path");
+    }
+
+    // ===================== `stats::*` — the raw-data twins of the charts =====================
+    //
+    // The point of these builtins is not that they compute *something like* what a chart shows —
+    // it is that they compute *exactly* it. Each test below runs a `plot::` call and its `stats::`
+    // twin against the same engine, and asserts the numbers are bit-identical. If someone ever
+    // reimplements one of the two, these fail.
+
+    /// The numbers in an array value.
+    fn nums(v: &Value) -> Vec<f64> {
+        match v {
+            Value::Array(xs) => xs
+                .iter()
+                .map(|x| match x {
+                    Value::Num(n) => *n,
+                    other => panic!("expected a number, got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected an array, got {other:?}"),
+        }
+    }
+
+    /// The rows of a matrix value.
+    fn rows(v: &Value) -> Vec<Vec<f64>> {
+        match v {
+            Value::Array(rs) => rs.iter().map(nums).collect(),
+            other => panic!("expected a matrix, got {other:?}"),
+        }
+    }
+
+    /// Run a program, then evaluate `expr` against its retained scope (the same trick the playground
+    /// sidecar uses) — so a `plot::` call and its `stats::` twin see the identical graph and roots.
+    fn engine_after(src: &str) -> Engine {
+        let mut eng = Engine::new();
+        eng.run(&with_prelude(src)).unwrap();
+        eng
+    }
+
+    fn plot_payload(eng: &mut Engine) -> Payload {
+        for o in eng.take_output() {
+            if let crate::Output::Plot(s) = o {
+                return s.payload.clone();
+            }
+        }
+        panic!("expected a plot in the output stream");
+    }
+
+    /// `stats::histogram(x)` returns the bins `plot::hist(x)` draws — the same binning, not a second.
+    #[test]
+    fn stats_histogram_is_the_data_behind_plot_hist() {
+        let mut eng = engine_after("X ~ normal(100, 15); plot::hist(X)");
+        let d = match plot_payload(&mut eng) {
+            Payload::One(d) => d,
+            other => panic!("expected a distribution, got {other:?}"),
+        };
+        let got = rows(&eng.run("stats::histogram(X)").unwrap());
+        assert_eq!(got.len(), 2, "[midpoints, counts]");
+        assert_eq!(got[1], d.hist.bins.iter().map(|&c| c as f64).collect::<Vec<_>>());
+        assert_eq!(got[0], d.hist.midpoints(false));
+        assert_eq!(got[0].len(), 30, "the default bin count is the chart's");
+        // The counts are a partition of the sample: nothing binned twice, nothing dropped.
+        assert_eq!(got[1].iter().sum::<f64>(), d.n as f64);
+    }
+
+    /// The bin count is a knob, and an *event* ignores it: `false`/`true` is all an event can be,
+    /// and its buckets are the points 0 and 1, not the halves of `[0, 1]`.
+    #[test]
+    fn stats_histogram_takes_a_bin_count_and_an_event_takes_two() {
+        let mut eng = engine_after("X ~ normal(0, 1); hit = X > 0");
+        assert_eq!(rows(&eng.run("stats::histogram(X, 8)").unwrap())[0].len(), 8);
+
+        let h = rows(&eng.run("stats::histogram(hit, 8)").unwrap());
+        assert_eq!(h[0], vec![0.0, 1.0], "an event bins into false/true, whatever `bins` says");
+        let (f, t) = (h[1][0], h[1][1]);
+        assert!((t / (f + t) - 0.5).abs() < 0.01, "P(X > 0) ≈ 0.5, got {}", t / (f + t));
+    }
+
+    /// `stats::quantiles` reads the same sample `describe` ranks, at the same levels.
+    #[test]
+    fn stats_quantiles_match_the_describe_card() {
+        let mut eng = engine_after("X ~ normal(0, 1); d = describe(X)");
+        let d = match &eng.run("describe(X)").unwrap() {
+            Value::Summary(s) => match &s.payload {
+                Payload::One(d) => d.clone(),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+        let got = nums(&eng.run("stats::quantiles(X, [0.05, 0.25, 0.5, 0.75, 0.95])").unwrap());
+        assert_eq!(got, vec![d.q05, d.q25, d.q50, d.q75, d.q95]);
+        // …and they are the quantiles of a standard normal, in the order asked.
+        assert!((got[2]).abs() < 0.02, "median ≈ 0, got {}", got[2]);
+        assert!((got[4] - 1.645).abs() < 0.02, "q95 ≈ 1.645, got {}", got[4]);
+    }
+
+    /// `stats::moments(x)` is `describe(x)`'s header line, as data — including the honest `n` of a
+    /// conditioned variable (only the in-condition lanes count).
+    #[test]
+    fn stats_moments_are_the_describe_header_including_a_conditional_n() {
+        let mut eng = engine_after("X ~ normal(0, 1)");
+        let d = match &eng.run("describe(X)").unwrap() {
+            Value::Summary(s) => match &s.payload {
+                Payload::One(d) => d.clone(),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+        let m = nums(&eng.run("stats::moments(X)").unwrap());
+        assert_eq!(m, vec![d.n as f64, d.mean, d.sd, d.min, d.max]);
+
+        // `X | X > 0` keeps ~half the lanes, and its mean is the half-normal's E[X | X>0] = √(2/π).
+        let c = nums(&eng.run("stats::moments(X | X > 0)").unwrap());
+        assert!((c[0] / m[0] - 0.5).abs() < 0.01, "about half the lanes survive: {} of {}", c[0], m[0]);
+        assert!((c[1] - (2.0 / std::f64::consts::PI).sqrt()).abs() < 0.01, "E[X|X>0] = √(2/π), got {}", c[1]);
+        assert!(c[3] >= 0.0, "no draw below the condition, got min {}", c[3]);
+    }
+
+    /// `stats::fan(path)` returns the very bands `plot::fan(path)` shades: 6 rows, one column per
+    /// index, in the documented order.
+    #[test]
+    fn stats_fan_is_the_data_behind_plot_fan() {
+        let mut eng = engine_after("zs ~[8] normal(0, 1); path = cumsum(zs); plot::fan(path)");
+        let c = match plot_payload(&mut eng) {
+            Payload::Fan(c) => c,
+            other => panic!("expected a fan, got {other:?}"),
+        };
+        let got = rows(&eng.run("stats::fan(path)").unwrap());
+        assert_eq!(got, vec![c.q05, c.q25, c.q50, c.q75, c.q95, c.mean]);
+        assert_eq!(got.len(), 6);
+        assert!(got.iter().all(|r| r.len() == 8), "one column per index");
+        // The bands are ordered at every index, because they came from one joint pass.
+        for t in 0..8 {
+            assert!(got[0][t] < got[1][t] && got[1][t] < got[2][t] && got[2][t] < got[3][t] && got[3][t] < got[4][t]);
+        }
+    }
+
+    /// `stats::corr(a, b)` is the number `corr(a, b)` reports; `stats::corr(v)` is the matrix
+    /// `plot::corr(v)` shades.
+    #[test]
+    fn stats_corr_is_a_number_for_two_variables_and_a_matrix_for_a_vector() {
+        let mut eng = engine_after("X ~ normal(0, 1); N ~ normal(0, 1); Y = X + N");
+        let expected = match &eng.run("corr(X, Y)").unwrap() {
+            Value::Summary(s) => match &s.payload {
+                Payload::Two(d) => d.corr,
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+        let got = match eng.run("stats::corr(X, Y)").unwrap() {
+            Value::Num(c) => c,
+            other => panic!("expected a number, got {other:?}"),
+        };
+        assert_eq!(got, expected);
+        assert!((got - 0.5f64.sqrt()).abs() < 0.01, "corr(X, X+N) = 1/√2, got {got}");
+
+        // A vector: the element×element matrix. iid ⇒ identity, up to Monte-Carlo noise.
+        let mut eng = engine_after("v ~[4] normal(0, 1)");
+        let m = rows(&eng.run("stats::corr(v)").unwrap());
+        assert_eq!(m.len(), 4);
+        for (i, row) in m.iter().enumerate() {
+            assert_eq!(row.len(), 4);
+            assert!((row[i] - 1.0).abs() < 1e-9, "the diagonal is 1");
+            for (j, &c) in row.iter().enumerate() {
+                if i != j {
+                    assert!(c.abs() < 0.02, "iid elements are uncorrelated: corr[{i}][{j}] = {c}");
+                }
+                assert_eq!(c, m[j][i], "the matrix is symmetric");
+            }
+        }
+    }
+
+    /// The results are ordinary arrays: index them, reduce them, feed them back into a plot.
+    #[test]
+    fn a_stats_result_is_an_ordinary_array() {
+        assert_eq!(num("b ~ bernoulli(0.25); h = stats::histogram(b, 2); h[0][1]"), 1.0);
+        // The counts sum to the sample size, so a share is one division away.
+        let p = num("b ~ bernoulli(0.25); h = stats::histogram(b, 2); h[1][1] / sum(h[1])");
+        assert!((p - 0.25).abs() < 0.01, "P(true) recovered from the counts: {p}");
+        // A fan's median row is a path a program can measure.
+        let drift = num("zs ~[16] rand::normal(0, 1); f = stats::fan(cumsum(zs)); max(f[2]) - min(f[2])");
+        assert!(drift > 0.0, "the median band moves");
+    }
+
+    /// `stats::` is always qualified (like `plot::`), and says so.
+    #[test]
+    fn stats_functions_are_always_qualified() {
+        let e = run("xs ~[4] normal(0,1); fan(xs)").unwrap_err().to_string();
+        assert!(e.contains("is in module 'stats'") && e.contains("stats::fan"), "{e}");
+        // `use stats;` parses (every module does) but grants nothing unqualified.
+        let e = super::run("use stats; xs ~[4] rand::normal(0,1); fan(xs)").unwrap_err().to_string();
+        assert!(e.contains("stats::fan"), "{e}");
+        // A bare `corr(a, b)` is still the introspection summary, not `stats::corr`'s number.
+        assert!(matches!(run("X ~ normal(0,1); corr(X, X)").unwrap(), Value::Summary(_)));
+    }
+
+    #[test]
+    fn stats_errors_are_specific() {
+        let e = run("X ~ normal(0,1); stats::bogus(X)").unwrap_err().to_string();
+        assert!(e.contains("unknown 'stats::bogus'"), "{e}");
+        let e = run("X ~ normal(0,1); stats::quantiles(X, 0.5)").unwrap_err().to_string();
+        assert!(e.contains("wants an array") && e.contains("Q(x, 0.5)"), "{e}");
+        let e = run("X ~ normal(0,1); stats::quantiles(X, [1.5])").unwrap_err().to_string();
+        assert!(e.contains("must lie in [0, 1]"), "{e}");
+        let e = run("X ~ normal(0,1); stats::histogram(X, 0)").unwrap_err().to_string();
+        assert!(e.contains("at least 1 bin"), "{e}");
+        let e = run("X ~ normal(0,1); stats::fan(X)").unwrap_err().to_string();
+        assert!(e.contains("stats::fan wants a vector"), "{e}");
+        let e = run("X ~ normal(0,1); stats::corr(X)").unwrap_err().to_string();
+        assert!(e.contains("two variables, or one vector"), "{e}");
+        // A condition that never holds has nothing to summarize — the same error `describe` gives.
+        let e = run("X ~ normal(0,1); stats::moments(X | X > 100)").unwrap_err().to_string();
+        assert!(e.contains("never occurred"), "{e}");
+    }
+
+    /// `noise validate` must type/shape-check a `stats::` program without drawing a single sample —
+    /// so the placeholders it returns have to carry the *right shape*, or indexing them would raise
+    /// a phantom error.
+    #[test]
+    fn check_mode_gives_stats_results_their_real_shape_without_sampling() {
+        let mut eng = Engine::new();
+        let src = with_prelude(
+            "X ~ normal(0,1); zs ~[5] normal(0,1); v ~[3] normal(0,1);
+             h = stats::histogram(X, 7); q = stats::quantiles(X, [0.1, 0.9]);
+             m = stats::moments(X); f = stats::fan(cumsum(zs)); c = stats::corr(v);
+             [Len(h[0]), Len(h[1]), Len(q), Len(m), Len(f), Len(f[0]), Len(c), Len(c[0])]",
+        );
+        let shape = nums(&eng.check(&src).unwrap());
+        assert_eq!(shape, vec![7.0, 7.0, 2.0, 5.0, 6.0, 5.0, 3.0, 3.0]);
+        assert_eq!(eng.stats().samples, 0, "check mode must not draw");
     }
 }

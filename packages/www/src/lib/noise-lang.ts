@@ -24,7 +24,7 @@ const BUILTINS = [
   'set_max_samples', 'set_max_opts', 'set_resolution',
 ];
 const CONSTANTS = ['pi', 'e', 'i', 'j'];
-const MODULES = ['builtin', 'rand', 'math', 'vec', 'signal', 'engine'];
+const MODULES = ['builtin', 'rand', 'math', 'vec', 'signal', 'engine', 'plot', 'stats'];
 
 let registered = false;
 

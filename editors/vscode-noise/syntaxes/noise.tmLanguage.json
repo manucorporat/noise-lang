@@ -49,7 +49,7 @@
       ]
     },
     "namespaces": {
-      "match": "\\b(rand|vec|math|signal|builtin)(::)",
+      "match": "\\b(rand|vec|math|signal|builtin|engine|plot|stats)(::)",
       "captures": {
         "1": { "name": "entity.name.namespace.noise" },
         "2": { "name": "keyword.operator.namespace.noise" }

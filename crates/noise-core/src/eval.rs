@@ -298,6 +298,10 @@ impl Engine {
                 if module == Some("plot") {
                     return self.plot_call(base, args, &arg_vals, node.span);
                 }
+                // `stats::*` — the same computations, handed back as numbers instead of a chart.
+                if module == Some("stats") {
+                    return self.stats_call(base, &arg_vals, node.span);
+                }
                 // A user function (unqualified) shadows a builtin of the same name.
                 if module.is_none() {
                     if let Some(f) = self.funcs.get(base).cloned() {
@@ -347,7 +351,7 @@ impl Engine {
             Expr::Use(module) => {
                 if !is_module(module) {
                     return Err(NoiseError::runtime(
-                        format!("unknown module '{module}' (known modules: rand, math, vec, signal, engine, builtin)"),
+                        format!("unknown module '{module}' (known modules: {})", MODULES.join(", ")),
                         node.span,
                     ));
                 }
@@ -447,7 +451,7 @@ impl Engine {
             Some(m) => {
                 if !is_module(m) {
                     return Err(NoiseError::runtime(
-                        format!("unknown module '{m}' (known modules: rand, math, vec, signal, engine, builtin)"),
+                        format!("unknown module '{m}' (known modules: {})", MODULES.join(", ")),
                         span,
                     ));
                 }
@@ -467,6 +471,12 @@ impl Engine {
                 Some(m) if self.module_active(m) => Ok(()),
                 Some(m) => Err(NoiseError::runtime(
                     format!("'{base}' is in module '{m}' — add `use {m};` or write `{m}::{base}`"),
+                    span,
+                )),
+                // `stats` has no unqualified form to enable, so point at the path itself rather
+                // than let the name fall through to "unknown function".
+                None if STATS_FNS.contains(&base) => Err(NoiseError::runtime(
+                    format!("'{base}' is in module 'stats' — write `stats::{base}(...)` (always qualified, like `plot::`)"),
                     span,
                 )),
                 None => Ok(()),
@@ -1335,27 +1345,37 @@ impl Engine {
         Ok(wrap(grid(&self.graph, &roots, rows, cols, n, INTROSPECT_SEED)))
     }
 
-    /// `corr(vec)` → the element×element correlation heatmap, sampled in one joint pass. Restricted to
-    /// a vector (1-D) and capped in length, since the cost is O(n²) per lane.
+    /// `corr(vec)` → the element×element correlation heatmap, sampled in one joint pass.
     fn corr_matrix_summary(&mut self, xs: &[Value], label: String, span: Span) -> Result<Value> {
-        use crate::introspect::{corr_grid, CorrMatrix, Payload, Summary, View, INTROSPECT_SEED};
-        const CORR_MAX: usize = 64;
+        use crate::introspect::{Payload, Summary, View};
+        let c = self.corr_matrix_of(xs, span)?;
+        Ok(Value::Summary(Rc::new(Summary {
+            view: View::CorrMatrix,
+            label,
+            label_b: None,
+            payload: Payload::CorrMatrix(c),
+        })))
+    }
+
+    /// The element×element correlation matrix of a vector, in one joint pass — the computation
+    /// behind `corr(vec)` / `plot::corr(vec)` / `stats::corr(vec)`. Restricted to a vector (1-D) and
+    /// capped in length, since the cost is O(n²) per lane. In check mode the matrix is empty (no
+    /// sampling), and the callers fill the shape.
+    fn corr_matrix_of(&mut self, xs: &[Value], span: Span) -> Result<crate::introspect::CorrMatrix> {
+        use crate::introspect::{corr_grid, CorrMatrix, CORR_MAX, INTROSPECT_SEED};
         let roots = self.vector_roots(xs, span)?;
         if roots.len() > CORR_MAX {
             return Err(NoiseError::runtime(
-                format!("corr heatmap supports up to {CORR_MAX} elements, got {} — slice the vector first", roots.len()),
+                format!("corr supports up to {CORR_MAX} elements, got {} — slice the vector first", roots.len()),
                 span,
             ));
         }
-        let wrap = |c| {
-            Value::Summary(Rc::new(Summary { view: View::CorrMatrix, label, label_b: None, payload: Payload::CorrMatrix(c) }))
-        };
         if self.check_mode {
-            return Ok(wrap(CorrMatrix { n: roots.len(), corr: vec![] }));
+            return Ok(CorrMatrix { n: roots.len(), corr: vec![] });
         }
         // The pairwise matrix needs fewer draws than a single estimate; cap it to stay snappy.
         let n = self.max_samples.min(100_000);
-        Ok(wrap(corr_grid(&self.graph, &roots, n, INTROSPECT_SEED)))
+        Ok(corr_grid(&self.graph, &roots, n, INTROSPECT_SEED))
     }
 
     /// Lower a vector of scalar RVs/constants to element roots (a nested array — a matrix — is a
@@ -1472,23 +1492,208 @@ impl Engine {
         Ok(Value::Unit)
     }
 
+    // === `stats::*` — the numbers behind the pictures ==========================================
+    //
+    // Every `plot::` shortcut is a computation plus a chart. `stats::` is the same computation
+    // without the chart: `stats::histogram(x)` returns the very bins `plot::hist(x)` draws,
+    // `stats::fan(path)` the very bands `plot::fan(path)` shades. Not a re-implementation — both
+    // call the same functions in `crate::introspect`, at the same budget and the same seed, so the
+    // two agree exactly rather than approximately. That is what makes a chart auditable: you can
+    // always ask for its data.
+    //
+    // These force sampling (like `P`/`E`/`Var`/`Q`), which is why they live in `stats::` and not in
+    // the never-sampling `math::`. Their budget is the *introspection* budget (`INTROSPECT_N`), not
+    // `P`'s — a chart's numbers, not a probability's last digit. So `Q(x, 0.5)` and
+    // `stats::quantiles(x, [0.5])` may differ in the final places: `Q` is the estimator,
+    // `stats::quantiles` is what the picture is made of.
+
+    /// Dispatch a `stats::` call. Each arm returns plain numbers/arrays, so the result composes with
+    /// the rest of the language (index it, plot it, feed it back in).
+    fn stats_call(&mut self, base: &str, arg_vals: &[Value], span: Span) -> Result<Value> {
+        match base {
+            "histogram" => self.stats_histogram(arg_vals, span),
+            "quantiles" => self.stats_quantiles(arg_vals, span),
+            "moments" => self.stats_moments(arg_vals, span),
+            "fan" => self.stats_fan(arg_vals, span),
+            "corr" => self.stats_corr(arg_vals, span),
+            other => Err(NoiseError::runtime(
+                format!("unknown 'stats::{other}' (try histogram, quantiles, moments, fan, corr)"),
+                span,
+            )),
+        }
+    }
+
+    /// `stats::histogram(x)` / `stats::histogram(x, bins)` → `[[midpoints], [counts]]`, the two rows
+    /// a bar chart needs. Accepts a conditioned variable (`stats::histogram(x | c)`), like `hist`.
+    /// An event has exactly two buckets, `false` and `true`, whatever `bins` says.
+    fn stats_histogram(&mut self, arg_vals: &[Value], span: Span) -> Result<Value> {
+        use crate::introspect::{histogram, Histogram, NUM_BINS};
+        if arg_vals.is_empty() || arg_vals.len() > 2 {
+            return Err(NoiseError::runtime(
+                format!("stats::histogram expects a variable and an optional bin count, got {} arguments", arg_vals.len()),
+                span,
+            ));
+        }
+        let nbins = match arg_vals.get(1) {
+            Some(v) => introspect_count(v, span)?,
+            None => NUM_BINS,
+        };
+        if nbins == 0 {
+            return Err(NoiseError::runtime("stats::histogram needs at least 1 bin".to_string(), span));
+        }
+        let (root, conditional, boolean) = self.introspect_root(&arg_vals[0], span)?;
+        let nbins = if boolean { 2 } else { nbins };
+        let h = match self.stats_draws(root, conditional, span)? {
+            None => Histogram { lo: 0.0, hi: 1.0, bins: vec![0; nbins] }, // check mode: shape only
+            Some(draws) => histogram(&draws, boolean, nbins),
+        };
+        Ok(matrix_of([h.midpoints(boolean), h.bins.iter().map(|&c| c as f64).collect()]))
+    }
+
+    /// `stats::quantiles(x, [q…])` → one value per requested quantile, in the order asked. The same
+    /// empirical rule `Q` uses, over the histogram's sample.
+    fn stats_quantiles(&mut self, arg_vals: &[Value], span: Span) -> Result<Value> {
+        use crate::introspect::quantile_sorted;
+        if arg_vals.len() != 2 {
+            return Err(NoiseError::runtime(
+                "stats::quantiles expects a variable and an array of quantiles, e.g. `stats::quantiles(x, [0.05, 0.5, 0.95])`".to_string(),
+                span,
+            ));
+        }
+        let qs = match &arg_vals[1] {
+            Value::Array(qs) => qs.clone(),
+            other => {
+                return Err(NoiseError::runtime(
+                    format!("stats::quantiles wants an array of quantiles, got {} — for a single one, `Q(x, 0.5)`", other.type_name()),
+                    span,
+                ))
+            }
+        };
+        let mut levels = Vec::with_capacity(qs.len());
+        for q in qs.iter() {
+            let q = match q {
+                Value::Num(q) | Value::Est { val: q, .. } => *q,
+                other => {
+                    return Err(NoiseError::runtime(
+                        format!("a quantile must be a number, got {}", other.type_name()),
+                        span,
+                    ))
+                }
+            };
+            if !(0.0..=1.0).contains(&q) {
+                return Err(NoiseError::runtime(format!("a quantile must lie in [0, 1], got {q}"), span));
+            }
+            levels.push(q);
+        }
+        let (root, conditional, _) = self.introspect_root(&arg_vals[0], span)?;
+        let Some(mut draws) = self.stats_draws(root, conditional, span)? else {
+            return Ok(row_of(vec![0.0; levels.len()])); // check mode: shape only
+        };
+        draws.sort_by(f64::total_cmp);
+        Ok(row_of(levels.into_iter().map(|q| quantile_sorted(&draws, q)).collect()))
+    }
+
+    /// `stats::moments(x)` → `[n, mean, sd, min, max]` — the header line of `describe(x)`, as data.
+    /// `n` is the number of draws that *counted* (a conditioned variable keeps only its in-condition
+    /// lanes), so it is the honest denominator behind the other four.
+    fn stats_moments(&mut self, arg_vals: &[Value], span: Span) -> Result<Value> {
+        use crate::introspect::Dist1;
+        if arg_vals.len() != 1 {
+            return Err(NoiseError::runtime(
+                format!("stats::moments expects 1 variable, got {}", arg_vals.len()),
+                span,
+            ));
+        }
+        let (root, conditional, boolean) = self.introspect_root(&arg_vals[0], span)?;
+        let Some(draws) = self.stats_draws(root, conditional, span)? else {
+            return Ok(row_of(vec![0.0; 5])); // check mode: shape only
+        };
+        let d = Dist1::from_draws(&draws, boolean, 0);
+        Ok(row_of(vec![d.n as f64, d.mean, d.sd, d.min, d.max]))
+    }
+
+    /// `stats::fan(path)` → a 6×cols matrix: the rows `q05, q25, q50, q75, q95, mean`, one column
+    /// per index. Exactly the bands `plot::fan(path)` shades, drawn in one joint pass.
+    fn stats_fan(&mut self, arg_vals: &[Value], span: Span) -> Result<Value> {
+        let c = self.fan_chart("stats::fan", arg_vals, span)?;
+        if c.q50.is_empty() {
+            return Ok(matrix_of([(); 6].map(|_| vec![0.0; c.cols]))); // check mode: shape only
+        }
+        Ok(matrix_of([c.q05, c.q25, c.q50, c.q75, c.q95, c.mean]))
+    }
+
+    /// `stats::corr(a, b)` → their correlation, one number. `stats::corr(v)` → the element×element
+    /// matrix of a vector (`n×n`, diagonal 1) — the heatmap `plot::corr(v)` draws.
+    fn stats_corr(&mut self, arg_vals: &[Value], span: Span) -> Result<Value> {
+        use crate::introspect::{dist2, INTROSPECT_N, INTROSPECT_SEED};
+        if let [Value::Array(xs)] = arg_vals {
+            let c = self.corr_matrix_of(&xs.clone(), span)?;
+            if c.corr.is_empty() {
+                return Ok(matrix_of((0..c.n).map(|_| vec![0.0; c.n]))); // check mode: shape only
+            }
+            return Ok(matrix_of(c.corr.chunks(c.n).map(<[f64]>::to_vec)));
+        }
+        if arg_vals.len() != 2 {
+            return Err(NoiseError::runtime(
+                format!("stats::corr expects two variables, or one vector to correlate its elements — got {} arguments", arg_vals.len()),
+                span,
+            ));
+        }
+        let a = self.introspect_plain_root(&arg_vals[0], "stats::corr", span)?;
+        let b = self.introspect_plain_root(&arg_vals[1], "stats::corr", span)?;
+        if self.check_mode {
+            return Ok(Value::Num(0.0));
+        }
+        let n = self.max_samples.min(INTROSPECT_N);
+        match dist2(&self.graph, a, b, None, n, INTROSPECT_SEED) {
+            Some(d) => Ok(Value::Num(d.corr)),
+            None => Err(condition_never(n, span)),
+        }
+    }
+
+    /// Draw the sample behind a one-variable `stats::` call, at the introspection budget and seed —
+    /// the same draws `describe`/`hist` see. `None` means check mode (no sampling happened, and the
+    /// caller returns a correctly-shaped placeholder); an empty in-condition sample is an error, as
+    /// it is for `describe`.
+    fn stats_draws(&mut self, root: RvId, conditional: bool, span: Span) -> Result<Option<Vec<f64>>> {
+        use crate::introspect::{draws, INTROSPECT_N, INTROSPECT_SEED};
+        if self.check_mode {
+            return Ok(None);
+        }
+        let n = self.max_samples.min(INTROSPECT_N);
+        let d = draws(&self.graph, root, conditional, n, INTROSPECT_SEED);
+        if d.is_empty() {
+            return Err(condition_never(n, span));
+        }
+        Ok(Some(d))
+    }
+
     /// `plot::fan(path)` — the cone chart: per-index quantile bands (q05/q25/q50/q75/q95) of a
     /// vector of random variables, sampled **jointly** in one pass (shared lanes,
     /// [`crate::introspect::fan`]) so the bands are consistent across the index. Restricted to a
     /// vector — a path. A deterministic numeric array is the degenerate fan (every band equals the
     /// values); a scalar or matrix is a friendly spanned error.
     fn fan_summary(&mut self, args: &[Spanned], arg_vals: &[Value], span: Span) -> Result<Value> {
-        use crate::introspect::{fan, FanChart, Payload, Summary, View, INTROSPECT_N, INTROSPECT_SEED};
-        const FAN_MAX: usize = 1024;
+        use crate::introspect::{Payload, Summary, View};
+        let label = label_of(&args[0]);
+        let c = self.fan_chart("plot::fan", arg_vals, span)?;
+        Ok(Value::Summary(Rc::new(Summary { view: View::Fan, label, label_b: None, payload: Payload::Fan(c) })))
+    }
+
+    /// The per-index quantile bands of a path, in ONE joint pass — the computation behind
+    /// `plot::fan(path)` and `stats::fan(path)`. `who` names the caller so the errors stay honest
+    /// about which surface the program used. In check mode the bands are empty (no sampling); the
+    /// callers fill the shape from `cols`.
+    fn fan_chart(&mut self, who: &str, arg_vals: &[Value], span: Span) -> Result<crate::introspect::FanChart> {
+        use crate::introspect::{fan, FanChart, FAN_MAX, INTROSPECT_N, INTROSPECT_SEED};
         if arg_vals.len() != 1 {
             return Err(NoiseError::runtime(
-                format!("plot::fan expects 1 argument (a path — an array of random values), got {}", arg_vals.len()),
+                format!("{who} expects 1 argument (a path — an array of random values), got {}", arg_vals.len()),
                 span,
             ));
         }
-        let not_a_path = || {
-            NoiseError::runtime("plot::fan wants a vector — a path of random values".to_string(), span)
-        };
+        let not_a_path =
+            || NoiseError::runtime(format!("{who} wants a vector — a path of random values"), span);
         let xs = match &arg_vals[0] {
             Value::Array(xs) => xs.clone(),
             _ => return Err(not_a_path()),
@@ -1498,17 +1703,13 @@ impl Engine {
         }
         if xs.len() > FAN_MAX {
             return Err(NoiseError::runtime(
-                format!("fan chart supports up to {FAN_MAX} elements, got {} — slice the path first", xs.len()),
+                format!("{who} supports up to {FAN_MAX} elements, got {} — slice the path first", xs.len()),
                 span,
             ));
         }
-        let label = label_of(&args[0]);
         let roots = self.vector_roots(&xs, span)?;
-        let wrap = |c| {
-            Value::Summary(Rc::new(Summary { view: View::Fan, label, label_b: None, payload: Payload::Fan(c) }))
-        };
         if self.check_mode {
-            return Ok(wrap(FanChart {
+            let empty = FanChart {
                 cols: roots.len(),
                 n: 0,
                 q05: vec![],
@@ -1517,11 +1718,12 @@ impl Engine {
                 q75: vec![],
                 q95: vec![],
                 mean: vec![],
-            }));
+            };
+            return Ok(empty);
         }
         // The introspection budget, further clamped inside `fan` to its cols×n memory cap.
         let n = self.max_samples.min(INTROSPECT_N);
-        Ok(wrap(fan(&self.graph, &roots, n, INTROSPECT_SEED)))
+        Ok(fan(&self.graph, &roots, n, INTROSPECT_SEED))
     }
 
     /// Evaluate a prefix unary op (`-x` / `!x` / the math ufuncs). A conditioned operand pushes the
@@ -3359,6 +3561,16 @@ fn binop_symbol(op: BinOp) -> &'static str {
     }
 }
 
+/// A row of numbers, as a Noise array value.
+fn row_of(xs: Vec<f64>) -> Value {
+    Value::Array(Rc::new(xs.into_iter().map(Value::Num).collect()))
+}
+
+/// A matrix of numbers (rows of equal length), as a Noise array-of-arrays value.
+fn matrix_of(rows: impl IntoIterator<Item = Vec<f64>>) -> Value {
+    Value::Array(Rc::new(rows.into_iter().map(row_of).collect()))
+}
+
 /// Resolve a count argument (the `k` in `samples(x, k)`) to a non-negative integer.
 fn introspect_count(v: &Value, span: Span) -> Result<usize> {
     let n = match v {
@@ -3432,9 +3644,16 @@ fn ancestors(graph: &RvGraph, root: RvId) -> HashSet<RvId> {
     seen
 }
 
-/// The built-in modules. `builtin` is always active; the others need a `use`. `plot` is the charting
-/// surface (`plot::histogram(X)` …) — always reachable qualified, like a namespaced builtin.
-const MODULES: [&str; 7] = ["rand", "math", "vec", "signal", "engine", "builtin", "plot"];
+/// The built-in modules. `builtin` is always active; the others need a `use`. `plot` (charts) and
+/// `stats` (the same numbers, unrendered) are **always qualified** — they are reachable as
+/// `plot::hist(X)` / `stats::histogram(X)` without a `use`, and never unqualified, because their
+/// short verbs (`fan`, `corr`, `moments`) would otherwise shadow far too much.
+const MODULES: [&str; 8] = ["rand", "math", "vec", "signal", "engine", "builtin", "plot", "stats"];
+
+/// The `stats::` functions — the raw-data twin of each `plot::` chart. Not in [`module_of`]: they
+/// resolve through the early `stats::` interception in `eval`, so this list exists only to point a
+/// bare `fan(path)` at `stats::fan(path)`.
+const STATS_FNS: [&str; 5] = ["histogram", "quantiles", "moments", "fan", "corr"];
 
 /// Whether `m` names a known module.
 #[inline]

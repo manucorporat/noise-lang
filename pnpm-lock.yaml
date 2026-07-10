@@ -26,9 +26,21 @@ importers:
       astro:
         specifier: ^5.13.0
         version: 5.18.2(rollup@4.62.2)(typescript@5.9.3)
+      flint-chart:
+        specifier: 0.2.0
+        version: 0.2.0(vega-lite@5.23.0(vega@5.33.1))(vega@5.33.1)
       monaco-editor:
         specifier: ^0.52.2
         version: 0.52.2
+      vega:
+        specifier: ^5.33.1
+        version: 5.33.1
+      vega-embed:
+        specifier: ^6.29.0
+        version: 6.29.0(vega-lite@5.23.0(vega@5.33.1))(vega@5.33.1)
+      vega-lite:
+        specifier: ^5.23.0
+        version: 5.23.0(vega@5.33.1)
 
 packages:
 
@@ -689,6 +701,9 @@ packages:
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
 
+  '@types/geojson@7946.0.4':
+    resolution: {integrity: sha512-MHmwBtCb7OCv1DSivz2UNJXPGU/1btAWRKlqJ2saEhVJkpkvqHMMaOpKg0v4sAbDWSQekHGvPVMM8nQ+Jen03Q==}
+
   '@types/hast@3.0.4':
     resolution: {integrity: sha512-WPs+bbQw5aCj+x6laNGWLH3wviHtoCv/P3+otBhbOhJgG8qtpdAMlTCxLtsTWA7LH1Oh/bFCHsBn0TPS5m30EQ==}
 
@@ -722,6 +737,10 @@ packages:
   ansi-regex@6.2.2:
     resolution: {integrity: sha512-Bq3SmSpyFHaWjPk8If9yc6svM8c56dB5BAtW4Qbw5jHTwwXXcTLoRMkpDJp6VL0XzlWaCHTXrkFURMYmD0sLqg==}
     engines: {node: '>=12'}
+
+  ansi-styles@4.3.0:
+    resolution: {integrity: sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg==}
+    engines: {node: '>=8'}
 
   ansi-styles@6.2.3:
     resolution: {integrity: sha512-4Dj6M28JB+oAH8kFkTLUo+a2jwOFkuqb3yucU0CANcRRUbxS0cP0nZYCGjcc3BNXwRIsUVmDGgzawme7zvJHvg==}
@@ -795,9 +814,20 @@ packages:
     resolution: {integrity: sha512-/lzGpEWL/8PfI0BmBOPRwp0c/wFNX1RdUML3jK/RcSBA9T8mZDdQpqYBKtCFTOfQbwPqWEOpjqW+Fnayc0969g==}
     engines: {node: '>=10'}
 
+  cliui@8.0.1:
+    resolution: {integrity: sha512-BSeNnyus75C4//NQ9gQt1/csTXyo/8Sb+afLAkzAptFuMsod9HFokGNudZpi/oQV73hnVK+sR+5PVRMd+Dr7YQ==}
+    engines: {node: '>=12'}
+
   clsx@2.1.1:
     resolution: {integrity: sha512-eYm0QWBtUrBWZWG0d386OGAw16Z995PiOVo2B7bjWSbHedGl5e0ZWaq65kOGgUSNesEIDkB9ISbTg/JK9dhCZA==}
     engines: {node: '>=6'}
+
+  color-convert@2.0.1:
+    resolution: {integrity: sha512-RRECPsj7iu/xb5oKYcsFHSppFNnsj/52OVTRKb4zP5onXwVF3zVmmToNcOfGC+CRDpfK/U584fMg38ZHCaElKQ==}
+    engines: {node: '>=7.0.0'}
+
+  color-name@1.1.4:
+    resolution: {integrity: sha512-dOy+3AuW3a2wNbZHIuMZpTcgjGuLU/uBL/ubcZF9OXbDo8ff4O8yVp5Bf0efS8uEoYo5q4Fx7dY9OgQGXgAsQA==}
 
   comma-separated-tokens@2.0.3:
     resolution: {integrity: sha512-Fu4hJdvzeylCfQPp9SGWidpzrMs7tTrlu6Vb8XGaRGck8QSNZJJp538Wrb60Lax4fPwR64ViY468OIUTbRlGZg==}
@@ -805,6 +835,13 @@ packages:
   commander@11.1.0:
     resolution: {integrity: sha512-yPVavfyCcRhmorC7rWlkHn15b4wDVgVmBA7kV4QVBsF7kv/9TKJAbAXVTxvTnwP8HHKjRCJDClKbciiYS7p0DQ==}
     engines: {node: '>=16'}
+
+  commander@2.20.3:
+    resolution: {integrity: sha512-GpVkmM8vF2vQUkj2LvZmD35JxeJOLCwJ9cUkugyk2nuhbv3+mJvpLYYt+0+USMxE+oj+ey/lJEnhZw75x/OMcQ==}
+
+  commander@7.2.0:
+    resolution: {integrity: sha512-QrWXB+ZQSVPmIWIhtEO9H+gwHaMGYiF5ChvoJ+K9ZGHG/sVsa6yiesAD1GC/x46sET00Xlwo1u49RVVVzvcSkw==}
+    engines: {node: '>= 10'}
 
   common-ancestor-path@1.0.1:
     resolution: {integrity: sha512-L3sHRo1pXXEqX8VU28kfgUY+YGsk09hPqZiZmLacNib6XNTCM8ubYeT7ryXQw8asB1sKgcU5lkB7ONug08aB8w==}
@@ -843,6 +880,84 @@ packages:
     resolution: {integrity: sha512-0LrrStPOdJj+SPCCrGhzryycLjwcgUSHBtxNA8aIDxf0GLsRh1cKYhB00Gd1lDOS4yGH69+SNn13+TWbVHETFQ==}
     engines: {node: ^10 || ^12.20.0 || ^14.13.0 || >=15.0.0, npm: '>=7.0.0'}
 
+  d3-array@3.2.4:
+    resolution: {integrity: sha512-tdQAmyA18i4J7wprpYq8ClcxZy3SC31QMeByyCFyRt7BVHdREQZ5lpzoe5mFEYZUWe+oq8HBvk9JjpibyEV4Jg==}
+    engines: {node: '>=12'}
+
+  d3-color@3.1.0:
+    resolution: {integrity: sha512-zg/chbXyeBtMQ1LbD/WSoW2DpC3I0mpmPdW+ynRTj/x2DAWYrIY7qeZIHidozwV24m4iavr15lNwIwLxRmOxhA==}
+    engines: {node: '>=12'}
+
+  d3-delaunay@6.0.4:
+    resolution: {integrity: sha512-mdjtIZ1XLAM8bm/hx3WwjfHt6Sggek7qH043O8KEjDXN40xi3vx/6pYSVTwLjEgiXQTbvaouWKynLBiUZ6SK6A==}
+    engines: {node: '>=12'}
+
+  d3-dispatch@3.0.1:
+    resolution: {integrity: sha512-rzUyPU/S7rwUflMyLc1ETDeBj0NRuHKKAcvukozwhshr6g6c5d8zh4c2gQjY2bZ0dXeGLWc1PF174P2tVvKhfg==}
+    engines: {node: '>=12'}
+
+  d3-dsv@3.0.1:
+    resolution: {integrity: sha512-UG6OvdI5afDIFP9w4G0mNq50dSOsXHJaRE8arAS5o9ApWnIElp8GZw1Dun8vP8OyHOZ/QJUKUJwxiiCCnUwm+Q==}
+    engines: {node: '>=12'}
+    hasBin: true
+
+  d3-force@3.0.0:
+    resolution: {integrity: sha512-zxV/SsA+U4yte8051P4ECydjD/S+qeYtnaIyAs9tgHCqfguma/aAQDjo85A9Z6EKhBirHRJHXIgJUlffT4wdLg==}
+    engines: {node: '>=12'}
+
+  d3-format@3.1.2:
+    resolution: {integrity: sha512-AJDdYOdnyRDV5b6ArilzCPPwc1ejkHcoyFarqlPqT7zRYjhavcT3uSrqcMvsgh2CgoPbK3RCwyHaVyxYcP2Arg==}
+    engines: {node: '>=12'}
+
+  d3-geo-projection@4.0.0:
+    resolution: {integrity: sha512-p0bK60CEzph1iqmnxut7d/1kyTmm3UWtPlwdkM31AU+LW+BXazd5zJdoCn7VFxNCHXRngPHRnsNn5uGjLRGndg==}
+    engines: {node: '>=12'}
+    hasBin: true
+
+  d3-geo@3.1.1:
+    resolution: {integrity: sha512-637ln3gXKXOwhalDzinUgY83KzNWZRKbYubaG+fGVuc/dxO64RRljtCTnf5ecMyE1RIdtqpkVcq0IbtU2S8j2Q==}
+    engines: {node: '>=12'}
+
+  d3-hierarchy@3.1.2:
+    resolution: {integrity: sha512-FX/9frcub54beBdugHjDCdikxThEqjnR93Qt7PvQTOHxyiNCAlvMrHhclk3cD5VeAaq9fxmfRp+CnWw9rEMBuA==}
+    engines: {node: '>=12'}
+
+  d3-interpolate@3.0.1:
+    resolution: {integrity: sha512-3bYs1rOD33uo8aqJfKP3JWPAibgw8Zm2+L9vBKEHJ2Rg+viTR7o5Mmv5mZcieN+FRYaAOWX5SJATX6k1PWz72g==}
+    engines: {node: '>=12'}
+
+  d3-path@3.1.0:
+    resolution: {integrity: sha512-p3KP5HCf/bvjBSSKuXid6Zqijx7wIfNW+J/maPs+iwR35at5JCbLUT0LzF1cnjbCHWhqzQTIN2Jpe8pRebIEFQ==}
+    engines: {node: '>=12'}
+
+  d3-quadtree@3.0.1:
+    resolution: {integrity: sha512-04xDrxQTDTCFwP5H6hRhsRcb9xxv2RzkcsygFzmkSIOJy3PeRJP7sNk3VRIbKXcog561P9oU0/rVH6vDROAgUw==}
+    engines: {node: '>=12'}
+
+  d3-scale-chromatic@3.1.0:
+    resolution: {integrity: sha512-A3s5PWiZ9YCXFye1o246KoscMWqf8BsD9eRiJ3He7C9OBaxKhAd5TFCdEx/7VbKtxxTsu//1mMJFrEt572cEyQ==}
+    engines: {node: '>=12'}
+
+  d3-scale@4.0.2:
+    resolution: {integrity: sha512-GZW464g1SH7ag3Y7hXjf8RoUuAFIqklOAq3MRl4OaWabTFJY9PN/E1YklhXLh+OQ3fM9yS2nOkCoS+WLZ6kvxQ==}
+    engines: {node: '>=12'}
+
+  d3-shape@3.2.0:
+    resolution: {integrity: sha512-SaLBuwGm3MOViRq2ABk3eLoxwZELpH6zhl3FbAoJ7Vm1gofKx6El1Ib5z23NUEhF9AsGl7y+dzLe5Cw2AArGTA==}
+    engines: {node: '>=12'}
+
+  d3-time-format@4.1.0:
+    resolution: {integrity: sha512-dJxPBlzC7NugB2PDLwo9Q8JiTR3M3e4/XANkreKSUxF8vvXKqm1Yfq4Q5dl8budlunRVlUUaDUgFt7eA8D6NLg==}
+    engines: {node: '>=12'}
+
+  d3-time@3.1.0:
+    resolution: {integrity: sha512-VqKjzBLejbSMT4IgbmVgDjpkYrNWUYJnbCGo874u7MMKIWsILRX+OpX/gTk8MqjpT1A/c6HY2dCA77ZN0lkQ2Q==}
+    engines: {node: '>=12'}
+
+  d3-timer@3.0.1:
+    resolution: {integrity: sha512-ndfJ/JxxMd3nw31uyKoY2naivF+r29V+Lc0svZxe1JvvIRmi8hUsrMvdOwgS1o6uBHmiz91geQ0ylPP0aj1VUA==}
+    engines: {node: '>=12'}
+
   debug@4.4.3:
     resolution: {integrity: sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==}
     engines: {node: '>=6.0'}
@@ -857,6 +972,9 @@ packages:
 
   defu@6.1.7:
     resolution: {integrity: sha512-7z22QmUWiQ/2d0KkdYmANbRUVABpZ9SNYyH5vx6PZ+nE5bcC0l7uFvEfHlyld/HcGBFTL536ClDt3DEcSlEJAQ==}
+
+  delaunator@5.1.0:
+    resolution: {integrity: sha512-AGrQ4QSgssa1NGmWmLPqN5NY2KajF5MqxetNEO+o0n3ZwZZeTmt7bBnvzHWrmkZFxGgr4HdyFgelzgi06otLuQ==}
 
   dequal@2.0.3:
     resolution: {integrity: sha512-0je+qPKHEMohvfRTCEo3CrPG6cAzAYgmzKyxRiYSSDkS6eGJdyVJm7WaYA5ECaAD9wLB2T4EEeymA5aFVcYXCA==}
@@ -930,6 +1048,10 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
+  escalade@3.2.0:
+    resolution: {integrity: sha512-WUj2qlxaQtO4g6Pq5c29GTcWGDyd8itL8zTlipgECz3JesAiiOKotd8JU6otB3PACgG6xkJUyVhboMS+bje/jA==}
+    engines: {node: '>=6'}
+
   escape-string-regexp@5.0.0:
     resolution: {integrity: sha512-/veY75JbMK4j1yjvuUxuVsiS/hr/4iHs9FTT6cgTexxdE0Ly/glccBAkloH/DofkjRbZU3bnoj38mOmhkZ0lHw==}
     engines: {node: '>=12'}
@@ -946,6 +1068,9 @@ packages:
   extend@3.0.2:
     resolution: {integrity: sha512-fjquC59cD7CyW6urNXK0FBufkZcoiGG80wTuPujX590cB5Ttln20E2UB4S/WARVqhXffZl2LNgS+gQdPIIim/g==}
 
+  fast-json-patch@3.1.1:
+    resolution: {integrity: sha512-vf6IHUX2SBcA+5/+4883dsIjpBTqmfBjmYiWK1savxQmFk4JfBMLa7ynTYOs1Rolp/T1betJxHiGD3g1Mn8lUQ==}
+
   fdir@6.5.0:
     resolution: {integrity: sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==}
     engines: {node: '>=12.0.0'}
@@ -959,6 +1084,24 @@ packages:
     resolution: {integrity: sha512-9UbaD6XdAL97+k/n+N7JwX46K/M6Zc6KcFYskrYL8wbBV/Uyk0CTAMY0VT+qiK5PM7AIc9aTWYtq65U7T+aCNQ==}
     engines: {node: '>=8'}
 
+  flint-chart@0.2.0:
+    resolution: {integrity: sha512-rh5x2Bd5CSI7VJv4bfF9aDrDtjx3KaJmMby+NYi8nIlvxIAoAgcIY1LgZ/IqbZ8zh3ivMWONtDWMqy6WtO/Rlw==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      chart.js: ^4.0.0
+      echarts: ^5.0.0 || ^6.0.0
+      vega: ^5.0.0 || ^6.0.0
+      vega-lite: ^5.0.0 || ^6.0.0
+    peerDependenciesMeta:
+      chart.js:
+        optional: true
+      echarts:
+        optional: true
+      vega:
+        optional: true
+      vega-lite:
+        optional: true
+
   fontace@0.4.1:
     resolution: {integrity: sha512-lDMvbAzSnHmbYMTEld5qdtvNH2/pWpICOqpean9IgC7vUbUJc3k+k5Dokp85CegamqQpFbXf0rAVkbzpyTA8aw==}
 
@@ -970,6 +1113,10 @@ packages:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
+
+  get-caller-file@2.0.5:
+    resolution: {integrity: sha512-DyFP3BM/3YHTQOCUL/w0OZHR0lpKeGrxotcHWcqNEdnltqFwXVfhEBQ94eIo34AfQpo0rGki4cyIiftY06h2Fg==}
+    engines: {node: 6.* || 8.* || >= 10.*}
 
   get-east-asian-width@1.6.0:
     resolution: {integrity: sha512-QRbvDIbx6YklUe6RxeTeleMR0yv3cYH6PsPZHcnVn7xv7zO1BHN8r0XETu8n6Ye3Q+ahtSarc3WgtNWmehIBfA==}
@@ -1020,8 +1167,16 @@ packages:
   http-cache-semantics@4.2.0:
     resolution: {integrity: sha512-dTxcvPXqPvXBQpq5dUr6mEMJX4oIEFv6bwom3FDwKRDsuIjjJGANqhBuoAn9c1RQJIdAKav33ED65E2ys+87QQ==}
 
+  iconv-lite@0.6.3:
+    resolution: {integrity: sha512-4fCk79wshMdzMp2rH06qWrJE4iolqLhCUH+OiuIgU++RB0+94NlDL81atO7GX55uUKueo0txHNtvEyI6D7WdMw==}
+    engines: {node: '>=0.10.0'}
+
   import-meta-resolve@4.2.0:
     resolution: {integrity: sha512-Iqv2fzaTQN28s/FwZAoFq0ZSs/7hMAHJVX+w8PZl3cY19Pxk6jFFalxQoIfW2826i/fDLXv8IiEZRIT0lDuWcg==}
+
+  internmap@2.0.3:
+    resolution: {integrity: sha512-5Hh7Y1wQbvY5ooGgPbDaL5iYLAPzMTUrjMulskHLH6wnv/A+1q5rgEaiuqEjB+oxGXIVZs1FF+R/KPN3ZSQYYg==}
+    engines: {node: '>=12'}
 
   iron-webcrypto@1.2.1:
     resolution: {integrity: sha512-feOM6FaSr6rEABp/eDfVseKyTMDt+KGpeB35SkVn9Tyn0CqvVsY3EwI0v5i8nMHyJnzCIQf7nsy3p41TPkJZhg==}
@@ -1051,6 +1206,9 @@ packages:
   js-yaml@4.3.0:
     resolution: {integrity: sha512-1td788aAnnZ5qs7V2QIRl1owjtYpbKt749Y3xauqQgwIIGF/xXWz1wMTEBx5O3LK3lXLVuqXPdPxj2BoFHaW9Q==}
     hasBin: true
+
+  json-stringify-pretty-compact@4.0.0:
+    resolution: {integrity: sha512-3CNZ2DnrpByG9Nqj6Xo8vqbjT4F6N+tb4Gb28ESAZjYZ5yqvmc56J+/kuIwkaAMOyblTQhUW7PxMkUb8Q36N3Q==}
 
   kleur@3.0.3:
     resolution: {integrity: sha512-eTIzlVOSUR+JxdDFepEYcBMtZ9Qqdef+rnzWdRZuMbOywu5tO2w2N7rqjoANZ5k9vywhL6Br1VRjUIgTQx4E8w==}
@@ -1226,6 +1384,15 @@ packages:
   node-fetch-native@1.6.7:
     resolution: {integrity: sha512-g9yhqoedzIUm0nTnTqAQvueMPVOuIY16bqgAJJC8XOOubYFNwz6IER9qs0Gq2Xd0+CecCKFjtdDTMA4u4xG06Q==}
 
+  node-fetch@2.7.0:
+    resolution: {integrity: sha512-c4FRfUm/dbcWZ7U+1Wq0AwCyFL+3nt2bEw05wfxSz+DWpWsitgmSgYmy2dQdWyKC1694ELPqMs/YzUSNozLt8A==}
+    engines: {node: 4.x || >=6.0.0}
+    peerDependencies:
+      encoding: ^0.1.0
+    peerDependenciesMeta:
+      encoding:
+        optional: true
+
   node-mock-http@1.0.4:
     resolution: {integrity: sha512-8DY+kFsDkNXy1sJglUfuODx1/opAGJGyrTuFqEoN90oRc2Vk0ZbD4K2qmKXBBEhZQzdKHIVfEJpDU8Ak2NJEvQ==}
 
@@ -1342,6 +1509,10 @@ packages:
   remark-stringify@11.0.0:
     resolution: {integrity: sha512-1OSmLd3awB/t8qdoEOMazZkNsfVTeY4fTsgzcQFdXNq8ToTN4ZGwrMnlda4K6smTFKD+GRV6O48i6Z4iKgPPpw==}
 
+  require-directory@2.1.1:
+    resolution: {integrity: sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q==}
+    engines: {node: '>=0.10.0'}
+
   retext-latin@4.0.0:
     resolution: {integrity: sha512-hv9woG7Fy0M9IlRQloq/N6atV82NxLGveq+3H2WOi79dtIYWN8OaxogDm77f8YnVXJL2VD3bbqowu5E3EMhBYA==}
 
@@ -1354,10 +1525,19 @@ packages:
   retext@9.0.0:
     resolution: {integrity: sha512-sbMDcpHCNjvlheSgMfEcVrZko3cDzdbe1x/e7G66dFp0Ff7Mldvi2uv6JkJQzdRcvLYE8CA8Oe8siQx8ZOgTcA==}
 
+  robust-predicates@3.0.3:
+    resolution: {integrity: sha512-NS3levdsRIUOmiJ8FZWCP7LG3QpJyrs/TE0Zpf1yvZu8cAJJ6QMW92H1c7kWpdIHo8RvmLxN/o2JXTKHp74lUA==}
+
   rollup@4.62.2:
     resolution: {integrity: sha512-RFnrW4lhXA3s3eqHDZvN654g8OTjzRfqpIRJYczCGB6HzphckVAi/Qh4tbPUbRuDi7s1Llv8g/NspLkttY3gTA==}
     engines: {node: '>=18.0.0', npm: '>=8.0.0'}
     hasBin: true
+
+  rw@1.3.3:
+    resolution: {integrity: sha512-PdhdWy89SiZogBLaw42zdeqtRJ//zFd2PgQavcICDUgJT5oW10QCRKbJ6bg4r0/UY2M6BWd5tkxuGFRvCkgfHQ==}
+
+  safer-buffer@2.1.2:
+    resolution: {integrity: sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg==}
 
   sax@1.6.0:
     resolution: {integrity: sha512-6R3J5M4AcbtLUdZmRv2SygeVaM7IhrLXu9BmnOGmmACak8fiUtOsYNWUS4uK7upbmHIBbLBeFeI//477BKLBzA==}
@@ -1423,6 +1603,13 @@ packages:
   tinyglobby@0.2.17:
     resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==}
     engines: {node: '>=12.0.0'}
+
+  topojson-client@3.1.0:
+    resolution: {integrity: sha512-605uxS6bcYxGXw9qi62XyrV6Q3xwbndjachmNxu8HWTtVPxZfEJN9fd/SZS1Q54Sn2y0TMyMxFj/cJINqGHrKw==}
+    hasBin: true
+
+  tr46@0.0.3:
+    resolution: {integrity: sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw==}
 
   trim-lines@3.0.1:
     resolution: {integrity: sha512-kRj8B+YHZCc9kQYdWfJB2/oUl9rA99qbowYYBtr4ui4mZyAQ2JpvVBd/6U2YloATfqBhBTSMhTpgBHtU0Mf3Rg==}
@@ -1557,6 +1744,127 @@ packages:
       uploadthing:
         optional: true
 
+  vega-canvas@1.2.7:
+    resolution: {integrity: sha512-OkJ9CACVcN9R5Pi9uF6MZBF06pO6qFpDYHWSKBJsdHP5o724KrsgR6UvbnXFH82FdsiTOff/HqjuaG8C7FL+9Q==}
+
+  vega-crossfilter@4.1.4:
+    resolution: {integrity: sha512-5E/i60Y80CUt+4O+U89X8ZnauaFuq0ztq/Hx4i4sT/crk4Lfn1oplRAjNOo7dFEZ04TahyBbYiJKIhR0yvmHpw==}
+
+  vega-dataflow@5.7.8:
+    resolution: {integrity: sha512-jrllcIjSYU5Jh130RDR44o/SbUbJndLuoiM9IsKWW+a7HayKnfmbdHWm7MvCrj/YLupFZVojRaS1tTs53EXTdA==}
+
+  vega-embed@6.29.0:
+    resolution: {integrity: sha512-PmlshTLtLFLgWtF/b23T1OwX53AugJ9RZ3qPE2c01VFAbgt3/GSNI/etzA/GzdrkceXFma+FDHNXUppKuM0U6Q==}
+    peerDependencies:
+      vega: ^5.21.0
+      vega-lite: '*'
+
+  vega-encode@4.10.3:
+    resolution: {integrity: sha512-245ebBuN1TjwVVDFG7JZaZ/ExLAhZ4kDTK2zlIoXs/g2P5rRgL4Q6oRixr+Pgr43G7ISCEHrUBgUjRcSoG8eEA==}
+
+  vega-event-selector@3.0.1:
+    resolution: {integrity: sha512-K5zd7s5tjr1LiOOkjGpcVls8GsH/f2CWCrWcpKy74gTCp+llCdwz0Enqo013ZlGaRNjfgD/o1caJRt3GSaec4A==}
+
+  vega-expression@5.1.2:
+    resolution: {integrity: sha512-fFeDTh4UtOxlZWL54jf1ZqJHinyerWq/ROiqrQxqLkNJRJ86RmxYTgXwt65UoZ/l4VUv9eAd2qoJeDEf610Umw==}
+
+  vega-expression@5.2.1:
+    resolution: {integrity: sha512-9KKbI2q9qTI55NSjD/dVWg3aeCtw+gwyWCiLMM47ha6iXrAN9pQ+EKRJfxOHuoDfCTlJJTaUfnnXgbqm0HEszg==}
+
+  vega-force@4.2.3:
+    resolution: {integrity: sha512-7Yp1uOPy3eyzK/hnAIU0v/yQ9mIhtoJ+tq8AMaZiWqy67SUYsE3olmgdllY6R9M81D/n/rv8K+8JjbHMU5/sUA==}
+
+  vega-format@1.1.4:
+    resolution: {integrity: sha512-+oz6UvXjQSbweW9P8q+1o2qFYyBYPFax94j6a9PQMnCIWMovFSss1wEElljOT8CEpnHyS15yiGlmz4qbWTQwnQ==}
+
+  vega-functions@5.18.1:
+    resolution: {integrity: sha512-qEBAbo0jxGGebRvbX1zmxzmjwFz8/UtncRhzwk9/KcI0WudULNmCM1iTu+DGFRnNHdcKi6kUlwJBPIp7zDu3HQ==}
+
+  vega-geo@4.4.4:
+    resolution: {integrity: sha512-jTLYrDvhXJinWQCfuVLP1nSlOdFlA9blVS6K7uOcBTJ4382Aw3ALGZKluUQyJkFdrkGfqxoDJo5MLHLu2zlc6g==}
+
+  vega-hierarchy@4.1.4:
+    resolution: {integrity: sha512-/iSh1YqdgsHFB20QxJ6IAVzRZQBKuMpZ/GsN5sZDP3bBJdVWl3we48L/r6w7FP9NU+JzFHcDUPJ0S0UzpMhaqg==}
+
+  vega-interpreter@1.2.1:
+    resolution: {integrity: sha512-EMHLGxJ+SWfh1K/fHDRlHEZtLA/2ZNAXItYb5e8CxuAIm/Ha/3DHX/8VlvbTGIciUpuwmcKx4tVhJWlKreQ/Yw==}
+
+  vega-label@1.3.2:
+    resolution: {integrity: sha512-YlUCUZNsp1FHkpPjOpD+aVVmVLFw6xa+bFQGBCECuY1DuRyN6l8oCRmUOjBrr70ip8fbqfGk+czHw543J1PJgg==}
+
+  vega-lite@5.23.0:
+    resolution: {integrity: sha512-l4J6+AWE3DIjvovEoHl2LdtCUkfm4zs8Xxx7INwZEAv+XVb6kR6vIN1gt3t2gN2gs/y4DYTs/RPoTeYAuEg6mA==}
+    engines: {node: '>=18'}
+    hasBin: true
+    peerDependencies:
+      vega: ^5.24.0
+
+  vega-loader@4.5.4:
+    resolution: {integrity: sha512-AOJPsDVz009aTdD9hzigUaO/NFmuN1o83rzvZu/g37TJfhU+3DOvgnO0rnqJbnSOfcBkLWER6XghlKS3j77w4A==}
+
+  vega-parser@6.6.1:
+    resolution: {integrity: sha512-FIez+huStzgjsxLqOkxDAooTkDC2XruYCIFWhd3HuM/QrqKtj9JKGuIUJjpVVkE7by7S5ejrucpRzVVgQfbzSg==}
+
+  vega-projection@1.6.3:
+    resolution: {integrity: sha512-vusyaPi3EFIHrBVs0chNv2bCqxw4X+XgI1m3+yOgUD/dutsIGTcqy+PjlNlspPQvMI9JjTeIUTGt8u1V7oDwAA==}
+
+  vega-regression@1.3.2:
+    resolution: {integrity: sha512-DtGToopuJGmxeoymaOXTDKlWkkYiDVvZFV1IWQNuRlChTBI6YBpil4WmA3U+ECePDQuk2+/mWlw+vafrbgF8Tg==}
+
+  vega-runtime@6.2.2:
+    resolution: {integrity: sha512-5c+i7y5XBw5phIA1mBeqF/gtOQcDjUzroUAQ0g3y3weNx0K4mzj7V360yZiBLNcuHv65xgTlijstbKQttxeY/g==}
+
+  vega-scale@7.4.3:
+    resolution: {integrity: sha512-f7SSN2YJowtrdkt7nJIR6YYhjDk8oB37q5So2/OxXQv5CBHipFPQSHS1ZVw9vD3V5wLnrZCxC4Ji27gmsTefgA==}
+
+  vega-scenegraph@4.13.2:
+    resolution: {integrity: sha512-eCutgcLzdUg23HLc6MTZ9pHCdH0hkqSmlbcoznspwT0ajjATk6M09JNyJddiaKR55HuQo03mBWsPeRCd5kOi0g==}
+
+  vega-schema-url-parser@2.2.0:
+    resolution: {integrity: sha512-yAtdBnfYOhECv9YC70H2gEiqfIbVkq09aaE4y/9V/ovEFmH9gPKaEgzIZqgT7PSPQjKhsNkb6jk6XvSoboxOBw==}
+
+  vega-selections@5.6.3:
+    resolution: {integrity: sha512-DXd+XVKcIjBAtSCcgtPx7cXuqG/7L98SWoFh6GKNu26EBUyn3zm0GAlZxNLPoI01Jz9Fb3YpSsewk2aIAbM68g==}
+
+  vega-statistics@1.9.0:
+    resolution: {integrity: sha512-GAqS7mkatpXcMCQKWtFu1eMUKLUymjInU0O8kXshWaQrVWjPIO2lllZ1VNhdgE0qGj4oOIRRS11kzuijLshGXQ==}
+
+  vega-themes@2.15.0:
+    resolution: {integrity: sha512-DicRAKG9z+23A+rH/3w3QjJvKnlGhSbbUXGjBvYGseZ1lvj9KQ0BXZ2NS/+MKns59LNpFNHGi9us/wMlci4TOA==}
+    peerDependencies:
+      vega: '*'
+      vega-lite: '*'
+
+  vega-time@2.1.4:
+    resolution: {integrity: sha512-DBMRps5myYnSAlvQ+oiX8CycJZjGQNqyGE04xaZrpOgHll7vlvezpET2FnGZC7wS3DsqMcPjnpnI1h7+qJox1Q==}
+
+  vega-tooltip@0.35.2:
+    resolution: {integrity: sha512-kuYcsAAKYn39ye5wKf2fq1BAxVcjoz0alvKp/G+7BWfIb94J0PHmwrJ5+okGefeStZnbXxINZEOKo7INHaj9GA==}
+
+  vega-transforms@4.12.2:
+    resolution: {integrity: sha512-VuNLzB0DavFn5GIkFvR2XvwPavjY7VXl2oPUOFvNgSfyQywmCoC7VOX+iHeOdxoZdoy+XEOGAqRs9imxVo2HVA==}
+
+  vega-typings@1.5.1:
+    resolution: {integrity: sha512-40kRoG/jG8+4cd3kT5yw08iTlIGe57F7Go/ileSCtRtgU8RZ7tpPaE6GgYvF/HTPlCKMk9/pOdp62+o5sulhvQ==}
+
+  vega-util@1.17.4:
+    resolution: {integrity: sha512-+y3ZW7dEqM8Ck+KRsd+jkMfxfE7MrQxUyIpNjkfhIpGEreym+aTn7XUw1DKXqclr8mqTQvbilPo16B3lnBr0wA==}
+
+  vega-view-transforms@4.6.2:
+    resolution: {integrity: sha512-udnYutgX7T7E0crqKWSs4hcxTdUmZHR2F4rKj0+3nN9+CfYMWbGgUkCkP2pMu7j2OH0ETX2uDn5xL8+YJWeXSg==}
+
+  vega-view@5.16.1:
+    resolution: {integrity: sha512-YyG4i2JDkRCacHd9xNAwyov2cELxwzPGY224PA2o0gEhkoOjPkVElTmo9QHJvKeVxMoyad6wvoq+Jj+TB6zhLw==}
+
+  vega-voronoi@4.2.5:
+    resolution: {integrity: sha512-u0TLSQboiLyoM6V9S0E6cc77EfWati+ApZ6zE+NhH3h/zZRzYZmElnDn46hUof2o9jNyh09xFXTXykVHmt7IGg==}
+
+  vega-wordcloud@4.1.7:
+    resolution: {integrity: sha512-xdMykDXdWEp3/7Hil7Yx8uNVmjvqxwGibHJLSfiubNNO9OErrH3ZUgcxWv5hLe9wdK+KSGP94SSqTOAaqH7r/A==}
+
+  vega@5.33.1:
+    resolution: {integrity: sha512-1fArfVDUqVbb5z8n+/nVQb+VNBzx8svY6CrsyTK4Ujm4yrd9I1auoKxBAPXLCavY1LcrbHUskQbGUP8gXOzyQw==}
+
   vfile-location@5.0.3:
     resolution: {integrity: sha512-5yXvWDEgqeiYiBe1lbxYF7UMAIm/IcopxMHrMQDq3nvKcjPKIhZklUKL+AE7J7uApI4kwe2snsK+eI6UTj9EHg==}
 
@@ -1617,6 +1925,12 @@ packages:
   web-namespaces@2.0.1:
     resolution: {integrity: sha512-bKr1DkiNa2krS7qxNtdrtHAmzuYGFQLiQ13TsorsdT6ULTkPLKuu5+GsFpDlg6JFjUTwX2DyhMPG2be8uPrqsQ==}
 
+  webidl-conversions@3.0.1:
+    resolution: {integrity: sha512-2JAn3z8AR6rjK8Sm8orRC0h/bcl/DqL7tRPdGZ4I1CjdF+EaMLmYxBHyXuKL849eucPFhvBoxMsflfOb8kxaeQ==}
+
+  whatwg-url@5.0.0:
+    resolution: {integrity: sha512-saE57nupxk6v3HY35+jzBwYa0rKSy0XR8JSxZPwgLr7ys0IBzhGviA1/TUGJLmSVqs8pb9AnvICXEuOHLprYTw==}
+
   which-pm-runs@1.1.0:
     resolution: {integrity: sha512-n1brCuqClxfFfq/Rb0ICg9giSZqCS+pLtccdag6C2HyufBrh3fBOiy9nb6ggRMvWOVH5GrdJskj5iGTZNxd7SA==}
     engines: {node: '>=4'}
@@ -1625,6 +1939,10 @@ packages:
     resolution: {integrity: sha512-c9bZp7b5YtRj2wOe6dlj32MK+Bx/M/d+9VB2SHM1OtsUHR0aV0tdP6DWh/iMt0kWi1t5g1Iudu6hQRNd1A4PVA==}
     engines: {node: '>=18'}
 
+  wrap-ansi@7.0.0:
+    resolution: {integrity: sha512-YVGIj2kamLSTxw6NsZjoBxfSwsn0ycdesmc4p+Q21c5zPuZ1pl+NfxVdxPtdHvmNVOQ6XSYG4AUtyt/Fi7D16Q==}
+    engines: {node: '>=10'}
+
   wrap-ansi@9.0.2:
     resolution: {integrity: sha512-42AtmgqjV+X1VpdOfyTGOYRi0/zsoLqtXQckTmqTeybT+BDIbM/Guxo7x3pE2vtpr1ok6xRqM9OpBe+Jyoqyww==}
     engines: {node: '>=18'}
@@ -1632,8 +1950,16 @@ packages:
   xxhash-wasm@1.1.0:
     resolution: {integrity: sha512-147y/6YNh+tlp6nd/2pWq38i9h6mz/EuQ6njIrmW8D1BS5nCqs0P6DG+m6zTGnNz5I+uhZ0SHxBs9BsPrwcKDA==}
 
+  y18n@5.0.8:
+    resolution: {integrity: sha512-0pfFzegeDWJHJIAmTLRP2DwHjdF5s7jo9tuztdQxAhINCdvS+3nGINqPd00AphqJR/0LhANUS6/+7SCb98YOfA==}
+    engines: {node: '>=10'}
+
   yargs-parser@21.1.1:
     resolution: {integrity: sha512-tVpsJW7DdjecAiFpbIB1e3qxIQsE6NoPc5/eTdrbbIC4h0LVsWhnoa3g+m2HclBIujHzsxZ4VJVA+GUuc2/LBw==}
+    engines: {node: '>=12'}
+
+  yargs@17.7.3:
+    resolution: {integrity: sha512-GZtjxm/J/4TSxuL3FNYjCmLktBTnIw/rVmKSIyKeYAZpmJB2ig9VauCC5xsa82GNKVKDAqpOn3KVzNt0zmrU0g==}
     engines: {node: '>=12'}
 
   yocto-queue@1.2.2:
@@ -2114,6 +2440,8 @@ snapshots:
 
   '@types/estree@1.0.9': {}
 
+  '@types/geojson@7946.0.4': {}
+
   '@types/hast@3.0.4':
     dependencies:
       '@types/unist': 3.0.3
@@ -2141,6 +2469,10 @@ snapshots:
   ansi-regex@5.0.1: {}
 
   ansi-regex@6.2.2: {}
+
+  ansi-styles@4.3.0:
+    dependencies:
+      color-convert: 2.0.1
 
   ansi-styles@6.2.3: {}
 
@@ -2296,11 +2628,27 @@ snapshots:
 
   cli-boxes@3.0.0: {}
 
+  cliui@8.0.1:
+    dependencies:
+      string-width: 4.2.3
+      strip-ansi: 6.0.1
+      wrap-ansi: 7.0.0
+
   clsx@2.1.1: {}
+
+  color-convert@2.0.1:
+    dependencies:
+      color-name: 1.1.4
+
+  color-name@1.1.4: {}
 
   comma-separated-tokens@2.0.3: {}
 
   commander@11.1.0: {}
+
+  commander@2.20.3: {}
+
+  commander@7.2.0: {}
 
   common-ancestor-path@1.0.1: {}
 
@@ -2338,6 +2686,79 @@ snapshots:
     dependencies:
       css-tree: 2.2.1
 
+  d3-array@3.2.4:
+    dependencies:
+      internmap: 2.0.3
+
+  d3-color@3.1.0: {}
+
+  d3-delaunay@6.0.4:
+    dependencies:
+      delaunator: 5.1.0
+
+  d3-dispatch@3.0.1: {}
+
+  d3-dsv@3.0.1:
+    dependencies:
+      commander: 7.2.0
+      iconv-lite: 0.6.3
+      rw: 1.3.3
+
+  d3-force@3.0.0:
+    dependencies:
+      d3-dispatch: 3.0.1
+      d3-quadtree: 3.0.1
+      d3-timer: 3.0.1
+
+  d3-format@3.1.2: {}
+
+  d3-geo-projection@4.0.0:
+    dependencies:
+      commander: 7.2.0
+      d3-array: 3.2.4
+      d3-geo: 3.1.1
+
+  d3-geo@3.1.1:
+    dependencies:
+      d3-array: 3.2.4
+
+  d3-hierarchy@3.1.2: {}
+
+  d3-interpolate@3.0.1:
+    dependencies:
+      d3-color: 3.1.0
+
+  d3-path@3.1.0: {}
+
+  d3-quadtree@3.0.1: {}
+
+  d3-scale-chromatic@3.1.0:
+    dependencies:
+      d3-color: 3.1.0
+      d3-interpolate: 3.0.1
+
+  d3-scale@4.0.2:
+    dependencies:
+      d3-array: 3.2.4
+      d3-format: 3.1.2
+      d3-interpolate: 3.0.1
+      d3-time: 3.1.0
+      d3-time-format: 4.1.0
+
+  d3-shape@3.2.0:
+    dependencies:
+      d3-path: 3.1.0
+
+  d3-time-format@4.1.0:
+    dependencies:
+      d3-time: 3.1.0
+
+  d3-time@3.1.0:
+    dependencies:
+      d3-array: 3.2.4
+
+  d3-timer@3.0.1: {}
+
   debug@4.4.3:
     dependencies:
       ms: 2.1.3
@@ -2347,6 +2768,10 @@ snapshots:
       character-entities: 2.0.2
 
   defu@6.1.7: {}
+
+  delaunator@5.1.0:
+    dependencies:
+      robust-predicates: 3.0.3
 
   dequal@2.0.3: {}
 
@@ -2457,6 +2882,8 @@ snapshots:
       '@esbuild/win32-ia32': 0.27.7
       '@esbuild/win32-x64': 0.27.7
 
+  escalade@3.2.0: {}
+
   escape-string-regexp@5.0.0: {}
 
   estree-walker@2.0.2: {}
@@ -2469,11 +2896,18 @@ snapshots:
 
   extend@3.0.2: {}
 
+  fast-json-patch@3.1.1: {}
+
   fdir@6.5.0(picomatch@4.0.5):
     optionalDependencies:
       picomatch: 4.0.5
 
   flattie@1.1.1: {}
+
+  flint-chart@0.2.0(vega-lite@5.23.0(vega@5.33.1))(vega@5.33.1):
+    optionalDependencies:
+      vega: 5.33.1
+      vega-lite: 5.23.0(vega@5.33.1)
 
   fontace@0.4.1:
     dependencies:
@@ -2485,6 +2919,8 @@ snapshots:
 
   fsevents@2.3.3:
     optional: true
+
+  get-caller-file@2.0.5: {}
 
   get-east-asian-width@1.6.0: {}
 
@@ -2595,7 +3031,13 @@ snapshots:
 
   http-cache-semantics@4.2.0: {}
 
+  iconv-lite@0.6.3:
+    dependencies:
+      safer-buffer: 2.1.2
+
   import-meta-resolve@4.2.0: {}
+
+  internmap@2.0.3: {}
 
   iron-webcrypto@1.2.1: {}
 
@@ -2616,6 +3058,8 @@ snapshots:
   js-yaml@4.3.0:
     dependencies:
       argparse: 2.0.1
+
+  json-stringify-pretty-compact@4.0.0: {}
 
   kleur@3.0.3: {}
 
@@ -2966,6 +3410,10 @@ snapshots:
 
   node-fetch-native@1.6.7: {}
 
+  node-fetch@2.7.0:
+    dependencies:
+      whatwg-url: 5.0.0
+
   node-mock-http@1.0.4: {}
 
   normalize-path@3.0.0: {}
@@ -3119,6 +3567,8 @@ snapshots:
       mdast-util-to-markdown: 2.1.2
       unified: 11.0.5
 
+  require-directory@2.1.1: {}
+
   retext-latin@4.0.0:
     dependencies:
       '@types/nlcst': 2.0.3
@@ -3143,6 +3593,8 @@ snapshots:
       retext-latin: 4.0.0
       retext-stringify: 4.0.0
       unified: 11.0.5
+
+  robust-predicates@3.0.3: {}
 
   rollup@4.62.2:
     dependencies:
@@ -3174,6 +3626,10 @@ snapshots:
       '@rollup/rollup-win32-x64-gnu': 4.62.2
       '@rollup/rollup-win32-x64-msvc': 4.62.2
       fsevents: 2.3.3
+
+  rw@1.3.3: {}
+
+  safer-buffer@2.1.2: {}
 
   sax@1.6.0: {}
 
@@ -3274,6 +3730,12 @@ snapshots:
       fdir: 6.5.0(picomatch@4.0.5)
       picomatch: 4.0.5
 
+  topojson-client@3.1.0:
+    dependencies:
+      commander: 2.20.3
+
+  tr46@0.0.3: {}
+
   trim-lines@3.0.1: {}
 
   trough@2.2.0: {}
@@ -3282,8 +3744,7 @@ snapshots:
     optionalDependencies:
       typescript: 5.9.3
 
-  tslib@2.8.1:
-    optional: true
+  tslib@2.8.1: {}
 
   type-fest@4.41.0: {}
 
@@ -3364,6 +3825,316 @@ snapshots:
       ofetch: 1.5.1
       ufo: 1.6.4
 
+  vega-canvas@1.2.7: {}
+
+  vega-crossfilter@4.1.4:
+    dependencies:
+      d3-array: 3.2.4
+      vega-dataflow: 5.7.8
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-dataflow@5.7.8:
+    dependencies:
+      vega-format: 1.1.4
+      vega-loader: 4.5.4
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-embed@6.29.0(vega-lite@5.23.0(vega@5.33.1))(vega@5.33.1):
+    dependencies:
+      fast-json-patch: 3.1.1
+      json-stringify-pretty-compact: 4.0.0
+      semver: 7.8.5
+      tslib: 2.8.1
+      vega: 5.33.1
+      vega-interpreter: 1.2.1
+      vega-lite: 5.23.0(vega@5.33.1)
+      vega-schema-url-parser: 2.2.0
+      vega-themes: 2.15.0(vega-lite@5.23.0(vega@5.33.1))(vega@5.33.1)
+      vega-tooltip: 0.35.2
+
+  vega-encode@4.10.3:
+    dependencies:
+      d3-array: 3.2.4
+      d3-interpolate: 3.0.1
+      vega-dataflow: 5.7.8
+      vega-scale: 7.4.3
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-event-selector@3.0.1: {}
+
+  vega-expression@5.1.2:
+    dependencies:
+      '@types/estree': 1.0.9
+      vega-util: 1.17.4
+
+  vega-expression@5.2.1:
+    dependencies:
+      '@types/estree': 1.0.9
+      vega-util: 1.17.4
+
+  vega-force@4.2.3:
+    dependencies:
+      d3-force: 3.0.0
+      vega-dataflow: 5.7.8
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-format@1.1.4:
+    dependencies:
+      d3-array: 3.2.4
+      d3-format: 3.1.2
+      d3-time-format: 4.1.0
+      vega-time: 2.1.4
+      vega-util: 1.17.4
+
+  vega-functions@5.18.1:
+    dependencies:
+      d3-array: 3.2.4
+      d3-color: 3.1.0
+      d3-geo: 3.1.1
+      vega-dataflow: 5.7.8
+      vega-expression: 5.2.1
+      vega-scale: 7.4.3
+      vega-scenegraph: 4.13.2
+      vega-selections: 5.6.3
+      vega-statistics: 1.9.0
+      vega-time: 2.1.4
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-geo@4.4.4:
+    dependencies:
+      d3-array: 3.2.4
+      d3-color: 3.1.0
+      d3-geo: 3.1.1
+      vega-canvas: 1.2.7
+      vega-dataflow: 5.7.8
+      vega-projection: 1.6.3
+      vega-statistics: 1.9.0
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-hierarchy@4.1.4:
+    dependencies:
+      d3-hierarchy: 3.1.2
+      vega-dataflow: 5.7.8
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-interpreter@1.2.1:
+    dependencies:
+      vega-util: 1.17.4
+
+  vega-label@1.3.2:
+    dependencies:
+      vega-canvas: 1.2.7
+      vega-dataflow: 5.7.8
+      vega-scenegraph: 4.13.2
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-lite@5.23.0(vega@5.33.1):
+    dependencies:
+      json-stringify-pretty-compact: 4.0.0
+      tslib: 2.8.1
+      vega: 5.33.1
+      vega-event-selector: 3.0.1
+      vega-expression: 5.1.2
+      vega-util: 1.17.4
+      yargs: 17.7.3
+
+  vega-loader@4.5.4:
+    dependencies:
+      d3-dsv: 3.0.1
+      node-fetch: 2.7.0
+      topojson-client: 3.1.0
+      vega-format: 1.1.4
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-parser@6.6.1:
+    dependencies:
+      vega-dataflow: 5.7.8
+      vega-event-selector: 3.0.1
+      vega-functions: 5.18.1
+      vega-scale: 7.4.3
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-projection@1.6.3:
+    dependencies:
+      d3-geo: 3.1.1
+      d3-geo-projection: 4.0.0
+      vega-scale: 7.4.3
+
+  vega-regression@1.3.2:
+    dependencies:
+      d3-array: 3.2.4
+      vega-dataflow: 5.7.8
+      vega-statistics: 1.9.0
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-runtime@6.2.2:
+    dependencies:
+      vega-dataflow: 5.7.8
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-scale@7.4.3:
+    dependencies:
+      d3-array: 3.2.4
+      d3-interpolate: 3.0.1
+      d3-scale: 4.0.2
+      d3-scale-chromatic: 3.1.0
+      vega-time: 2.1.4
+      vega-util: 1.17.4
+
+  vega-scenegraph@4.13.2:
+    dependencies:
+      d3-path: 3.1.0
+      d3-shape: 3.2.0
+      vega-canvas: 1.2.7
+      vega-loader: 4.5.4
+      vega-scale: 7.4.3
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-schema-url-parser@2.2.0: {}
+
+  vega-selections@5.6.3:
+    dependencies:
+      d3-array: 3.2.4
+      vega-expression: 5.2.1
+      vega-util: 1.17.4
+
+  vega-statistics@1.9.0:
+    dependencies:
+      d3-array: 3.2.4
+
+  vega-themes@2.15.0(vega-lite@5.23.0(vega@5.33.1))(vega@5.33.1):
+    dependencies:
+      vega: 5.33.1
+      vega-lite: 5.23.0(vega@5.33.1)
+
+  vega-time@2.1.4:
+    dependencies:
+      d3-array: 3.2.4
+      d3-time: 3.1.0
+      vega-util: 1.17.4
+
+  vega-tooltip@0.35.2:
+    dependencies:
+      vega-util: 1.17.4
+    optionalDependencies:
+      '@rollup/rollup-linux-x64-gnu': 4.62.2
+
+  vega-transforms@4.12.2:
+    dependencies:
+      d3-array: 3.2.4
+      vega-dataflow: 5.7.8
+      vega-statistics: 1.9.0
+      vega-time: 2.1.4
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-typings@1.5.1:
+    dependencies:
+      '@types/geojson': 7946.0.4
+      vega-event-selector: 3.0.1
+      vega-expression: 5.2.1
+      vega-util: 1.17.4
+
+  vega-util@1.17.4: {}
+
+  vega-view-transforms@4.6.2:
+    dependencies:
+      vega-dataflow: 5.7.8
+      vega-scenegraph: 4.13.2
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-view@5.16.1:
+    dependencies:
+      d3-array: 3.2.4
+      d3-timer: 3.0.1
+      vega-dataflow: 5.7.8
+      vega-format: 1.1.4
+      vega-functions: 5.18.1
+      vega-runtime: 6.2.2
+      vega-scenegraph: 4.13.2
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-voronoi@4.2.5:
+    dependencies:
+      d3-delaunay: 6.0.4
+      vega-dataflow: 5.7.8
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega-wordcloud@4.1.7:
+    dependencies:
+      vega-canvas: 1.2.7
+      vega-dataflow: 5.7.8
+      vega-scale: 7.4.3
+      vega-statistics: 1.9.0
+      vega-util: 1.17.4
+    transitivePeerDependencies:
+      - encoding
+
+  vega@5.33.1:
+    dependencies:
+      vega-crossfilter: 4.1.4
+      vega-dataflow: 5.7.8
+      vega-encode: 4.10.3
+      vega-event-selector: 3.0.1
+      vega-expression: 5.2.1
+      vega-force: 4.2.3
+      vega-format: 1.1.4
+      vega-functions: 5.18.1
+      vega-geo: 4.4.4
+      vega-hierarchy: 4.1.4
+      vega-label: 1.3.2
+      vega-loader: 4.5.4
+      vega-parser: 6.6.1
+      vega-projection: 1.6.3
+      vega-regression: 1.3.2
+      vega-runtime: 6.2.2
+      vega-scale: 7.4.3
+      vega-scenegraph: 4.13.2
+      vega-statistics: 1.9.0
+      vega-time: 2.1.4
+      vega-transforms: 4.12.2
+      vega-typings: 1.5.1
+      vega-util: 1.17.4
+      vega-view: 5.16.1
+      vega-view-transforms: 4.6.2
+      vega-voronoi: 4.2.5
+      vega-wordcloud: 4.1.7
+    transitivePeerDependencies:
+      - encoding
+
   vfile-location@5.0.3:
     dependencies:
       '@types/unist': 3.0.3
@@ -3396,11 +4167,24 @@ snapshots:
 
   web-namespaces@2.0.1: {}
 
+  webidl-conversions@3.0.1: {}
+
+  whatwg-url@5.0.0:
+    dependencies:
+      tr46: 0.0.3
+      webidl-conversions: 3.0.1
+
   which-pm-runs@1.1.0: {}
 
   widest-line@5.0.0:
     dependencies:
       string-width: 7.2.0
+
+  wrap-ansi@7.0.0:
+    dependencies:
+      ansi-styles: 4.3.0
+      string-width: 4.2.3
+      strip-ansi: 6.0.1
 
   wrap-ansi@9.0.2:
     dependencies:
@@ -3410,7 +4194,19 @@ snapshots:
 
   xxhash-wasm@1.1.0: {}
 
+  y18n@5.0.8: {}
+
   yargs-parser@21.1.1: {}
+
+  yargs@17.7.3:
+    dependencies:
+      cliui: 8.0.1
+      escalade: 3.2.0
+      get-caller-file: 2.0.5
+      require-directory: 2.1.1
+      string-width: 4.2.3
+      y18n: 5.0.8
+      yargs-parser: 21.1.1
 
   yocto-queue@1.2.2: {}
 

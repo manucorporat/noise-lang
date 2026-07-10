@@ -520,7 +520,39 @@ The modules:
 | `vec`     | `sum`, `prod`, `count`, `any`, `all`, `max`, `min`, `mean`, `cumsum`, `cumprod`, `cummax`, `cummin`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` (vector `+`/`-` and `@` cover add/sub/matvec) | needs `use vec;` |
 | `signal`  | `sine`, `cosine` (lazy waveforms), `noise_white`, `noise_white_complex`, `noise_brown`, `noise_pink`, `noise_ou` (undrawn noise generators — drawn with `~`), `sample` | needs `use signal;` |
 | `plot`    | `histogram`, `line`, `scatter`, `heatmap`, `corr`, `fan`, `explain`, `value` (charts, pushed to the output stream like `Print`) | path-only (`plot::fan(...)`) |
+| `stats`   | `histogram`, `quantiles`, `moments`, `fan`, `corr` — the same computations as `plot::`, returned as numbers | path-only (`stats::fan(...)`) |
 | `engine`  | `set_max_samples`, `set_max_opts`, `set_resolution` (run-time evaluator knobs) | needs `use engine;` |
+
+**The `stats` module** is the raw-data twin of `plot`: every chart's numbers, without the chart.
+`stats::histogram(x)` returns the bins `plot::hist(x)` draws; `stats::fan(path)` returns the bands
+`plot::fan(path)` shades. Not an approximation of them — literally the same computation, at the same
+budget and seed, so a picture is always auditable. Like `plot::`, it is always written as a path.
+
+| Call | Returns |
+|---|---|
+| `stats::histogram(x)`, `stats::histogram(x, bins)` | a 2×bins matrix `[[midpoints], [counts]]` (default 30 bins; an event always gets the two buckets `[0, 1]`) |
+| `stats::quantiles(x, [q…])` | one value per level, in the order asked |
+| `stats::moments(x)` | `[n, mean, sd, min, max]` — `describe(x)`'s header line, as data |
+| `stats::fan(path)` | a 6×cols matrix: rows `q05, q25, q50, q75, q95, mean` |
+| `stats::corr(a, b)` | their correlation, one number |
+| `stats::corr(v)` | the element×element `n×n` matrix (diagonal 1) |
+
+They **force sampling** (that's why they are `stats::` and never `math::`, which never samples) and
+accept a conditioned variable: `stats::moments(x | x > 0)` summarizes only the in-condition lanes,
+and its `n` reports how many survived. Their budget is the *introspection* budget (200 000 draws),
+not `P`'s — a chart's numbers, not a probability's last digit. So `Q(x, 0.5)` and
+`stats::quantiles(x, [0.5])` can differ in the final places: `Q` is the estimator, `stats::quantiles`
+is what the picture is made of.
+
+```noise
+use rand; use vec;
+X ~ normal(100, 15);
+h = stats::histogram(X, 6);
+m = stats::moments(X);
+Print("counts:  ", h[1]);      # [248, 11058, 76769, 92348, 18937, 640]
+Print("mean, sd:", m[1], m[2]);  # 100.00483911223 15.00450459098
+Print("VaR95:   ", stats::quantiles(X, [0.05])[0]);  # 75.269722471943
+```
 
 **`engine::set_max_samples(N)`** sets the default Monte Carlo budget — the sample count `P`/`E`/
 `Var`/`Q` use when called *without* an explicit count — to `N` (an integer `>= 1`) for the rest of
@@ -632,8 +664,8 @@ identically (e.g. `sum` over `dist` elements lifts to an Add-chain RV).
   `any(path < b)`, and a worst drawdown is `min(path / cummax(path)) - 1`.
 - **`plot::fan(path)`** (in the `plot` module) — the cone chart for an array of random values (a
   path): all indices are sampled **jointly in one pass**, and the per-index
-  `q05/q25/q50/q75/q95` quantile bands render as stacked sparklines on one shared scale (the
-  playground receives the same data as a structured payload). A deterministic array gives the
+  `q05/q25/q50/q75/q95` quantile bands become a cone: two translucent bands with the median line
+  on top (the CLI prints the same numbers as a text card). A deterministic array gives the
   degenerate fan (every band equals the values); a scalar or a matrix is a friendly error; a
   path caps at 1024 elements.
 - **Linear algebra:** the `@` operator is the **matrix product** — `v @ w` (dot), `M @ v` (mat·vec),
