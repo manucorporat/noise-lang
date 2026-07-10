@@ -3,8 +3,6 @@
 use rand;   # unif
 use math;   # pi, sin
 
-engine::set_max_samples(4000000);   # Monte Carlo budget for the P() below — set once, not per query
-
 # Floorboards spaced 1 apart, needle of length 1. When it lands, its center sits a random
 # distance `d` from the nearest line, tilted at a random `angle`. It crosses iff the needle's
 # half-reach toward the line, (1/2)*sin(angle), covers that gap.
@@ -15,8 +13,10 @@ cross = d <= 0.5 * sin(angle);
 # Geometry says P(cross) = 2L / (pi t) = 2/pi, so pi = 2 / P(cross). The estimate's standard
 # error rides through the division, so the printed pi shows only the digits it has earned.
 p = P(cross);
-Print("P(needle crosses a line) =", p, " (exact 2/pi =", 2 / pi, ")");
-Print("pi estimate = 2 / P      =", 2 / p, " vs pi =", pi);
+```latex
+P(\text{needle crosses a line}) = ${p} \approx \frac{2}{\pi} = ${2 / pi}
+\pi \approx \frac{2}{P(\text{cross})} = ${2 / p} \qquad (\text{true } \pi = ${pi})
+```
 
 # The pi we squeezed out of the needle drops, shown with its error bar.
 plot::value(2 / p)

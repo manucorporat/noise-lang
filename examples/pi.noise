@@ -1,9 +1,22 @@
-# Estimate pi by Monte Carlo. A point uniform in the 2x2 square lands in the unit
-# circle with probability pi/4, so pi = 4 * P(inside).   analytic: 3.14159
+---
+title: "Estimate π"
+abstract: >
+  Throw darts uniformly at the 2×2 square around the origin. A dart lands inside
+  the unit circle when X²+Y² < 1. The fraction that do is the ratio of areas, π/4 —
+  so 4·P(inside) ≈ π. This is the "hello world" of Monte Carlo: a geometric
+  probability turned into a number by sampling.
+tags: [basics, monte carlo]
+extra:
+  blurb: "Monte Carlo π from random darts in a square."
+  category: "Basics"
+  analytic: "3.14159…"
+---
 X ~ rand::unif(-1, 1);
 Y ~ rand::unif(-1, 1);
 pi = 4 * P(X^2 + Y^2 < 1);
-Print("Estimated pi ~", pi);
+```latex
+\pi \approx 4 \cdot P\!\left(X^2 + Y^2 < 1\right) = ${pi}
+```
 
 # Each dot is one random point; together they fill the square and reveal the round circle inside.
 plot::scatter(X, Y);

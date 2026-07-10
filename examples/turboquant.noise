@@ -1,31 +1,17 @@
-# TurboQuant (arXiv:2504.19874) — reproducing the paper's ACTUAL two-stage algorithm by Monte Carlo.
-#
-# To store a vector cheaply you QUANTIZE it: replace each coordinate with a few bits, then later
-# DEQUANTIZE to an approximation. You use that approximation to estimate inner products <y, x> —
-# the core operation in similarity search and attention.
-#
-# The paper builds this in two layers, and we reproduce both, live:
-#
-#   Algorithm 1 (MSE-optimal).  Spin the vector by a random ROTATION so its coordinates spread out
-#   evenly (each becomes ~Normal(0, 1/d)), then snap each coordinate to the nearest entry of a tiny
-#   per-coordinate codebook (the optimal "Lloyd-Max" levels). With b bits you get 2^b levels. This
-#   minimizes the reconstruction error ||x - xhat||^2 — and matches the paper's table exactly.
-#
-#   The catch.  An MSE-tuned quantizer is the WRONG tool for inner products: it is BIASED, shrinking
-#   every estimate of <y,x> by a factor 2/pi ~ 0.637 at 1 bit. Bias is the dangerous kind of error —
-#   averaging more samples does NOT remove it.
-#
-#   Algorithm 2 (inner-product-optimal, "TurboQuant_prod").  The fix, and the headline result. Run
-#   the MSE quantizer with ONE fewer bit, look at what it got wrong (the residual r = x - xhat_mse),
-#   and spend the spare bit on a 1-bit QJL sketch of that residual. Adding it back is UNBIASED and
-#   has several-times-smaller error than the MSE quantizer — matching the paper's D_prod table.
-#
-# This needs a genuine random rotation (not a Gaussian shortcut): the distortion win only appears
-# because an orthonormal rotation makes the residual small. `rotation(d)` gives a fresh one per
-# sample (Gram-Schmidt of a Gaussian matrix); `quantize` snaps each coordinate to its nearest level.
-#
-# Every E() below is a Monte Carlo average; set the sample budget once for the whole run (instead of
-# threading an `N` through each query). 10k samples is plenty to land near the paper's table values.
+---
+title: "TurboQuant"
+abstract: >
+  The capstone. A fresh random rotation per sample, matrix–vector products, and
+  reductions show that a naive MSE 1-bit quantizer is inner-product biased by 2/π
+  and carries several times the squared error — while a 1-bit QJL sketch of the
+  residual is unbiased. Empirical validation of a research result in a page of
+  readable code.
+tags: [research, capstone]
+extra:
+  blurb: "Reproducing a quantization bias (and its fix) from an arXiv paper."
+  category: "Functions & research"
+  analytic: "bias 2/π ≈ 0.637"
+---
 engine::set_max_samples(10000);
 use math;     # pi, sqrt, sign
 use vec;      # normalize, ones, iota, quantize, normsq, norm, transpose
@@ -55,13 +41,17 @@ mse2 = PiT @ quantize(rot, L2);
 mse3 = PiT @ quantize(rot, L3);
 mse4 = PiT @ quantize(rot, L4);
 
-Print("D_mse  b=1 =", E(normsq(x - mse1)), " (paper 0.36)");
-Print("D_mse  b=2 =", E(normsq(x - mse2)), " (paper 0.117)");
-Print("D_mse  b=3 =", E(normsq(x - mse3)), " (paper 0.03)");
-Print("D_mse  b=4 =", E(normsq(x - mse4)), " (paper 0.009)");
+```latex
+D_{\text{mse}},\ b = 1 = ${E(normsq(x - mse1))} \qquad(\text{paper } 0.36)
+D_{\text{mse}},\ b = 2 = ${E(normsq(x - mse2))} \qquad(\text{paper } 0.117)
+D_{\text{mse}},\ b = 3 = ${E(normsq(x - mse3))} \qquad(\text{paper } 0.03)
+D_{\text{mse}},\ b = 4 = ${E(normsq(x - mse4))} \qquad(\text{paper } 0.009)
+```
 
 # === The catch: that 1-bit MSE quantizer is BIASED for inner products by exactly 2/pi.
-Print("MSE b=1  E[est]/true =", E(y @ mse1) / true_ip, " (biased: 2/pi =", 2 / pi, ")");
+```latex
+\text{MSE } b = 1: \quad \frac{E[\text{est}]}{\text{true}} = ${E(y @ mse1) / true_ip} \qquad(\text{biased: } \tfrac{2}{\pi} = ${2 / pi})
+```
 
 # Picture the bias: the MSE estimate lands at ~2/pi of the truth, not 1.
 plot::value(E(y @ mse1) / true_ip);
@@ -93,8 +83,10 @@ prod4 = tq_ip(x, y, m4, S4, d);
 # paper's D_prod table (scaled by 1/d) — error a fraction of the biased MSE quantizer's.
 # ...and the fix lands on 1 — the unbiased estimate with its confidence interval.
 plot::value(E(prod2) / true_ip);
-Print("prod b=2 E[est]/true =", E(prod2) / true_ip, " (unbiased: ~1)");
-Print("D_prod b=1 =", E((prod1 - true_ip) ^ 2), " (plain QJL; <= bound pi/2/d =", pi / 2 / d, ")");
-Print("D_prod b=2 =", E((prod2 - true_ip) ^ 2), " (paper 0.56/d =", 0.56 / d, ")");
-Print("D_prod b=3 =", E((prod3 - true_ip) ^ 2), " (paper 0.18/d =", 0.18 / d, ")");
-Print("D_prod b=4 =", E((prod4 - true_ip) ^ 2), " (paper 0.047/d =", 0.047 / d, ")")
+```latex
+\text{prod } b = 2: \quad \frac{E[\text{est}]}{\text{true}} = ${E(prod2) / true_ip} \qquad(\text{unbiased} \approx 1)
+D_{\text{prod}},\ b = 1 = ${E((prod1 - true_ip) ^ 2)} \qquad(\text{plain QJL};\ \le \text{ bound } \tfrac{\pi}{2d} = ${pi / 2 / d})
+D_{\text{prod}},\ b = 2 = ${E((prod2 - true_ip) ^ 2)} \qquad(\text{paper } \tfrac{0.56}{d} = ${0.56 / d})
+D_{\text{prod}},\ b = 3 = ${E((prod3 - true_ip) ^ 2)} \qquad(\text{paper } \tfrac{0.18}{d} = ${0.18 / d})
+D_{\text{prod}},\ b = 4 = ${E((prod4 - true_ip) ^ 2)} \qquad(\text{paper } \tfrac{0.047}{d} = ${0.047 / d})
+```

@@ -1,13 +1,23 @@
-# D&D "advantage": roll 2d20 and keep the HIGHER die. Chance the result is >= 15?
-# Now that `if` lifts over random variables, `max(A, B)` is just an if.
-# analytic: 1 - (14/20)^2 = 0.51
+---
+title: "D&D advantage"
+abstract: >
+  Rolling with "advantage" means taking the max of two twenty-sided dice. A lifted
+  if (if A > B { A } else { B }) builds the max as a new random variable, then
+  P(result ≥ 15) shows how much advantage shifts the odds.
+tags: [games, lifted if]
+extra:
+  blurb: "Keep the higher of two d20s."
+  category: "Games & risk"
+---
 use rand;
 
 A ~ unif_int(1, 20);
 B ~ unif_int(1, 20);
 higher = if A > B { A } else { B };
 p = P(higher >= 15);
-Print("P(advantage roll >= 15) =", p)
+```md
+The chance an advantage roll lands **≥ 15** is **${p}**.
+```
 
 # Advantage leans the d20 toward the high end: big numbers get the tallest bars.
 plot::histogram(higher)

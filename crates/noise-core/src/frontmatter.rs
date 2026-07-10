@@ -16,11 +16,18 @@
 use crate::error::{NoiseError, Result, Span};
 
 /// A parsed frontmatter block. `knobs` keeps **source order** (a `Vec`, not a map) because that is
-/// the order a host renders the knob UI in; `extra` preserves every unknown key as raw JSON so new
-/// metadata (blurb, category, seed…) can grow without an engine release.
+/// the order a host renders the knob UI in; `extra` is the file's explicit `extra:` map — raw JSON
+/// the engine passes through untouched, so host-specific metadata (blurb, category, seed…) can grow
+/// without an engine release. Only `title`/`abstract`/`tags`/`knobs`/`extra` are recognized at the
+/// top level; any other key is a validation error (§D2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frontmatter {
     pub title: Option<String>,
+    /// A paper-style abstract — the prose a literate host renders under the title. (Named
+    /// `abstract_` because `abstract` is a reserved Rust keyword; the JSON key stays `abstract`.)
+    pub abstract_: Option<String>,
+    /// Free-form keyword tags (a paper's "Keywords:" line).
+    pub tags: Vec<String>,
     pub knobs: Vec<Knob>,
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -149,6 +156,13 @@ impl Frontmatter {
         if let Some(t) = &self.title {
             m.insert("title".into(), serde_json::json!(t));
         }
+        if let Some(a) = &self.abstract_ {
+            m.insert("abstract".into(), serde_json::json!(a));
+        }
+        m.insert(
+            "tags".into(),
+            serde_json::Value::Array(self.tags.iter().map(|t| serde_json::json!(t)).collect()),
+        );
         m.insert(
             "knobs".into(),
             serde_json::Value::Array(self.knobs.iter().map(Knob::to_json).collect()),
@@ -274,6 +288,24 @@ fn from_value(value: serde_json::Value, span: Span) -> Result<Frontmatter> {
         Some(_) => return Err(NoiseError::parse("frontmatter `title` must be a string", span)),
     };
 
+    let abstract_ = match obj.remove("abstract") {
+        None => None,
+        Some(serde_json::Value::String(s)) => Some(s),
+        Some(_) => return Err(NoiseError::parse("frontmatter `abstract` must be a string", span)),
+    };
+
+    let tags = match obj.remove("tags") {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => Ok(s),
+                _ => Err(NoiseError::parse("frontmatter `tags` must be a list of strings", span)),
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(_) => return Err(NoiseError::parse("frontmatter `tags` must be a list of strings", span)),
+    };
+
     let mut knobs = Vec::new();
     if let Some(knobs_val) = obj.remove("knobs") {
         let knob_map = match knobs_val {
@@ -285,7 +317,26 @@ fn from_value(value: serde_json::Value, span: Span) -> Result<Frontmatter> {
         }
     }
 
-    Ok(Frontmatter { title, knobs, extra: obj })
+    // `extra` is the explicit escape hatch for host-specific metadata (blurb, category, seed…): a
+    // free-form map the engine passes through untouched. It must be spelled out — everything left at
+    // the top level has to be a recognized key, so an unknown key is a typo or a field that belongs
+    // under `extra:` rather than something silently accepted.
+    let extra = match obj.remove("extra") {
+        None => serde_json::Map::new(),
+        Some(serde_json::Value::Object(m)) => m,
+        Some(_) => return Err(NoiseError::parse("frontmatter `extra` must be a map", span)),
+    };
+    if let Some(key) = obj.keys().next() {
+        return Err(NoiseError::parse(
+            format!(
+                "frontmatter has unknown key `{key}` \
+                 (allowed: title, abstract, tags, knobs, extra — put custom metadata under `extra:`)"
+            ),
+            span,
+        ));
+    }
+
+    Ok(Frontmatter { title, abstract_, tags, knobs, extra })
 }
 
 fn parse_knob(name: &str, spec: serde_json::Value, span: Span) -> Result<Knob> {
@@ -304,6 +355,17 @@ fn parse_knob(name: &str, spec: serde_json::Value, span: Span) -> Result<Knob> {
             ))
         }
     };
+    // Reject unknown fields — this also catches the common YAML footgun `min:1` (no space), which
+    // parses as a *key* `min:1` with a null value, silently dropping the bound. Require `min: 1`.
+    const ALLOWED: &[&str] = &["type", "min", "max", "step", "default", "options", "label"];
+    for key in map.keys() {
+        if !ALLOWED.contains(&key.as_str()) {
+            return Err(NoiseError::parse(
+                format!("knob `{name}` has unknown field `{key}` (need a space after each `:`, e.g. `min: 1`)"),
+                span,
+            ));
+        }
+    }
     let type_str = map
         .get("type")
         .and_then(|v| v.as_str())
@@ -483,11 +545,46 @@ mod tests {
     }
 
     #[test]
-    fn extra_keys_preserved() {
-        let src = "---\ntitle: t\nblurb: hello there\ncategory: basics\n---\n";
+    fn extra_map_is_passthrough() {
+        let src = "---\ntitle: t\nextra:\n  blurb: hello there\n  category: basics\n---\n";
         let (fm, _) = parse(src).unwrap().unwrap();
         assert_eq!(fm.extra.get("blurb").unwrap().as_str(), Some("hello there"));
         assert_eq!(fm.extra.get("category").unwrap().as_str(), Some("basics"));
+    }
+
+    #[test]
+    fn unknown_top_level_key_errors() {
+        // A field that isn't first-class must live under `extra:`; at the top level it's a typo.
+        let err = parse("---\ntitle: t\nblurb: hi\n---\n").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("unknown key `blurb`"), "got: {msg}");
+        assert!(msg.contains("extra"), "should point the user at `extra:`; got: {msg}");
+    }
+
+    #[test]
+    fn extra_must_be_a_map() {
+        let err = parse("---\ntitle: t\nextra: nope\n---\n").unwrap_err();
+        assert!(format!("{err}").contains("`extra` must be a map"));
+    }
+
+    #[test]
+    fn abstract_and_tags_are_native() {
+        let src = "---\ntitle: T\nabstract: >\n  A short paper-style summary\n  spanning two lines.\ntags: [monte carlo, basics]\n---\nx = 1\n";
+        let (fm, _) = parse(src).unwrap().unwrap();
+        assert_eq!(fm.abstract_.as_deref(), Some("A short paper-style summary spanning two lines.\n"));
+        assert_eq!(fm.tags, vec!["monte carlo".to_string(), "basics".to_string()]);
+        // Native fields don't leak into `extra`.
+        assert!(!fm.extra.contains_key("abstract"));
+        assert!(!fm.extra.contains_key("tags"));
+        let j = fm.to_json();
+        assert_eq!(j["tags"], serde_json::json!(["monte carlo", "basics"]));
+        assert_eq!(j["abstract"], serde_json::json!("A short paper-style summary spanning two lines.\n"));
+    }
+
+    #[test]
+    fn tags_must_be_strings() {
+        let err = parse("---\ntags: [1, 2]\n---\n").unwrap_err();
+        assert!(format!("{err}").contains("list of strings"));
     }
 
     #[test]

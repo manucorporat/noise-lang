@@ -1,8 +1,15 @@
-# How many people do you need in a room before two of them probably share a birthday?
-# Surprisingly few: with just 23 people the odds are already better than a coin flip (~51%).
-# Here we give 23 people a random birthday each and ask how often two of them match.
-#
-# Change n to see it move: 5 people -> 0.027, 23 -> 0.507, 50 -> 0.970.
+---
+title: "Birthday paradox"
+abstract: >
+  Draw a birthday for each person with ~[n] unif_int(1,365), then
+  has_duplicates(...) checks whether any two match. Even small groups collide more
+  often than intuition suggests — and the whole experiment is one expression that
+  scales to any group size.
+tags: [collections, classic]
+extra:
+  blurb: "How often does a group share a birthday?"
+  category: "Probability"
+---
 use rand;   # unif_int
 
 # Give each of the n people a random day of the year, then ask whether any two collide.
@@ -10,6 +17,8 @@ n     = 23;
 bday  = unif_int(1, 365);
 days  ~[n] bday;
 match = vec::has_duplicates(days);
-Print("P(shared birthday among", n, ") =", P(match))
+```md
+P(shared birthday among ${n}) = **${P(match)}**
+```
 # The answer as a dot with error bars — with 23 people it lands just past a coin flip.
 plot::value(P(match))

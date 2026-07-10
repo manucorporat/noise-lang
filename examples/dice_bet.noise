@@ -1,12 +1,22 @@
-# A bet shaped by a random outcome: win 10 on a six, otherwise lose 2.
-# `payoff` is itself a random variable built with a lifted `if`.
-# P(you come out ahead) = P(roll a 6) = 1/6 = 0.16667
+---
+title: "A dice bet"
+abstract: >
+  A wager turns a die roll into a payoff random variable with if (win/lose
+  amounts), and P(profit > 0) reports how often you come out ahead. The same
+  lifted-if machinery models real decisions.
+tags: [lifted if, risk]
+extra:
+  blurb: "Build a payoff distribution, then ask about profit."
+  category: "Games & risk"
+---
 use rand;
 
 D ~ unif_int(1, 6);
 payoff = if D == 6 { 10 } else { 0 - 2 };
 p = P(payoff > 0);
-Print("P(come out ahead) =", p)
+```md
+The chance you come out ahead is **${p}**.
+```
 
 # Two outcomes only: a tall -2 bar (you usually lose a bit) and a short +10 bar.
 plot::histogram(payoff)

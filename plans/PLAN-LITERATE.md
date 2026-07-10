@@ -1,8 +1,9 @@
 # PLAN-LITERATE — frontmatter, knobs, and the .noise file as an interactive document
 
-**Date:** 2026-07-10 · **Status:** LT1 + LT2 shipped (frontmatter + knobs; template blocks);
-LT3–LT5 not started. Builds on PLAN-FLINT (the `log` stream contract) — FL1/FL2 shipped, so charts
-already ride the ordered output stream this plan extends.
+**Date:** 2026-07-10 · **Status:** LT1–LT4 shipped (frontmatter + knobs; template blocks; the
+`Document` contract; the Preview tab). LT5 (hover introspection + full example migration) not
+started. Builds on PLAN-FLINT (the `log` stream contract) — FL1/FL2 shipped, so charts already ride
+the ordered output stream this plan extends.
 
 **LT1 note:** frontmatter is parsed by `serde_yaml` (YAML is a superset of JSON, so the `{ … }`
 escape hatch is free) rather than the hand-rolled YAML subset the plan originally proposed —
@@ -13,6 +14,18 @@ of `{ name, type, … }` (not a name-keyed object) so order survives JSON withou
 **LT2 note:** templates emit an engine-internal `Output::Note { text, syntax }`; until LT3's
 `Document` lands, the CLI prints notes as text and the wasm layer folds them into the existing
 text/`log` stream (a `LogItem::Text`). The distinct `note` block + syntax tag arrives with LT3.
+
+**LT3 note:** shipped as the plan's D5 spec. New `doc.rs` (`segment` + `comment_layer` + `assemble`
++ `Document`/`Block`/`Comment` + JSON); `Engine::run_to_document` is the single entry both hosts
+call (they can't drift). `lexer::tokenize_with_trivia` records comment spans via a shared inner fn
+(hot-path `tokenize` unchanged). Emissions are span-tagged (`Emission { stmt_span, output }`) with a
+`MAX_EMISSIONS = 200` cap → `result.truncated`. WASM `run`/`run_with_introspection` return a
+`Document` (the latter as `{ document, bindings, introspections }`); `packages/core` bumped to
+0.2.0 and exports the `Document`/`Block`/`Comment` types. The JS `run()` enriches the wire
+`Document` with legacy convenience fields (`ok`/`value`/`output`/`error`/`stats`/`log`) so the
+landing-page demos keep working; the playground's flat output view now renders over `blocks`. The
+Preview tab + comment-layer/knob UI is LT4. Also added: unknown-knob-field rejection (catches the
+YAML `min:1`-without-a-space footgun).
 
 ## The decision
 
@@ -320,7 +333,7 @@ payload is PLAN-FLINT's, unchanged.)
   statement-position emit → `Output::Note`; CLI prints the rendered text.
 - LANG.md section + one example converted to use a template instead of `Print` chains.
 
-### LT3 — The `Document` contract (the breaking change)
+### LT3 — The `Document` contract (the breaking change) ✅ shipped
 
 - `tokenize_with_trivia`, attachment rules, `doc.rs` (`parse_doc` + `assemble`),
   span-tagged engine outputs.
@@ -347,7 +360,7 @@ payload is PLAN-FLINT's, unchanged.)
     is set.
   - Nested calls (root → f → g → `Print`) → still the root statement's span.
 
-### LT4 — Preview tab in the playground
+### LT4 — Preview tab in the playground ✅ shipped (hover-reveal deferred to LT5)
 
 - Output panel grows tabs that are all **filters over the same `Document`** — no
   re-run when switching: **Preview** (default, full literate render), **Output**
@@ -361,6 +374,24 @@ payload is PLAN-FLINT's, unchanged.)
 - Share links carry knob state: non-default overrides join the existing hash scheme
   (`#x=<id>&k=name:value,…` / alongside `#c=<encoded>`), so a tuned example is
   shareable exactly as tuned.
+
+**LT4 note (shipped):** the whole playground was reworked into a **resizable split** (draggable
+divider, keyboard-nudgeable) with the example title/explanation moved to a full-width card *on
+top* and a **full-height** output. The extra tabs were dropped — the **Preview is the only view**,
+rendered as a **typeset LaTeX-style paper** (the site's Computer Modern `--serif`, warm-paper
+page): emitted notes as body prose (markdown for a `md` fence), plots as **numbered figures**
+(`Figure N.` + a stats caption, reusing the global `.figure` styles), and code as clean listings
+with their **comments stripped from the page and revealed on hover as right-margin notes** (LaTeX
+`\marginpar`: an absolutely-positioned floating card in a reserved right gutter on a wide panel,
+dropping just below the listing on a narrow one via a container query — never shifts the layout). A
+faint "✎ N notes" tag + maroon spine marks a listing with hidden notes. Knob sliders/number-inputs
+are generated from `meta()` (kept in sync as you edit) and re-run debounced on change; share links
+carry non-default knobs (`&k=name:value`); the cap surfaces as a "…N more not shown" line.
+**Implementation gotcha:** the Preview DOM is built in JS, so Astro's *scoped* `<style>` never
+reaches it — all Preview styling lives in a `<style is:global>` block scoped by the `#pg-output`
+id. **Deferred to LT5:** hover-*introspection* (the variable popover) and hover-highlighting a
+producing line. Verified live in-browser (knob re-run, resizer, margin-note reveal on wide + narrow
+panels, share hash, no console errors).
 
 ### LT5 — Hover introspection + metadata migration
 

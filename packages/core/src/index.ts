@@ -41,21 +41,144 @@ export interface NoiseStats {
   rng_draws: number;
 }
 
-export interface NoiseResult {
+const ZERO_STATS: NoiseStats = { forcings: 0, samples: 0, ops: 0, rng_draws: 0 };
+
+// --- the Document contract (PLAN-LITERATE §D5) -----------------------------------------------
+//
+// A run returns exactly one `Document`: meta (frontmatter/knobs) + a flat, ordered array of typed
+// blocks (code, notes, plots) + the comment layer + the result. Every view (Preview, plots-only,
+// output-only) is a pure filter over `blocks`.
+
+/** A half-open byte range `[start, end)` into the source. */
+export interface Span {
+  start: number;
+  end: number;
+}
+
+/** One block in the flat array. `code` is verbatim source; `note`/`plot` are emissions carrying the
+ * `stmt_span` of the statement that produced them. */
+export type Block = CodeBlock | NoteBlock | PlotBlock;
+
+/** A verbatim source segment — one statement group. */
+export interface CodeBlock {
+  kind: 'code';
+  source: string;
+  span: Span;
+}
+
+/** An emitted note — a rendered template or a `Print` call. `syntax` is the fence tag (`md`, …). */
+export interface NoteBlock {
+  kind: 'note';
+  text: string;
+  syntax: string | null;
+  stmt_span: Span;
+}
+
+/** An emitted `plot::*` chart. Same shape as an introspection `Plot`, plus its producing statement. */
+export interface PlotBlock {
+  kind: 'plot';
+  title: string;
+  text: string;
+  charts: ChartSpec[];
+  stmt_span: Span;
+}
+
+/** One comment in the annotation layer. `code_span` is the code it annotates (null = detached prose). */
+export interface Comment {
+  text: string;
+  self_span: Span;
+  code_span: Span | null;
+}
+
+/** The program's final value, as `{ kind, text }` — `text` is the display form, `kind` for styling. */
+export interface DocValue {
+  kind: string;
+  text: string;
+}
+
+/** A spanned error (lex/parse/runtime). The blocks up to the failure are still present. */
+export interface DocError {
+  message: string;
+  span: Span;
+}
+
+/** Set when the run hit the emission cap. */
+export interface Truncated {
+  dropped: number;
+  first_dropped_stmt_span: Span;
+}
+
+export interface DocResult {
+  value: DocValue | null;
+  error: DocError | null;
+  stats: NoiseStats;
+  truncated: Truncated | null;
+}
+
+/** Frontmatter meta carried by a document (same shape as `meta()` minus `ok`). */
+export interface DocMeta {
+  title?: string;
+  /** A paper-style abstract — prose a literate host renders under the title. */
+  abstract?: string;
+  /** Free-form keyword tags (a paper's "Keywords:" line). */
+  tags: string[];
+  knobs: Knob[];
+  extra: Record<string, unknown>;
+}
+
+/** The wire `Document` — exactly what the engine returns. */
+export interface NoiseDocument {
+  meta: DocMeta;
+  blocks: Block[];
+  comments: Comment[];
+  result: DocResult;
+}
+
+/**
+ * A run: the `Document` plus client-side conveniences (`ok`/`value`/`output`/`error`/`stats`/`log`
+ * derived from `blocks`+`result`, and the measured `elapsedMs`). The wire format is the pure
+ * `Document`; these fields are added here so simple callers (demos) don't reach into `result`.
+ */
+export interface NoiseResult extends NoiseDocument {
+  /** `true` when the run finished without error. */
   ok: boolean;
-  /** Display form of the program's final value, or null for `unit` / on error. */
+  /** Display form of the final value, or null for `unit` / on error. */
   value: string | null;
-  /** Everything `Print` emitted, in order. */
+  /** Every note's text, joined by newlines (the old `Print` log). */
   output: string;
   /** Error message (with a source span) on failure, else null. */
   error: string | null;
-  /** Engine run-time counters (zeroed if a program forced no sampling). */
+  /** Engine run-time counters. */
   stats: NoiseStats;
-  /** Wall-clock time of the WASM `run` call, in milliseconds (measured here, not in Rust). */
+  /** Notes + plots in emission order, in the legacy `LogItem` shape (a filter over `blocks`). */
+  log: LogItem[];
+  /** Wall-clock time of the run, in milliseconds (measured here, not in Rust). */
   elapsedMs: number;
 }
 
-const ZERO_STATS: NoiseStats = { forcings: 0, samples: 0, ops: 0, rng_draws: 0 };
+/** Derive the client-side convenience fields from a wire `Document`. */
+function enrich(doc: NoiseDocument, elapsedMs: number): NoiseResult {
+  const log: LogItem[] = [];
+  const outputLines: string[] = [];
+  for (const b of doc.blocks) {
+    if (b.kind === 'note') {
+      log.push({ kind: 'text', text: b.text });
+      outputLines.push(b.text);
+    } else if (b.kind === 'plot') {
+      log.push({ kind: 'plot', title: b.title, text: b.text, charts: b.charts });
+    }
+  }
+  return {
+    ...doc,
+    ok: doc.result.error === null,
+    value: doc.result.value?.text ?? null,
+    output: outputLines.join('\n'),
+    error: doc.result.error?.message ?? null,
+    stats: doc.result.stats ?? ZERO_STATS,
+    log,
+    elapsedMs,
+  };
+}
 
 /** A concrete knob value a host passes as an override — a number (int/float) or a bool. */
 export type KnobValue = number | boolean;
@@ -82,9 +205,8 @@ export async function run(src: string, opts?: RunOpts): Promise<NoiseResult> {
   const t0 = performance.now();
   const raw = wasmRun(src, optsToJson(opts));
   const elapsedMs = performance.now() - t0;
-  const parsed = JSON.parse(raw) as Omit<NoiseResult, 'elapsedMs'>;
-  // The defensive serialization-error fallback omits `stats`; default it so callers needn't guard.
-  return { ...parsed, stats: parsed.stats ?? ZERO_STATS, elapsedMs };
+  const doc = JSON.parse(raw) as NoiseDocument;
+  return enrich(doc, elapsedMs);
 }
 
 // --- frontmatter + knobs (the "read metadata without running" path) --------------------------
@@ -109,6 +231,10 @@ export interface NoiseMeta {
   ok: boolean;
   /** The document title, if declared. */
   title?: string;
+  /** A paper-style abstract — prose a literate host renders under the title. */
+  abstract?: string;
+  /** Free-form keyword tags (a paper's "Keywords:" line). */
+  tags: string[];
   /** Declared knobs, in source order (render sliders top-to-bottom). */
   knobs: Knob[];
   /** Unknown frontmatter keys, preserved verbatim (blurb, category, …). */
@@ -128,6 +254,8 @@ export async function meta(src: string): Promise<NoiseMeta> {
   return {
     ok: parsed.ok ?? false,
     title: parsed.title,
+    abstract: parsed.abstract,
+    tags: parsed.tags ?? [],
     knobs: parsed.knobs ?? [],
     extra: parsed.extra ?? {},
     error: parsed.error,
@@ -199,15 +327,13 @@ export interface NoiseIntrospectResult extends NoiseResult {
   bindings: Binding[];
   /** One result per request, in request order. */
   introspections: Plot[];
-  /** The output stream in source order: `Print` lines and `plot::*` charts, interleaved. */
-  log: LogItem[];
 }
 
 /**
- * Run a program and, against its retained scope, resolve a list of introspection requests — the
- * sidecar that powers a variable inspector. Passing `[]` requests still returns `bindings`, so a
- * plain run can populate a variable picker. Never throws; failures surface in `error` (and
- * per-request failures as `{ type: 'error' }` entries).
+ * Run a program → one `Document`, and against its retained scope resolve a list of introspection
+ * requests — the sidecar that powers a variable inspector. Passing `[]` requests still returns
+ * `bindings`, so a plain run can populate a variable picker. Never throws; failures surface in
+ * `result.error` (and per-request failures as `{ error }` entries in `introspections`).
  */
 export async function runWithIntrospection(
   src: string,
@@ -218,13 +344,14 @@ export async function runWithIntrospection(
   const t0 = performance.now();
   const raw = wasmRunIntrospect(src, JSON.stringify(requests), optsToJson(opts));
   const elapsedMs = performance.now() - t0;
-  const parsed = JSON.parse(raw) as Omit<NoiseIntrospectResult, 'elapsedMs'>;
+  const parsed = JSON.parse(raw) as {
+    document: NoiseDocument;
+    bindings?: Binding[];
+    introspections?: Plot[];
+  };
   return {
-    ...parsed,
-    stats: parsed.stats ?? ZERO_STATS,
+    ...enrich(parsed.document, elapsedMs),
     bindings: parsed.bindings ?? [],
     introspections: parsed.introspections ?? [],
-    log: parsed.log ?? [],
-    elapsedMs,
   };
 }

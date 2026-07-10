@@ -1,10 +1,20 @@
-# A gadget has 3 backup parts, each working 90% of the time. The gadget keeps running as long
-# as AT LEAST ONE part still works. How often is it up? Almost always: it only fails if all
-# three fail at once, and that's 0.1 x 0.1 x 0.1 = 0.001, so it's up 0.999 of the time.
-# Three independent parts, each up 90% of the time; the system is up if at least one works.
+---
+title: "Redundancy"
+abstract: >
+  Three independent components are each up with probability 0.9; the system is up
+  if any of them is. any([...]) over the three Bernoulli draws gives P(system up)
+  ≈ 0.999 — redundancy turning 90% into three nines.
+tags: [engineering, collections]
+extra:
+  blurb: "Three parallel components, each 90% reliable."
+  category: "Games & risk"
+  analytic: "0.999"
+---
 part   = rand::bernoulli(0.9);
 parts  ~[3] part;
 up     = vec::any(parts);
-Print("System uptime (3-way parallel) =", P(up))
+```latex
+P(\text{system up}) = ${P(up)} \qquad (\text{3-way parallel})
+```
 # Two bars: the system is up almost always, down only the tiny 0.001 of the time.
 plot::histogram(up)

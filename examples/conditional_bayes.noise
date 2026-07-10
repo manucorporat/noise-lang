@@ -1,19 +1,33 @@
-# Conditional probability with the `|` bar: P(D == 6 | D > 3) — "given the roll beat 3,
-# how often is it a 6?". Bayes: P(D==6 && D>3) / P(D>3) = (1/6)/(1/2) = 1/3 = 0.33333.
-# The `|` conditions the query to the worlds where `D > 3` holds — no global state, no side
-# effect; it just scopes THIS query. The estimate self-rounds to its justified precision.
+---
+title: "Conditional probability"
+abstract: >
+  A conditional probability P(A | B) scopes a query to the worlds where B holds.
+  Here: given a die rolled above 3, how likely was it a 6? The `|` bar gives 1/3
+  directly — exactly P(A and B) / P(B), with no global state.
+tags: [probability, bayes]
+extra:
+  blurb: "P(A | B) as a ratio of probabilities."
+  category: "Probability"
+  analytic: "1/3 ≈ 0.3333"
+---
 use rand;
 
 D ~ unif_int(1, 6);
-Print("P(rolled a 6 | rolled > 3) =", P(D == 6 | D > 3));
+```md
+The chance a die known to have beaten 3 is actually a 6 is **${P(D == 6 | D > 3)}**.
+```
 
 # A conditioned value is first-class: bind it once, then ask several questions of it.
 high = D | D > 3;                       # the roll, restricted to the worlds where D > 3
-Print("  E(roll | roll > 3)  =", E(high), "(mean of 4,5,6 = 5)");
-Print("  median(roll | > 3)  =", Q(high, 0.5), "(= 5)");
+```latex
+E[\text{roll} \mid \text{roll} > 3] = ${E(high)} \qquad(\text{mean of } 4,5,6 = 5)
+\mathrm{median}(\text{roll} \mid {>}\,3) = ${Q(high, 0.5)} \qquad(= 5)
+```
 
 # Same answer the long way — `P(A | C)` is exactly `P(A && C) / P(C)`, just less ceremony:
-Print("  via the ratio form  =", P(D == 6 && D > 3) / P(D > 3));
+```latex
+P(D = 6 \mid D > 3) = \frac{P(D = 6 \cap D > 3)}{P(D > 3)} = ${P(D == 6 && D > 3) / P(D > 3)}
+```
 
 # Once we know the roll beat 3, only 4, 5 and 6 are left — see them share the chances evenly.
 plot::histogram(high)

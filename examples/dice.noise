@@ -1,20 +1,27 @@
 ---
 title: "Roll a die"
+abstract: >
+  A die is discrete, so it uses unif_int(1,6) — integers 1..6. With the continuous
+  unif(1,6) the probability of landing exactly on 4 would be 0 (a continuous draw
+  never hits a single point). P(Dice == 4) ≈ 1/6 is the payoff of picking the right
+  distribution.
+tags: [basics, discrete]
 knobs:
   dice_sides:    { type: int, min: 1, max: 100, step: 1, default: 6 }
   target_number: { type: int, min: 1, max: 100, step: 1, default: 4 }
+extra:
+  blurb: "Why dice need unif_int, not unif."
+  category: "Basics"
+  analytic: "1/6 ≈ 0.1667"
 ---
-# Roll one fair die; how often do you get the target face? One face in `dice_sides`
-# (with the default six-sided die and target 4, that's 1/6 = 0.16667).
-# A die is DISCRETE, so we use unif_int (with the continuous unif, P(== 4) would be exactly 0).
 use rand;
 
 Dice ~ unif_int(1, dice_sides);
 p = P(Dice == target_number);
 
-`
-P(rolling a ${target_number}) = ${p}
-`
+```latex
+P(\text{rolling a } ${target_number}) = ${p}
+```
 
 # See it for real: every face 1..dice_sides shows up about equally often.
 plot::histogram(Dice)

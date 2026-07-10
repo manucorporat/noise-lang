@@ -70,7 +70,22 @@ pub struct Token {
     pub span: Span,
 }
 
+/// Tokenize `src` into a flat `Vec<Token>` ending in `Eof`. The hot path — no trivia recorded.
 pub fn tokenize(src: &str) -> Result<Vec<Token>> {
+    tokenize_inner(src, None)
+}
+
+/// Tokenize *and* collect the spans of every line comment (`//` / `#`) as a side channel — trivia
+/// for the literate doc model (PLAN-LITERATE §D4). Comments inside strings, template bodies, and the
+/// frontmatter block are **not** trivia (they never reach the comment branch). The token stream is
+/// identical to [`tokenize`]'s.
+pub fn tokenize_with_trivia(src: &str) -> Result<(Vec<Token>, Vec<Span>)> {
+    let mut comments = Vec::new();
+    let tokens = tokenize_inner(src, Some(&mut comments))?;
+    Ok((tokens, comments))
+}
+
+fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec<Token>> {
     let bytes = src.as_bytes();
     // A `---`-fenced frontmatter block at byte 0 is trivia: skip it *in place* so every token span
     // keeps pointing into the original source (error messages and the doc model rely on it). Only
@@ -91,8 +106,12 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
 
         // line comments: `//` and `#`
         if c == '#' || (c == '/' && i + 1 < n && bytes[i + 1] == b'/') {
+            let cstart = i;
             while i < n && bytes[i] != b'\n' {
                 i += 1;
+            }
+            if let Some(sink) = comments.as_deref_mut() {
+                sink.push(Span::new(cstart, i));
             }
             continue;
         }

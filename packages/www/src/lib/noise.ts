@@ -26,6 +26,18 @@ export type {
   KnobOverrides,
   RunOpts,
   NoiseMeta,
+  Span,
+  Block,
+  CodeBlock,
+  NoteBlock,
+  PlotBlock,
+  Comment,
+  DocValue,
+  DocError,
+  Truncated,
+  DocResult,
+  DocMeta,
+  NoiseDocument,
 } from '@noiselang/core';
 
 import type { NoiseResult } from '@noiselang/core';

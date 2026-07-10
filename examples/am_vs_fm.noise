@@ -1,8 +1,16 @@
-# Ever wonder why FM sounds better than AM radio? Let's simulate both and find out.
-#
-# A radio carrier is a spinning arrow: AM stores the sound in the arrow's LENGTH, FM stores it in
-# the arrow's ANGLE. Static knocks the arrow's tip around — which ruins a length far more than an
-# angle. We send the same tone both ways, add the same static, and measure what comes back.
+---
+title: "AM vs FM"
+abstract: >
+  A full modulate → add static → demodulate pipeline for both AM (message in the
+  carrier's length) and FM (message in its angle, via e^{iθ}). One ~-drawn complex
+  static hits both carriers — the same storm by construction — and FM comes back
+  several times cleaner. The whole chain is written on waveforms; the resolution is
+  one knob at the top.
+tags: [signals, dsp, complex]
+extra:
+  blurb: "Why FM survives noise better than AM."
+  category: "Signals & DSP"
+---
 use math;
 use vec;
 
@@ -32,12 +40,16 @@ recovered_fm = fm_demodulate(fm_modulate(msg, fm_swing) + static, fm_swing);
 # that over many realizations of the static.
 am_err = E(mse(recovered_am, msg));
 fm_err = E(mse(recovered_fm, msg));
-Print("AM recovered-message error (MSE) =", am_err);
-Print("FM recovered-message error (MSE) =", fm_err);
+```md
+AM recovered-message error (MSE) = **${am_err}**
+FM recovered-message error (MSE) = **${fm_err}**
+```
 
 # In the small-signal limit the advantage approaches swing^2; the simulation lands a bit under
 # that ideal because at finite noise the angle reading degrades on the wider swings.
-Print("FM is", am_err / fm_err, "x cleaner for the same static  (ideal: swing^2 =", fm_swing ^ 2, ")");
+```md
+FM is **${am_err / fm_err}**x cleaner for the same static (ideal: swing^2 = **${fm_swing ^ 2}**)
+```
 
 # The original tone, then what each scheme drags back out of the static: FM's recovered wave
 # hugs the message; AM's is visibly rattled by the same noise.

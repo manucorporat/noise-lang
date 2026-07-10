@@ -1,25 +1,32 @@
-# The Nyquist-Shannon sampling theorem, shown by counterexample: if you sample too slowly, a
-# fast wave becomes a perfect impostor of a slow one — you literally cannot tell them apart.
-#
-# The rule: to capture a wave of frequency f you must take MORE than 2*f samples per window. Below
-# that, "aliasing" kicks in (it's why wagon wheels spin backwards in old films, and why music is
-# sampled at 44.1 kHz to cover the ~20 kHz limit of hearing).
-#
-# `sine(f)` here is a LAZY signal — just a frequency, no samples — and `sample(sig, n)` is the knob
-# that takes `n` snapshots. Turning that knob is exactly choosing your sample rate.
-
+---
+title: "Nyquist–Shannon"
+abstract: >
+  Sample a 7-cycle wave below twice its frequency and it becomes indistinguishable
+  from a 3-cycle wave (identical samples — aliasing). Sample above the Nyquist rate
+  and they separate. The sampling theorem, demonstrated rather than asserted.
+tags: [signals, dsp]
+extra:
+  blurb: "Aliasing by counterexample."
+  category: "Signals & DSP"
+---
 high = signal::cosine(7);   # a fast wave: 7 cycles per window
 low  = signal::cosine(3);   # a slow wave: 3 cycles per window  -- genuinely a different signal
 
 # Nyquist limit for the 7-cycle wave: you need > 2*7 = 14 samples per window.
 # UNDERSAMPLE at 10 (< 14): the fast wave aliases — its samples become *identical* to the slow
 # one's, so mse is 0. The two are indistinguishable from these samples alone.
-Print("undersampled (10 < 14 pts):  mse(fast, slow) =", vec::mse(signal::sample(high, 10), signal::sample(low, 10)));
+```md
+undersampled (10 < 14 pts): mse(fast, slow) = **${vec::mse(signal::sample(high, 10), signal::sample(low, 10))}**
+```
 
 # OVERSAMPLE at 64 (> 14): now there are enough snapshots to keep them apart, and mse is large.
-Print("oversampled  (64 > 14 pts):  mse(fast, slow) =", vec::mse(signal::sample(high, 64), signal::sample(low, 64)));
+```md
+oversampled (64 > 14 pts): mse(fast, slow) = **${vec::mse(signal::sample(high, 64), signal::sample(low, 64))}**
+```
 
-Print("Sample too slowly and a 7-cycle wave masquerades as a 3-cycle one (7 folds to 10-7 = 3).");
+```md
+Sample too slowly and a 7-cycle wave masquerades as a 3-cycle one (7 folds to 10-7 = 3).
+```
 
 # Undersampled at 10: the fast 7-cycle wave and the slow 3-cycle wave land on the SAME points — twins.
 plot::line(signal::sample(high, 10));

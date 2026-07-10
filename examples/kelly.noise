@@ -16,11 +16,15 @@ log_growth(f) = {
 fractions = [for k in 0..11 { k / 20 }];
 growth    = [for f in fractions { log_growth(f) }];
 
-Print("stake fraction f -> expected log-growth per round (bigger is better):");
+```md
+stake fraction f -> expected log-growth per round (bigger is better):
+```
 for k in 0..11 {
-  Print("  f =", fractions[k], " ->", growth[k])
+  Print(`  f = ${fractions[k]} -> ${growth[k]}`)
 };
 
-Print("The curve peaks at f* = 2p - 1 = 0.2 — the Kelly fraction — and goes NEGATIVE past ~0.4:");
-Print("overbetting a winning game loses money in the long run.");
-Print("(Analytic: E[log g] = p*log(1+f) + (1-p)*log(1-f); at f = 0.2 that's ~0.0201 per round.)")
+```md
+The curve peaks at f* = 2p - 1 = 0.2 — the Kelly fraction — and goes NEGATIVE past ~0.4:
+overbetting a winning game loses money in the long run.
+(Analytic: E[log g] = p*log(1+f) + (1-p)*log(1-f); at f = 0.2 that's ~0.0201 per round.)
+```

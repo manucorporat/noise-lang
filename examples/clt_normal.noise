@@ -1,20 +1,29 @@
-# Add up a bunch of random numbers and something neat happens: the total starts to trace out
-# the classic bell curve, almost no matter what you added. That's the Central Limit Theorem.
-#
-# Here we add 12 random numbers between 0 and 1. After shifting so the average is 0, the total
-# behaves like a standard bell curve. We check that by computing the same tail probability two
-# ways — from our sum, and from a real bell curve (normal) — and seeing that they agree.
+---
+title: "Central limit theorem"
+abstract: >
+  Summing twelve U(0,1) draws and centering gives an approximately standard-normal
+  variable (a classic CLT trick). A tail probability of that sum lands near the
+  true normal tail — the CLT made tangible.
+tags: [continuous, clt]
+extra:
+  blurb: "A normal built from twelve uniforms."
+  category: "Continuous & CLT"
+---
 use rand;   # unif, normal
 
 # Add n uniforms and recenter to mean 0 — by the CLT its right tail should match a bell curve.
 n     = 12;
 draws ~[n] unif(0, 1);
 clt   = vec::sum(draws) - n / 2;
-Print("CLT (sum of", n, "uniforms) P(Z>1) ~", P(clt > 1));
+```latex
+P(Z > 1) \approx ${P(clt > 1)} \qquad (\text{CLT: sum of } ${n} \text{ uniforms})
+```
 
 # Compare against an actual standard normal: the two tail probabilities should agree (~0.16).
 Z ~ normal(0, 1);
-Print("native normal           P(Z>1) =", P(Z > 1));
+```latex
+P(Z > 1) = ${P(Z > 1)} \qquad (\text{native normal})
+```
 
 # Stack up 12 random numbers and the totals trace the classic bell curve all on their own.
 plot::histogram(clt)

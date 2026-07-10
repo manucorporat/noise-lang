@@ -1,13 +1,21 @@
 ---
 title: "Heads in a row"
+abstract: >
+  Instead of computing (1/2)³ yourself, you model three independent coin flips and
+  ask whether all three came up heads. The language does the probability —
+  P(all heads) ≈ 0.125 — by simulating the actual event.
+tags: [independence, modeling]
 knobs:
   flip_count: { type: int, min: 1, max: 20, step: 1, default: 3 }
+extra:
+  blurb: "Model the event, don’t multiply probabilities by hand."
+  category: "Probability"
+  analytic: "1/8 = 0.125"
 ---
-# Flip a fair coin `flip_count` times. How often do you get heads every single time?
-# Each flip is 50/50 and they don't affect each other, so it's (1/2)^flip_count
-# (with the default of 3 flips, that's 1/2 x 1/2 x 1/2 = 1/8 = 0.125).
 flips  ~[flip_count] rand::bernoulli(0.5);
 streak = vec::all(flips);
-Print("P(all heads in a row) =", P(streak))
+```md
+P(all heads in a row) = **${P(streak)}**
+```
 # Two bars: how often you DON'T get the streak vs. the rare all-heads win.
 plot::histogram(streak)

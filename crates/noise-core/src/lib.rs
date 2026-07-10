@@ -10,6 +10,7 @@ pub mod backend;
 pub mod builtins;
 pub mod bytecode;
 pub mod dist;
+pub mod doc;
 pub mod error;
 pub mod eval;
 pub mod flint;
@@ -32,8 +33,9 @@ pub mod wasm_host;
 pub mod value;
 
 pub use dist::RvId;
+pub use doc::Document;
 pub use error::{NoiseError, Result};
-pub use eval::{Engine, Output};
+pub use eval::{Emission, Engine, Output};
 pub use frontmatter::{Frontmatter, Knob, KnobKind, KnobValue};
 pub use sampler::Moments;
 pub use stats::RunStats;
@@ -3010,7 +3012,7 @@ mod tests {
         let items = eng.take_output();
         let plots: Vec<_> = items
             .iter()
-            .filter_map(|o| match o {
+            .filter_map(|o| match &o.output {
                 crate::Output::Plot(s) => Some(s),
                 crate::Output::Text(_) | crate::Output::Note { .. } => None,
             })
@@ -3042,7 +3044,7 @@ mod tests {
         let mut eng = Engine::new();
         eng.run(&with_prelude(src)).unwrap();
         for o in eng.take_output() {
-            if let crate::Output::Plot(s) = o {
+            if let crate::Output::Plot(s) = o.output {
                 if matches!(s.payload, Payload::Fan(_)) {
                     return s;
                 }
@@ -3161,7 +3163,7 @@ mod tests {
 
     fn plot_payload(eng: &mut Engine) -> Payload {
         for o in eng.take_output() {
-            if let crate::Output::Plot(s) = o {
+            if let crate::Output::Plot(s) = &o.output {
                 return s.payload.clone();
             }
         }
@@ -3406,7 +3408,7 @@ mod tests {
         let notes: Vec<String> = eng
             .take_output()
             .into_iter()
-            .filter_map(|o| match o {
+            .filter_map(|o| match o.output {
                 crate::Output::Note { text, .. } => Some(text),
                 _ => None,
             })
@@ -3419,7 +3421,7 @@ mod tests {
     fn template_triple_fence_carries_syntax_tag() {
         let mut eng = Engine::new();
         eng.run("x = 1\n```md\nhi ${x}\n```\n").unwrap();
-        match eng.take_output().into_iter().next().unwrap() {
+        match eng.take_output().into_iter().next().unwrap().output {
             crate::Output::Note { text, syntax } => {
                 assert_eq!(text, "hi 1");
                 assert_eq!(syntax.as_deref(), Some("md"));

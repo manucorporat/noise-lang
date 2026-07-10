@@ -1,5 +1,15 @@
-# Monty Hall, reframed: switching wins EXACTLY when your first pick was wrong.
-# analytic: 2/3 = 0.66667.  The `if` prints a verdict instead of a hardcoded message.
+---
+title: "Monty Hall"
+abstract: >
+  Reframed cleanly: switching wins exactly when your first pick was wrong, which
+  happens 2/3 of the time. Sampling the first pick and checking that condition
+  reproduces the famous counterintuitive answer.
+tags: [classic, modeling]
+extra:
+  blurb: "Switching doors wins 2/3 of the time."
+  category: "Probability"
+  analytic: "2/3 ≈ 0.6667"
+---
 use rand;
 
 car  ~ unif_int(1, 3);
@@ -8,7 +18,7 @@ p = P(pick != car);
 # The answer as a dot with its error bars — it should sit right around 2/3.
 plot::value(p)
 if p > 0.5 {
-  Print("Switch! You win", p, "of the time.")
+  Print(`Switch! You win ${p} of the time.`)
 } else {
-  Print("Stay. Switching only wins", p, "of the time.")
+  Print(`Stay. Switching only wins ${p} of the time.`)
 }

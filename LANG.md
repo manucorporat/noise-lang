@@ -158,7 +158,8 @@ true false                boolean literals
 ## Frontmatter and knobs (literate files)
 
 A `.noise` file may open with a `---`-fenced **frontmatter** block that turns it into a
-self-describing document: a title and a set of typed, tunable **knobs**. The fence is recognized
+self-describing document: a `title`, a paper-style `abstract`, keyword `tags`, a set of typed,
+tunable **knobs**, and an `extra:` map for host-specific metadata. The fence is recognized
 **only at byte 0** — line 1 must be exactly `---`, and the block runs to the next line that is
 exactly `---`. Anywhere else in a file, `---` keeps meaning three unary minuses, so no ordinary
 program is affected. The engine treats the whole block as trivia (it never becomes a token), so
@@ -167,9 +168,14 @@ error spans still point at the original source.
 ```
 ---
 title: "Roll a die"
+abstract: >
+  A die is discrete, so it uses unif_int — integers 1..6.
+tags: [basics, discrete]
 knobs:
   dice_sides:    { type: int, min: 1, max: 100, step: 1, default: 6 }
   target_number: { type: int, min: 1, max: 100, step: 1, default: 4 }
+extra:
+  category: "Basics"          # host-specific metadata, engine passes it through
 ---
 Dice ~ rand::unif_int(1, dice_sides);
 p = P(Dice == target_number);
@@ -177,8 +183,9 @@ Print("P(rolling a", target_number, ") =", p)
 ```
 
 - **Syntax**: the block is **YAML** (a `{ … }` JSON block also works, since JSON is valid YAML).
-  Unknown top-level keys (a `blurb`, a `category`, …) are preserved verbatim for hosts and ignored
-  by the engine.
+- **Recognized keys**: only `title`, `abstract`, `tags`, `knobs`, and `extra` are accepted at the
+  top level — any other key is a validation error. Host-specific metadata (a `blurb`, a `category`,
+  a `seed`, …) goes under `extra:`, a free-form map the engine passes through untouched.
 - **Knobs** are `name: { type, … }` maps. `type` is `int`, `float`, or `bool`. Numeric knobs take
   optional `min`, `max`, and `step`; every knob needs a `default`. An optional `label` names it in a
   UI. Each knob binds as a plain **deterministic global** (a point mass) *before the first
@@ -207,9 +214,11 @@ The probability is **${p}**.
 ```
 
 - **Single backtick** `` `…` `` — a plain body; it cannot contain a backtick.
-- **Triple fence** ` ```tag … ``` ` — carries a syntax tag (e.g. `md`) so a host can render the note
-  as markdown vs preformatted text; the body may contain single backticks. A bare ` ``` ` (no tag)
-  is just the plain template.
+- **Triple fence** ` ```tag … ``` ` — carries a syntax tag (e.g. `md` for markdown, or `latex` which a
+  host typesets with a math renderer like KaTeX — one display equation per non-blank line) so a host can
+  render the note richly vs as preformatted text; the body may contain single backticks. A bare ` ``` `
+  (no tag) is just the plain template. The engine is tag-agnostic — it carries the tag through on the
+  note and leaves rendering to the host.
 - **Body**: raw text with `${expr}` holes. The shared leading indentation is stripped and the blank
   opening/closing lines next to the fences are removed, so a template indented inside code still
   renders flush-left. A hole renders via its value's **display form** (an `Est` self-rounds to its
@@ -877,6 +886,26 @@ user-defined functions land *(Phase 3)*.
 A program is a sequence of statements; its value is the value of the **last** statement
 (or `unit` if empty). The CLI prints that value; the REPL evaluates one line at a time
 against a persistent environment.
+
+### The document contract
+
+A run produces exactly one **`Document`** (PLAN-LITERATE §D5) — a self-describing structure every
+host (CLI, playground, `@noiselang/core`) renders:
+
+- `meta` — the frontmatter (title, knobs, extra).
+- `blocks` — one flat, ordered array in emission order, each tagged `code` (a verbatim source
+  group), `note` (emitted text — a template or a `Print`, with an optional `syntax` tag), or `plot`
+  (a `plot::*`/`describe` chart). A note/plot carries the `stmt_span` of the statement that produced
+  it, so a host can group outputs under their code or highlight the producing line.
+- `comments` — the annotation *layer*: each comment a `(self_span, code_span?)` pair. An attached
+  comment names the code it annotates (one line or a whole group); a detached run (blank line
+  between it and the code) has no `code_span` and reads as free-standing prose.
+- `result` — `{ value?, error?, stats, truncated? }`. `value` is `{ kind, text }` (absent when the
+  program ends in `unit`); `error` is spanned and still returns all blocks that ran before it;
+  `truncated` is set when a run exceeds the emission cap (it keeps running, but stops recording).
+
+Every view is a pure filter over `blocks`: *only plots*, *hide code*, *only text*, or the full
+literate render — no re-run, one contract.
 
 ## Not yet implemented (see plans/PLAN.md / GOAL.md)
 

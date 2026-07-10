@@ -59,7 +59,19 @@ combPsi = [for x in 0..16 { onehot(math::modpow(7, x, 15), 15) }] / 16 ^ 0.5;
 comb    = [for p in combQFT @ combPsi { vec::normsq(p) }];
 plot::line(comb);
 
-Print("period of 7^x mod 15 (the quantum step) =", period(7, 15, 16));   # 4
-Print("shor(15) =", shor(15));   # [3, 5] — factored
-Print("shor(21) =", shor(21));   # [3, 7]
-Print("shor(35) =", shor(35));   # [5, 7]
+```md
+The period of 7^x mod 15 (the quantum step) is **${period(7, 15, 16)}**.
+```
+# 4
+```md
+shor(15) = **${shor(15)}**
+```
+# [3, 5] — factored
+```md
+shor(21) = **${shor(21)}**
+```
+# [3, 7]
+```md
+shor(35) = **${shor(35)}**
+```
+# [5, 7]

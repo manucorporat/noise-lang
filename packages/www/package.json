@@ -19,6 +19,12 @@
     "monaco-editor": "^0.52.2",
     "vega": "^5.33.1",
     "vega-embed": "^6.29.0",
-    "vega-lite": "^5.23.0"
+    "vega-lite": "^5.23.0",
+    "katex": "^0.16.11"
+  },
+  "devDependencies": {
+    "js-yaml": "^4.1.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/katex": "^0.16.7"
   }
 }

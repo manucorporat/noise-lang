@@ -107,7 +107,8 @@ console.log(result.output);  // everything Print(...) emitted`;
 
   .play-main { padding: 1.6rem 0 1rem; }
   /* the playground claims most of the viewport width (wider than the prose `.wide` column) */
-  .play-host { max-width: min(1640px, 95vw); margin: 0 auto; padding: 0 1.5rem; }
+  .play-host { max-width: min(1720px, 98vw); margin: 0 auto; padding: 0 0.75rem; }
+  @media (max-width: 680px) { .play-host { padding: 0 0.4rem; } }
 
   /* "Put Noise in your own site" — quiet prose column under the playground. */
   .embed { padding: 2.8rem 0 0.5rem; }

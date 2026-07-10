@@ -1,11 +1,23 @@
-# Pick three random numbers between 0 and 1 and add them up. How often is the total above 2?
-# That's a high bar — their average would have to top 2/3 — so it's fairly rare: 1/6 = 0.16667.
+---
+title: "Sum of uniforms"
+abstract: >
+  Add three independent U(0,1) draws and ask P(sum > 2). The sum has a bell-ish
+  (Irwin–Hall) shape; sampling recovers the tail probability without any density
+  algebra.
+tags: [continuous, collections]
+extra:
+  blurb: "The Irwin–Hall distribution by simulation."
+  category: "Continuous & CLT"
+  analytic: "1/6 ≈ 0.1667"
+---
 use rand;   # unif
 
 # Add three independent uniforms and ask how often the total clears 2.
 draws ~[3] unif(0, 1);
 total = vec::sum(draws);
-Print("P(sum of three uniforms > 2) =", P(total > 2));
+```latex
+P(\text{sum of three uniforms} > 2) = ${P(total > 2)}
+```
 
 # The totals pile up in the middle and thin out at the edges — a little hill already forming.
 plot::histogram(total)

@@ -50,7 +50,13 @@ pub struct Engine {
     /// interleaved (a plot is just another kind of output). The CLI/REPL drain and render it; the
     /// WASM playground reads it to show program output (text + charts) in the browser. Buffering
     /// (instead of a bare `println!`) keeps `Print` portable to `wasm32`, where stdout goes nowhere.
-    outputs: Vec<Output>,
+    outputs: Vec<Emission>,
+    /// The span of the top-level statement currently executing — stamped onto every [`Emission`] so
+    /// the doc model can attribute an output to its producing statement (PLAN-LITERATE §D5).
+    current_stmt_span: Span,
+    /// Emissions dropped after the [`MAX_EMISSIONS`] cap, and the first dropped statement's span.
+    dropped: usize,
+    first_dropped_span: Option<Span>,
     /// Default Monte Carlo budget for `P`/`E`/`Var`/`Q` when a call carries no explicit sample
     /// count. Starts at [`builtins::P_DEFAULT_N`]; a program tunes it for the whole run with
     /// `engine::set_max_samples(N)`. An explicit per-call count (`P(event, n)`) still wins over this.
@@ -99,6 +105,22 @@ pub enum Output {
     Plot(Rc<crate::introspect::Summary>),
 }
 
+/// One emitted output tagged with the **top-level statement** that produced it (PLAN-LITERATE §D5).
+/// `stmt_span` is many-to-one by design: a root `for` that prints five times yields five emissions
+/// sharing one `stmt_span`; a plotting function called from three root statements attributes each
+/// emission to its *call site's* root statement. The doc model interleaves emissions after the code
+/// block whose span contains their `stmt_span`.
+#[derive(Debug, Clone)]
+pub struct Emission {
+    pub stmt_span: Span,
+    pub output: Output,
+}
+
+/// The most output blocks a single run records (PLAN-LITERATE §D5). Past the cap the engine keeps
+/// running but stops recording and reports `truncated`, so a runaway loop can't melt a host with a
+/// 10⁴-block payload — and nothing is *silently* dropped.
+pub const MAX_EMISSIONS: usize = 200;
+
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
@@ -114,6 +136,9 @@ impl Engine {
             call_depth: 0,
             used: HashSet::new(),
             outputs: Vec::new(),
+            current_stmt_span: Span::new(0, 0),
+            dropped: 0,
+            first_dropped_span: None,
             max_samples: builtins::P_DEFAULT_N,
             max_opts: builtins::MAX_OPS_DEFAULT,
             check_mode: false,
@@ -127,21 +152,38 @@ impl Engine {
     /// Take the program's whole output stream so far (`Print` lines and `plot::*` charts, in source
     /// order), clearing the buffer. The CLI/REPL render it to the terminal; the WASM playground
     /// serializes it to show interleaved text and charts.
-    pub fn take_output(&mut self) -> Vec<Output> {
+    pub fn take_output(&mut self) -> Vec<Emission> {
         std::mem::take(&mut self.outputs)
     }
 
-    /// The text-only output so far (the concatenation of `Print` lines, charts omitted), without
-    /// clearing — a convenience for callers that only want the textual log (e.g. simple demos).
+    /// The text-only output so far (the concatenation of `Print`/`Note` lines, charts omitted),
+    /// without clearing — a convenience for callers that only want the textual log (e.g. simple demos).
     pub fn output_text(&self) -> String {
         let mut s = String::new();
         for item in &self.outputs {
-            if let Output::Text(line) = item {
-                s.push_str(line);
-                s.push('\n');
+            match &item.output {
+                Output::Text(line) | Output::Note { text: line, .. } => {
+                    s.push_str(line);
+                    s.push('\n');
+                }
+                Output::Plot(_) => {}
             }
         }
         s
+    }
+
+    /// Record an emission, stamped with the current top-level statement, enforcing the
+    /// [`MAX_EMISSIONS`] cap. Past the cap the output is dropped (counted, not recorded) so a
+    /// runaway loop keeps running without producing an unbounded payload.
+    fn emit(&mut self, output: Output) {
+        if self.outputs.len() >= MAX_EMISSIONS {
+            self.dropped += 1;
+            if self.first_dropped_span.is_none() {
+                self.first_dropped_span = Some(self.current_stmt_span);
+            }
+            return;
+        }
+        self.outputs.push(Emission { stmt_span: self.current_stmt_span, output });
     }
 
     /// Read-only access to the sample-DAG (tests assert it stays empty for deterministic
@@ -197,21 +239,29 @@ impl Engine {
     ) -> Result<Value> {
         // Fresh run-time counters for this program (the playground reads them after `run`).
         crate::stats::reset();
+        self.dropped = 0;
+        self.first_dropped_span = None;
         self.inject_knobs(src, overrides)?;
         let program = parse(src)?;
         let mut last = Value::Unit;
         for stmt in &program.stmts {
-            // A template at **root statement position** emits an `Output::Note` and yields unit —
-            // the `Print`-without-`Print` (PLAN-LITERATE §D3). Anywhere else it is a string value.
-            if let Expr::Template { parts, syntax } = &stmt.expr {
-                let text = self.render_template(parts)?;
-                self.outputs.push(Output::Note { text, syntax: syntax.clone() });
-                last = Value::Unit;
-            } else {
-                last = self.eval(stmt)?;
-            }
+            last = self.eval_top(stmt)?;
         }
         Ok(last)
+    }
+
+    /// Evaluate one **top-level** statement: stamp its span for emission attribution, and handle the
+    /// root-position template emit (PLAN-LITERATE §D3/§D5). Anywhere below the top level a template
+    /// is an ordinary string value (`eval`'s `Expr::Template` arm).
+    fn eval_top(&mut self, stmt: &Spanned) -> Result<Value> {
+        self.current_stmt_span = stmt.span;
+        if let Expr::Template { parts, syntax } = &stmt.expr {
+            let text = self.render_template(parts)?;
+            self.emit(Output::Note { text, syntax: syntax.clone() });
+            Ok(Value::Unit)
+        } else {
+            self.eval(stmt)
+        }
     }
 
     /// Bind each declared knob as a point-mass global. Called before statement 1 by
@@ -221,11 +271,21 @@ impl Engine {
         src: &str,
         overrides: &[(String, crate::frontmatter::KnobValue)],
     ) -> Result<()> {
+        let fm = crate::frontmatter::parse(src)?.map(|(fm, _span)| fm);
+        self.inject_knobs_fm(fm.as_ref(), overrides)
+    }
+
+    /// Bind knobs from an already-parsed frontmatter (so [`run_to_document`](Engine::run_to_document)
+    /// parses the fence once). `None` = no frontmatter, so any override is an error.
+    fn inject_knobs_fm(
+        &mut self,
+        fm: Option<&crate::frontmatter::Frontmatter>,
+        overrides: &[(String, crate::frontmatter::KnobValue)],
+    ) -> Result<()> {
         use crate::frontmatter::KnobValue;
-        let fm = match crate::frontmatter::parse(src)? {
-            Some((fm, _span)) => fm,
+        let fm = match fm {
+            Some(fm) => fm,
             None => {
-                // No frontmatter: any override has nothing to bind to → a clear error.
                 if let Some((name, _)) = overrides.first() {
                     return Err(NoiseError::runtime(
                         format!("override for unknown knob `{name}` (file declares no knobs)"),
@@ -254,6 +314,62 @@ impl Engine {
             self.vars.insert(knob.name.clone(), value);
         }
         Ok(())
+    }
+
+    /// Run a program and assemble the single [`Document`](crate::doc::Document) contract
+    /// (PLAN-LITERATE §D5) — meta + a flat, ordered block array (code / notes / plots) + the comment
+    /// layer + the result. Never returns `Err`: a lex/parse failure yields a best-effort document
+    /// (meta if the frontmatter parsed, empty blocks, spanned error); a runtime failure returns all
+    /// blocks emitted up to the failing statement, with the error spanned. Both hosts (CLI, wasm)
+    /// render *this*, so they can't drift.
+    pub fn run_to_document(
+        &mut self,
+        src: &str,
+        overrides: &[(String, crate::frontmatter::KnobValue)],
+    ) -> crate::doc::Document {
+        use crate::doc::Document;
+        crate::stats::reset();
+        self.dropped = 0;
+        self.first_dropped_span = None;
+
+        // Frontmatter first — a malformed fence still yields a shaped document (no meta, spanned error).
+        let fm = match crate::frontmatter::parse(src) {
+            Ok(fm) => fm.map(|(fm, _)| fm),
+            Err(e) => return Document::error_only(None, e, self.stats()),
+        };
+        if let Err(e) = self.inject_knobs_fm(fm.as_ref(), overrides) {
+            return Document::error_only(fm, e, self.stats());
+        }
+        let program = match parse(src) {
+            Ok(p) => p,
+            Err(e) => return Document::error_only(fm, e, self.stats()),
+        };
+
+        // Pure segmentation + comment attachment (no evaluation).
+        let segs = crate::doc::segment(src, &program.stmts);
+        let comments = match crate::doc::comment_layer(src, &program.stmts) {
+            Ok(c) => c,
+            // A trivia re-lex can only fail the same way `parse` already succeeded, but stay total.
+            Err(e) => return Document::error_only(fm, e, self.stats()),
+        };
+
+        // Evaluate, catching the first runtime error (the document still carries all prior blocks).
+        let mut last = Value::Unit;
+        let mut error: Option<NoiseError> = None;
+        for stmt in &program.stmts {
+            match self.eval_top(stmt) {
+                Ok(v) => last = v,
+                Err(e) => {
+                    error = Some(e);
+                    break;
+                }
+            }
+        }
+        let emissions = self.take_output();
+        let truncated = self.first_dropped_span.map(|span| (self.dropped, span));
+        crate::doc::assemble(
+            src, fm, segs, comments, emissions, last, error, self.stats(), truncated,
+        )
     }
 
     /// Convenience alias of [`Engine::run`]: the last statement's value is the RV.
@@ -404,7 +520,7 @@ impl Engine {
                         .map(|v| v.to_string())
                         .collect::<Vec<_>>()
                         .join(" ");
-                    self.outputs.push(Output::Text(line));
+                    self.emit(Output::Text(line));
                     Ok(Value::Unit)
                 } else {
                     builtins::call(base, &arg_vals, &self.graph, self.max_samples, self.max_opts, node.span, self.check_mode)
@@ -1557,7 +1673,7 @@ impl Engine {
         if base == "fan" {
             let summary = self.fan_summary(args, arg_vals, span)?;
             if let Value::Summary(s) = &summary {
-                self.outputs.push(Output::Plot(s.clone()));
+                self.emit(Output::Plot(s.clone()));
             }
             return Ok(Value::Unit);
         }
@@ -1577,7 +1693,7 @@ impl Engine {
         };
         let summary = self.introspect_call(inner, args, arg_vals, span)?;
         if let Value::Summary(s) = &summary {
-            self.outputs.push(Output::Plot(s.clone()));
+            self.emit(Output::Plot(s.clone()));
         }
         // A plot is captured into the output stream (rendered by the host), not a value to fold — it
         // yields unit like `Print`, and interleaves with `Print` lines in source order.

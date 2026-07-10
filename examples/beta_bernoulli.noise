@@ -11,16 +11,21 @@ next  ~ bernoulli(bias);      # an 11th flip from the same coin (for the predict
 heads = count(flips);         # how many of the 10 came up heads
 
 # Before any data, the bias averages 1/2 — that's just the prior.
-Print("prior mean bias            =", E(bias), "(0.5)");
+```latex
+E[\text{bias}] = ${E(bias)} \quad (0.5)
+```
 
 # Now CONDITION on what we saw (7 heads). `| heads == 7` keeps the worlds matching the data;
 # the posterior mean of a flat prior after h of n heads is (h+1)/(n+2) = 8/12 = 0.6667.
-Print("posterior mean bias | 7/10 =", E(bias | heads == 7),        "(0.6667)");
-Print("posterior 90% interval     =",
-  Q(bias | heads == 7, 0.05), "..", Q(bias | heads == 7, 0.95));
+```latex
+E[\text{bias} \mid 7/10] = ${E(bias | heads == 7)} \quad (0.6667)
+\text{90\% interval} = [\, ${Q(bias | heads == 7, 0.05)},\ ${Q(bias | heads == 7, 0.95)} \,]
+```
 
 # The posterior PREDICTIVE: how likely is the NEXT flip heads, given the data? Same 8/12.
-Print("P(next flip heads | 7/10)  =", P(next | heads == 7),        "(0.6667)");
+```latex
+P(\text{next flip heads} \mid 7/10) = ${P(next | heads == 7)} \quad (0.6667)
+```
 
 # Before any flips, every bias is equally likely — the prior is flat.
 plot::histogram(bias);

@@ -1,16 +1,24 @@
-# A 1-D preview of QJL's unbiased inner-product identity (TurboQuant, Lemma 4) — the building
-# block of TurboQuant_prod. For a standard normal s and unit scalars x = y = 1:
-#   E[ sqrt(pi/2) * s * sign(s) ] = sqrt(pi/2) * E|s| = sqrt(pi/2) * sqrt(2/pi) = 1 = <y, x>.
-# So the 1-bit sign quantizer, rescaled by sqrt(pi/2), is an UNBIASED estimator. analytic: 1.0.
-# Exercises: normal, E / var, sqrt, the `pi` constant, a user function, and lifted `if`.
+---
+title: "QJL in 1-D"
+abstract: >
+  A scalar warm-up for the TurboQuant capstone: a sign-based 1-bit sketch, rescaled
+  by √(π/2), recovers an inner product without bias. Uses normal, E/Var, sqrt and
+  pi — the primitives the d-dimensional version scales up.
+tags: [research, continuous]
+extra:
+  blurb: "An unbiased 1-bit quantizer (TurboQuant building block)."
+  category: "Functions & research"
+---
 use rand;   # normal
 use math;   # sqrt, pi
 
 sign(t) = if t > 0 { 1 } else { -1 };
 s ~ normal(0, 1);
 estimate = sqrt(pi / 2) * s * sign(s);          # = sqrt(pi/2) * |s|
-Print("E[QJL 1-D estimate] =", E(estimate), "(unbiased target = 1.0)");
-Print("Var[estimate]       =", Var(estimate));
+```latex
+E[\text{QJL 1-D estimate}] = ${E(estimate)} \qquad (\text{unbiased target} = 1.0)
+\mathrm{Var}[\text{estimate}] = ${Var(estimate)}
+```
 
 # The 1-bit estimate should sit on 1.0 — show it with its confidence interval.
 plot::value(E(estimate))

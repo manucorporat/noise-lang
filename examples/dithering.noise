@@ -8,19 +8,25 @@ engine::set_max_samples(200000);   # Monte Carlo budget for every E() below — 
 # A 1-bit quantizer reports only the SIGN (+1 / -1) of its input. Ask it about a fixed level v and
 # it's useless: it answers "+1" for any positive v, telling you nothing about HOW big v is.
 v = 0.3;
-Print("no dither: E[sign(v)]     =", E(sign(v)), " (stuck at +1 — says nothing about v =", v, ")");
+```md
+no dither: E[sign(v)] = **${E(sign(v))}** (stuck at +1 — says nothing about v = ${v})
+```
 
 # Now add uniform dither in [-1, 1] BEFORE the comparator and average many comparisons. The noise
 # randomizes the threshold crossing so that, for |v| < 1, E[sign(v + u)] = v EXACTLY: the average
 # of the 1-bit answers reconstructs the analog level. One noisy bit, repeated, becomes a ruler.
 u ~ unif(-1, 1);
-Print("dithered:  E[sign(v + u)] =", E(sign(v + u)), " (recovers v =", v, ")");
+```md
+dithered: E[sign(v + u)] = **${E(sign(v + u))}** (recovers v = ${v})
+```
 
 # And it's not a fluke for one value — the response is LINEAR. Each level comes back on the nose.
-Print("linearity check (dithered average should equal the input):");
-Print("  v = -0.5 ->", E(sign(-0.5 + u)));
-Print("  v =  0.0 ->", E(sign( 0.0 + u)));
-Print("  v =  0.8 ->", E(sign( 0.8 + u)));
+```md
+linearity check (dithered average should equal the input):
+v = -0.5 -> **${E(sign(-0.5 + u))}**
+v =  0.0 -> **${E(sign( 0.0 + u))}**
+v =  0.8 -> **${E(sign( 0.8 + u))}**
+```
 
 # Sweep the input from -1 to +1 and plot the dithered 1-bit average at each level: a clean straight
 # ramp, proof that the noisy comparator reconstructs the analog value linearly.

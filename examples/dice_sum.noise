@@ -1,12 +1,25 @@
-# Roll two dice and add them up. How often is the total exactly 7?
-# 7 is the most likely total: there are 6 ways to make it (1+6, 2+5, ...) out of 36, so 1/6.
+---
+title: "Two dice"
+abstract: >
+  The one rule that surprises everyone: a name bound with ~ is one fixed draw, so
+  Dice + Dice would be 2·Dice (one die doubled), not two dice. Real independence
+  comes from separate draws — here ~[2] unif_int(1,6) makes two independent dice,
+  and sum(...) adds them. P(sum == 7) ≈ 1/6.
+tags: [independence, collections]
+extra:
+  blurb: "Independence is a separate ~ draw, not a repeated name."
+  category: "Basics"
+  analytic: "1/6 ≈ 0.1667"
+---
 use rand;   # unif_int
 
 # Roll one fair die twice independently and add the rolls; ask how often the total is 7.
 die   = unif_int(1, 6);
 dice  ~[2] die;
 total = vec::sum(dice);
-Print("P(two dice sum to 7) =", P(total == 7))
+```latex
+P(\text{two dice sum to } 7) = ${P(total == 7)}
+```
 
 # The total piles up in a triangle: 7 is the tallest bar, 2 and 12 the shortest.
 plot::histogram(total)

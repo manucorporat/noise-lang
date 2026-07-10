@@ -190,17 +190,41 @@ fn run_file(path: &str, knobs: &[(String, KnobValue)]) {
         }
     };
     let mut engine = Engine::new();
-    let result = engine.run_with_knobs(&src, knobs);
-    // Render the output stream in source order: `Print` lines and `plot::*` charts (as their
-    // one-line text cards), interleaved exactly as the program emitted them, then the final value.
-    print_output(engine.take_output());
-    match result {
-        // Don't echo a trailing `unit` (e.g. when the program ends in `print(...)`).
-        Ok(noise_core::Value::Unit) => {}
-        Ok(value) => println!("{value}"),
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
+    let doc = engine.run_to_document(&src, knobs);
+    // Render the one `Document`: notes as text and plots as their one-line text cards, in emission
+    // order, then the final value (or the error). The CLI is just another renderer of the same
+    // structure the playground uses (PLAN-LITERATE §D5).
+    let errored = render_document(&doc);
+    if errored {
+        std::process::exit(1);
+    }
+}
+
+/// Render a `Document` to the terminal: emitted notes/plots in order, then the final value or the
+/// error. Code blocks are the input file, so they're not re-printed. Returns whether the run errored.
+fn render_document(doc: &noise_core::doc::Document) -> bool {
+    use noise_core::doc::Block;
+    for block in &doc.blocks {
+        match block {
+            Block::Code { .. } => {}
+            Block::Note { text, .. } => println!("{text}"),
+            Block::Plot { text, .. } => println!("{text}"),
+        }
+    }
+    if let Some(t) = &doc.result.truncated {
+        println!("… {} more emissions not shown (output capped)", t.dropped);
+    }
+    match &doc.result.error {
+        Some(e) => {
+            eprintln!("{}", e.message);
+            true
+        }
+        None => {
+            // Don't echo a trailing `unit` (e.g. when the program ends in `plot(...)`).
+            if let Some(v) = &doc.result.value {
+                println!("{}", v.text);
+            }
+            false
         }
     }
 }
@@ -252,25 +276,8 @@ fn repl() {
         if line.is_empty() {
             continue;
         }
-        let result = engine.run(line);
-        print_output(engine.take_output());
-        match result {
-            Ok(noise_core::Value::Unit) => {}
-            Ok(value) => println!("{value}"),
-            Err(e) => eprintln!("{e}"),
-        }
+        let doc = engine.run_to_document(line, &[]);
+        render_document(&doc);
     }
 }
 
-/// Render a program's output stream to stdout in source order — `Print` lines as text and `plot::*`
-/// charts as the one-line text card their `Display` builds (`crate` has no chart code; the picture
-/// is a host's job, from the Flint specs `noise_core::flint` emits), interleaved exactly as emitted.
-fn print_output(items: Vec<noise_core::Output>) {
-    for item in items {
-        match item {
-            noise_core::Output::Text(line) => println!("{line}"),
-            noise_core::Output::Note { text, .. } => println!("{text}"),
-            noise_core::Output::Plot(plot) => println!("{plot}"),
-        }
-    }
-}

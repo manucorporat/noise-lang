@@ -16,11 +16,17 @@ play(rounds) = {
   payout
 };
 
-Print("Expected payout keeps growing as you allow more rounds (E ~ number of rounds):");
-Print("  up to  4 rounds:", E(play(4)),  " (~ 4)");
-Print("  up to  8 rounds:", E(play(8)),  " (~ 8)");
-Print("  up to 12 rounds:", E(play(12)), " (~ 12)");
+```md
+Expected payout keeps growing as you allow more rounds (E ~ number of rounds):
+```
+```latex
+E[\text{payout up to 4 rounds}] = ${E(play(4))} \quad (\approx 4)
+E[\text{payout up to 8 rounds}] = ${E(play(8))} \quad (\approx 8)
+E[\text{payout up to 12 rounds}] = ${E(play(12))} \quad (\approx 12)
+```
 # The mean hides in rare jackpots — the histogram shows that long, heavy tail.
 plot::histogram(play(8));
-Print("Each extra round adds about $1 of expected value forever, so no finite price is fair.");
-Print("(The mean lives in ever-rarer jackpots, so longer games need exponentially more samples.)")
+```md
+Each extra round adds about $1 of expected value forever, so no finite price is fair.
+(The mean lives in ever-rarer jackpots, so longer games need exponentially more samples.)
+```

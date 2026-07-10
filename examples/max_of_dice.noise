@@ -1,12 +1,24 @@
-# Roll two dice and keep the higher one; how often is that higher die a 6?
-# It's a 6 unless BOTH dice miss: 1 - (5/6)^2 = 11/36 = 0.3056.  (the max is a lifted `if`)
+---
+title: "Max of two dice"
+abstract: >
+  if cond { a } else { b } over a random condition is not control flow — it is a
+  per-sample select that builds a new random variable. That gives you max/min/abs
+  over distributions for free. Here P(higher of 2d6 == 6) ≈ 11/36.
+tags: [lifted if]
+extra:
+  blurb: "max over random variables via a lifted if."
+  category: "Games & risk"
+  analytic: "11/36 ≈ 0.3056"
+---
 use rand;
 
 A ~ unif_int(1, 6);
 B ~ unif_int(1, 6);
 higher = if A > B { A } else { B };
 p = P(higher == 6);
-Print("P(higher of 2d6 is a 6) =", p)
+```md
+The chance the higher of 2d6 is a 6 is **${p}**.
+```
 
 # Keeping the bigger die skews things high: 6 is by far the most common result.
 plot::histogram(higher)

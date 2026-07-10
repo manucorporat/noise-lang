@@ -40,4 +40,6 @@ plot::histogram(all_win);
 
 # Heavier than most examples: a random box index is a per-lane gather, which runs on the
 # interpreter, so we use a smaller sample budget here.
-Print("P(all 100 prisoners go free) =", P(all_win), " (analytic ~0.3118)")
+```md
+P(all 100 prisoners go free) = **${P(all_win)}** (analytic ~0.3118)
+```
