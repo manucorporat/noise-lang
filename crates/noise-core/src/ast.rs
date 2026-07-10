@@ -40,6 +40,12 @@ pub enum UnOp {
     // both have a floor/ceil instruction; the interpreter uses `f64::floor`/`ceil`).
     Floor,
     Ceil,
+    // Real exponential / natural log ufuncs (`math::exp`/`math::log`, PLAN-FINANCE F1) — the
+    // lognormal/Kelly unlock. `Exp` lowers to a `pow(e, x)` call in both code generators (no new
+    // polynomial); `Ln` reuses the inlined `approx::ln` polynomial behind a full-domain guard
+    // (x > 0 → poly, 0 → -inf, < 0 → NaN, ±inf/NaN propagate) so it matches `f64::ln` semantics.
+    Exp,
+    Ln,
 }
 
 /// `=` binds a deterministic value; `~` binds a random variable / distribution.

@@ -169,6 +169,34 @@ pub fn grid_moments(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec
         .collect()
 }
 
+/// Raw per-element draws of a whole set of roots in ONE joint pass — the forcing path behind a fan
+/// chart (per-index *quantiles* need the full sample column, not just `Σx`/`Σx²`). `roots` are the
+/// element RVs of a path; every lane draws them jointly ([`compile_roots`]), so column `j` holds the
+/// `n` lane-aligned draws of `roots[j]` — the bands a caller derives are consistent across the
+/// index. Memory is `k×n` f64s; the caller budgets `n` accordingly.
+pub fn grid_draws(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<Vec<f64>> {
+    let k = roots.len();
+    if k == 0 || n == 0 {
+        return vec![Vec::new(); k];
+    }
+    let (prog, regs) = compile_roots(graph, roots);
+    let idx: Vec<usize> = regs.iter().map(|&r| r as usize).collect();
+    let mut cols: Vec<Vec<f64>> = (0..k).map(|_| Vec::with_capacity(n)).collect();
+    let mut buf: Vec<Box<[f64]>> =
+        (0..prog.n_regs).map(|_| vec![0.0f64; BATCH].into_boxed_slice()).collect();
+    let mut rng = Rng::seed_from_u64(seed);
+    let mut remaining = n;
+    while remaining > 0 {
+        run_batch(&prog, &mut buf, &mut rng);
+        let take = remaining.min(BATCH);
+        for j in 0..k {
+            cols[j].extend_from_slice(&buf[idx[j]][..take]);
+        }
+        remaining -= take;
+    }
+    cols
+}
+
 /// The full `k×k` correlation matrix over a set of roots in ONE joint pass — the forcing path behind
 /// the element-vs-element heatmap (`corr` of a vector). Accumulates per-element `Σx`/`Σx²` and the
 /// pairwise `Σxᵢxⱼ`, then forms Pearson correlations. Row-major `k*k`; the diagonal is 1 (a constant

@@ -546,6 +546,29 @@ fn emit_unary(s: &mut InstructionSink, ctx: &Ctx, op: UnOp, a: u32) {
         UnOp::Ceil => {
             s.local_get(a).f64_ceil();
         }
+        UnOp::Ln => {
+            // Full-domain ln: the inlined poly (positive finite inputs only) behind guards that
+            // match `f64::ln` — x > 0 → poly, 0 → -inf, negative/NaN → NaN, +inf → +inf (the
+            // poly's exponent bit-surgery would misread ±inf/NaN/negatives). Mirrors
+            // `jit::emit_ln_guarded`.
+            s.local_get(a);
+            emit_ln(s, ctx); // stack: poly
+            // non_pos = (a == 0) ? -inf : NaN
+            s.f64_const(f64c(f64::NEG_INFINITY)).f64_const(f64c(f64::NAN));
+            s.local_get(a).f64_const(f64c(0.0)).f64_eq();
+            s.select(); // stack: poly, non_pos
+            // r = (a > 0) ? poly : non_pos
+            s.local_get(a).f64_const(f64c(0.0)).f64_gt();
+            s.select(); // stack: r
+            // (a != +inf) ? r : +inf — patch the poly's mangled +inf back.
+            s.f64_const(f64c(f64::INFINITY));
+            s.local_get(a).f64_const(f64c(f64::INFINITY)).f64_ne();
+            s.select();
+        }
+        UnOp::Exp => {
+            // e^x as pow(e, x) — reuses the existing `pow` import (no new polynomial).
+            s.f64_const(f64c(std::f64::consts::E)).local_get(a).call(POW);
+        }
         UnOp::Sign => {
             // (a > 0) - (a < 0): -1 / 0 / +1, exactly 0 at 0 (matches `apply_un`, unlike signum).
             s.local_get(a).f64_const(f64c(0.0)).f64_gt().f64_convert_i32_u();
@@ -731,6 +754,22 @@ mod tests {
         assert_wasm_matches_interp("use rand; X ~ unif(-5,5); X % 4", 20);
         assert_wasm_matches_interp("use rand; use math; X ~ unif(-3,3); math::floor(X)", 21);
         assert_wasm_matches_interp("use rand; use math; X ~ unif(-3,3); math::ceil(X)", 22);
+    }
+
+    #[test]
+    fn wasm_exp_ln_match_interp() {
+        // exp lowers to the imported pow(e, x): E[e^X] over N(0,1) = e^0.5 (the lognormal mean).
+        assert_wasm_matches_interp("use rand; use math; X ~ normal(0,1); exp(X)", 23);
+        assert_wasm_matches_interp("use rand; use math; X ~ unif(-1,1); exp(X)", 24);
+        // ln of a strictly positive draw hits the inlined poly (guard's x > 0 arm only).
+        assert_wasm_matches_interp("use rand; use math; X ~ unif(0.5, 3); log(X)", 25);
+        // Domain guard, negative lanes: log(x<0) is NaN and NaN == NaN is false, so the indicator
+        // mean is P(X > 0) = 0.6 — matching the interpreter's f64::ln lane-for-lane.
+        assert_wasm_matches_interp("use rand; use math; X ~ unif(-2, 3); log(X) == log(X)", 26);
+        // Domain guard, zero lanes: log(0) = -inf < -100, P = 1/5 over unif_int(0,4).
+        assert_wasm_matches_interp("use rand; use math; X ~ unif_int(0, 4); log(X) < 0 - 100", 27);
+        // Domain guard, +inf: X/0 = +inf per lane; log(+inf) = +inf > 100 surely.
+        assert_wasm_matches_interp("use rand; use math; X ~ unif(1, 2); log(X / 0) > 100", 28);
     }
 
     #[test]

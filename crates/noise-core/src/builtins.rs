@@ -196,14 +196,7 @@ pub fn call(
             }
             Ok(Value::Num(x.sqrt()))
         }
-        "log" | "log10" => {
-            // Natural / base-10 logarithm. Domain x > 0 (log of 0 or negative is undefined).
-            let x = one_num(name, arg_vals, span)?;
-            if x <= 0.0 {
-                return Err(NoiseError::runtime(format!("{name} needs x > 0, got {x}"), span));
-            }
-            Ok(Value::Num(if name == "log" { x.ln() } else { x.log10() }))
-        }
+        // `log`/`log10` are handled in `eval::lib_call` (they lift over RVs and need `&mut` graph).
         "gcd" => {
             // Greatest common divisor (Euclid), defined on integers via |a|, |b|; gcd(0, 0) = 0.
             // Deterministic integer op (a `Dist` argument errors in `as_num`).

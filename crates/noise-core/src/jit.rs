@@ -628,6 +628,26 @@ fn emit_pow(fb: &mut FunctionBuilder, base: Value, k: u32) -> Value {
     acc
 }
 
+/// Full-domain `ln(x)` — the inlined [`emit_ln`] polynomial (positive finite inputs only) wrapped
+/// in the guards that make it agree with `f64::ln` everywhere the *user* can steer an RV:
+/// `x > 0` → poly, `x == 0` → `-inf`, `x < 0` / NaN → NaN, `+inf` → `+inf`. (The raw poly is only
+/// ever fed positive uniforms by the draw kernels, so they keep calling it unguarded.)
+fn emit_ln_guarded(fb: &mut FunctionBuilder, a: Value) -> Value {
+    let poly = emit_ln(fb, a);
+    let zero = fb.ins().f64const(0.0);
+    let neg_inf = fb.ins().f64const(f64::NEG_INFINITY);
+    let nan = fb.ins().f64const(f64::NAN);
+    // Non-positive lanes: 0 → -inf; negative or NaN input → NaN.
+    let is_zero = fb.ins().fcmp(FloatCC::Equal, a, zero);
+    let non_pos = fb.ins().select(is_zero, neg_inf, nan);
+    let is_pos = fb.ins().fcmp(FloatCC::GreaterThan, a, zero);
+    let r = fb.ins().select(is_pos, poly, non_pos);
+    // The poly mangles +inf (exponent bit-surgery reads it as 2^1024) — patch it back to +inf.
+    let inf = fb.ins().f64const(f64::INFINITY);
+    let is_inf = fb.ins().fcmp(FloatCC::Equal, a, inf);
+    fb.ins().select(is_inf, inf, r)
+}
+
 fn emit_unary(fb: &mut FunctionBuilder, math: &MathRefs, op: UnOp, a: Value) -> Value {
     match op {
         UnOp::Neg => fb.ins().fneg(a),
@@ -643,6 +663,13 @@ fn emit_unary(fb: &mut FunctionBuilder, math: &MathRefs, op: UnOp, a: Value) -> 
         UnOp::Round => call1(fb, math.round, a),
         UnOp::Floor => fb.ins().floor(a),
         UnOp::Ceil => fb.ins().ceil(a),
+        UnOp::Ln => emit_ln_guarded(fb, a),
+        UnOp::Exp => {
+            // e^x as pow(e, x) — reuses the existing `pow` libcall (no new polynomial); handles
+            // the whole domain (pow(e, -inf) = 0, pow(e, inf) = inf, NaN propagates).
+            let e = fb.ins().f64const(std::f64::consts::E);
+            call2(fb, math.pow, e, a)
+        }
         UnOp::Sign => {
             // -1 / 0 / +1 as (a > 0) - (a < 0), matching `apply_un` (0 exactly at 0, unlike signum).
             let zero = fb.ins().f64const(0.0);
@@ -787,6 +814,24 @@ mod tests {
         assert_jit_matches_interp("use rand; use math; X ~ unif(-3,3); math::ceil(X)", 16);
         // floored modulo of a negative dividend: a − b·floor(a/b) (composed op chain)
         assert_jit_matches_interp("use rand; use math; X ~ unif(0,8); math::floor(X) % 3", 17);
+    }
+
+    #[test]
+    fn jit_exp_ln_match_interp() {
+        // exp lowers to pow(e, x): E[e^X] over N(0,1) = e^0.5 (the lognormal mean).
+        assert_jit_matches_interp("use rand; use math; X ~ normal(0,1); exp(X)", 18);
+        assert_jit_matches_interp("use rand; use math; X ~ unif(-1,1); exp(X)", 19);
+        // ln of a strictly positive draw hits the inlined poly (E[ln U(0.5,3)] via the guard's
+        // x > 0 arm only).
+        assert_jit_matches_interp("use rand; use math; X ~ unif(0.5, 3); log(X)", 20);
+        // Domain guard, negative lanes: log(x<0) is NaN and NaN == NaN is false, so the indicator
+        // mean is P(X > 0) = 0.6 — matching the interpreter's f64::ln semantics lane-for-lane.
+        assert_jit_matches_interp("use rand; use math; X ~ unif(-2, 3); log(X) == log(X)", 21);
+        // Domain guard, zero lanes: log(0) = -inf < -100, P = 1/5 over unif_int(0,4) (an
+        // indicator, so the mean stays finite and comparable).
+        assert_jit_matches_interp("use rand; use math; X ~ unif_int(0, 4); log(X) < 0 - 100", 22);
+        // Domain guard, +inf: X/0 = +inf per lane; log(+inf) = +inf > 100 surely.
+        assert_jit_matches_interp("use rand; use math; X ~ unif(1, 2); log(X / 0) > 100", 23);
     }
 
     /// The default kernel must actually interleave `STREAMS` RNG streams (not silently build a

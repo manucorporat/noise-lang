@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use crate::ast::*;
 use crate::builtins;
-use crate::dist::{DistArg, Recipe, RvGraph, RvId, RvKind, RvNode, Source, Uniform};
+use crate::dist::{DataId, DistArg, Recipe, RvGraph, RvId, RvKind, RvNode, Source, Uniform};
 use crate::error::{NoiseError, Result, Span};
 use crate::parser::parse;
 use crate::sampler::{self, Moments};
@@ -78,6 +78,10 @@ pub struct Engine {
     /// [`builtins::RESOLUTION_DEFAULT`]): the length at which reducers render a lazy signal that
     /// never met an explicit length — the time-axis twin of `max_samples`.
     resolution: usize,
+    /// Constant data arrays interned by the bootstrap constructors (`rand::empirical` /
+    /// `rand::block_bootstrap`), referenced by [`DataId`] so the recipes stay `Copy`.
+    /// Append-only, like the graph.
+    datasets: Vec<Rc<Vec<f64>>>,
 }
 
 /// One item in a program's output stream — the unit `take_output` returns, in source order. `Print`
@@ -112,6 +116,7 @@ impl Engine {
             realizations: HashMap::new(),
             next_realization: 0,
             resolution: builtins::RESOLUTION_DEFAULT,
+            datasets: Vec::new(),
         }
     }
 
@@ -779,6 +784,12 @@ impl Engine {
         if let Recipe::Permutation { n } = r {
             return self.draw_permutation(n);
         }
+        if let Recipe::Empirical { data } = r {
+            return Ok(self.draw_empirical(data));
+        }
+        if let Recipe::BlockBootstrap { data, block_len } = r {
+            return Ok(self.draw_block_bootstrap(data, block_len));
+        }
         // A complex draw yields a `Value::Complex` (two independent real channels), not a scalar id.
         if let Recipe::NormalComplex { sigma } = r {
             let s = sigma / std::f64::consts::SQRT_2;
@@ -870,6 +881,10 @@ impl Engine {
             // Handled above with an early return (they yield arrays/complex, not a scalar `id`).
             Recipe::Rotation { .. } => unreachable!("rotation drawn via draw_rotation"),
             Recipe::Permutation { .. } => unreachable!("permutation drawn via draw_permutation"),
+            Recipe::Empirical { .. } => unreachable!("empirical drawn via draw_empirical"),
+            Recipe::BlockBootstrap { .. } => {
+                unreachable!("block_bootstrap drawn via draw_block_bootstrap")
+            }
             Recipe::NormalComplex { .. } => unreachable!("normal_complex drawn via the complex path"),
         };
         Ok(Value::Dist(id))
@@ -915,7 +930,7 @@ impl Engine {
             }
             // Math ufuncs need a numeric RV and yield a numeric RV.
             UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Sign | UnOp::Round | UnOp::Floor
-            | UnOp::Ceil => {
+            | UnOp::Ceil | UnOp::Exp | UnOp::Ln => {
                 if kind != RvKind::Num {
                     return Err(NoiseError::runtime(
                         format!("cannot apply {} to {}", unop_name(op), kind.type_name()),
@@ -1425,6 +1440,15 @@ impl Engine {
     /// `histogram`/`hist` (a distribution), `line`/`heatmap`/`value`/`show` (polymorphic `describe`
     /// of a vector/matrix/scalar), `scatter`, `corr` (pair or element-matrix), `explain`, `samples`.
     fn plot_call(&mut self, base: &str, args: &[Spanned], arg_vals: &[Value], span: Span) -> Result<Value> {
+        // `fan` has no scalar-introspection counterpart (it's a whole-path quantile chart), so it
+        // dispatches to its own summary builder rather than the `introspect_call` core.
+        if base == "fan" {
+            let summary = self.fan_summary(args, arg_vals, span)?;
+            if let Value::Summary(s) = &summary {
+                self.outputs.push(Output::Plot(s.clone()));
+            }
+            return Ok(Value::Unit);
+        }
         let inner = match base {
             "histogram" | "hist" => "hist",
             "line" | "heatmap" | "value" | "show" | "dist" | "describe" => "describe",
@@ -1434,7 +1458,7 @@ impl Engine {
             "samples" => "samples",
             other => {
                 return Err(NoiseError::runtime(
-                    format!("unknown plot 'plot::{other}' (try histogram, line, heatmap, scatter, corr, explain, value)"),
+                    format!("unknown plot 'plot::{other}' (try histogram, line, heatmap, fan, scatter, corr, explain, value)"),
                     span,
                 ))
             }
@@ -1446,6 +1470,58 @@ impl Engine {
         // A plot is captured into the output stream (rendered by the host), not a value to fold — it
         // yields unit like `Print`, and interleaves with `Print` lines in source order.
         Ok(Value::Unit)
+    }
+
+    /// `plot::fan(path)` — the cone chart: per-index quantile bands (q05/q25/q50/q75/q95) of a
+    /// vector of random variables, sampled **jointly** in one pass (shared lanes,
+    /// [`crate::introspect::fan`]) so the bands are consistent across the index. Restricted to a
+    /// vector — a path. A deterministic numeric array is the degenerate fan (every band equals the
+    /// values); a scalar or matrix is a friendly spanned error.
+    fn fan_summary(&mut self, args: &[Spanned], arg_vals: &[Value], span: Span) -> Result<Value> {
+        use crate::introspect::{fan, FanChart, Payload, Summary, View, INTROSPECT_N, INTROSPECT_SEED};
+        const FAN_MAX: usize = 1024;
+        if arg_vals.len() != 1 {
+            return Err(NoiseError::runtime(
+                format!("plot::fan expects 1 argument (a path — an array of random values), got {}", arg_vals.len()),
+                span,
+            ));
+        }
+        let not_a_path = || {
+            NoiseError::runtime("plot::fan wants a vector — a path of random values".to_string(), span)
+        };
+        let xs = match &arg_vals[0] {
+            Value::Array(xs) => xs.clone(),
+            _ => return Err(not_a_path()),
+        };
+        if xs.iter().any(|x| matches!(x, Value::Array(_))) {
+            return Err(not_a_path()); // a matrix (nested rows) has no single index to fan over
+        }
+        if xs.len() > FAN_MAX {
+            return Err(NoiseError::runtime(
+                format!("fan chart supports up to {FAN_MAX} elements, got {} — slice the path first", xs.len()),
+                span,
+            ));
+        }
+        let label = label_of(&args[0]);
+        let roots = self.vector_roots(&xs, span)?;
+        let wrap = |c| {
+            Value::Summary(Rc::new(Summary { view: View::Fan, label, label_b: None, payload: Payload::Fan(c) }))
+        };
+        if self.check_mode {
+            return Ok(wrap(FanChart {
+                cols: roots.len(),
+                n: 0,
+                q05: vec![],
+                q25: vec![],
+                q50: vec![],
+                q75: vec![],
+                q95: vec![],
+                mean: vec![],
+            }));
+        }
+        // The introspection budget, further clamped inside `fan` to its cols×n memory cap.
+        let n = self.max_samples.min(INTROSPECT_N);
+        Ok(wrap(fan(&self.graph, &roots, n, INTROSPECT_SEED)))
     }
 
     /// Evaluate a prefix unary op (`-x` / `!x` / the math ufuncs). A conditioned operand pushes the
@@ -1858,17 +1934,14 @@ impl Engine {
     }
 
     /// One deferred unary step applied to a materialized element: a constant folds with the same
-    /// kernel the deterministic walk uses; an RV lifts (`exp` of an RV is rejected exactly like
-    /// `math::exp` of one — the VM has no exp node).
+    /// kernel the deterministic walk uses; an RV lifts (a deferred `exp` over a noisy lane lifts
+    /// to the same `UnOp::Exp` node `math::exp` of an RV builds).
     fn sig_unary(&mut self, op: SigUnOp, x: Value, span: Span) -> Result<Value> {
         match (op, x) {
             (op, Value::Num(v)) => Ok(Value::Num(crate::signal::apply_unary(op, v))),
             (op, Value::Est { val, .. }) => Ok(Value::Num(crate::signal::apply_unary(op, val))),
             (SigUnOp::Un(u), x @ Value::Dist(_)) => self.lift_unary(u, x, span),
-            (SigUnOp::Exp, Value::Dist(_)) => Err(NoiseError::runtime(
-                "math::exp of a random real value is not supported (the VM has no exp node); exp of a complex angle e^{i·θ} works because it lowers to cos/sin".to_string(),
-                span,
-            )),
+            (SigUnOp::Exp, x @ Value::Dist(_)) => self.lift_unary(UnOp::Exp, x, span),
             (_, other) => Err(NoiseError::runtime(
                 format!("cannot apply a signal op to {}", other.type_name()),
                 span,
@@ -2074,6 +2147,10 @@ impl Engine {
             "sample" => self.lib_sample(args, span),
             "quantize" => self.lib_quantize(args, span),
             "sum" => self.lib_sum(args, span),
+            "prod" => self.lib_prod(args, span),
+            // prefix scans (PLAN-FINANCE F3): array in → same-length array of running reductions.
+            "cumsum" | "cumprod" => self.lib_cum_fold(name, args, span),
+            "cummax" | "cummin" => self.lib_cum_extreme(name, args, span),
             "count" => self.lib_count(args, span),
             "any" => self.lib_any(args, span),
             "all" => self.lib_all(args, span),
@@ -2094,11 +2171,17 @@ impl Engine {
             "cos" => self.lib_ufunc(UnOp::Cos, args, span),
             "atan" => self.lib_ufunc(UnOp::Atan, args, span),
             "sign" => self.lib_ufunc(UnOp::Sign, args, span),
+            // RV-aware logarithms (PLAN-FINANCE F1) — intercepted here (not `builtins.rs`)
+            // because the Dist path builds `UnOp::Ln` graph nodes.
+            "log" => self.lib_log("log", args, span),
+            "log10" => self.lib_log("log10", args, span),
             // complex-aware math ufuncs (PLAN-COMPLEX §4) + the real rounding family (§8).
             "exp" | "abs" | "sqrt" | "arg" | "conj" | "re" | "im" | "floor" | "ceil" => {
                 self.math_ufunc(name, args, span)
             }
             "categorical" => self.lib_categorical(args, span),
+            "empirical" => self.lib_empirical(args, span),
+            "block_bootstrap" => self.lib_block_bootstrap(args, span),
             "noise_white" => self.lib_noise(NoiseKind::White, args, span),
             "noise_white_complex" => self.lib_noise(NoiseKind::WhiteComplex, args, span),
             "noise_brown" => self.lib_noise(NoiseKind::Brown, args, span),
@@ -2362,6 +2445,71 @@ impl Engine {
         Ok(Value::Array(Rc::new(out)))
     }
 
+    /// Draw an `empirical(xs)` recipe (the iid bootstrap, PLAN-FINANCE F2): one fresh
+    /// `unif_int(0, n-1)` index source, gathered over the constant data elements — exactly the
+    /// manual idiom `i ~ unif_int(0, Len(xs)-1); xs[i]`. Each `~` (and each leaf of a shaped
+    /// `~[n]` draw) builds a fresh index, so repeated draws resample independently. Gather is
+    /// interpreter-only (`kernel::walk_cost`) — accepted for bootstrap workloads.
+    fn draw_empirical(&mut self, data: DataId) -> Value {
+        let xs = self.datasets[data.0 as usize].clone();
+        let hi = (xs.len() - 1) as f64; // non-empty by construction (`bootstrap_data`)
+        let index =
+            self.graph.push(RvNode::Src(Source::UniformInt { lo: 0.0, hi }), RvKind::Num);
+        let elems = self.const_elems(&xs);
+        Value::Dist(self.graph.push(RvNode::Gather { elems, index }, RvKind::Num))
+    }
+
+    /// Draw a `block_bootstrap(xs, b)` recipe: a length-`n` series assembled from `⌈n/b⌉` random
+    /// contiguous blocks of the data (the moving-block bootstrap). Element `j` is
+    /// `xs[start_{⌊j/b⌋} + (j mod b)]` with each block start an independent `unif_int(0, n-b)` —
+    /// non-wrapping, so every block is a real run from the history and within-block
+    /// autocorrelation survives; the last block truncates when `b ∤ n`. Like `Permutation` this
+    /// is a *structured* draw: it returns a whole `Value::Array` of RV elements. With `b == n`
+    /// the only start is 0 (the series is the data); with `b == 1` it degenerates to `n` iid
+    /// `empirical` draws.
+    fn draw_block_bootstrap(&mut self, data: DataId, b: usize) -> Value {
+        let xs = self.datasets[data.0 as usize].clone();
+        let n = xs.len();
+        let elems = self.const_elems(&xs);
+        // One independent start per block, uniform over the valid (non-wrapping) positions.
+        let start_hi = (n - b) as f64; // 1 <= b <= n by construction (`lib_block_bootstrap`)
+        let starts: Vec<RvId> = (0..n.div_ceil(b))
+            .map(|_| {
+                self.graph
+                    .push(RvNode::Src(Source::UniformInt { lo: 0.0, hi: start_hi }), RvKind::Num)
+            })
+            .collect();
+        // Offset constants are shared across blocks; offset 0 reuses the start node directly.
+        let mut offsets: Vec<Option<RvId>> = vec![None; b];
+        let mut out = Vec::with_capacity(n);
+        for j in 0..n {
+            let (start, off) = (starts[j / b], j % b);
+            let index = if off == 0 {
+                start
+            } else {
+                let off_id = match offsets[off] {
+                    Some(id) => id,
+                    None => {
+                        let id = self.graph.push(RvNode::ConstNum(off as f64), RvKind::Num);
+                        offsets[off] = Some(id);
+                        id
+                    }
+                };
+                self.graph.push(RvNode::Binary(BinOp::Add, start, off_id), RvKind::Num)
+            };
+            out.push(Value::Dist(
+                self.graph.push(RvNode::Gather { elems: elems.clone(), index }, RvKind::Num),
+            ));
+        }
+        Value::Array(Rc::new(out))
+    }
+
+    /// Lift a constant dataset to `ConstNum` element nodes (the gather targets of the bootstrap
+    /// draws).
+    fn const_elems(&mut self, xs: &[f64]) -> Box<[RvId]> {
+        xs.iter().map(|&x| self.graph.push(RvNode::ConstNum(x), RvKind::Num)).collect()
+    }
+
     /// `quantize(v, centroids)` — snap each coordinate of `v` to its **nearest** value in `centroids`
     /// (the optimal scalar quantizer of TurboQuant Algorithm 1: a Voronoi/Lloyd–Max decision rule
     /// whose cell boundaries are the midpoints between consecutive sorted centroids). `centroids`
@@ -2416,6 +2564,66 @@ impl Engine {
             acc = self.binop(BinOp::Add, acc, x.clone(), span)?;
         }
         Ok(acc)
+    }
+
+    /// `prod(xs)` — fold `*` over the elements (`1` for an empty array, the multiplicative
+    /// identity, mirroring `sum`'s `0`). Folds from `xs[0]` so no spurious `1*x` node is built
+    /// and non-numeric element types behave exactly like the underlying `*`.
+    fn lib_prod(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [xs] = arity1("prod", args, span)?;
+        let xs = self.expect_array("prod", xs, span)?;
+        let Some(first) = xs.first() else {
+            return Ok(Value::Num(1.0));
+        };
+        let mut acc = first.clone();
+        for x in xs.iter().skip(1) {
+            acc = self.binop(BinOp::Mul, acc, x.clone(), span)?;
+        }
+        Ok(acc)
+    }
+
+    /// `cumsum(xs)` / `cumprod(xs)` — prefix scan (PLAN-FINANCE F3): `out[t]` is the sum/product
+    /// of `xs[0..=t]`, so the output has the same length as the input. `out[0]` is `xs[0]` itself
+    /// (the scan starts from the first element — no spurious `+0`/`*1` node, and every element
+    /// type behaves exactly like the underlying `+`/`*`). The scan of an empty array is the empty
+    /// array. Constants fold and RVs lift uniformly through `binop`, so
+    /// `path = cumprod(1 + steps)` over shaped draws builds the same DAG the hand-written
+    /// for-loop accumulator would.
+    fn lib_cum_fold(&mut self, name: &str, args: &[Value], span: Span) -> Result<Value> {
+        let [xs] = arity1(name, args, span)?;
+        let xs = self.expect_array(name, xs, span)?;
+        let op = if name == "cumsum" { BinOp::Add } else { BinOp::Mul };
+        let mut out: Vec<Value> = Vec::with_capacity(xs.len());
+        for x in xs.iter() {
+            let acc = match out.last().cloned() {
+                None => x.clone(),
+                Some(prev) => self.binop(op, prev, x.clone(), span)?,
+            };
+            out.push(acc);
+        }
+        Ok(Value::Array(Rc::new(out)))
+    }
+
+    /// `cummax(xs)` / `cummin(xs)` — running-extremum scan via the select (lifted `if`) path,
+    /// mirroring `max`/`min` element-for-element: `out[t]` is the max/min of `xs[0..=t]`. Unlike
+    /// the reducers (which error on empty — there is no extremum of nothing), the scan of an
+    /// empty array is the empty array: every prefix an output element summarizes is nonempty.
+    fn lib_cum_extreme(&mut self, name: &str, args: &[Value], span: Span) -> Result<Value> {
+        let [xs] = arity1(name, args, span)?;
+        let xs = self.expect_array(name, xs, span)?;
+        let cmp = if name == "cummax" { BinOp::Gt } else { BinOp::Lt };
+        let mut out: Vec<Value> = Vec::with_capacity(xs.len());
+        for x in xs.iter() {
+            let m = match out.last().cloned() {
+                None => x.clone(),
+                Some(prev) => {
+                    let cond = self.binop(cmp, x.clone(), prev.clone(), span)?;
+                    self.select(cond, x.clone(), prev, span)?
+                }
+            };
+            out.push(m);
+        }
+        Ok(Value::Array(Rc::new(out)))
     }
 
     /// `count(xs)` — number of true elements (sum of `0/1` indicators).
@@ -2579,6 +2787,84 @@ impl Engine {
         Ok(index)
     }
 
+    /// `rand::empirical(xs)` — the **iid bootstrap** constructor (PLAN-FINANCE F2): a *recipe*
+    /// whose every `~` draw is a uniformly-random element of the constant data array `xs`
+    /// ("don't fit a distribution — resample history"). Sugar for
+    /// `i ~ unif_int(0, Len(xs)-1); xs[i]`, but a true recipe — so `a ~ …; b ~ …` are
+    /// independent resamples and `~[n]` yields `n` iid resamples per leaf (unlike
+    /// `categorical`, which returns its one draw directly and shares it under `~[n]`).
+    fn lib_empirical(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [xs] = arity1("empirical", args, span)?;
+        let data = self.bootstrap_data("empirical", xs, span)?;
+        Ok(Value::Recipe(Recipe::Empirical { data }))
+    }
+
+    /// `rand::block_bootstrap(xs, block_len)` — the **moving-block bootstrap** constructor
+    /// (PLAN-FINANCE F2): a recipe whose `~` draw is a whole `Len(xs)`-long series glued from
+    /// random contiguous blocks of `xs` (block starts iid `unif_int(0, n - block_len)`), so
+    /// streaks/autocorrelation inside a block survive the resampling. `block_len` must be an
+    /// integer with `1 <= block_len <= Len(xs)`.
+    fn lib_block_bootstrap(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [xs, b] = arity2("block_bootstrap", args, span)?;
+        let data = self.bootstrap_data("block_bootstrap", xs, span)?;
+        let n = self.datasets[data.0 as usize].len();
+        let bl = match scalar_const(b) {
+            Some(x) => x,
+            None => {
+                return Err(NoiseError::runtime(
+                    format!(
+                        "block_bootstrap(xs, block_len) needs a constant number for the block \
+                         length, got {}",
+                        b.type_name()
+                    ),
+                    span,
+                ))
+            }
+        };
+        if bl.fract() != 0.0 || !bl.is_finite() || bl < 1.0 || bl > n as f64 {
+            return Err(NoiseError::runtime(
+                format!(
+                    "block_bootstrap(xs, block_len) needs an integer block length with \
+                     1 <= block_len <= Len(xs) = {n}, got {bl}"
+                ),
+                span,
+            ));
+        }
+        Ok(Value::Recipe(Recipe::BlockBootstrap { data, block_len: bl as usize }))
+    }
+
+    /// Validate and intern a bootstrap data array (`empirical` / `block_bootstrap`): a
+    /// non-empty **flat** array of constant numbers (paste your data as a literal array).
+    /// Returns the engine dataset handle the recipe carries, so the recipe stays `Copy`.
+    fn bootstrap_data(&mut self, name: &str, v: &Value, span: Span) -> Result<DataId> {
+        let xs = self.expect_array(name, v, span)?;
+        if xs.is_empty() {
+            return Err(NoiseError::runtime(
+                format!("{name} needs a non-empty data array — an empty history has nothing to resample"),
+                span,
+            ));
+        }
+        let mut data = Vec::with_capacity(xs.len());
+        for e in xs.iter() {
+            match scalar_const(e) {
+                Some(x) => data.push(x),
+                None => {
+                    return Err(NoiseError::runtime(
+                        format!(
+                            "{name} resamples a flat array of constant numbers, but an element \
+                             is {} — paste the data as plain numbers",
+                            e.type_name()
+                        ),
+                        span,
+                    ))
+                }
+            }
+        }
+        let id = DataId(self.datasets.len() as u32);
+        self.datasets.push(Rc::new(data));
+        Ok(id)
+    }
+
     /// `normsq(a)` — `Σ |aᵢ|²`, the squared Euclidean norm. **Magnitude-based**, so it always
     /// returns a *real* (PLAN-COMPLEX §7): for a real vector this is `Σ aᵢ²` (unchanged); for a
     /// complex vector it is `Σ (reᵢ² + imᵢ²)` — exactly what measurement probabilities and signal
@@ -2724,6 +3010,57 @@ impl Engine {
         }
     }
 
+    /// `math::log` (natural) / `math::log10` — RV-aware logarithms (PLAN-FINANCE F1). A
+    /// deterministic scalar keeps the friendly build-time domain error (`x > 0`); a random
+    /// variable lifts to a per-lane `UnOp::Ln` node with IEEE `f64::ln` semantics (a lane's value
+    /// can't be inspected at build time, so `0 → -inf` and `negative → NaN` per lane); `log10`
+    /// rides on the same node via `log10(x) = ln(x)/ln(10)`. Arrays map elementwise and a lazy
+    /// signal defers the op into its tree, like every other ufunc.
+    fn lib_log(&mut self, name: &'static str, args: &[Value], span: Span) -> Result<Value> {
+        let [x] = arity1(name, args, span)?;
+        let base10 = name == "log10";
+        match x {
+            Value::Num(n) | Value::Est { val: n, .. } => {
+                let n = *n;
+                if n <= 0.0 {
+                    return Err(NoiseError::runtime(format!("{name} needs x > 0, got {n}"), span));
+                }
+                Ok(Value::Num(if base10 { n.log10() } else { n.ln() }))
+            }
+            Value::Array(xs) => {
+                let xs = xs.clone();
+                let mut out = Vec::with_capacity(xs.len());
+                for e in xs.iter() {
+                    out.push(self.lib_log(name, std::slice::from_ref(e), span)?);
+                }
+                Ok(Value::Array(Rc::new(out)))
+            }
+            Value::Dist(_) => {
+                let lnx = self.lift_unary(UnOp::Ln, x.clone(), span)?;
+                if base10 {
+                    self.binop(BinOp::Div, lnx, Value::Num(std::f64::consts::LN_10), span)
+                } else {
+                    Ok(lnx)
+                }
+            }
+            Value::Signal(s) => {
+                let lns = Value::Signal(Rc::new(SigExpr::Unary(SigUnOp::Un(UnOp::Ln), s.clone())));
+                if base10 {
+                    self.binop(BinOp::Div, lns, Value::Num(std::f64::consts::LN_10), span)
+                } else {
+                    Ok(lns)
+                }
+            }
+            other => Err(NoiseError::runtime(
+                format!(
+                    "{name} expects a number, array, or random variable, got {}",
+                    other.type_name()
+                ),
+                span,
+            )),
+        }
+    }
+
     /// The complex-aware `math::` ufuncs (PLAN-COMPLEX §4): `exp`/`abs`/`sqrt`/`arg`/`conj`/`re`/`im`
     /// and the real-only rounding family `floor`/`ceil` (§8). Each branches by input type — real in →
     /// real semantics; complex in → complex semantics — and maps elementwise over arrays (so it works
@@ -2778,20 +3115,15 @@ impl Engine {
     }
 
     /// `exp(z)` — `e^z`. Real `x` → `e^x` (a lazy signal **defers** `exp` into its tree — legal
-    /// on the deterministic part of a chain); complex `z = a + bi` → Euler `e^a·(cos b + i·sin b)`.
-    /// The imaginary part may be an RV (cos/sin lift); the **real part must be deterministic** —
-    /// there is no `exp` node in the VM, so a random real part (`math::exp` of a real RV) is
-    /// rejected, at build time for a scalar and at materialization for a noisy signal. In practice
-    /// the complex `exp` is always applied to a purely-imaginary angle (`e^{iθ}`), where `a = 0`.
+    /// on the deterministic part of a chain); a real RV lifts to a per-lane `UnOp::Exp` node
+    /// (PLAN-FINANCE F1 — `exp(normal(...))` is the lognormal construction); complex `z = a + bi`
+    /// → Euler `e^a·(cos b + i·sin b)`, where both channels may be RVs (exp/cos/sin all lift).
     fn cufunc_exp(&mut self, x: Value, span: Span) -> Result<Value> {
         match x {
             Value::Num(n) => Ok(Value::Num(n.exp())),
             Value::Est { val, .. } => Ok(Value::Num(val.exp())),
             Value::Signal(s) => Ok(Value::Signal(Rc::new(SigExpr::Unary(SigUnOp::Exp, s)))),
-            Value::Dist(_) => Err(NoiseError::runtime(
-                "math::exp of a random real value is not supported (the VM has no exp node); exp of a complex angle e^{i·θ} works because it lowers to cos/sin".to_string(),
-                span,
-            )),
+            x @ Value::Dist(_) => self.lift_unary(UnOp::Exp, x, span),
             Value::Complex { re, im } => {
                 // The magnitude factor e^a: folds for a constant, defers for a signal, and
                 // errors for a random real part (the recursive call enforces all three).
@@ -3124,7 +3456,7 @@ fn module_of(name: &str) -> Option<&'static str> {
         // not a builtin — see the `Sample` AST node.
         "unif" | "unif_int" | "bernoulli" | "normal" | "normal_int" | "normal_complex"
         | "exponential" | "exponential_int" | "poisson" | "geometric" | "categorical"
-        | "rotation" | "permutation" => "rand",
+        | "rotation" | "permutation" | "empirical" | "block_bootstrap" => "rand",
         // math constants (lowercase only): pi/e (real), i/j (the imaginary unit, complex)
         "pi" | "e" | "i" | "j" => "math",
         "sqrt" | "round" | "log" | "log10" | "sin" | "cos" | "atan" | "sign" => "math",
@@ -3138,6 +3470,8 @@ fn module_of(name: &str) -> Option<&'static str> {
         "sum" | "count" | "any" | "all" | "max" | "min" | "mean" | "dot" | "vdot" | "normsq"
         | "norm" | "transpose" | "adjoint" | "normalize" | "has_duplicates" | "count_duplicates"
         | "mse" | "ones" | "zeros" | "iota" | "outer" | "quantize" => "vec",
+        // prefix scans + the product reducer (PLAN-FINANCE F3): paths as fixed-horizon arrays.
+        "prod" | "cumsum" | "cumprod" | "cummax" | "cummin" => "vec",
         // signal generation (DSP waveforms) + colored noise + materialization
         "sine" | "cosine" | "sample" | "noise_white" | "noise_white_complex"
         | "noise_brown" | "noise_pink" | "noise_ou" => "signal",
@@ -3256,6 +3590,8 @@ fn unop_name(op: UnOp) -> &'static str {
         UnOp::Round => "round",
         UnOp::Floor => "floor",
         UnOp::Ceil => "ceil",
+        UnOp::Exp => "exp",
+        UnOp::Ln => "log",
     }
 }
 
@@ -3272,6 +3608,8 @@ fn apply_unop_f64(op: UnOp, x: f64) -> f64 {
         UnOp::Round => x.round(),
         UnOp::Floor => x.floor(),
         UnOp::Ceil => x.ceil(),
+        UnOp::Exp => x.exp(),
+        UnOp::Ln => x.ln(),
         UnOp::Not => unreachable!("Not is a boolean op, not a numeric ufunc"),
     }
 }

@@ -122,8 +122,8 @@ pub fn walk_cost(
         RvNode::ConstNum(_) | RvNode::ConstBool(_) => true, // neutral
         RvNode::Unary(op, a) => {
             match op {
-                UnOp::Sin | UnOp::Cos => charge(1, fusible, libcalls), // inlined on native
-                UnOp::Atan | UnOp::Round => *libcalls += 1,            // still a call everywhere
+                UnOp::Sin | UnOp::Cos | UnOp::Ln => charge(1, fusible, libcalls), // inlined on native
+                UnOp::Atan | UnOp::Round | UnOp::Exp => *libcalls += 1, // still a call everywhere
                 _ => *fusible += 1,
             }
             walk_cost(graph, *a, seen, fusible, libcalls, inline_trans)
@@ -185,7 +185,7 @@ fn latency_bound(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>) -> bool {
         RvNode::Gather { .. } => false, // interpreter-only (gated out before this is consulted)
         RvNode::ConstNum(_) | RvNode::ConstBool(_) => true,
         RvNode::Unary(op, a) => {
-            !matches!(op, UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Round)
+            !matches!(op, UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Round | UnOp::Exp | UnOp::Ln)
                 && latency_bound(graph, *a, seen)
         }
         RvNode::Binary(crate::ast::BinOp::Pow, a, b) => {

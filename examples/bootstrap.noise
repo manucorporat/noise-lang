@@ -1,0 +1,34 @@
+# The bootstrap: don't assume a bell curve — reshuffle history itself.
+# You have 24 days of real returns for a stock, including one ugly -4% crash day. What might
+# tomorrow look like? The textbook move is to fit a normal distribution to the data — but real
+# markets have fat tails, and fitting would average the crash away into a polite sigma. The
+# bootstrap skips the fitting entirely: make tomorrow a random draw FROM the history. If history
+# crashed 1 day in 24, your model crashes 1 day in 24 — no Gaussian assumed anywhere.
+use rand; use vec;
+
+# Step 1 — paste the data: 24 daily returns (0.012 = +1.2%). Days 11-14 are a panic streak
+# around the -4% crash — real markets have bad WEEKS, not just isolated bad days.
+rets = [ 0.004, -0.006,  0.012,  0.003, -0.002,
+         0.007,  0.001, -0.005,  0.008,  0.002,
+        -0.012, -0.040, -0.018, -0.009,  0.011,
+         0.006, -0.003,  0.009, -0.001,  0.013,
+        -0.007,  0.002,  0.010, -0.004 ];
+
+# Step 2 — tomorrow is a uniformly-random day from history (the iid bootstrap).
+tomorrow ~ rand::empirical(rets);
+Print("E(tomorrow)       =", E(tomorrow), "  (sample mean:", mean(rets), ")");
+Print("1-day VaR (Q05)   =", Q(tomorrow, 0.05), "  — straight from history, crash included");
+Print("P(another -4% day) =", P(tomorrow <= -0.04), "  (= 1/24, its share of history)");
+
+# Step 3 — a WEEK is not 5 independent days: losses cluster. Shuffling days one at a time
+# (iid) destroys those streaks, so it understates weekly risk. The BLOCK bootstrap instead
+# glues random contiguous 5-day runs of history together, keeping each streak intact.
+iid_days ~[5] rand::empirical(rets);
+iid_week = sum(iid_days);
+
+week ~ rand::block_bootstrap(rets, 5);            # a full resampled series, in 5-day blocks
+hist_week = sum([for j in 0..5 { week[j] }]);      # its first block = one real 5-day run
+
+Print("iid  week VaR (Q05) =", Q(iid_week, 0.05), "  — streaks shuffled away");
+Print("real week VaR (Q05) =", Q(hist_week, 0.05), "  — the panic week stays glued together");
+Print("Blocks matter whenever returns are autocorrelated: same days, scarier (honest) tail.")

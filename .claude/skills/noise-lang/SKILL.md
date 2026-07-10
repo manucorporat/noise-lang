@@ -102,10 +102,11 @@ path). Start each program with the `use` lines you need.
 | Module    | `use`?   | Items |
 |-----------|----------|-------|
 | `builtin` | always   | `P`, `Q`, `E`, `Var`, `Print`, `Len` |
-| `rand`    | `use rand;` | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `normal_complex`, `exponential`, `exponential_int`, `poisson`, `geometric`, `categorical`, `rotation`, `permutation` |
-| `math`    | `use math;` | `pi`, `e`, `i`/`j` (imaginary unit), `sqrt`, `exp`, `abs`, `arg`, `conj`, `re`, `im`, `floor`, `ceil`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign`, `gcd`, `modpow` |
-| `vec`     | `use vec;`  | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` |
+| `rand`    | `use rand;` | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `normal_complex`, `exponential`, `exponential_int`, `poisson`, `geometric`, `categorical`, `empirical`, `block_bootstrap`, `rotation`, `permutation` |
+| `math`    | `use math;` | `pi`, `e`, `i`/`j` (imaginary unit), `sqrt`, `exp`, `abs`, `arg`, `conj`, `re`, `im`, `floor`, `ceil`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign`, `gcd`, `modpow` — `exp`/`log`/`log10` lift over RVs like `sin`/`cos` |
+| `vec`     | `use vec;`  | `sum`, `prod`, `count`, `any`, `all`, `max`, `min`, `mean`, `cumsum`, `cumprod`, `cummax`, `cummin`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` |
 | `signal`  | `use signal;` | `sine`, `cosine`, `sample`, `noise_white`, `noise_white_complex`, `noise_brown`, `noise_pink`, `noise_ou` |
+| `plot`    | path-only | `histogram`, `line`, `scatter`, `heatmap`, `corr`, `fan` (quantile-band cone of a path), `explain`, `value` — write the path (`plot::fan(...)`); charts are pushed to the output stream like `Print` |
 | `engine`  | `use engine;` (or path) | `set_max_samples`, `set_max_opts`, `set_resolution` |
 
 ```noise
@@ -146,6 +147,17 @@ Print("P(shared birthday among", n, ") =", P(match))
 - `normal_complex(sigma)` — a circularly-symmetric complex Gaussian (`E|z|² = sigma²`); a complex
   RV. `categorical(weights)` — sample an index ∝ weights (`y ~ rand::categorical(probs)`).
 - `rotation(d)` — a fresh random `d×d` orthonormal matrix per sample (Haar rotation).
+- `empirical(xs)` — the **iid bootstrap**: each draw is a uniformly random element of the
+  constant numeric array `xs` (resample history instead of assuming a distribution). A true
+  recipe: draw with `~`; `~[n]` gives `n` iid resamples. `block_bootstrap(xs, b)` — the
+  **moving-block bootstrap** for autocorrelated series: one draw is an *array* of `Len(xs)`
+  values glued from random contiguous length-`b` blocks of `xs`, keeping streaks intact. Both
+  need a flat, non-empty, constant numeric array (`1 <= b <= Len(xs)`) and run interpreter-only
+  (they gather).
+- **`math::exp` / `math::log` / `log10` lift over RVs** — `Z ~ normal(mu, sigma); exp(Z)` is a
+  lognormal, `E(log(1 + f*R))` is Kelly log-growth. A per-lane bad value follows IEEE
+  (`log` of `x < 0` → NaN, of `0` → −inf); a *deterministic* `log(0)` is still a friendly
+  build-time error.
 - **Random parameters (hierarchical models).** A parameter can itself be a random variable:
   `p ~ unif(0,1); k ~ bernoulli(p)`. Supported for `unif`/`unif_int`/`normal`/`normal_int`/
   `exponential`/`exponential_int`/`bernoulli` (not yet `poisson`/`geometric`/`normal_complex`). Two
@@ -176,13 +188,15 @@ Print("P(shared birthday among", n, ") =", P(match))
 **Arrays** are fixed-length and known at build time. Build them with literals (`[1, 2, 3]`, `[]`),
 the range `a..b` (half-open: `0..n` is `0 … n-1`), the shaped draw `~[n] d`, or `vec`
 constructors (`ones(n)`, `zeros(n)`, `iota(n)`). Index with `xs[i]` (chains: `M[i][j]`); the index
-must be a **constant non-negative integer in range** — never a random variable. There is no
+is normally a **constant non-negative integer in range** — a *random* numeric index lifts to a
+per-lane **gather** (each lane picks its own element; interpreter-only, no JIT). There is no
 append/push.
 
 **Arithmetic broadcasts** over arrays (NumPy-style, nesting for matrices):
 `[1,2,3] + [10,20,30]` → `[11,22,33]`, `1 + [1,2,3]` → `[2,3,4]`, `[1,2,3] ^ 2` → `[1,4,9]`.
 The `@` operator is the **matrix product** (`v @ w` dot, `M @ v` matvec, `M @ N` matmul); `*`
-stays elementwise. `sin`/`cos`/`atan` are ufuncs (scalar, lifted over RVs, or mapped over arrays).
+stays elementwise. `sin`/`cos`/`atan`/`exp`/`log`/`log10` are ufuncs (scalar, lifted over RVs, or
+mapped over arrays).
 
 **Shaped draws & reducers.** `~[n] d` is `n` iid draws (an array); `~[n, m] d` a matrix. Fold with
 a `vec` reducer — independence becomes a one-liner:
@@ -194,6 +208,29 @@ flips ~[3] bernoulli(0.5); Print("P(all heads) =", P(all(flips)))       # 3-coin
 flips ~[3] bernoulli(0.5); Print("P(exactly 2) =", P(count(flips)==2))  # count of true
 parts ~[3] bernoulli(0.9); Print("uptime =", P(any(parts)))             # at-least-one
 ```
+
+**Paths & finance idioms (scans).** The scans `cumsum`/`cumprod`/`cummax`/`cummin` (running
+folds: element `t` is the fold of `xs[0..=t]`) turn a shaped draw into a whole **fixed-horizon
+path** — no loop needed:
+
+```noise
+use rand; use vec; use math;
+rets ~[252] normal(0.0004, 0.01);          # a year of iid daily returns
+walk = cumsum(rets);                        # random walk = cumsum(increments)
+path = cumprod(1 + rets);                   # compounding wealth path
+# exact GBM, no discretization bias:  path = s0 * exp(cumsum(logrets))
+hit      = any(path < 0.9);                 # barrier: did it EVER dip 10%?
+asian    = mean(path);                      # Asian option averages the path
+lookback = max(path);                       # lookback takes its peak
+drawdown = min(path / cummax(path)) - 1;    # worst peak-to-trough
+final = path[251];
+var = Q(final, 0.05);                       # VaR — Q returns a plain number...
+Print("VaR95 =", var, " ES95 =", E(final | final < var));  # ...so it feeds ES/CVaR
+plot::fan(path)                             # the cone: q05/25/50/75/95 bands over the index
+```
+
+`vec::prod` is the product reducer (`prod([]) == 1`). Scans work on any process whose **length
+is known up front**; a random-length process is not expressible (see Hazards).
 
 **Lifted `if` = per-lane select** (a value, not control flow; `else` required, both branches
 evaluated and reuse the condition's per-lane draws). Gives `max`/`min`/`abs` over RVs for free:
@@ -299,15 +336,18 @@ static ~[64] rand::normal_complex(1);    # 64 iid complex-Gaussian static sample
   (`unif_int`, `bernoulli`, `*_int`) whenever you compare for equality or count.
 - **Arithmetic on an undrawn recipe is an error.** Draw with `~` first (rule 2 above).
 - **No closures.** Function bodies see only parameters and the `pi`/`e` constants.
-- **Indices must be constant non-negative integers**, known at build time — never a random
-  variable.
+- **Indices are constant non-negative integers** known at build time; a *random* index works but
+  lifts to a per-lane gather that runs **interpreter-only** (slow path — fine for bootstrap-style
+  lookups, not for hot inner math).
 - **Arrays are fixed-length.** No `push`/append. Build with literals, `a..b`, `~[shape]`, or the
   `vec` constructors.
 - **Blocks don't scope** — bindings made inside leak out (there is one flat environment).
-- **No sequential / stateful processes.** A random walk, Markov chain, or M/M/1 queue
-  (`W_{n+1} = max(0, W_n + S_n − A_{n+1})`) is *not* expressible — the engine samples independent
-  lanes that can't carry state across a time index. A lifted `if` picks a value per lane; it can't
-  thread state across steps.
+- **No random-length / early-stopping processes.** A process that runs *until* something happens
+  (expected time to ruin, an unbounded first-passage time, a queue run until empty) is *not*
+  expressible — the engine samples independent lanes of a fixed-size graph. **Fixed-horizon**
+  paths ARE expressible, as one-liners via the scans: `path = cumprod(1 + rets)` with
+  `rets ~[252] normal(mu, sigma)` (see "Paths & finance idioms"). A lifted `if` picks a value per
+  lane; it can't decide *when to stop*.
 - **Each query samples its own pass.** `P(A)`, `P(B)`, `P(A && B)` are estimated independently, so
   exact cross-query consistency (`P(A && B) ≤ P(A)`) is not guaranteed. (Inside *one* conditional
   query, event and condition share a pass — so `P(A | C)` is internally consistent.)
@@ -331,5 +371,6 @@ static ~[64] rand::normal_complex(1);    # 64 iid complex-Gaussian static sample
 - [ ] Independence comes from `~[n]` or separate `~` — not from repeating a name.
 - [ ] Equality / counting uses a **discrete** distribution (`unif_int`/`bernoulli`/`*_int`).
 - [ ] `use` lines present for every non-`builtin` name; queries are capitalized (`P`/`E`/`Var`/`Q`/`Print`/`Len`).
-- [ ] No sequential-state recurrence, no random index, no expectation of block scoping.
+- [ ] No random-length / early-stopping recurrence (fixed-horizon paths via scans are fine), no
+      expectation of block scoping.
 - [ ] Program ends in `Print(...)`; run it and sanity-check against the analytic value.

@@ -302,6 +302,17 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
 - **`categorical(weights)`** — sample an index `0..len(weights)` with probability proportional to
   the (constant, non-negative) `weights`. The honest "measure a discrete distribution" primitive
   (`y ~ rand::categorical(probs)`). Built by inverse-CDF from one `unif(0,total)` draw.
+- **`empirical(xs)`** — the **iid bootstrap**: a recipe whose every draw is a uniformly random
+  element of the constant numeric array `xs` (resample history instead of assuming a
+  distribution). A true recipe: draw with `~`, `~[n]` gives `n` iid resamples, one name is one
+  draw. Internally a `unif_int` index plus a per-lane **gather**, so — like all gathers — it runs
+  on the interpreter only (no JIT).
+- **`block_bootstrap(xs, b)`** — the **moving-block bootstrap** for autocorrelated series: one
+  draw yields an *array* of `Len(xs)` values assembled from random contiguous blocks of `xs` of
+  length `b` (non-wrapping start indices in `[0, n − b]`; the last block truncates to fit), so
+  within-block autocorrelation survives where iid resampling would shuffle it away. Same recipe
+  semantics and interpreter-only gather note as `empirical`. Both require a flat, non-empty,
+  constant numeric array; `b` must be an integer with `1 <= b <= Len(xs)`.
 - **`poisson(lambda)`** — Poisson counts (discrete, `lambda > 0`, `mean = variance = lambda`),
   support `0, 1, 2, …`. Sampled via Knuth's algorithm.
 - **`geometric(p)`** — the number of failures before the first success (discrete, `0 < p <= 1`,
@@ -326,6 +337,12 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
 - **`sqrt(x)`** (`x >= 0`) and the constants **`pi`**, **`e`** — math helpers for scaling
   factors. `pi`/`e` are bare identifiers resolved as constants, so they also work *inside*
   function bodies (which otherwise see only their parameters).
+- **`math::exp(x)` / `math::log(x)` / `math::log10(x)` lift over random variables** — like
+  `sin`/`cos`, a scalar computes directly and an RV lifts to a per-lane graph node, so
+  `Z ~ normal(mu, sigma); exp(Z)` (a lognormal) and Kelly's `E(log(1 + f*R))` just work. One deliberate
+  asymmetry: a *deterministic* `log(0)`/`log(-x)` keeps the friendly build-time "needs x > 0"
+  error, while a per-lane RV value follows IEEE (`x < 0` → `NaN`, `x == 0` → `-inf`) — a rare bad
+  lane shouldn't kill a million-sample run. Complex `exp` (Euler `e^{iθ}`) is unchanged.
 - **`math::gcd(a, b)`** and **`math::modpow(base, exp, mod)`** — deterministic integer number
   theory (the modular-arithmetic core). `gcd` is Euclid's algorithm on `|a|`, `|b|` (`gcd(0,0)=0`);
   `modpow` is `base^exp mod` by square-and-multiply, **exact** even when `base**exp` would overflow
@@ -363,8 +380,10 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
   - branches reuse the *same per-lane draws* as the condition (sharing flows through), so
     `if D == 6 { D } else { 0 }` yields `6` exactly on the lanes where `D` rolled a 6.
   - This gives `max`/`min`/`abs` over RVs for free, e.g. `if A > B { A } else { B }`.
-  It is **not** sequential branching — the engine still samples independent lanes; a lifted `if`
-  cannot carry state across a time step (that's the dynamics fork in `plans/PLAN.md`).
+  It is **not** sequential branching — the engine still samples independent lanes. A
+  **fixed-horizon** path is nonetheless idiomatic via the scans (`vec::cumsum`/`cumprod`/… — see
+  "Collections"); what remains out of scope is a *random-length* / early-stopping process
+  (that's the dynamics fork in `plans/PLAN.md`).
 
 ### Conditioning: `event | given`
 
@@ -496,10 +515,11 @@ The modules:
 | Module    | Items | Default? |
 |-----------|-------|----------|
 | `builtin` | `P`, `Q`, `E`, `Var`, `Print`, `Len` (capital-only) | **always active** (no `use`) |
-| `rand`    | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `normal_complex`, `exponential`, `exponential_int`, `poisson`, `geometric`, `categorical`, `rotation`, `permutation` (batched sampling is the `~[shape]` operator, not a builtin) | needs `use rand;` |
+| `rand`    | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `normal_complex`, `exponential`, `exponential_int`, `poisson`, `geometric`, `categorical`, `empirical`, `block_bootstrap`, `rotation`, `permutation` (batched sampling is the `~[shape]` operator, not a builtin) | needs `use rand;` |
 | `math`    | `pi`, `e`, `i`/`j` (imaginary unit), `sqrt`, `exp`, `abs`, `arg`, `conj`, `re`, `im`, `floor`, `ceil`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign`, `gcd`, `modpow` | needs `use math;` |
-| `vec`     | `sum`, `count`, `any`, `all`, `max`, `min`, `mean`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` (vector `+`/`-` and `@` cover add/sub/matvec) | needs `use vec;` |
+| `vec`     | `sum`, `prod`, `count`, `any`, `all`, `max`, `min`, `mean`, `cumsum`, `cumprod`, `cummax`, `cummin`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` (vector `+`/`-` and `@` cover add/sub/matvec) | needs `use vec;` |
 | `signal`  | `sine`, `cosine` (lazy waveforms), `noise_white`, `noise_white_complex`, `noise_brown`, `noise_pink`, `noise_ou` (undrawn noise generators — drawn with `~`), `sample` | needs `use signal;` |
+| `plot`    | `histogram`, `line`, `scatter`, `heatmap`, `corr`, `fan`, `explain`, `value` (charts, pushed to the output stream like `Print`) | path-only (`plot::fan(...)`) |
 | `engine`  | `set_max_samples`, `set_max_opts`, `set_resolution` (run-time evaluator knobs) | needs `use engine;` |
 
 **`engine::set_max_samples(N)`** sets the default Monte Carlo budget — the sample count `P`/`E`/
@@ -556,9 +576,11 @@ but a `~` draw is deterministic at build time). Elements are arbitrary values �
 just an array of `dist`.
 
 - **Literals & indexing.** `[a, b, c]` builds an array; `[]` is empty. `xs[i]` indexes it, and
-  indexing chains: `M[i][j]`. The index `i` must evaluate to a **constant non-negative integer in
-  range** — never a random variable (a random gather is the dynamics fork). Out-of-bounds, a
-  non-integer, or a `dist` index is a spanned error.
+  indexing chains: `M[i][j]`. The index `i` is normally a **constant non-negative integer in
+  range** (out-of-bounds or a non-integer is a spanned error); a *random* numeric index lifts to
+  a per-lane **gather** — each Monte Carlo lane picks its own element (`boxes[box]` in
+  `prisoners.noise`, and the machinery under `rand::empirical`). Gathers run on the interpreter
+  only (no JIT).
 - **Arithmetic broadcasts over arrays** (NumPy-style): `[1,2,3] + [10,20,30] = [11,22,33]`,
   `1 + [1,2,3] = [2,3,4]`, `[2,4,6] / 2 = [1,2,3]`, `[1,2,3] ^ 2 = [1,4,9]`. It nests, so an
   array-of-arrays (a matrix, or an `[I, Q]` signal pair) broadcasts recursively. Lengths must match.
@@ -600,8 +622,20 @@ identically (e.g. `sum` over `dist` elements lifts to an Add-chain RV).
   gives a fresh rotation per sample, and `~[k] rotation(d)` an array of `k` independent ones. Arrays
   are fixed-size — there is no append/`push`; build them with literals, `a..b`, `~[shape]`, or the
   `vec` constructors below.
-- **Reducers:** `sum`, `mean`, `count` (number of true elements), `any` (`||`), `all` (`&&`),
-  `max`, `min`.
+- **Reducers:** `sum`, `prod` (product; `prod([]) == 1`), `mean`, `count` (number of true
+  elements), `any` (`||`), `all` (`&&`), `max`, `min`.
+- **Scans (running folds):** `cumsum`, `cumprod`, `cummax`, `cummin` — array → same-length array
+  whose element `t` is the fold of `xs[0..=t]` (element 0 is `xs[0]`; empty → empty; a matrix
+  broadcasts like `sum`: `cumsum([[1,2],[3,4]]) == [[1,2],[4,6]]`). Scans make **fixed-horizon
+  paths** idiomatic: a random walk is `cumsum(increments)`, a compounding path is
+  `cumprod(1 + rets)` (or, exactly, `s0 * math::exp(cumsum(logrets))`), a barrier is
+  `any(path < b)`, and a worst drawdown is `min(path / cummax(path)) - 1`.
+- **`plot::fan(path)`** (in the `plot` module) — the cone chart for an array of random values (a
+  path): all indices are sampled **jointly in one pass**, and the per-index
+  `q05/q25/q50/q75/q95` quantile bands render as stacked sparklines on one shared scale (the
+  playground receives the same data as a structured payload). A deterministic array gives the
+  degenerate fan (every band equals the values); a scalar or a matrix is a friendly error; a
+  path caps at 1024 elements.
 - **Linear algebra:** the `@` operator is the **matrix product** — `v @ w` (dot), `M @ v` (mat·vec),
   `M @ N` (matmul), dispatched by shape; `*` stays elementwise/broadcast, and vector `+`/`-` are
   elementwise add/sub. Also `dot`, `normsq`,
@@ -624,9 +658,10 @@ P(clt > 1)                           # ≈ 0.159, agreeing with normal(0, 1)
 ```
 
 > **Status: implemented.** A user definition shadows a library name (your `sum` wins). Deferred:
-> first-class functions / `map` (element-wise ops are explicit loops/builtins for now), random
-> indexing / random-length loops, and a native columnar vector representation (so a `d×d` mat·vec
-> builds `O(d²)` nodes — fine for `d ≤ ~64`). See `plans/PLAN-COLLECTIONS.md` §1.
+> first-class functions / `map` (element-wise ops are explicit loops/builtins for now),
+> random-length loops / early stopping, and a native columnar vector representation (so a `d×d`
+> mat·vec builds `O(d²)` nodes, and a scan unrolls to `O(steps)` fold nodes — fine for
+> `d ≤ ~64`). See `plans/PLAN-COLLECTIONS.md` §1.
 
 ### Signals (lazy waveform expressions)
 

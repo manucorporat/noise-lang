@@ -1,0 +1,54 @@
+# Price an option that DIES if the stock ever touches 80 — no stochastic calculus, just simulate.
+#
+# A regular ("vanilla") call option pays you whatever the stock ends up above 100 after a year.
+# A DOWN-AND-OUT call is the same deal with a trapdoor: if the stock ever dips below 80 along the
+# way — even for one week — the contract is void and you get nothing. It's cheaper, because some
+# of the futures where you'd have been paid get cancelled. How much cheaper? Wall Street answers
+# with the reflection principle and a page of algebra. We answer by simulating the whole year,
+# week by week, a few hundred thousand times, and just LOOKING at how often the trapdoor springs.
+#
+# The path is built in one line each: 52 standard normal shocks, turned into weekly log-returns,
+# summed into a running total with cumsum (log-space = EXACT geometric Brownian motion, no
+# discretization error), then exp'd back into prices. `any(path < barrier)` is "did we ever touch".
+#
+# Analytic anchor: the vanilla leg has a closed form (Black-Scholes). For S0=100, K=100, r=0.05,
+# sigma=0.2, T=1 it says 10.4506 — our Monte Carlo vanilla price must land right on it.
+engine::set_max_samples(200000);
+use rand;   # normal
+use math;   # exp, sqrt
+use vec;    # cumsum, cummax, any, min
+
+# --- The contract ---
+s0      = 100;    # stock price today
+strike  = 100;    # you're paid max(S_T - strike, 0) at the end...
+barrier = 80;     # ...unless the stock EVER trades below this — then you get nothing
+r       = 0.05;   # risk-free rate (prices are discounted expectations under this drift)
+sigma   = 0.2;    # volatility: ~20% swing in a typical year
+t       = 1;      # one year to expiry
+
+# --- One simulated year, one week at a time ---
+n  = 52;                                        # weekly monitoring
+dt = t / n;
+zs ~[n] normal(0, 1);                           # 52 independent standard normal shocks
+logrets = (r - sigma^2 / 2) * dt + sigma * sqrt(dt) * zs;   # per-week log-returns (GBM)
+path    = s0 * exp(cumsum(logrets));            # running log-return -> the whole price path
+
+# --- The two legs ---
+s_final = path[n - 1];                                        # where the stock ends the year
+vanilla = if s_final > strike { s_final - strike } else { 0 };  # plain call payoff
+knocked = any(path < barrier);                                # did we ever touch the trapdoor?
+knockout = if knocked { 0 } else { vanilla };                 # same payoff, void if touched
+
+# --- Prices are discounted expected payoffs ---
+discount = exp(-r * t);
+Print("vanilla call:   ", E(discount * vanilla), "  (Black-Scholes says 10.4506)");
+Print("knock-out call: ", E(discount * knockout), "  (cheaper: the trapdoor eats some payoffs)");
+Print("P(knocked out): ", P(knocked));
+
+# Bonus one-liner: cummax(path) is the running peak, so this is the worst peak-to-trough
+# drawdown the stock suffers along the way — a risk number for free from the same paths.
+drawdown = min(path / cummax(path)) - 1;
+Print("typical worst drawdown along the way:", E(drawdown));
+
+# The cone of possible price paths: week-by-week 5/25/50/75/95% bands of the simulated year.
+plot::fan(path)

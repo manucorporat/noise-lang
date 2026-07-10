@@ -158,6 +158,8 @@ pub fn apply_unary(op: SigUnOp, x: f64) -> f64 {
         SigUnOp::Un(UnOp::Round) => x.round(),
         SigUnOp::Un(UnOp::Floor) => x.floor(),
         SigUnOp::Un(UnOp::Ceil) => x.ceil(),
+        SigUnOp::Un(UnOp::Exp) => x.exp(),
+        SigUnOp::Un(UnOp::Ln) => x.ln(),
         SigUnOp::Un(UnOp::Not) => {
             if x == 0.0 {
                 1.0
@@ -220,6 +222,8 @@ fn fmt_expr(e: &SigExpr, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 SigUnOp::Un(UnOp::Round) => "round",
                 SigUnOp::Un(UnOp::Floor) => "floor",
                 SigUnOp::Un(UnOp::Ceil) => "ceil",
+                SigUnOp::Un(UnOp::Exp) => "exp",
+                SigUnOp::Un(UnOp::Ln) => "log",
             };
             write!(f, "{name}(")?;
             fmt_expr(a, f)?;

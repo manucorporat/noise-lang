@@ -16,6 +16,12 @@ use crate::rng::Rng;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RvId(pub u32);
 
+/// Handle into the engine-owned **dataset store** (`Engine::datasets`) — the constant data
+/// arrays behind `rand::empirical` / `rand::block_bootstrap`. The data is interned so the
+/// bootstrap recipes stay `Copy` like every other [`Recipe`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataId(pub u32);
+
 /// A distribution fills a whole column of samples in one call.
 pub trait Distribution {
     fn sample_into(&self, rng: &mut Rng, out: &mut [f64]);
@@ -119,6 +125,20 @@ pub enum Recipe {
     /// their argsort (each element is `rank(keyₖ)`), so every entry is an ordinary RV node and the
     /// `n` entries are jointly a permutation per Monte Carlo lane. See `Engine::draw_permutation`.
     Permutation { n: usize },
+    /// An **iid bootstrap** over a constant data array (`rand::empirical(xs)`, PLAN-FINANCE F2):
+    /// each `~` draws a uniformly-random element of the data — resample history instead of
+    /// fitting a distribution. Sugar for `i ~ unif_int(0, Len(xs)-1); xs[i]`, but a true recipe,
+    /// so `~[n]` yields iid resamples at every leaf. The data lives in the engine's dataset
+    /// store (recipes stay `Copy`); drawing pushes one uniform-integer index source and a
+    /// per-lane `Gather` over the constant elements. See `Engine::draw_empirical`.
+    Empirical { data: DataId },
+    /// A **moving-block bootstrap** over a constant data array
+    /// (`rand::block_bootstrap(xs, block_len)`): `~` draws a whole `Len(xs)`-long series glued
+    /// from random contiguous blocks of the data (block starts iid `unif_int(0, n-b)`,
+    /// non-wrapping; the last block truncates when `b ∤ n`), so within-block autocorrelation
+    /// survives the resampling. A *structured* draw like `Permutation` — it yields a
+    /// `Value::Array`. See `Engine::draw_block_bootstrap`.
+    BlockBootstrap { data: DataId, block_len: usize },
     // --- distributions with a possibly-random parameter (hierarchical models) ---
     // Each is drawn (LANG.md core model §2 / "Hierarchical distributions") by lowering to a
     // *standard base draw + a deterministic transform* (location–scale / inverse-CDF / threshold)
@@ -152,6 +172,10 @@ impl std::fmt::Display for Recipe {
             Recipe::ExpInt { rate } => write!(f, "exponential_int({rate})"),
             Recipe::Rotation { d } => write!(f, "rotation({d})"),
             Recipe::Permutation { n } => write!(f, "permutation({n})"),
+            Recipe::Empirical { .. } => write!(f, "empirical(data)"),
+            Recipe::BlockBootstrap { block_len, .. } => {
+                write!(f, "block_bootstrap(data, {block_len})")
+            }
             Recipe::UniformDyn { lo, hi } => write!(f, "unif({lo}, {hi})"),
             Recipe::UniformIntDyn { lo, hi } => write!(f, "unif_int({lo}, {hi})"),
             Recipe::NormalDyn { mu, sigma, int } => {

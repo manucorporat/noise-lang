@@ -129,6 +129,8 @@ impl Builder {
                 UnOp::Round => return self.num(x.round()),
                 UnOp::Floor => return self.num(x.floor()),
                 UnOp::Ceil => return self.num(x.ceil()),
+                UnOp::Exp => return self.num(x.exp()),
+                UnOp::Ln => return self.num(x.ln()),
                 UnOp::Not => {} // kind-checked away upstream; fall through
             }
         }
@@ -262,6 +264,28 @@ mod tests {
 
     fn out_has_mul(g: &RvGraph) -> bool {
         (0..g.len() as u32).any(|i| matches!(g.node(RvId(i)), RvNode::Binary(BinOp::Mul, ..)))
+    }
+
+    #[test]
+    fn folds_constant_exp_and_ln() {
+        // exp(1) + X → e + X: the constant Unary(Exp) node folds away (Ln folds symmetrically).
+        let mut g = RvGraph::default();
+        let x = src(&mut g);
+        let one = num(&mut g, 1.0);
+        let e = g.push(RvNode::Unary(UnOp::Exp, one), RvKind::Num);
+        let lne = g.push(RvNode::Unary(UnOp::Ln, e), RvKind::Num); // ln(exp(1)) folds to 1
+        let root = bin(&mut g, BinOp::Add, lne, x);
+        let (out, r) = simplify(&g, root);
+        match out.node(r) {
+            RvNode::Binary(BinOp::Add, a, _) => match out.node(*a) {
+                RvNode::ConstNum(v) => assert!((v - 1.0).abs() < 1e-12, "ln(exp(1)) folded to {v}"),
+                other => panic!("expected a folded constant, got {other:?}"),
+            },
+            other => panic!("expected Add(1, X), got {other:?}"),
+        }
+        let any_unary = (0..out.len() as u32)
+            .any(|i| matches!(out.node(RvId(i)), RvNode::Unary(UnOp::Exp | UnOp::Ln, _)));
+        assert!(!any_unary, "constant exp/ln nodes must fold away");
     }
 
     #[test]

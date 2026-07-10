@@ -219,6 +219,19 @@ enum IntrospectionOut {
     },
     #[serde(rename = "corrmatrix")]
     CorrMatrix { label: String, n: usize, corr: Vec<f64> },
+    /// A fan chart: per-index quantile bands of a simulated path (all vectors have length `cols`).
+    #[serde(rename = "fan")]
+    Fan {
+        label: String,
+        cols: usize,
+        n: u64,
+        q05: Vec<f64>,
+        q25: Vec<f64>,
+        q50: Vec<f64>,
+        q75: Vec<f64>,
+        q95: Vec<f64>,
+        mean: Vec<f64>,
+    },
     #[serde(rename = "error")]
     Error { error: String },
 }
@@ -283,6 +296,17 @@ fn summary_out(s: &Summary) -> IntrospectionOut {
         Payload::CorrMatrix(c) => {
             IntrospectionOut::CorrMatrix { label: s.label.clone(), n: c.n, corr: c.corr.clone() }
         }
+        Payload::Fan(c) => IntrospectionOut::Fan {
+            label: s.label.clone(),
+            cols: c.cols,
+            n: c.n,
+            q05: c.q05.clone(),
+            q25: c.q25.clone(),
+            q50: c.q50.clone(),
+            q75: c.q75.clone(),
+            q95: c.q95.clone(),
+            mean: c.mean.clone(),
+        },
     }
 }
 

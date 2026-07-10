@@ -50,6 +50,9 @@ and a derived value like `4 * P(C)` or a ratio rounds itself correctly.
 | `am_vs_fm_complex.noise` | the **complex-number** retelling of `am_vs_fm`: the carrier is one complex phasor `z`, AM writes the message into `\|z\|` and FM into `arg(z)`, and static is a single `rand::normal_complex` draw (circular symmetry is now a property of the *type*). Uses `math::i`/`exp`/`abs`/`arg` | FM ≫ AM cleaner | AM 0.044, FM 0.005 (8× cleaner) |
 | `shor_period.noise` | **Shor's factoring algorithm** end to end as `shor(N)`: a complex inverse-QFT (`math::exp` + `vec::outer` + complex `@`) makes the inputs interfere into a comb whose spike count is the period `r`, then `gcd(a^(r/2)±1, N)` yields the factors. Uses the `math::gcd`/`math::modpow` builtins, comprehensions, and `for`-loop control flow | `shor(15)` | `[3, 5]` |
 | `nyquist.noise` | the Nyquist–Shannon theorem by counterexample: a 7-cycle wave sampled below `2·7` aliases into a 3-cycle one (identical samples); above, they separate. Lazy `signal` + `sample(sig, n)` | 0 vs > 0 | 0 (aliased) / 1 (resolved) |
+| `kelly.noise` | **the Kelly criterion** — sweep the stake fraction `f` and tabulate `E(math::log(growth))` per round (`log` of an RV); the curve peaks at the Kelly fraction and goes negative past ~0.4 (overbetting a winning game loses) | f\* = 2p−1 = 0.2; E[log g] ≈ 0.0201 | peak 0.02 at f = 0.2 |
+| `bootstrap.noise` | **the bootstrap** — `rand::empirical(rets)` makes tomorrow a random draw from 24 pasted days of history (no Gaussian fitted, crash included): 1-day VaR and `P(another −4% day)`; then `block_bootstrap(rets, 5)` keeps the panic *week* glued together, so weekly VaR comes out honestly scarier than iid resampling | 1/24 ≈ 0.0417 | 0.042; week VaR −0.051 (iid) vs −0.068 (block) |
+| `barrier_option.noise` | **a knock-out (down-and-out) call** — a year of *exact* GBM in one line (`s0 * exp(cumsum(logrets))`), barrier = `any(path < 80)`, worst drawdown = `min(path / cummax(path)) − 1`, and a `plot::fan` cone of the paths; the vanilla leg must land on Black-Scholes | 10.4506 | 10.5 / KO 10.4 |
 
 ## What these deliberately show about the design
 
@@ -78,16 +81,26 @@ and a derived value like `4 * P(C)` or a ratio rounds itself correctly.
 - **Feed-forward d-dimensional experiments reproduce real research.** `turboquant` draws a fresh
   `d×d` Gaussian projection per sample, runs matrix–vector products and reductions, and recovers a
   published bias (`2/π`) and its fix — empirical validation of an arXiv paper in ~20 readable lines.
+- **Fixed-horizon paths are one-liners.** `barrier_option` builds a whole simulated year as
+  `s0 * exp(cumsum(logrets))` — a scan turns 52 draws into a price path, `any`/`cummax` read the
+  barrier and the drawdown off it, and `plot::fan` draws the cone. `kelly` needs `math::log` of a
+  random growth factor; `bootstrap` swaps the Gaussian for history itself
+  (`rand::empirical` / `rand::block_bootstrap`).
 
 ## Where the language hits its ceiling (honest limits)
 
-These are *not* expressible today, by design — they need features beyond the static
-random-variable algebra (see the "dynamics fork" in `../plans/PLAN.md`):
+The ceiling has moved: **fixed-horizon** processes are now in scope. What remains out, by
+design, needs features beyond the static random-variable algebra (see the "dynamics fork" in
+`../plans/PLAN.md`):
 
-- **Sequential / stateful processes.** A random walk, a Markov chain, or an **M/M/1 queue**
-  (`W_{n+1} = max(0, W_n + S_n − A_{n+1})`) needs per-step state — the columnar engine samples
-  independent lanes that can't carry state across a time index.
-- **Sequential / stateful control flow.** You *can* now pick a **value** from a random outcome —
-  `if D == 6 { 10 } else { -2 }` lifts to a per-lane select (see `dice_bet.noise`,
-  `max_of_dice.noise`). What's still missing is *sequential* branching that carries state across
-  a time step (the recurrences above), which is a different execution mode.
+- **Fixed-horizon paths are expressible — idiomatically.** A random walk is
+  `cumsum(increments)`, a compounding price path is `cumprod(1 + rets)` or, exactly,
+  `s0 * exp(cumsum(logrets))`; a barrier is `any(path < b)`, a lookback is `max(path)`, a
+  drawdown is `min(path / cummax(path)) − 1` (see `barrier_option.noise`). The scans
+  (`vec::cumsum`/`cumprod`/`cummax`/`cummin`) cover any process whose *length is known up front*.
+- **Random-length / early-stopping processes are the real ceiling.** "Expected *time* to ruin",
+  an unbounded first-passage time, or a queue run *until* it empties needs a per-lane stepper
+  that stops at a data-dependent step — the columnar engine samples independent lanes of a
+  fixed-size graph. Within a fixed horizon, a lifted `if` still covers absorbing states
+  (freeze-at-absorption: `bank = if ruined { bank } else { bank + pnl }`), but it picks a
+  *value* per lane; it cannot decide *when to stop*.

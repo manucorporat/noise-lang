@@ -182,6 +182,23 @@ impl DistGrid {
     }
 }
 
+/// Per-index quantile bands of a *path* — a vector of random variables sampled **jointly** (one
+/// pass, shared lanes), so the bands are consistent across the index: the data behind
+/// `plot::fan(path)`. Each band vector has length `cols`; `q05[t] … q95[t]` bracket the simulated
+/// value at index `t`, and `mean` rides along (it falls out of the same draws for free). A
+/// deterministic path is the degenerate fan: every band equals the values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FanChart {
+    pub cols: usize,
+    pub n: u64,
+    pub q05: Vec<f64>,
+    pub q25: Vec<f64>,
+    pub q50: Vec<f64>,
+    pub q75: Vec<f64>,
+    pub q95: Vec<f64>,
+    pub mean: Vec<f64>,
+}
+
 /// The full element×element correlation matrix of a vector of random variables (`n×n`, row-major) —
 /// the dependence heatmap behind `corr(vec)` / `plot::corr`. Diagonal is 1; iid elements are ~0
 /// off-diagonal. Computed in one joint pass ([`crate::sampler::corr_matrix`]).
@@ -290,6 +307,43 @@ pub fn corr_grid(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> CorrMa
     CorrMatrix { n: roots.len(), corr: sampler::corr_matrix(graph, roots, n, seed) }
 }
 
+/// Memory budget for a fan chart's joint draw matrix, in `f64` cells (`cols × n` ≈ 32 MB at the
+/// cap). A fan holds every column's *full sample* (quantiles need it, unlike [`grid`]'s running
+/// moments), so a wide path trims the per-index draw count instead of ballooning memory: a 252-step
+/// year still gets ~15k draws per index — plenty to pin a q05/q95 band for a chart.
+const FAN_CELLS: usize = 4_000_000;
+
+/// Per-index quantile bands of a path of `roots` in ONE joint pass — the data behind
+/// `plot::fan(path)`. All indices are drawn on shared lanes ([`sampler::grid_draws`]), then each
+/// column is sorted and read at the same five quantiles a scalar [`Dist1`] reports
+/// (q05/q25/q50/q75/q95, [`quantile_sorted`]). `n` is a *request*; it is clamped to the
+/// [`FAN_CELLS`] budget (see there) and the effective count is returned in the chart.
+pub fn fan(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> FanChart {
+    let cols = roots.len();
+    let n = n.min(FAN_CELLS / cols.max(1)).max(1);
+    let draws = sampler::grid_draws(graph, roots, n, seed);
+    let mut fc = FanChart {
+        cols,
+        n: n as u64,
+        q05: Vec::with_capacity(cols),
+        q25: Vec::with_capacity(cols),
+        q50: Vec::with_capacity(cols),
+        q75: Vec::with_capacity(cols),
+        q95: Vec::with_capacity(cols),
+        mean: Vec::with_capacity(cols),
+    };
+    for mut col in draws {
+        fc.mean.push(col.iter().sum::<f64>() / col.len().max(1) as f64);
+        col.sort_by(f64::total_cmp);
+        fc.q05.push(quantile_sorted(&col, 0.05));
+        fc.q25.push(quantile_sorted(&col, 0.25));
+        fc.q50.push(quantile_sorted(&col, 0.50));
+        fc.q75.push(quantile_sorted(&col, 0.75));
+        fc.q95.push(quantile_sorted(&col, 0.95));
+    }
+    fc
+}
+
 /// Linear-interpolated empirical quantile of a **sorted, non-empty** sample (numpy's type-7 rule —
 /// the same rule `builtins::Q` uses, kept private here so introspection has no cross-module dep).
 fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
@@ -353,6 +407,7 @@ pub enum View {
     Value,
     Grid,
     CorrMatrix,
+    Fan,
 }
 
 /// The payload behind a [`Summary`] — one of the data ops' results. `One`/`Two` are the scalar
@@ -366,6 +421,7 @@ pub enum Payload {
     Value(ValueCard),
     Grid(DistGrid),
     CorrMatrix(CorrMatrix),
+    Fan(FanChart),
 }
 
 /// A first-class introspection result — what `describe(x)` / `corr(a, b)` / `explain(y)` evaluate
@@ -438,6 +494,7 @@ impl fmt::Display for Summary {
             (Payload::Value(v), _) => fmt_value(f, &self.label, v),
             (Payload::Grid(g), _) => fmt_grid(f, &self.label, g),
             (Payload::CorrMatrix(c), _) => fmt_corr_matrix(f, &self.label, c),
+            (Payload::Fan(c), _) => fmt_fan(f, &self.label, c),
         }
     }
 }
@@ -483,6 +540,32 @@ fn fmt_corr_matrix(f: &mut fmt::Formatter<'_>, label: &str, c: &CorrMatrix) -> f
         writeln!(f, "  {row}")?;
     }
     write!(f, "  |corr|: 0 ░▒▓█ 1")
+}
+
+fn fmt_fan(f: &mut fmt::Formatter<'_>, label: &str, c: &FanChart) -> fmt::Result {
+    if c.q50.is_empty() {
+        return write!(f, "fan {label} (empty)");
+    }
+    // ONE global scale (the outermost band's extremes), so the stacked rows read as a cone: the q95
+    // row visibly rides high and the q05 row low. Each row is a sparkline of that quantile's path.
+    let lo = c.q05.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = c.q95.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    writeln!(f, "fan {label}  [{} … {}]  ({} elems, n={})", fmt_n(lo), fmt_n(hi), c.cols, c.n)?;
+    let bands: [(&str, &[f64]); 5] =
+        [("q95", &c.q95), ("q75", &c.q75), ("q50", &c.q50), ("q25", &c.q25), ("q05", &c.q05)];
+    for (i, (name, row)) in bands.iter().enumerate() {
+        // Directly level→glyph (NOT `sparkline`, which re-normalizes each row to its own max and
+        // would collapse the shared scale). Level 0 still draws ▁ so a flat-low band stays visible.
+        let line: String = scale_to_levels(row, lo, hi)
+            .iter()
+            .map(|&l| BLOCKS[(l as usize).min(BLOCKS.len() - 1)])
+            .collect();
+        write!(f, "  {name} {line}")?;
+        if i + 1 < bands.len() {
+            writeln!(f)?;
+        }
+    }
+    Ok(())
 }
 
 /// Map values onto the 8 sparkline levels, given a `[lo, hi]` range.
@@ -615,6 +698,31 @@ mod tests {
         assert!((Dist2::from_pairs(&same, 100).corr - 1.0).abs() < 1e-9);
         let anti: Vec<(f64, f64)> = (0..1000).map(|i| (i as f64, -(i as f64))).collect();
         assert!((Dist2::from_pairs(&anti, 100).corr + 1.0).abs() < 1e-9);
+    }
+
+    /// The fan rendering keeps ONE global scale: a q05 row pinned at the global low must render at
+    /// the bottom glyph even though its own row-max is far below the global high (i.e. rows are
+    /// level-mapped directly, never re-normalized per row like `sparkline`).
+    #[test]
+    fn fan_display_shares_one_global_scale() {
+        let c = FanChart {
+            cols: 3,
+            n: 100,
+            q05: vec![0.0, 0.0, 0.0],
+            q25: vec![1.0, 1.0, 1.0],
+            q50: vec![2.0, 2.0, 2.0],
+            q75: vec![3.0, 3.0, 3.0],
+            q95: vec![8.0, 8.0, 8.0],
+            mean: vec![2.0, 2.0, 2.0],
+        };
+        let s = Summary { view: View::Fan, label: "path".into(), label_b: None, payload: Payload::Fan(c) };
+        let shown = s.to_string();
+        assert!(shown.starts_with("fan path"), "{shown}");
+        assert!(shown.contains("0 … 8"), "global range legend: {shown}");
+        assert!(shown.contains("q95 ███"), "q95 at the global high renders full blocks: {shown}");
+        assert!(shown.contains("q05 ▁▁▁"), "q05 at the global low renders bottom blocks: {shown}");
+        // q25 sits at 1/8 of the range — a low block, NOT a full one (no per-row re-normalizing).
+        assert!(shown.contains("q25 ▂▂▂"), "q25 keeps the shared scale: {shown}");
     }
 
     #[test]

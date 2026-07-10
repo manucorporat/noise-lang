@@ -1197,6 +1197,113 @@ mod tests {
     }
 
     #[test]
+    fn empirical_resamples_the_data() {
+        // `empirical(xs)` draws a uniformly-random element of the data: the bootstrap mean is the
+        // sample mean, and a value's probability is its multiplicity (exactly-representable data).
+        assert!((num("X ~ empirical([1, 2, 3, 4]); E(X)") - 2.5).abs() < 0.01);
+        assert!((num("X ~ empirical([1, 2, 2, 5]); P(X == 2)") - 0.5).abs() < 0.01);
+        assert!((num("X ~ empirical([1, 2, 2, 5]); P(X == 5)") - 0.25).abs() < 0.01);
+        // it's a recipe like any distribution: `=` keeps it undrawn, arithmetic on it errors.
+        assert!(run("X = empirical([1, 2, 3]); X + 1").is_err());
+    }
+
+    #[test]
+    fn empirical_draws_are_iid() {
+        // two `~` draws resample independently: P(a == b) = Σ pᵢ² (0.5 for two equal atoms), not 1.
+        assert!((num("d = [0, 1]; a ~ empirical(d); b ~ empirical(d); P(a == b)") - 0.5).abs() < 0.01);
+        // a shaped draw is iid at every leaf — NOT one shared draw repeated (two iid coin values
+        // sum to 1 half the time; a shared pair never would).
+        assert!((num("xs ~[2] empirical([0, 1]); P(sum(xs) == 1)") - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn empirical_one_name_one_draw() {
+        // binding the draw to a name shares the ONE draw: X - X is identically zero.
+        assert_eq!(num("X ~ empirical([1, 2, 3]); P(X - X == 0)"), 1.0);
+    }
+
+    #[test]
+    fn block_bootstrap_preserves_blocks() {
+        // data 0..19 in blocks of 5: the drawn series has the data's length, and inside a block
+        // consecutive elements are consecutive data points (difference exactly 1, every lane).
+        assert_eq!(num("s ~ block_bootstrap(0..20, 5); Len(s)"), 20.0);
+        assert_eq!(num("s ~ block_bootstrap(0..20, 5); P(s[1] - s[0] == 1)"), 1.0);
+        assert_eq!(num("s ~ block_bootstrap(0..20, 5); P(s[4] - s[3] == 1)"), 1.0);
+        // across a block boundary the blocks are independent, so a +1 step is rare but possible:
+        // start₁ == start₀ + 5, i.e. 11 of the 16² equally-likely start pairs ≈ 0.043.
+        let p = num("s ~ block_bootstrap(0..20, 5); P(s[5] - s[4] == 1)");
+        assert!(p > 0.02 && p < 0.5, "boundary step probability was {p}");
+    }
+
+    #[test]
+    fn block_bootstrap_marginals() {
+        // data 0..19, b = 5, starts uniform on 0..15 (mean 7.5): element j sits at offset
+        // o = j mod 5 inside its block, so its marginal mean is 7.5 + o — NOT the sample mean
+        // (non-wrapping starts skew each position toward its offset). Averaged over a whole
+        // series the offsets contribute their mean 2, so E(mean(s)) = 9.5 = the sample mean.
+        assert!((num("s ~ block_bootstrap(0..20, 5); E(s[1])") - 8.5).abs() < 0.05);
+        assert!((num("s ~ block_bootstrap(0..20, 5); E(mean(s), 200000)") - 9.5).abs() < 0.05);
+    }
+
+    #[test]
+    fn block_bootstrap_degenerate_block_lengths() {
+        // block_len == Len(xs): the only valid start is 0, so the series IS the data, every lane.
+        assert_eq!(
+            num("d = [3, 1, 4, 1, 5]; s ~ block_bootstrap(d, 5); \
+                 P(all([for k in 0..5 { s[k] == d[k] }]))"),
+            1.0
+        );
+        // block_len == 1: every element is an independent iid resample (like `empirical`).
+        assert!((num("s ~ block_bootstrap([0, 1], 1); P(sum(s) == 1)") - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn block_bootstrap_draws_are_independent() {
+        // two `~` draws pick independent block starts: the first elements agree only when the
+        // two starts collide (1/16 for data 0..19, b = 5).
+        let p = num(
+            "a ~ block_bootstrap(0..20, 5); b ~ block_bootstrap(0..20, 5); P(a[0] == b[0])",
+        );
+        assert!((p - 1.0 / 16.0).abs() < 0.01, "got {p}");
+    }
+
+    #[test]
+    fn bootstrap_validation_errors() {
+        let e = run("X ~ empirical([])").unwrap_err().to_string();
+        assert!(e.contains("non-empty"), "{e}");
+        // elements must be constant numbers (flat): an RV or a nested array is rejected.
+        let e = run("Z ~ normal(0, 1); X ~ empirical([Z, 1])").unwrap_err().to_string();
+        assert!(e.contains("constant numbers"), "{e}");
+        let e = run("X ~ empirical([[1, 2], [3, 4]])").unwrap_err().to_string();
+        assert!(e.contains("constant numbers"), "{e}");
+        // block_len must be an integer in 1..=Len(xs).
+        for bad in ["0", "4", "1.5"] {
+            let e = run(&format!("s ~ block_bootstrap([1, 2, 3], {bad})"))
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("1 <= block_len <= Len(xs)"), "{e}");
+        }
+        let e = run("s ~ block_bootstrap([], 1)").unwrap_err().to_string();
+        assert!(e.contains("non-empty"), "{e}");
+    }
+
+    #[test]
+    fn bootstrap_example_core() {
+        // the core of examples/bootstrap.noise: bootstrap mean == sample mean, the crash day
+        // keeps exactly its 1/24 share of history, and a contiguous resampled week is a real run.
+        let rets = "[0.004, -0.006, 0.012, 0.003, -0.002, 0.007, 0.001, -0.005, 0.008, 0.002, \
+                     -0.012, -0.04, -0.018, -0.009, 0.011, 0.006, -0.003, 0.009, -0.001, 0.013, \
+                     -0.007, 0.002, 0.01, -0.004]";
+        let diff = num(&format!("rets = {rets}; r ~ empirical(rets); E(r) - mean(rets)"));
+        assert!(diff.abs() < 0.001, "bootstrap mean off the sample mean by {diff}");
+        let p_crash = num(&format!("rets = {rets}; r ~ empirical(rets); P(r <= -0.04)"));
+        assert!((p_crash - 1.0 / 24.0).abs() < 0.005, "got {p_crash}");
+        // the first 5 elements of a block-5 series form one contiguous historical run, so
+        // consecutive differences match some window of the data every lane (spot-check length).
+        assert_eq!(num(&format!("rets = {rets}; w ~ block_bootstrap(rets, 5); Len(w)")), 24.0);
+    }
+
+    #[test]
     fn hundred_prisoners_cycle_following() {
         // The 100 Prisoners Riddle, cycle-following strategy: prisoner i follows the permutation
         // from drawer i, opening `opens` drawers; everyone wins iff the longest cycle <= opens.
@@ -1567,6 +1674,75 @@ mod tests {
     }
 
     #[test]
+    fn exp_log_scalars_and_arrays() {
+        // Scalar sanity: exp/log are exact inverses on the deterministic path.
+        assert_eq!(num("exp(0)"), 1.0);
+        assert!((num("exp(1)") - std::f64::consts::E).abs() < 1e-12);
+        assert!((num("log(e)") - 1.0).abs() < 1e-12);
+        assert_eq!(num("log(1)"), 0.0);
+        assert!((num("exp(log(5))") - 5.0).abs() < 1e-12);
+        // Arrays map elementwise: log([1, e, e^2]) ≈ [0, 1, 2], exp keeps shape.
+        assert_eq!(num("log([1, e, e ^ 2])[0]"), 0.0);
+        assert!((num("log([1, e, e ^ 2])[1]") - 1.0).abs() < 1e-12);
+        assert!((num("log([1, e, e ^ 2])[2]") - 2.0).abs() < 1e-12);
+        assert_eq!(display_of("exp([0, 0])"), "[1, 1]");
+        // log10 rides on the same machinery (scalar fast path stays exact).
+        assert_eq!(num("log10(1000)"), 3.0);
+        assert!((num("log10([1, 100])[1]") - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn exp_log_lift_over_random_variables() {
+        // Lognormal mean: X ~ N(0,1) → E[e^X] = e^{1/2} (the PLAN-FINANCE F1 unlock).
+        let m = run_num("X ~ normal(0, 1); E(exp(X))");
+        let want = (0.5f64).exp();
+        assert!((m - want).abs() < 3e-2 * want, "E[e^X] = {m} (want e^0.5 = {want})");
+        // E[ln U] over U(0,1) = -1.
+        let l = run_num("U ~ unif(0, 1); E(log(U))");
+        assert!((l + 1.0).abs() < 1e-2, "E[ln U] = {l} (want -1)");
+        // Lognormal price: S = 100·e^X with X ~ N(0, 0.25) → E[S] = 100·e^{σ²/2} = 100·e^{0.03125}.
+        let s = run_num("X ~ normal(0, 0.25); S = 100 * exp(X); E(S)");
+        let want_s = 100.0 * (0.03125f64).exp();
+        assert!((s - want_s).abs() < 0.5, "E[S] = {s} (want {want_s})");
+        // log10 of an RV lifts as Ln/ln10: a point mass at 100 comes back as exactly-2-ish.
+        let l10 = run_num("X ~ unif_int(100, 100); E(log10(X))");
+        assert!((l10 - 2.0).abs() < 1e-9, "E[log10(100)] = {l10}");
+        // Domain semantics per lane match f64: e^X is surely positive; negative lanes of log are
+        // NaN (NaN == NaN is false), so P(log X == log X) = P(X > 0).
+        assert_eq!(run_num("X ~ normal(0, 1); P(exp(X) > 0)"), 1.0);
+        let p = run_num("X ~ normal(0, 1); P(log(X) == log(X))");
+        assert!((p - 0.5).abs() < 3e-3, "P(log X == log X) = {p} (want 0.5)");
+        // E[ln|X|] for X ~ N(0,1) = -(γ + ln 2)/2 ≈ -0.6352 — finite despite the |X| → 0 lanes.
+        let la = run_num("X ~ normal(0, 1); E(log(abs(X)))");
+        assert!((la + 0.6352).abs() < 2e-2, "E[ln|X|] = {la} (want ≈ -0.6352)");
+        // exp/log map elementwise over an *array of RVs*: E[Σₖ e^{Xₖ}] = 3·e^{1/2}.
+        let a = run_num("xs ~[3] normal(0, 1); E(sum(exp(xs)))");
+        assert!((a - 3.0 * (0.5f64).exp()).abs() < 0.15, "E[Σ e^X] = {a} (want 3·e^0.5)");
+        // A *noisy lazy signal* defers exp into its tree and lifts per lane at materialization.
+        let sg = run_num("static ~ noise_white(1); E(mean(sample(exp(static), 16)))");
+        assert!((sg - (0.5f64).exp()).abs() < 0.05, "E[mean e^noise] = {sg} (want e^0.5)");
+    }
+
+    #[test]
+    fn kelly_log_growth_peaks_at_kelly_fraction() {
+        // A 60% coin that doubles-or-nothings the staked fraction f: per-round growth factor is
+        // 1+f on a win, 1-f on a loss. The long-run compounding rate is E[log g], and its analytic
+        // peak is the Kelly fraction f* = 2p - 1 = 0.2 (mirrors examples/kelly.noise).
+        let growth = |f: f64| {
+            run_num(&format!(
+                "win ~ bernoulli(0.6); g = if win {{ 1 + {f} }} else {{ 1 - {f} }}; E(log(g))"
+            ))
+        };
+        let analytic = |f: f64| 0.6 * (1.0 + f).ln() + 0.4 * (1.0 - f).ln();
+        for f in [0.1, 0.2, 0.3] {
+            let (got, want) = (growth(f), analytic(f));
+            assert!((got - want).abs() < 2e-3, "E[log g] at f={f}: {got} (want {want})");
+        }
+        // The Kelly point beats both neighbours (analytic gaps ≈ 5e-3 >> MC noise).
+        assert!(growth(0.2) > growth(0.1) && growth(0.2) > growth(0.3));
+    }
+
+    #[test]
     fn arithmetic_broadcasts_over_arrays() {
         assert_eq!(display_of("1 + [1, 2, 3]"), "[2, 3, 4]"); // scalar ⊕ array
         assert_eq!(display_of("[1, 2, 3] + [10, 20, 30]"), "[11, 22, 33]"); // array ⊕ array
@@ -1692,6 +1868,133 @@ mod tests {
         assert_eq!(num("count_duplicates([2, 2, 2])"), 3.0);
         assert_eq!(num("count_duplicates([])"), 0.0);
         assert_eq!(num("count_duplicates([7])"), 0.0);
+    }
+
+    // --- PLAN-FINANCE F3: prefix scans (cumsum/cumprod/cummax/cummin) + the prod reducer ---
+
+    #[test]
+    fn scans_deterministic() {
+        assert_eq!(display_of("cumsum([1, 2, 3, 4])"), "[1, 3, 6, 10]");
+        assert_eq!(display_of("cumprod([1, 2, 3, 4])"), "[1, 2, 6, 24]");
+        assert_eq!(display_of("cummax([3, 1, 4, 2])"), "[3, 3, 4, 4]");
+        assert_eq!(display_of("cummin([3, 1, 4, 2])"), "[3, 1, 1, 1]");
+        assert_eq!(num("prod([1, 2, 3, 4])"), 24.0);
+        // Scans route through the same `binop` as `sum`, so a matrix scans by elementwise
+        // row folds (mirroring `sum(matrix)` = elementwise row-sum vector).
+        assert_eq!(display_of("cumsum([[1, 2], [3, 4]])"), "[[1, 2], [4, 6]]");
+        assert_eq!(display_of("prod([[1, 2], [3, 4]])"), "[3, 8]");
+    }
+
+    #[test]
+    fn scan_last_element_matches_reducer() {
+        let xs = "xs = [2.5, -1, 4, 0.5];";
+        assert_eq!(num(&format!("{xs} cumsum(xs)[3] - sum(xs)")), 0.0);
+        assert_eq!(num(&format!("{xs} cumprod(xs)[3] - prod(xs)")), 0.0);
+        assert_eq!(num(&format!("{xs} cummax(xs)[3] - max(xs)")), 0.0);
+        assert_eq!(num(&format!("{xs} cummin(xs)[3] - min(xs)")), 0.0);
+    }
+
+    #[test]
+    fn scans_and_prod_on_empty_arrays() {
+        // A scan of an empty array is the empty array (every output element summarizes a
+        // nonempty prefix, so there are simply no elements to output). `prod`'s empty fold is
+        // the multiplicative identity 1, mirroring `sum`'s additive 0 — while the extremum
+        // *reducers* keep erroring (no extremum of nothing).
+        assert_eq!(display_of("cumsum([])"), "[]");
+        assert_eq!(display_of("cumprod([])"), "[]");
+        assert_eq!(display_of("cummax([])"), "[]");
+        assert_eq!(display_of("cummin([])"), "[]");
+        assert_eq!(num("prod([])"), 1.0);
+        assert_eq!(num("sum([])"), 0.0);
+        assert!(run("max([])").is_err());
+        assert!(run("min([])").is_err());
+    }
+
+    #[test]
+    fn cumsum_of_mixed_const_and_rv_array() {
+        // Literal arrays mixing constants and RVs scan like any other: E[1 + U + 2] = 3.5.
+        let e = run_num("X ~ unif(0, 1); c = cumsum([1, X, 2]); E(c[2])");
+        assert!((e - 3.5).abs() < 0.05, "E(cumsum [1,X,2] last) = {e}");
+        // the constant prefix stays a plain number
+        assert_eq!(run_num("X ~ unif(0, 1); cumsum([1, X, 2])[0]"), 1.0);
+    }
+
+    #[test]
+    fn cumsum_over_shaped_draws_is_a_random_walk() {
+        // path[t] = Σ steps[0..=t] of iid normal(0.01, 0.1): E[path[t]] = (t+1)·0.01 and
+        // Var[path[99]] = 100·0.01 = 1.0 (independent increments add in variance).
+        let common = "steps ~[100] normal(0.01, 0.1); path = cumsum(steps);";
+        let e99 = run_num(&format!("{common} E(path[99], 200000)"));
+        assert!((e99 - 1.0).abs() < 0.02, "E(path[99]) = {e99}");
+        let e49 = run_num(&format!("{common} E(path[49], 200000)"));
+        assert!((e49 - 0.5).abs() < 0.02, "E(path[49]) = {e49}");
+        let v99 = run_num(&format!("{common} Var(path[99], 200000)"));
+        assert!((v99 - 1.0).abs() < 0.05, "Var(path[99]) = {v99}");
+        // path[9] is ONE random variable reused (the scan shares structure), not a fresh draw:
+        // subtracting it from itself is exactly 0 in every lane.
+        assert_eq!(run_num(&format!("{common} P(path[9] - path[9] == 0, 10000)")), 1.0);
+    }
+
+    #[test]
+    fn cumprod_gbm_one_liner() {
+        // GBM in one line: 52 weekly returns, E[S_52] = 100·(1.001)^52 ≈ 105.33.
+        let e = run_num(
+            "rets ~[52] normal(0.001, 0.02); path = 100 * cumprod(1 + rets); \
+             E(path[51], 200000)",
+        );
+        let want = 100.0 * 1.001f64.powi(52);
+        assert!((e - want).abs() < 0.25, "E(path[51]) = {e}, want ~{want}");
+    }
+
+    #[test]
+    fn barrier_via_scan_matches_hand_rolled_loop() {
+        // P(the walk ever touches the barrier): the scan idiom must agree (statistically —
+        // different RNG streams) with the hand-written for-loop accumulator of the SAME model.
+        let scan = run_num(
+            "zs ~[52] normal(0, 1); \
+             path = 100 * cumprod(exp(0.001 + 0.02 * zs)); \
+             P(any(path < 90), 100000)",
+        );
+        let looped = run_num(
+            "s = 100; knocked = false; \
+             for t in 0..52 { z ~ normal(0, 1); s = s * exp(0.001 + 0.02 * z); \
+                              knocked = knocked || (s < 90) }; \
+             P(knocked, 100000)",
+        );
+        assert!(
+            (scan - looped).abs() < 0.02,
+            "scan barrier P = {scan}, hand-rolled P = {looped}"
+        );
+        // sanity: the event is neither impossible nor certain
+        assert!(scan > 0.05 && scan < 0.95, "P(knocked) = {scan}");
+    }
+
+    #[test]
+    fn drawdown_one_liner_via_cummax() {
+        // Max drawdown = min(path / running peak) - 1: strictly inside (-1, 0) for a walk
+        // that moves (it can't gain relative to its own peak, and can't lose everything).
+        let dd = run_num(
+            "rets ~[52] normal(0.001, 0.02); path = 100 * cumprod(1 + rets); \
+             dd = min(path / cummax(path)) - 1; E(dd, 50000)",
+        );
+        assert!(dd > -1.0 && dd < 0.0, "E(max drawdown) = {dd}, want in (-1, 0)");
+    }
+
+    #[test]
+    fn barrier_option_vanilla_leg_matches_black_scholes() {
+        // The examples/barrier_option.noise pricing core: exact per-step GBM (log-space cumsum
+        // through exp), so the vanilla European call must match Black-Scholes 10.4506 for
+        // S0=100, K=100, r=0.05, sigma=0.2, T=1 (any step count — the discretization is exact).
+        let price = run_num(
+            "s0 = 100; k = 100; r = 0.05; sigma = 0.2; t = 1; n = 52; dt = t / n; \
+             zs ~[52] normal(0, 1); \
+             logrets = (r - sigma^2 / 2) * dt + sigma * sqrt(dt) * zs; \
+             path = s0 * exp(cumsum(logrets)); \
+             s_final = path[51]; \
+             payoff = if s_final > k { s_final - k } else { 0 }; \
+             E(exp(0 - r * t) * payoff, 400000)",
+        );
+        assert!((price - 10.4506).abs() < 0.2, "vanilla call = {price}, BS wants 10.4506");
     }
 
     #[test]
@@ -2288,8 +2591,9 @@ mod tests {
         // |e^{iX}| = 1 for every lane (cos²+sin² = 1): exp lifts the imaginary RV via cos/sin.
         let m = run_num("X ~ rand::unif(0, 1); E(math::abs(math::exp(math::i * X)))");
         assert!((m - 1.0).abs() < 1e-9, "E|e^iX| = {m}");
-        // exp of a *random real part* is unsupported (no exp node in the VM)
-        assert!(run("X ~ rand::unif(0,1); math::exp(X)").is_err());
+        // exp of a *random real part* lifts too (PLAN-FINANCE F1): E[e^U] over U(0,1) = e - 1.
+        let x = run_num("X ~ rand::unif(0,1); E(math::exp(X))");
+        assert!((x - (std::f64::consts::E - 1.0)).abs() < 0.02, "E e^U = {x}");
         // sqrt over a real RV is IEEE `^ 0.5`: E[sqrt(U(0,4))] = (1/4)∫₀⁴ √x dx = 4/3
         let s = run_num("X ~ rand::unif(0, 4); E(math::sqrt(X))");
         assert!((s - 4.0 / 3.0).abs() < 0.02, "E sqrt = {s}");
@@ -2726,5 +3030,90 @@ mod tests {
             }
             other => panic!("expected a grid, got {other:?}"),
         }
+    }
+
+    // ===================== fan charts (plot::fan of a path) =====================
+
+    /// Run a program (with the module prelude) and return the fan chart it plotted.
+    fn fan_plot_of(src: &str) -> std::rc::Rc<Summary> {
+        let mut eng = Engine::new();
+        eng.run(&with_prelude(src)).unwrap();
+        for o in eng.take_output() {
+            if let crate::Output::Plot(s) = o {
+                if matches!(s.payload, Payload::Fan(_)) {
+                    return s;
+                }
+            }
+        }
+        panic!("expected a fan plot in the output stream for {src:?}");
+    }
+
+    /// `plot::fan(path)` of a driftless random walk shows the textbook cone: at EVERY index the
+    /// bands are strictly ordered (q05 < q25 < q50 < q75 < q95 — one joint pass, so they never
+    /// cross), the median hugs the zero drift line, and the band widens with t (sd = √(t+1)).
+    #[test]
+    fn fan_of_a_random_walk_is_a_widening_cone() {
+        let s = fan_plot_of("steps ~[16] normal(0, 1); path = cumsum(steps); plot::fan(path)");
+        let c = match &s.payload {
+            Payload::Fan(c) => c,
+            other => panic!("expected a fan chart, got {other:?}"),
+        };
+        assert_eq!(c.cols, 16);
+        for t in 0..c.cols {
+            assert!(
+                c.q05[t] < c.q25[t] && c.q25[t] < c.q50[t] && c.q50[t] < c.q75[t] && c.q75[t] < c.q95[t],
+                "bands must be strictly ordered at index {t}"
+            );
+        }
+        assert!(c.q50[15].abs() < 0.1, "driftless median ≈ 0, got {}", c.q50[15]);
+        let (w0, w1) = (c.q95[0] - c.q05[0], c.q95[15] - c.q05[15]);
+        assert!(w1 > 2.0 * w0, "the cone must widen with t: width {w0} → {w1}");
+    }
+
+    /// A plain numeric array is the degenerate fan: every band (and the mean) equals the values —
+    /// accepted rather than erroring, so `plot::fan` works on data too. The CLI rendering carries
+    /// the quantile row labels and the global range legend.
+    #[test]
+    fn fan_of_a_deterministic_array_is_the_degenerate_fan() {
+        let s = fan_plot_of("plot::fan([1, 2, 3])");
+        let c = match &s.payload {
+            Payload::Fan(c) => c,
+            other => panic!("expected a fan chart, got {other:?}"),
+        };
+        assert_eq!(c.cols, 3);
+        for (i, want) in [1.0, 2.0, 3.0].into_iter().enumerate() {
+            for band in [&c.q05, &c.q25, &c.q50, &c.q75, &c.q95, &c.mean] {
+                assert_eq!(band[i], want, "a constant's every quantile is itself");
+            }
+        }
+        let shown = s.to_string();
+        assert!(shown.contains("q95") && shown.contains("q50") && shown.contains("q05"), "{shown}");
+        assert!(shown.contains("1 … 3"), "global range legend missing: {shown}");
+    }
+
+    /// A scalar or a matrix has no single index to fan over → a friendly spanned error.
+    #[test]
+    fn fan_rejects_scalars_and_matrices() {
+        let scalar = run("X ~ rand::normal(0,1); plot::fan(X)").unwrap_err().to_string();
+        assert!(scalar.contains("plot::fan wants a vector"), "got: {scalar}");
+        let matrix = run("M ~[2, 2] rand::normal(0,1); plot::fan(M)").unwrap_err().to_string();
+        assert!(matrix.contains("plot::fan wants a vector"), "got: {matrix}");
+        let num = run("plot::fan(3)").unwrap_err().to_string();
+        assert!(num.contains("plot::fan wants a vector"), "got: {num}");
+    }
+
+    /// End-to-end: a GBM-style program with `plot::fan(path)` runs, captures an `Output::Plot`, and
+    /// its Display is the stacked-band chart (header + labeled quantile sparklines).
+    #[test]
+    fn plot_fan_of_a_gbm_path_renders_the_band_chart() {
+        let s = fan_plot_of(
+            "zs ~[8] normal(0, 1);
+             path = 100 * exp(cumsum(0.01 * zs - 0.005));
+             plot::fan(path)",
+        );
+        let shown = s.to_string();
+        assert!(shown.starts_with("fan path"), "labeled header: {shown}");
+        assert!(shown.contains("q95") && shown.contains("q05"), "quantile rows: {shown}");
+        assert!(shown.contains("8 elems"), "element count in the legend: {shown}");
     }
 }

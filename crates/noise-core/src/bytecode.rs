@@ -277,6 +277,10 @@ fn apply_un(op: UnOp, x: f64) -> f64 {
         UnOp::Round => x.round(),
         UnOp::Floor => x.floor(),
         UnOp::Ceil => x.ceil(),
+        // The interpreter is the exact oracle: full-precision libm `exp`/`ln` (IEEE semantics —
+        // ln(0) = -inf, ln(x<0) = NaN). The code generators approximate these within MC noise.
+        UnOp::Exp => x.exp(),
+        UnOp::Ln => x.ln(),
     }
 }
 
