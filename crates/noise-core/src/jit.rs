@@ -25,9 +25,10 @@
 //! graphs that the interpreter samples faster also stay there (see [`crate::kernel::profitable`]).
 
 use std::collections::HashMap;
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
-use cranelift::codegen::ir::UserFuncName;
+use cranelift::codegen::ir::{BlockArg, UserFuncName};
 use cranelift::prelude::settings::Configurable;
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
@@ -58,12 +59,30 @@ extern "C" fn nz_round(x: f64) -> f64 {
 extern "C" fn nz_pow(a: f64, b: f64) -> f64 {
     a.powf(b)
 }
+// Accurate library `sin`/`cos` for the large-argument fallback: the inlined polynomial degrades
+// past `approx::TRIG_MAX`, so `emit_trig` calls these there to stay in agreement with the
+// interpreter's libm across the whole range (finding C3). Rare path — the compare almost always
+// picks the inline poly, so the shim is only a defended edge, not a hot cost.
+extern "C" fn nz_sin(x: f64) -> f64 {
+    x.sin()
+}
+extern "C" fn nz_cos(x: f64) -> f64 {
+    x.cos()
+}
+// `e^x` via the exact library `exp`, so the JIT matches the interpreter's `f64::exp` bit-for-bit
+// (finding C9 — the old `pow(e, x)` lowering could differ in the last bit from `x.exp()`).
+extern "C" fn nz_exp(x: f64) -> f64 {
+    x.exp()
+}
 
 /// Module-level `FuncId`s for the math shims (declared once per build).
 struct MathIds {
     atan: cranelift_module::FuncId,
     round: cranelift_module::FuncId,
     pow: cranelift_module::FuncId,
+    sin: cranelift_module::FuncId,
+    cos: cranelift_module::FuncId,
+    exp: cranelift_module::FuncId,
 }
 
 /// In-function `FuncRef`s for the math shims (resolved once at the top of the kernel body, then
@@ -73,6 +92,9 @@ struct MathRefs {
     atan: cranelift::codegen::ir::FuncRef,
     round: cranelift::codegen::ir::FuncRef,
     pow: cranelift::codegen::ir::FuncRef,
+    sin: cranelift::codegen::ir::FuncRef,
+    cos: cranelift::codegen::ir::FuncRef,
+    exp: cranelift::codegen::ir::FuncRef,
 }
 
 /// The Cranelift JIT backend. Construction is cheap; the work happens in [`Self::compile`].
@@ -106,15 +128,35 @@ impl Backend for JitBackend {
 /// pointer, and the stream count (so runners size their RNG state). Shared behind an `Arc`.
 struct JitProgramInner {
     // `func` points into `_module`'s code memory; the module is kept alive for the program's life.
-    _module: JITModule,
+    // Wrapped in `ManuallyDrop` so `Drop` can move it out and call `free_memory` (see below) —
+    // cranelift-jit's own `Memory::drop` deliberately `mem::forget`s the executable pages, so
+    // dropping a `JITModule` without `free_memory()` leaks every compiled kernel (finding C4).
+    _module: ManuallyDrop<JITModule>,
     func: KernelFn,
     streams: usize,
 }
 
+impl Drop for JitProgramInner {
+    fn drop(&mut self) {
+        // SAFETY: `free_memory` unmaps the executable pages `func` points into, so it is sound only
+        // once no kernel function pointer can still be called. That is exactly the invariant the
+        // `Send`/`Sync` reasoning below already establishes: `func` never escapes this struct
+        // (`JitRunner` only holds the `Arc<JitProgramInner>` and calls through it), so when the last
+        // `Arc` drops — the only path here — no runner, and hence no live `func` pointer, remains.
+        // `ManuallyDrop::take` is called exactly once (in `drop`), and the module is never touched
+        // afterwards. Freeing here rather than leaking bounds memory in a REPL/server (finding C4).
+        unsafe {
+            let module = ManuallyDrop::take(&mut self._module);
+            module.free_memory();
+        }
+    }
+}
+
 // SAFETY: after `finalize_definitions`, the module's code is immutable and we never touch the
-// module again (only keep it mapped). The kernel has NO global mutable state — its RNG state and
-// output buffer are passed in per call — so concurrent calls from multiple threads with distinct
-// arguments are data-race-free. Hence the artifact is safe to send and share between threads.
+// module again (only keep it mapped, then free it exactly once on `Drop`). The kernel has NO global
+// mutable state — its RNG state and output buffer are passed in per call — so concurrent calls from
+// multiple threads with distinct arguments are data-race-free. Hence the artifact is safe to send
+// and share between threads.
 unsafe impl Send for JitProgramInner {}
 unsafe impl Sync for JitProgramInner {}
 
@@ -203,6 +245,9 @@ fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram,
     builder.symbol("nz_atan", nz_atan as *const u8);
     builder.symbol("nz_round", nz_round as *const u8);
     builder.symbol("nz_pow", nz_pow as *const u8);
+    builder.symbol("nz_sin", nz_sin as *const u8);
+    builder.symbol("nz_cos", nz_cos as *const u8);
+    builder.symbol("nz_exp", nz_exp as *const u8);
     let mut module = JITModule::new(builder);
 
     // Declare the math shims as imports (f64->f64, except `pow` which is f64,f64->f64).
@@ -232,6 +277,9 @@ fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram,
             atan: module.declare_func_in_func(math_ids.atan, fb.func),
             round: module.declare_func_in_func(math_ids.round, fb.func),
             pow: module.declare_func_in_func(math_ids.pow, fb.func),
+            sin: module.declare_func_in_func(math_ids.sin, fb.func),
+            cos: module.declare_func_in_func(math_ids.cos, fb.func),
+            exp: module.declare_func_in_func(math_ids.exp, fb.func),
         };
 
         let entry = fb.create_block();
@@ -323,15 +371,15 @@ fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram,
 
     Ok(JitProgram {
         inner: Arc::new(JitProgramInner {
-            _module: module,
+            _module: ManuallyDrop::new(module),
             func,
             streams,
         }),
     })
 }
 
-/// Declare the six math shims as module imports and return their `FuncId`s. (Errors are
-/// stringified — `ModuleError` is large, and the caller only ever falls back on failure.)
+/// Declare the math shims as module imports and return their `FuncId`s. (Errors are stringified —
+/// `ModuleError` is large, and the caller only ever falls back on failure.)
 fn declare_math(module: &mut JITModule) -> Result<MathIds, String> {
     let sig1 = {
         let mut s = module.make_signature();
@@ -355,6 +403,9 @@ fn declare_math(module: &mut JITModule) -> Result<MathIds, String> {
         atan: decl(module, "nz_atan", &sig1)?,
         round: decl(module, "nz_round", &sig1)?,
         pow: decl(module, "nz_pow", &sig2)?,
+        sin: decl(module, "nz_sin", &sig1)?,
+        cos: decl(module, "nz_cos", &sig1)?,
+        exp: decl(module, "nz_exp", &sig1)?,
     })
 }
 
@@ -541,10 +592,44 @@ fn emit_ln(fb: &mut FunctionBuilder, x: Value) -> Value {
     fb.ins().fadd(two_fp, e_ln2)
 }
 
-/// Inlined `cos(x)` (`is_cos`) / `sin(x)` for finite `x` — transcription of
+/// Range-guarded `cos`/`sin`: the inlined polynomial ([`emit_trig_poly`]) for `|x| < TRIG_MAX`, else
+/// the accurate library `sin`/`cos` shim (finding C3) — the 2-term reduction degrades past that, so
+/// this keeps the emitted trig in agreement with the interpreter's libm on large arguments (e.g.
+/// `sin(1e12 * X)`). Mirrors the `|x| < TRIG_MAX ? poly : call` shape in [`crate::approx::sin`].
+/// (The Box–Muller draw path calls [`emit_trig_poly`] directly — its argument is always `< 2π`.)
+fn emit_trig(fb: &mut FunctionBuilder, math: &MathRefs, x: Value, is_cos: bool) -> Value {
+    let ax = fb.ins().fabs(x);
+    let thresh = fb.ins().f64const(crate::approx::TRIG_MAX);
+    let big = fb.ins().fcmp(FloatCC::GreaterThanOrEqual, ax, thresh);
+
+    let big_block = fb.create_block();
+    let poly_block = fb.create_block();
+    let merge = fb.create_block();
+    fb.append_block_param(merge, types::F64);
+    fb.ins().brif(big, big_block, &[], poly_block, &[]);
+
+    // |x| >= TRIG_MAX: defer to the library shim (rare — this branch is predicted not-taken).
+    fb.switch_to_block(big_block);
+    fb.seal_block(big_block);
+    let shim = if is_cos { math.cos } else { math.sin };
+    let big_v = call1(fb, shim, x);
+    fb.ins().jump(merge, &[BlockArg::from(big_v)]);
+
+    // |x| < TRIG_MAX: the inline polynomial.
+    fb.switch_to_block(poly_block);
+    fb.seal_block(poly_block);
+    let poly_v = emit_trig_poly(fb, x, is_cos);
+    fb.ins().jump(merge, &[BlockArg::from(poly_v)]);
+
+    fb.switch_to_block(merge);
+    fb.seal_block(merge);
+    fb.block_params(merge)[0]
+}
+
+/// Inlined `cos(x)` (`is_cos`) / `sin(x)` for `|x| < TRIG_MAX` — transcription of
 /// [`crate::approx::cos`]/[`crate::approx::sin`]: Cody–Waite reduce to `[-π/4, π/4]`, evaluate both
 /// reduced kernels, then pick by quadrant. `nearest`/`fcvt_to_sint_sat` are native instructions.
-fn emit_trig(fb: &mut FunctionBuilder, x: Value, is_cos: bool) -> Value {
+fn emit_trig_poly(fb: &mut FunctionBuilder, x: Value, is_cos: bool) -> Value {
     use crate::approx::{COS_COEFFS, PIO2_HI, PIO2_LO, SIN_COEFFS};
     use std::f64::consts::FRAC_2_PI;
     // k = round(x·2/π); r = (x - k·π/2_hi) - k·π/2_lo ∈ [-π/4, π/4].
@@ -606,7 +691,9 @@ fn emit_normal(fb: &mut FunctionBuilder, s: &[Variable; 4], mu: f64, sigma: f64)
     let r = fb.ins().sqrt(inner);
     let tau = fb.ins().f64const(TAU);
     let ang = fb.ins().fmul(tau, u2);
-    let c = emit_trig(fb, ang, true);
+    // Argument is `TAU * u2 ∈ [0, 2π)` — always well inside the polynomial's range, so call it
+    // directly (no range guard) to keep the hot Box–Muller draw lean.
+    let c = emit_trig_poly(fb, ang, true);
     let rc = fb.ins().fmul(r, c);
     let sig = fb.ins().f64const(sigma);
     let scaled = fb.ins().fmul(sig, rc);
@@ -656,7 +743,19 @@ fn emit_pow(fb: &mut FunctionBuilder, base: Value, k: u32) -> Value {
 /// `x > 0` → poly, `x == 0` → `-inf`, `x < 0` / NaN → NaN, `+inf` → `+inf`. (The raw poly is only
 /// ever fed positive uniforms by the draw kernels, so they keep calling it unguarded.)
 fn emit_ln_guarded(fb: &mut FunctionBuilder, a: Value) -> Value {
-    let poly = emit_ln(fb, a);
+    // Subnormal positive inputs (exponent field 0) would corrupt `emit_ln`'s mantissa bit-surgery,
+    // so scale them into the normal range and correct by `54·ln2` (finding C9). `is_sub` is also
+    // true for `a <= 0`, but those lanes are overwritten by the domain selects below, so the bogus
+    // scaled value is harmless. Normal inputs pass through unscaled (select picks the raw poly).
+    let min_pos = fb.ins().f64const(f64::MIN_POSITIVE);
+    let is_sub = fb.ins().fcmp(FloatCC::LessThan, a, min_pos);
+    let scale = fb.ins().f64const(crate::approx::LN_SUBNORMAL_SCALE);
+    let a_scaled = fb.ins().fmul(a, scale);
+    let a_in = fb.ins().select(is_sub, a_scaled, a);
+    let poly_raw = emit_ln(fb, a_in);
+    let corr = fb.ins().f64const(crate::approx::LN_SUBNORMAL_CORR);
+    let poly_corr = fb.ins().fsub(poly_raw, corr);
+    let poly = fb.ins().select(is_sub, poly_corr, poly_raw);
     let zero = fb.ins().f64const(0.0);
     let neg_inf = fb.ins().f64const(f64::NEG_INFINITY);
     let nan = fb.ins().f64const(f64::NAN);
@@ -680,19 +779,16 @@ fn emit_unary(fb: &mut FunctionBuilder, math: &MathRefs, op: UnOp, a: Value) -> 
             let is_zero = fb.ins().fcmp(FloatCC::Equal, a, zero);
             bool_to_f64(fb, is_zero)
         }
-        UnOp::Sin => emit_trig(fb, a, false),
-        UnOp::Cos => emit_trig(fb, a, true),
+        UnOp::Sin => emit_trig(fb, math, a, false),
+        UnOp::Cos => emit_trig(fb, math, a, true),
         UnOp::Atan => call1(fb, math.atan, a),
         UnOp::Round => call1(fb, math.round, a),
         UnOp::Floor => fb.ins().floor(a),
         UnOp::Ceil => fb.ins().ceil(a),
         UnOp::Ln => emit_ln_guarded(fb, a),
-        UnOp::Exp => {
-            // e^x as pow(e, x) — reuses the existing `pow` libcall (no new polynomial); handles
-            // the whole domain (pow(e, -inf) = 0, pow(e, inf) = inf, NaN propagates).
-            let e = fb.ins().f64const(std::f64::consts::E);
-            call2(fb, math.pow, e, a)
-        }
+        // e^x via the library `exp` shim — bit-identical to the interpreter's `f64::exp` (the old
+        // `pow(e, x)` could differ in the last bit; finding C9). Whole domain handled by libm.
+        UnOp::Exp => call1(fb, math.exp, a),
         UnOp::Sign => {
             // -1 / 0 / +1 as (a > 0) - (a < 0), matching `apply_un` (0 exactly at 0, unlike signum).
             let zero = fb.ins().f64const(0.0);
@@ -762,6 +858,53 @@ mod tests {
     use crate::kernel::supported;
     use crate::kernel::STREAMS;
     use crate::sampler::moments;
+
+    // The shared cross-backend conformance corpus (finding C2), also consumed by `wasm_emit`.
+    use crate::conformance;
+
+    /// First root sample from a compiled program (seeded to 0). For an RNG-free graph every lane is
+    /// identical and seed-independent, so `[0]` fully characterizes the backend's output.
+    fn first_sample(program: &dyn Program) -> f64 {
+        let mut r = program.runner();
+        r.reseed(0);
+        let cap = r.batch_cap();
+        r.next_batch(cap)[0]
+    }
+
+    /// **Const-graph exact-equality suite (finding C2).** For every RNG-free program the JIT kernel
+    /// must be **bit-identical** to the interpreter oracle — there is no Monte-Carlo noise to hide a
+    /// divergence, so this is the strongest check of the "backend only changes speed" contract. It
+    /// pins the C3 (large-arg trig), C8 (`&&`/`||`), and C9 (`exp`) fixes at the bit level.
+    #[test]
+    fn conformance_const_graphs_bit_identical_interp_vs_jit() {
+        for (label, src) in conformance::CONST_CASES {
+            let mut eng = crate::Engine::new();
+            let id = match eng.run_rv(src).unwrap() {
+                crate::Value::Dist(id) => id,
+                other => panic!("{label}: expected a dist, got {other:?}"),
+            };
+            let g = eng.graph();
+            let interp = first_sample(&*InterpBackend.compile(g, id));
+            let jit = first_sample(&build(g, id).expect("jit build failed"));
+            assert_eq!(
+                interp.to_bits(),
+                jit.to_bits(),
+                "{label}: interp {interp} ({:#018x}) != jit {jit} ({:#018x})",
+                interp.to_bits(),
+                jit.to_bits()
+            );
+        }
+    }
+
+    /// The RNG half of the shared corpus: the JIT must agree with the interpreter in distribution on
+    /// every case (mean within tolerance), including the higher-moment and wide/large-argument trig
+    /// probes the JIT corpus previously lacked (finding C2).
+    #[test]
+    fn conformance_rng_cases_match_interp() {
+        for (_label, src, seed) in conformance::RNG_CASES {
+            assert_jit_matches_interp(src, *seed);
+        }
+    }
 
     /// JIT and interpreter must agree *in distribution* on a graph the JIT supports. We compare
     /// moments (not draw-for-draw — the RNG consumption order differs by design).
@@ -1051,6 +1194,35 @@ mod tests {
             "    cranelift(jit) {jit_mps:7.0}   llvm(rust) {llvm_mps:7.0}   llvm/jit {:.2}x",
             llvm_mps / jit_mps
         );
+    }
+
+    /// Compiling and dropping many kernels must run cleanly: `JitProgramInner`'s `Drop` calls
+    /// `module.free_memory()` to unmap the executable pages (finding C4 — cranelift-jit's own
+    /// `Memory::drop` `mem::forget`s them, so without this every kernel leaked). We can't assert the
+    /// bytes were returned to the OS, but running the `Drop` path hundreds of times — after actually
+    /// executing each kernel — must not crash or trip UB (run under the JIT test config).
+    #[test]
+    fn compile_and_drop_many_kernels_is_clean() {
+        let mut eng = crate::Engine::new();
+        let id = match eng
+            .run_rv("use rand; X ~ unif(0,1); X*X + 2*X - 1")
+            .unwrap()
+        {
+            crate::Value::Dist(id) => id,
+            _ => unreachable!(),
+        };
+        let g = eng.graph();
+        for _ in 0..200 {
+            let program = build(g, id).expect("jit build failed");
+            // Touch the code memory before it is freed on drop.
+            let mut r = program.runner();
+            r.reseed(1);
+            let cap = r.batch_cap();
+            let x = r.next_batch(cap)[0];
+            assert!(x.is_finite());
+            drop(r);
+            drop(program); // Drop → free_memory (must be UB-free)
+        }
     }
 
     #[test]

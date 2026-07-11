@@ -41,9 +41,14 @@ pub fn compile_root(graph: &RvGraph, root: RvId) -> (Box<dyn Program>, NodeCost)
     // The rewritten graph is local — backends copy what they need, retaining no reference to it.
     let (graph, root) = crate::simplify::simplify(graph, root);
     let cost = crate::kernel::cost(&graph, root);
-    #[cfg(feature = "jit")]
+    // The Cranelift JIT is native-only: `not(target_arch = "wasm32")` guards against feature
+    // unification turning `jit` on for a wasm32 build, which would otherwise select an impossible
+    // backend (finding C7). On wasm32 the WASM-host backend always wins (the `jit` arm can't match
+    // there); the interpreter is the remaining native, non-`jit` case. The three cfgs are mutually
+    // exclusive and exhaustive over the {wasm32?} × {jit?} matrix.
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
     let program = crate::jit::JitBackend::new().compile(&graph, root);
-    #[cfg(all(not(feature = "jit"), target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
     let program = crate::wasm_host::WasmHostBackend::new().compile(&graph, root);
     #[cfg(all(not(feature = "jit"), not(target_arch = "wasm32")))]
     let program = InterpBackend.compile(&graph, root);

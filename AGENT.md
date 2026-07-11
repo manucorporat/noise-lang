@@ -232,6 +232,41 @@ committed (reproducible CI and `cargo install`); CI is `.github/workflows/ci.yml
   deferred to Phase 4.
 - **Keep `noise-core` free of OS/threads** so the wasm32 path stays clean.
 
+### Adding an operator/ufunc across all backends (checklist)
+
+A new `UnOp`/`BinOp`/`Source` variant must land in **every** backend in the *same* change, or the
+three backends silently diverge (this is exactly what caused findings C2/C6). There is one IR
+(`RvGraph`) and three lowerings of it — the interpreter (the oracle), the Cranelift JIT, and the
+WASM emitter — plus the cost model that gates codegen. Work down this list:
+
+1. **AST + parser/lexer** (`ast.rs`, `lexer.rs`, `parser.rs`): add the variant and the surface
+   syntax (or the builtin that synthesizes it). `RvNode`/`Source`/`UnOp`/`BinOp` stay
+   `Clone`/`Copy`/`PartialEq`/alloc-free.
+2. **Interpreter — the oracle** (`bytecode.rs`: `apply_un`/`apply_bin` + any new `Inst`, and
+   `eval.rs` const-fold): implement the exact IEEE/libm semantics. Everything else is checked
+   *against this*, so define the behavior here first.
+3. **Cranelift JIT** (`jit.rs`: `emit_unary`/`emit_binary`/`emit_node`): emit the fused CLIF. If it
+   needs a scalar the ISA can't express in one instruction, add an `nz_*` shim (see
+   `nz_atan`/`nz_sin`) — register it in the `builder.symbol(...)` block, `declare_math`, `MathIds`,
+   and `MathRefs`.
+4. **WASM emitter** (`wasm_emit.rs`: `emit_unary`/`emit_binary`/`emit_node`): emit the same kernel in
+   `f64.*`/`i64.*`. If it needs a host import, add it to the import-index constants
+   (`ATAN`/`ROUND`/…/`N_IMPORTS`), the `imports.import("m", …)` block, **the `wasm_host.rs` JS
+   `_imports` object** (browser side), **and the `wasmi` test linker** in `wasm_emit`'s tests.
+5. **Shared reference for transcendentals** (`approx.rs`): if it's a transcendental, put the
+   polynomial/constants here as the single source both emitters transcribe (op-for-op), and range-
+   guard anything whose approximation degrades (see `TRIG_MAX` — finding C3).
+6. **Cost model — exhaustive, no `_`** (`kernel.rs`): classify the variant in `walk_cost` (fusible vs
+   libcall weight), `latency_bound` (does it keep the cone latency-bound?), and `supported`. These
+   matches are deliberately exhaustive (finding C6) — a new variant *will* fail to compile here until
+   classified. See the `TODO(CostClass)` note about unifying the three tables.
+7. **Conformance corpus** (`src/conformance.rs`): add a case. If the op is **exact** across backends
+   (pure arithmetic/logic/select, or a shared library call), add it to `CONST_CASES` (bit-identical
+   suite — pin operands with `unif(c,c)`/`unif_int(c,c)`). If it's a within-tolerance approximation
+   (polynomial transcendental, integer-`pow`), add it to `RNG_CASES`. Both the `jit` and `wasm_emit`
+   tests consume this one corpus, so a divergence fails `cargo test -p noise-core --features jit`.
+8. **Docs**: `LANG.md`, `.claude/skills/noise-lang/SKILL.md`, and the module notes above.
+
 ## Status snapshot (2026-07-06)
 
 - Deterministic core + RV runtime + Phase-3 probability surface + core-model rework Steps 1–5

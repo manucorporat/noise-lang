@@ -17,7 +17,7 @@
 
 use std::collections::HashSet;
 
-use crate::ast::UnOp;
+use crate::ast::{BinOp, UnOp};
 use crate::bytecode::BATCH;
 use crate::dist::{RvGraph, RvId, RvNode, Source};
 
@@ -132,6 +132,13 @@ pub fn walk_cost(
         if !seen.insert(id) {
             continue; // shared node already counted
         }
+        // TODO(CostClass): the three classifications in this module (`walk_cost` gate weights,
+        // `latency_bound`, `supported`) are parallel per-op tables; a single `CostClass` table
+        // deriving all three would remove the duplication. Until then every match here is
+        // **exhaustive** (no `_` catch-all): a new `Source`/`UnOp`/`BinOp` variant must be
+        // classified here explicitly or the crate fails to compile (finding C6) — the emitters'
+        // exhaustive matches already force this on the codegen side, and this keeps the gate/stream
+        // policy from silently misclassifying a future op as fusible.
         match graph.node(id) {
             RvNode::Src(Source::Poisson { .. }) => return false, // Knuth loop stays interpreter-only
             RvNode::Gather { .. } => return false, // data-dependent addressing stays interpreter-only
@@ -139,17 +146,19 @@ pub fn walk_cost(
             RvNode::Src(Source::Exp { .. }) | RvNode::Src(Source::Geometric { .. }) => {
                 charge(1, fusible, libcalls)
             }
-            RvNode::Src(_) => *fusible += 1, // uniform / uniform_int: cheap inline draw everywhere
+            // uniform / uniform_int: cheap inline draw everywhere.
+            RvNode::Src(Source::Uniform(_) | Source::UniformInt { .. }) => *fusible += 1,
             RvNode::ConstNum(_) | RvNode::ConstBool(_) => {} // neutral
             RvNode::Unary(op, a) => {
                 match op {
                     UnOp::Sin | UnOp::Cos | UnOp::Ln => charge(1, fusible, libcalls), // inlined native
                     UnOp::Atan | UnOp::Round | UnOp::Exp => *libcalls += 1, // still a call everywhere
-                    _ => *fusible += 1,
+                    // Cheap fused instructions on every backend (native/wasm floor/ceil/neg, etc.).
+                    UnOp::Neg | UnOp::Not | UnOp::Sign | UnOp::Floor | UnOp::Ceil => *fusible += 1,
                 }
                 stack.push(*a);
             }
-            RvNode::Binary(crate::ast::BinOp::Pow, a, b) => {
+            RvNode::Binary(BinOp::Pow, a, b) => {
                 if const_int_exponent(graph, *b).is_some() {
                     *fusible += 1; // repeated multiply, no call
                     stack.push(*a);
@@ -159,7 +168,25 @@ pub fn walk_cost(
                     stack.push(*b);
                 }
             }
-            RvNode::Binary(_, a, b) => {
+            // Every non-`Pow` binary op is a single fused instruction on all backends. Named
+            // exhaustively (no `_`) so a future `BinOp` must be classified here (finding C6).
+            RvNode::Binary(
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Gt
+                | BinOp::Le
+                | BinOp::Ge
+                | BinOp::And
+                | BinOp::Or,
+                a,
+                b,
+            ) => {
                 *fusible += 1;
                 stack.push(*a);
                 stack.push(*b);
@@ -206,28 +233,54 @@ fn latency_bound(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>) -> bool {
         if !seen.insert(id) {
             continue; // shared node already checked
         }
+        // Exhaustive (no `_`) so a future op is force-classified here too (finding C6); see the
+        // `TODO(CostClass)` in `walk_cost`.
         match graph.node(id) {
             RvNode::Src(Source::Uniform(_) | Source::UniformInt { .. }) => {}
-            RvNode::Src(_) => return false, // normal / exp / geometric / poisson: not latency-bound
+            // normal / exp / geometric / poisson: transcendental draw → throughput-bound.
+            RvNode::Src(
+                Source::Normal { .. }
+                | Source::Exp { .. }
+                | Source::Geometric { .. }
+                | Source::Poisson { .. },
+            ) => return false,
             RvNode::Gather { .. } => return false, // interpreter-only (gated out before this)
             RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
             RvNode::Unary(op, a) => {
-                if matches!(
-                    op,
-                    UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Round | UnOp::Exp | UnOp::Ln
-                ) {
-                    return false;
+                match op {
+                    // Transcendental/ufunc draws are arithmetic-throughput-bound, not latency-bound.
+                    UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Round | UnOp::Exp | UnOp::Ln => {
+                        return false
+                    }
+                    // Plain fused instructions keep the cone latency-bound.
+                    UnOp::Neg | UnOp::Not | UnOp::Sign | UnOp::Floor | UnOp::Ceil => {}
                 }
                 stack.push(*a);
             }
-            RvNode::Binary(crate::ast::BinOp::Pow, a, b) => {
+            RvNode::Binary(BinOp::Pow, a, b) => {
                 if const_int_exponent(graph, *b).is_none() {
                     return false;
                 }
                 stack.push(*a);
                 stack.push(*b);
             }
-            RvNode::Binary(_, a, b) => {
+            RvNode::Binary(
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Gt
+                | BinOp::Le
+                | BinOp::Ge
+                | BinOp::And
+                | BinOp::Or,
+                a,
+                b,
+            ) => {
                 stack.push(*a);
                 stack.push(*b);
             }

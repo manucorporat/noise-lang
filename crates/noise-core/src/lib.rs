@@ -9,6 +9,10 @@ pub mod ast;
 pub mod backend;
 pub mod builtins;
 pub mod bytecode;
+/// Shared cross-backend conformance corpus (finding C2), consumed by the `jit` and `wasm_emit`
+/// test modules. Test-only data — no runtime footprint.
+#[cfg(test)]
+mod conformance;
 pub mod dist;
 pub mod doc;
 pub mod error;
