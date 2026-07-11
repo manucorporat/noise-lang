@@ -25,13 +25,14 @@
             <span>Render</span>
           </button>
         </div>
-        <label class="pg-select-wrap">
-          <select id="pg-select" class="pg-select" aria-label="Choose an example"></select>
-        </label>
-        <button id="pg-run" class="btn btn-run" type="button">
-          <span class="btn-icon">▶</span> Run
-          <span class="kbd">⌘↵</span>
-        </button>
+        <div class="pg-toolbar-right">
+          <label class="pg-select-wrap">
+            <select id="pg-select" class="pg-select" aria-label="Choose an example"></select>
+          </label>
+          <button id="pg-run" class="btn btn-run" type="button" title="Run (⌘↵)">
+            <span class="btn-icon">▶</span> Run
+          </button>
+        </div>
       </div>
       <div id="editor" class="pg-editor"></div>
     </div>
@@ -62,7 +63,6 @@
               <span>Render</span>
             </button>
           </div>
-          <span class="pg-output-title"><span class="dot"></span> Render</span>
         </div>
         <div class="pg-head-right">
           <div id="pg-metrics" class="pg-metrics" hidden></div>
@@ -118,13 +118,20 @@
     display: inline-flex; align-items: stretch; gap: 2px;
     padding: 2px; border: 1px solid var(--rule); border-radius: 9px; background: var(--paper-2);
   }
-  /* The editor-toolbar copy sits at the toolbar's left edge and only shows when the editor is the
-     whole view (Code); in Split the Render-header copy is the visible one. */
+  /* The editor-toolbar copy leads the left (editor) panel and carries the toggle whenever the editor
+     is shown — Code and Split. Only in Render-only, where the editor panel is gone, does the
+     Render-header copy take over. So exactly one shows per view, always at the far left. */
   .pg-viewtabs-edit { display: none; }
-  .pg-split[data-view='code'] .pg-viewtabs-edit { display: inline-flex; }
-  .pg-split[data-view='split'] .pg-viewtabs-edit,
-  .pg-split[data-view='render'] .pg-viewtabs-edit { display: none; }
-  /* Left cluster of the Render header: the view toggle + the "Render" label. */
+  .pg-split[data-view='code'] .pg-viewtabs-edit,
+  .pg-split[data-view='split'] .pg-viewtabs-edit { display: inline-flex; }
+  .pg-viewtabs-out { display: none; }
+  .pg-split[data-view='render'] .pg-viewtabs-out { display: inline-flex; }
+  /* Toggle on the far left of the editor toolbar; the selector + Run ride together on the far right,
+     with the selector free to shrink so the row never wraps in the narrow split pane. */
+  .pg-toolbar-right { display: inline-flex; align-items: center; gap: 0.5rem; margin-left: auto; min-width: 0; }
+  .pg-toolbar-right .pg-select-wrap { min-width: 0; }
+  .pg-toolbar-right .pg-select { min-width: 0; }
+  /* Left cluster of the Render header: the view toggle (Render-only) + the "Render" label. */
   .pg-head-left { display: inline-flex; align-items: center; gap: 0.6rem; min-width: 0; }
   .pg-viewtab {
     font: inherit; font-size: 0.72rem; font-variant: small-caps; letter-spacing: 0.05em;
@@ -190,7 +197,7 @@
     padding: 0.3rem 0.7rem;
     border-bottom: 1px solid var(--rule);
     background: var(--paper);
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
   .pg-editor { flex: 1; min-height: 0; height: auto; width: 100%; }
   @media (max-width: 880px) { .pg-editor { flex: none; height: 320px; } }
@@ -259,8 +266,6 @@
     font-size: 0.76rem; font-variant: small-caps; letter-spacing: 0.06em; color: var(--ink-dim);
     background: var(--paper);
   }
-  .pg-output-title { display: inline-flex; align-items: center; gap: 0.5rem; }
-  .pg-output-head .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 
   .pg-output {
     margin: 0; padding: 0.85rem; flex: 1; overflow: auto;
