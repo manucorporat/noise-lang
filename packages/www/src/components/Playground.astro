@@ -8,29 +8,6 @@
 ---
 
 <section id="playground" class="playground">
-  <div class="pg-viewbar">
-    <div class="pg-viewtabs" id="pg-viewtabs" role="group" aria-label="Choose editor and render layout">
-      <button class="pg-viewtab" data-view="code" type="button" aria-pressed="false" title="Editor only">
-        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
-          <path d="M9 8l-4 4 4 4"></path><path d="M15 8l4 4-4 4"></path>
-        </svg>
-        <span>Code</span>
-      </button>
-      <button class="pg-viewtab pg-viewtab-split" data-view="split" type="button" aria-pressed="false" title="Editor and render side by side">
-        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
-          <rect x="4" y="5" width="7" height="14" rx="1"></rect><rect x="13" y="5" width="7" height="14" rx="1"></rect>
-        </svg>
-        <span>Split</span>
-      </button>
-      <button class="pg-viewtab" data-view="render" type="button" aria-pressed="false" title="Render only">
-        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
-          <rect x="4" y="5" width="16" height="14" rx="1"></rect><path d="M4 9h16"></path>
-        </svg>
-        <span>Render</span>
-      </button>
-    </div>
-  </div>
-
   <div class="pg-split" id="pg-split" data-view="split">
     <div class="pg-editor-wrap glass">
       <div class="pg-toolbar">
@@ -41,6 +18,20 @@
           <span class="btn-icon">▶</span> Run
           <span class="kbd">⌘↵</span>
         </button>
+        <div class="pg-viewtabs pg-viewtabs-edit" role="group" aria-label="Choose editor and render layout">
+          <button class="pg-viewtab" data-view="code" type="button" aria-pressed="false" title="Editor only">
+            <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M9 8l-4 4 4 4"></path><path d="M15 8l4 4-4 4"></path></svg>
+            <span>Code</span>
+          </button>
+          <button class="pg-viewtab pg-viewtab-split" data-view="split" type="button" aria-pressed="false" title="Editor and render side by side">
+            <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="7" height="14" rx="1"></rect><rect x="13" y="5" width="7" height="14" rx="1"></rect></svg>
+            <span>Split</span>
+          </button>
+          <button class="pg-viewtab" data-view="render" type="button" aria-pressed="false" title="Render only">
+            <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="1"></rect><path d="M4 9h16"></path></svg>
+            <span>Render</span>
+          </button>
+        </div>
       </div>
       <div id="editor" class="pg-editor"></div>
     </div>
@@ -92,6 +83,20 @@
               </button>
             </div>
           </div>
+          <div class="pg-viewtabs pg-viewtabs-out" role="group" aria-label="Choose editor and render layout">
+            <button class="pg-viewtab" data-view="code" type="button" aria-pressed="false" title="Editor only">
+              <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M9 8l-4 4 4 4"></path><path d="M15 8l4 4-4 4"></path></svg>
+              <span>Code</span>
+            </button>
+            <button class="pg-viewtab pg-viewtab-split" data-view="split" type="button" aria-pressed="false" title="Editor and render side by side">
+              <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="7" height="14" rx="1"></rect><rect x="13" y="5" width="7" height="14" rx="1"></rect></svg>
+              <span>Split</span>
+            </button>
+            <button class="pg-viewtab" data-view="render" type="button" aria-pressed="false" title="Render only">
+              <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="1"></rect><path d="M4 9h16"></path></svg>
+              <span>Render</span>
+            </button>
+          </div>
         </div>
       </div>
       <div id="pg-output" class="pg-output is-preview"><span class="muted">Press Run to evaluate.</span></div>
@@ -102,20 +107,27 @@
 <style>
   .playground { max-width: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1rem; }
 
-  /* Segmented control to switch the layout between Code-only, Split, and Render-only. Persisted so a
-     reader keeps whichever focus they picked; the Split segment is hidden on narrow screens where a
-     two-pane split can't breathe (there the view falls back to a single pane). */
-  .pg-viewbar { display: flex; justify-content: center; }
+  /* Segmented control to switch the layout between Code-only, Split, and Render-only. It lives in the
+     header rows (never its own bar, to save vertical space): a copy in the editor toolbar carries it
+     in Code view, and a copy in the Render header carries it in Split/Render — exactly one shows per
+     view, so there's always one control, pinned to the far right. Both drive the same persisted state.
+     The Split segment is hidden on narrow screens where a two-pane split can't breathe. */
   .pg-viewtabs {
     display: inline-flex; align-items: stretch; gap: 2px;
     padding: 2px; border: 1px solid var(--rule); border-radius: 9px; background: var(--paper-2);
   }
+  /* The editor-toolbar copy sits at the toolbar's right edge and only shows when the editor is the
+     whole view (Code); in Split the Render-header copy is the visible one. */
+  .pg-viewtabs-edit { margin-left: auto; display: none; }
+  .pg-split[data-view='code'] .pg-viewtabs-edit { display: inline-flex; }
+  .pg-split[data-view='split'] .pg-viewtabs-edit,
+  .pg-split[data-view='render'] .pg-viewtabs-edit { display: none; }
   .pg-viewtab {
-    font: inherit; font-size: 0.74rem; font-variant: small-caps; letter-spacing: 0.05em;
+    font: inherit; font-size: 0.72rem; font-variant: small-caps; letter-spacing: 0.05em;
     color: var(--ink-dim); background: transparent;
     border: 1px solid transparent; border-radius: 7px;
-    padding: 0.28rem 0.85rem; cursor: pointer;
-    display: inline-flex; align-items: center; gap: 0.42rem;
+    padding: 0.2rem 0.62rem; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 0.36rem;
     transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
   }
   .pg-viewtab svg { stroke: currentColor; stroke-width: 1.9; fill: none; stroke-linecap: round; stroke-linejoin: round; }
@@ -565,6 +577,23 @@
   // so the header shows before the first run too. After a run, `renderPreview` uses `res.meta`.
   let currentHeaderMeta: { title?: string; abstract?: string; tags?: string[] } | null = null;
 
+  // The layout view (Code / Split / Render). Declared up here (before `shareHash`/`loadFromHash`
+  // run) so the fragment can carry it and reloads restore it. Source of truth on load: the `v=`
+  // fragment param, then the persisted preference, then Split. The controls are wired further down.
+  const VIEW_KEY = 'noise-pg-view';
+  type ViewMode = 'code' | 'split' | 'render';
+  const isViewMode = (v: unknown): v is ViewMode => v === 'code' || v === 'split' || v === 'render';
+  const readView = (): ViewMode => {
+    const fromHash = parseHash(location.hash).view;
+    if (isViewMode(fromHash)) return fromHash;
+    try {
+      const v = localStorage.getItem(VIEW_KEY);
+      if (isViewMode(v)) return v;
+    } catch {}
+    return 'split';
+  };
+  let viewPref: ViewMode = readView();
+
   const editor = monaco.editor.create($('editor'), {
     value: byId.get(defaultExampleId)?.code ?? examples[0]?.code ?? '',
     language: LANGUAGE_ID,
@@ -624,13 +653,16 @@
   }
 
   // The shareable fragment: #x=id (unmodified example) or #c=snapshot, plus #i=name:value for any
-  // tuned inputs — so a tuned example is shareable exactly as tuned.
+  // tuned inputs and #v=view for a non-default layout — so a tuned example in a chosen view is
+  // shareable exactly as seen. The default Split view is left off to keep the common link clean.
   function shareHash(): string {
     const code = editor.getValue();
     const ex = currentId ? byId.get(currentId) : undefined;
-    const base = ex && ex.code.trim() === code.trim() ? `#x=${currentId}` : `#c=${encodeCode(code)}`;
+    let hash = ex && ex.code.trim() === code.trim() ? `#x=${currentId}` : `#c=${encodeCode(code)}`;
     const nd = nonDefaultInputs();
-    return Object.keys(nd).length ? `${base}&i=${encodeInputs(nd)}` : base;
+    if (Object.keys(nd).length) hash += `&i=${encodeInputs(nd)}`;
+    if (viewPref !== 'split') hash += `&v=${viewPref}`;
+    return hash;
   }
 
   /** Read the program's frontmatter and refresh the pre-run paper header (title/abstract/tags), so
@@ -714,7 +746,7 @@
     select.value = id;
     inputValues = { ...(inputs ?? {}) };
     if (loadCode) editor.setValue(ex.code);
-    if (updateHash) setHash(`#x=${id}`);
+    if (updateHash) setHash(viewPref !== 'split' ? `#x=${id}&v=${viewPref}` : `#x=${id}`);
     clearOutput();
     // Refresh the header, then auto-run — inputs (and their controls) come from the run itself.
     void refreshHeader().then(() => { if (autoRun) void execute(); });
@@ -733,6 +765,8 @@
 
   function loadFromHash({ updateHash = false } = {}) {
     const parsed = parseHash(location.hash);
+    // A `v=` in the link opens (or re-opens, on an external hash change) in that layout.
+    if (isViewMode(parsed.view)) viewPref = parsed.view;
     if (parsed.exampleId && byId.has(parsed.exampleId)) {
       selectExample(parsed.exampleId, { loadCode: true, updateHash, inputs: parsed.inputs, autoRun: true });
     } else if (parsed.code !== undefined) {
@@ -1223,23 +1257,13 @@
   });
 
   // --- layout view switcher (Code / Split / Render) ---
-  // The reader's choice is persisted so they keep the same focus next visit and on shared links.
-  // On narrow screens a side-by-side split doesn't fit, so the Split option falls back to a single
-  // pane there while the stored preference is left intact for when they're back on a wide screen.
-  const VIEW_KEY = 'noise-pg-view';
-  type ViewMode = 'code' | 'split' | 'render';
-  const isViewMode = (v: unknown): v is ViewMode => v === 'code' || v === 'split' || v === 'render';
+  // `viewPref` / `readView` are declared up top so the fragment carries the view and reloads restore
+  // it. The choice is also persisted so it survives a link with no `v=`. On narrow screens a
+  // side-by-side split doesn't fit, so `split` resolves to a single pane there while the stored
+  // preference is left intact for when the reader is back on a wide screen. There are two copies of
+  // the control (one per header row); both are wired here and only one shows per view.
   const narrow = window.matchMedia('(max-width: 880px)');
-  const viewTabs = Array.from(document.querySelectorAll<HTMLButtonElement>('#pg-viewtabs .pg-viewtab'));
-
-  const readView = (): ViewMode => {
-    try {
-      const v = localStorage.getItem(VIEW_KEY);
-      if (isViewMode(v)) return v;
-    } catch {}
-    return 'split';
-  };
-  let viewPref: ViewMode = readView();
+  const viewTabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.pg-viewtab'));
 
   // What actually renders: `split` isn't offered on narrow screens, so it resolves to `code` there.
   const effectiveView = (): ViewMode => (narrow.matches && viewPref === 'split' ? 'code' : viewPref);
@@ -1256,6 +1280,7 @@
   function setView(v: ViewMode) {
     viewPref = v;
     try { localStorage.setItem(VIEW_KEY, v); } catch {}
+    setHash(shareHash());
     applyView();
   }
 
@@ -1372,6 +1397,8 @@
   });
 
   window.addEventListener('hashchange', () => {
-    if (!suppressHash) loadFromHash();
+    if (suppressHash) return;
+    loadFromHash();
+    applyView(); // an external hash change may carry a different `v=`
   });
 </script>
