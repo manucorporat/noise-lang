@@ -40,6 +40,7 @@ impl Span {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive] // new structured error cases land across plan cycles; keep hosts wildcard-safe (E2)
 pub enum ErrorKind {
     /// Lexer hit a byte it can't start a token with.
     UnexpectedChar(char),

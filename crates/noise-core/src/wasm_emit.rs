@@ -36,6 +36,11 @@
 //! (`lo + floor(u * count)`) rather than the native kernel's Lemire multiply-high — wasm has no
 //! 64×64→128 `mulhi`, and the float form is identical in distribution (what the parity tests check).
 
+// The emitter and its host-import indices are exercised on the wasm32 target and by the wasmi
+// parity tests; on a native non-test build they read as dead. This module was previously `pub`,
+// which masked the same warnings.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 use wasm_encoder::{

@@ -15,6 +15,7 @@ use crate::introspect::Summary;
 use crate::signal::{NoiseSpec, SigExpr};
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive] // gains a variant nearly every plan cycle; hosts must keep a wildcard arm (E2)
 pub enum Value {
     Num(f64),
     Bool(bool),

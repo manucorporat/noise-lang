@@ -23,6 +23,9 @@ pub struct RvId(pub u32);
 pub struct DataId(pub u32);
 
 /// A distribution fills a whole column of samples in one call.
+// Vestigial extension seam (finding F7): one impl, no trait-dispatch callers. Kept until F7 is
+// resolved; `allow(dead_code)` because privatizing the module unmasked the never-used warning.
+#[allow(dead_code)]
 pub trait Distribution {
     fn sample_into(&self, rng: &mut Rng, out: &mut [f64]);
 }

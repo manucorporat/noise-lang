@@ -34,6 +34,7 @@ pub struct Document {
 /// each carrying the `stmt_span` of the statement that produced it (so a host can group them under
 /// their code block or highlight the producing line on hover).
 #[derive(Debug, Clone)]
+#[non_exhaustive] // the document model grows block kinds across plan cycles; keep hosts wildcard-safe (E2)
 pub enum Block {
     Code {
         source: String,

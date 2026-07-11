@@ -224,6 +224,8 @@ fn render_document(doc: &noise_core::doc::Document, source: Option<(&str, &str)>
                 };
                 println!("input {} = {shown}", spec.name);
             }
+            // `Block` is `#[non_exhaustive]` (E2): ignore any future block kind this CLI predates.
+            _ => {}
         }
     }
     if let Some(t) = &doc.result.truncated {

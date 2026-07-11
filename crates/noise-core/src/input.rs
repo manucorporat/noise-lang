@@ -15,6 +15,7 @@ use crate::error::{NoiseError, Result, Span};
 /// The type of an input. `Real` is the continuous slider; `Int` snaps to whole numbers; `Bool` is a
 /// checkbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive] // more input control kinds are expected; keep host matches wildcard-safe (E2)
 pub enum InputKind {
     Real,
     Int,

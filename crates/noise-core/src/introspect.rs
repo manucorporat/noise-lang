@@ -512,6 +512,7 @@ pub enum View {
 /// distribution / relationship; `Value` is a scalar+CI; `Grid` is a vector/matrix; `CorrMatrix` is
 /// an element×element heatmap; `Explain` is the driver fan-out.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive] // new introspection payload shapes land across plan cycles; keep hosts wildcard-safe (E2)
 pub enum Payload {
     One(Dist1),
     Two(Dist2),

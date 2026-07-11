@@ -16,6 +16,11 @@
 //! emitted code agrees op-for-op with the reference. Constants are the standard fdlibm kernel
 //! coefficients.
 
+// Reference polynomials/constants transcribed by the JIT (`--features jit`) and WASM backends.
+// Which items are live depends on the build config, so dead-code analysis is unreliable here
+// (this module was previously `pub`, which masked the same warnings).
+#![allow(dead_code)]
+
 use std::f64::consts::{FRAC_2_PI, LN_2, SQRT_2};
 
 /// `ln(m)` series: `ln(m) = 2·f·Σ cₖ·f²ᵏ` with `f = (m-1)/(m+1)` — i.e. the atanh expansion

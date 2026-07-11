@@ -15,6 +15,10 @@
 //!   * [`const_int_exponent`] — the `x ^ k` small-integer-power test (repeated multiply vs a `pow`
 //!     call), shared so both backends agree on which exponents fuse.
 
+// Backend-support helpers whose live set depends on the build config (`--features jit`, wasm
+// target, tests). This module was previously `pub`, which masked the same dead-code warnings.
+#![allow(dead_code)]
+
 use std::collections::HashSet;
 
 use crate::ast::{BinOp, UnOp};

@@ -7,8 +7,8 @@
 //! [`run_with_introspection`] returns the same `Document` next to the hover sidecar (live bindings +
 //! per-request plots). [`meta`] reads the frontmatter without running, for the pre-run paper header.
 
-use noise_core::flint::to_flint;
 use noise_core::introspect::Summary;
+use noise_core::to_flint;
 use noise_core::{Engine, InputValue, Value};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
