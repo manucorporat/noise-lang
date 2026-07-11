@@ -68,6 +68,13 @@ pub fn moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Moments {
 /// are skipped, so the moments are over the subpopulation where `C` holds. Returns those moments
 /// alongside the in-condition count `m` (≈ `n·P(C)`), which the caller uses for the standard error.
 /// `m == 0` means the condition never occurred in `n` draws (the conditional is undefined upstream).
+///
+/// KNOWN HOLE (finding B2): like [`cond_sample_n`], the NaN filter can't distinguish "condition
+/// false" from "the quantity is itself NaN on an in-condition lane" — an in-condition NaN quantity is
+/// *dropped* rather than propagated. So a conditional estimate over a quantity that can go NaN inside
+/// the condition (e.g. `E(math::log(X) | X > -1)` with `X ~ unif(-1, 1)`) is silently biased and
+/// reports a *tighter* SE than the honest one. The fix is a dedicated condition column (see
+/// `Engine::query_cond`); deferred for the interface-ripple reason noted on `cond_sample_n`.
 pub fn cond_moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> (Moments, u64) {
     let acc =
         crate::reduce::run_reduction(graph, root, n, seed, &crate::reduce::CondMomentsReducer);

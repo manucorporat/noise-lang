@@ -327,6 +327,22 @@ impl Engine {
     /// Parse and evaluate a whole program, returning the value of the last statement (or `Unit` for
     /// an empty program). Inline `input::` declarations resolve against any host overrides set with
     /// [`set_input_overrides`](Engine::set_input_overrides); with none, each input uses its default.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use noise_core::{Engine, Value};
+    ///
+    /// let mut engine = Engine::new();
+    /// // Roll a fair die and estimate P(roll == 4) by Monte Carlo. `use rand;` brings the
+    /// // distribution constructors into scope; `P` is an always-on builtin.
+    /// let value = engine.run("use rand; D ~ unif_int(1, 6); P(D == 4)").unwrap();
+    /// match value {
+    ///     // `P` returns an estimate carrying a standard error; the point value is ~1/6.
+    ///     Value::Est { val, .. } => assert!((val - 1.0 / 6.0).abs() < 0.01),
+    ///     other => panic!("expected a probability estimate, got {other:?}"),
+    /// }
+    /// ```
     pub fn run(&mut self, src: &str) -> Result<Value> {
         // Fresh run-time counters for this program (the playground reads them after `run`), and
         // install this engine's counters as the thread's recorder for the whole run (finding B8).

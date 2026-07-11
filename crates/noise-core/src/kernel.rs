@@ -9,9 +9,12 @@
 //!   * [`STREAMS`] / [`choose_streams`] — the multi-stream RNG policy.
 //!   * [`seed_state`] — SplitMix64 expansion of a seed into the per-stream xoshiro state layout.
 //!   * [`profitable`] / [`walk_cost`] — the cost model deciding whether codegen beats the
-//!     interpreter (the "B2" gate). One cost function, parameterized by `inline_trans`: the native
-//!     JIT inlines `ln`/`sin`/`cos` (passes `true`), the WASM emitter still imports them from the
-//!     host (passes `false`) — see PLAN.md "Browser note".
+//!     interpreter (the "B2" gate). One cost function, parameterized by `inline_trans`: **both**
+//!     backends now inline `ln`/`sin`/`cos` as polynomials and pass `true` — the native JIT via
+//!     `jit::emit_ln`/`emit_trig`, the WASM emitter via `wasm_emit::emit_ln`/`emit_trig`. The
+//!     `false` branch is a retained seam for a hypothetical backend that couldn't inline them.
+//!     `exp` and the large-argument trig fallback remain real calls on both (a host import on wasm,
+//!     an `nz_*` shim on the JIT) — see PLAN.md "Browser note" and findings C3/C9.
 //!   * [`const_int_exponent`] — the `x ^ k` small-integer-power test (repeated multiply vs a `pow`
 //!     call), shared so both backends agree on which exponents fuse.
 
@@ -72,12 +75,13 @@ pub fn const_int_exponent(graph: &RvGraph, id: RvId) -> Option<u32> {
 /// (no `Poisson` — its Knuth loop stays interpreter-only) **and** the count of fused nodes strictly
 /// exceeds the transcendental-call weight. See [`walk_cost`] for the calibration.
 ///
-/// `inline_trans` says whether *this backend* inlines `ln`/`sin`/`cos` as polynomials. The native
-/// JIT does ([`crate::approx`] / `jit::emit_ln`), so it passes `true` and a `normal`/`exp`/trig
-/// graph counts as fusible. The WASM emitter still imports those from the host (a per-draw call
-/// across the JS boundary — even costlier than a native libcall), so it passes `false` and such
-/// graphs stay on the interpreter, exactly as before. `atan`/`round`/non-integer `pow` are calls on
-/// both backends regardless.
+/// `inline_trans` says whether *this backend* inlines `ln`/`sin`/`cos` as polynomials. **Both**
+/// backends do — the native JIT via [`crate::approx`] / `jit::emit_ln`, the WASM emitter via
+/// `wasm_emit::emit_ln`/`emit_trig` — so both pass `true` and a `normal`/`exp`/trig graph counts as
+/// fusible on each. The `false` branch is a retained seam: a backend that *couldn't* inline a
+/// transcendental would pass `false` and the gate would correctly leave those graphs to the
+/// interpreter rather than emit a per-draw call. `atan`/`round`/`exp`/non-integer `pow` (and the
+/// rare large-|x| trig fallback, finding C3) are real calls on both backends regardless.
 pub fn profitable(graph: &RvGraph, root: RvId, inline_trans: bool) -> bool {
     let mut seen = HashSet::new();
     let (mut fusible, mut libcalls) = (0u32, 0u32);
@@ -155,7 +159,7 @@ pub fn walk_cost(
             RvNode::ConstNum(_) | RvNode::ConstBool(_) => {} // neutral
             RvNode::Unary(op, a) => {
                 match op {
-                    UnOp::Sin | UnOp::Cos | UnOp::Ln => charge(1, fusible, libcalls), // inlined native
+                    UnOp::Sin | UnOp::Cos | UnOp::Ln => charge(1, fusible, libcalls), // inlined on both backends
                     UnOp::Atan | UnOp::Round | UnOp::Exp => *libcalls += 1, // still a call everywhere
                     // Cheap fused instructions on every backend (native/wasm floor/ceil/neg, etc.).
                     UnOp::Neg | UnOp::Not | UnOp::Sign | UnOp::Floor | UnOp::Ceil => *fusible += 1,

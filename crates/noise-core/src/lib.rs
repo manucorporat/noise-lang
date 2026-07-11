@@ -18,6 +18,17 @@
 //! [`value`], [`eval`], [`input`], [`doc`], [`introspect`], [`frontmatter`], and [`stats`].
 //! Everything else — the lexer, parser, AST, bytecode VM, the sampler, and the JIT / WASM codegen
 //! backends — is a `pub(crate)` implementation detail and deliberately outside the semver surface.
+//!
+//! ## Example
+//!
+//! ```
+//! use noise_core::{run, Value};
+//!
+//! // A tiny deterministic program. The builtin modules are strictly scoped, so `math` must be
+//! // brought in with `use` before `sqrt` resolves — a bare `sqrt` is an undefined-name error.
+//! let value = run("use math; sqrt(2) ^ 2").unwrap();
+//! assert!(matches!(value, Value::Num(n) if (n - 2.0).abs() < 1e-9));
+//! ```
 
 pub(crate) mod approx;
 pub(crate) mod ast;

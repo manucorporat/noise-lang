@@ -474,6 +474,12 @@ fn moment(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
 ///
 /// Returns a plain `Num` (not an `Est`): a sample quantile's standard error depends on the density
 /// at that point, so we don't claim auto-rounded precision the way `P`/`E` do.
+///
+/// Note: `P` and `Q` on the *same* underlying event/quantity each force their **own independent
+/// sampling pass** over a *different* cone — an event-indicator graph for `P`, the numeric quantity
+/// for `Q` — so even at the same seed they realize different draws. Their answers agree only up to
+/// Monte Carlo error and can diverge most in the **tail** (where few samples land): `Q(X, 0.99)` need
+/// not be the exact `c` for which `P(X > c) == 0.01`.
 fn quantile(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
     let QueryCtx {
         graph,

@@ -280,14 +280,19 @@ The probability is **${p}**.
 program   := stmt*                         # statements separated by ';' or a newline
 stmt      := expr ( ';' | NEWLINE )?       # separator optional before a terminator; ';' is
                                            #   only required for two statements on one line
-expr      := bind | opexpr
-bind      := IDENT ('=' | '~') expr        # right-associative
-opexpr    := precedence-climbing over the operator table below
+expr      := bind | fndef | opexpr
+bind      := IDENT ('=' expr | '~' shape? expr)   # right-associative; `~` draws (see §2/§3)
+fndef     := IDENT '(' params? ')' ('=' | '~') expr   # function def: '=' pure, '~' stochastic (§4)
+params    := IDENT (',' IDENT)*
+opexpr    := precedence-climbing over the operator table below — including the `|` conditioning
+             bar, the `..` range, the prefix operators `-`/`!`, and the prefix draw `~ shape?`
+shape     := '[' expr (',' expr)* ']'      # draw shape: `~[n]`, `~[n, m]` — an iid batch (§3)
 postfix   := primary ('[' expr ']')*       # indexing, repeatable (M[i][j]); binds like a call
-primary   := NUMBER | STRING | path | 'true' | 'false'
+primary   := NUMBER | STRING | template | path | 'true' | 'false' | 'continue'
            | path '(' args? ')'            # call
            | '(' expr ')'
            | '[' (expr (',' expr)*)? ']'   # array literal
+           | '[' 'for' IDENT 'in' opexpr block ']'   # comprehension (see "Collections")
            | block
            | if
            | for
@@ -296,10 +301,16 @@ path      := IDENT ('::' IDENT)*           # bare name or module path (rand::uni
 block     := '{' stmt* '}'
 if        := 'if' opexpr block ('else' (if | block))?
 for       := 'for' IDENT 'in' opexpr block
-args      := expr (',' expr)*
+args      := expr (',' expr)*                            # all positional …
+           | IDENT ':' expr (',' IDENT ':' expr)*        # … or all named — never mixed (see "Named arguments")
+template  := '`' text `('${' expr '}')` … '`'            # single-backtick body
+           | '```' tag? text '```'                       # triple-fence body with an optional syntax tag
+NUMBER    := digits ('.' digits?)? ([eE] [+-]? digits)?  # scientific-notation exponent optional (`1e6`)
 ```
 
-Everything is an expression: `bind`, `block`, and `if` all produce values.
+Everything is an expression: `bind`, `fndef`, `block`, `if`, the comprehension, and a root-position
+`template` all produce values (a `for` loop and a root-position template/`Print` yield `unit`).
+`continue` is a control sentinel usable only in a loop/comprehension body, never as a data value.
 
 ## Operator precedence
 
@@ -307,20 +318,27 @@ Lowest to highest. All binary operators are left-associative **except** `^` and
 binding, which are right-associative. Prefix `-`/`!` bind tighter than everything below
 `^` (so `-2 ^ 2 == -(2 ^ 2) == -4`, matching common math convention).
 
-| Level | Operators            | Assoc  |
-|-------|----------------------|--------|
-| 1     | `=` `~` (binding)    | right  |
-| 2     | `\|` (conditioning)  | left   |
-| 3     | `..` (range)         | left   |
-| 4     | `\|\|`               | left   |
-| 5     | `&&`                 | left   |
-| 6     | `== != < > <= >=`    | left   |
-| 7     | `+ -`                | left   |
-| 8     | `* / % @`            | left   |
-| 9     | `^`                 | right  |
-| 10    | prefix `- ! ~`       | —      |
-| 11    | postfix `[index]`    | —      |
-| 12    | call, grouping       | —      |
+| Level | Operators                        | Assoc  |
+|-------|----------------------------------|--------|
+| 1     | `=` `~` (binding)                | right  |
+| 2     | `\|` (conditioning), `..` (range) | left   |
+| 3     | `\|\|`                           | left   |
+| 4     | `&&`                             | left   |
+| 5     | `== != < > <= >=`                | left   |
+| 6     | `+ -`                            | left   |
+| 7     | `* / % @`                        | left   |
+| 8     | `^`                             | right  |
+| 9     | prefix `- ! ~`                   | —      |
+| 10    | postfix `[index]`                | —      |
+| 11    | call, grouping                   | —      |
+
+> **`|` and `..` share one precedence level** (level 2), and are left-associative with respect to
+> each other. This is what the parser does: in `parser.rs` the conditioning bar and the range have
+> *identical* binding powers (`COND_LBP == RANGE_LBP == 1`, `COND_RBP == RANGE_RBP == 2`). The
+> consequence is that `a | b .. c` parses as `(a | b) .. c`, **not** `a | (b .. c)`. The two rarely
+> meet in practice — `|` is only valid inside a `P`/`E`/`Var`/`Q` query and its right operand is a
+> condition (an event), not a range — so this is a formality rather than a hazard, but the table and
+> the parser agree on it.
 
 ## Values and types
 
@@ -490,9 +508,15 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
 - **`Print(args...)`** — prints its arguments space-separated (each via its display form),
   then a newline. Returns `unit` (the CLI does not echo a trailing `unit`, so a program can
   end in `Print(...)`). Use it with string concatenation to emit messages:
-  `Print("P(win) =", round(p, 4))`.
+  `Print("P(win) =", round(p, 4))`. A `number`'s display form (`format_num`) trims float dust and
+  rounds to 12 decimal places, so a **tiny** magnitude rounds to zero: `Print(1e-13)` prints `0`
+  (any magnitude below about `5e-13` rounds to `0`). The full-precision value is unaffected — only its printed form
+  collapses; scale up (e.g. print `x * 1e13`) if you need to see sub-`1e-12` magnitudes.
 - **`round(x, digits)`** — round `x` to `digits` decimal places (handy for tidy messages).
-- **`&&` / `||`** — logical and/or; lift over bool-RVs as elementwise ops on 0/1 columns.
+- **`&&` / `||`** — logical and/or; lift over bool-RVs as elementwise ops on 0/1 columns. They
+  **do not short-circuit**: `a && b` and `a || b` always evaluate *both* operands (the columnar
+  form is a per-lane min/max over 0/1 columns, so every lane needs both values). Don't rely on the
+  right operand being skipped to avoid a side effect or a costly computation — it never is.
 - **`if` over a random variable** — when the condition is a `dist<bool>`, `if c { a } else { b }`
   lifts to a per-lane **select**: each sample takes `a`'s draw where `c` is true and `b`'s where
   false. It is a *value*, not control flow, so:

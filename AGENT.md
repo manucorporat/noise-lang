@@ -33,8 +33,8 @@ state is **Phases 0–3 plus core-model-rework Steps 1–4 complete** (see `plan
   `math` (`pi`/`e`/`sqrt`/`round`/`log`/`log10`), `vec` (collections/linear-algebra, incl. `mse`),
   and `builtin` (`P`/`E`/`var`/`print`/`range`/`push`/`len`). `builtin` is active by default; the
   rest are **strict** — a bare name errors until `use <module>;` (or a `mod::name` path).
-  `module_of()` in `eval.rs` is the single source of truth for membership; `Engine.used` tracks
-  active modules.
+  the `BUILTINS` registry in `eval.rs` is the single enumerable source of truth for name→module
+  membership (`module_of()` is a lookup into it — finding F2); `Engine.used` tracks active modules.
 - **Step 5 — TurboQuant capstone:** `transpose`/`ones`/`zeros`/`iota`, plus `rotation(d)` (random
   orthonormal matrix, Gram–Schmidt of a Gaussian seed lowered into the RV graph) and
   `quantize(v, centroids)` (nearest-centroid / Lloyd–Max snap). `examples/turboquant.noise` now
@@ -116,30 +116,82 @@ GOAL.md LANG.md README.md
 ```
 
 ### noise-core modules
-| File | Role |
-|------|------|
-| `error.rs` | `Span` (+ `Span::line_col(src)` → 1-based line/col, char-counted), `NoiseError` (`ErrorKind`: UnexpectedChar/UnterminatedString/Parse/UndefinedName/TypeMismatch/NotDrawn/ArityMismatch/Runtime, each with a stable `code()`), `Result`. Every failure is typed + spanned. **No panics in the pipeline.** |
-| `lexer.rs` | Hand-written lexer → `Vec<Token>` ending in `Eof`. Token set is a superset of what Phase 0 evaluates (comparisons, `^`, `!`, `if/else`, strings all tokenize). |
-| `ast.rs` | `Expr` (Number/**Bool**/Str/Ident/Unary/Binary/Bind/**FnDef**/Call/Block/If/**Array**/**Index**/**For**/**Use**), `BinOp`, `UnOp`, `BindKind` (Assign=`=`, Sample=`~`), `Spanned`, `Program`, **`split_path`** (splits `mod::name`; qualified names ride inside `Ident`/`Call` name strings). |
-| `parser.rs` | Pratt / precedence-climbing parser; `infix_op` precedence table. Disambiguates `f(x)=…`/`f()~…` function defs from calls via `matching_paren_after`. In-module `mod tests`. |
-| `value.rs` | `Value`: Num/Bool/Str/Unit/**Recipe(Recipe)** (undrawn distribution)/**Dist(RvId)**/**Est{val,se}** (Monte Carlo estimate; displays rounded to its standard error)/**Array(Rc<Vec<Value>>)** (fixed-length, build-time)/**Signal(Rc<SigExpr>)** (lazy signal expression)/**Noise(NoiseSpec)** (undrawn noise generator — `~`-only, like a recipe). `format_num` trims float dust from `Num` Display. |
-| `signal.rs` | `SigExpr` (lazy signal **tree**: `Wave`/`Konst`/`Noise{RealizationId}`/`Unary(SigUnOp)`/`Binop`/`Atan2`), `Wave{Sine,Cosine}`, `NoiseSpec`/`NoiseKind` (incl. `WhiteComplex`), `RealizationId`. `sample_f64(n)` folds a deterministic tree; noise-bearing trees materialize in `Engine::materialize_sig` through the realization cache. |
-| `rng.rs` | Hand-rolled xoshiro256++ PRNG, SplitMix64-seeded. No OS entropy/time/threads — WASM-clean, deterministic. `fill_uniform`/`fill_uniform_int`/**`fill_normal`** (Box–Muller) fill a whole column. |
-| `dist.rs` | `RvId` handle; `Distribution` trait + `Uniform`; `RvKind{Num,Bool}`; `Source{Uniform,UniformInt,**Normal**}`; **`Recipe{Uniform,UniformInt,Bernoulli,Normal}`** (undrawn dists); `RvNode{Src,ConstNum,ConstBool,Unary,Binary,Select}`; append-only `RvGraph` (structural sharing). |
-| `bytecode.rs` | `compile` (DAG→flat bytecode, CSE via `HashMap<RvId,Reg>`) + the columnar VM `run_batch`; `Inst` (incl. `Normal`, `Select`, And/Or); `BATCH = 1024`. In-module `mod tests`. |
-| `sampler.rs` | Forcing path: `for_each_batch`/`sample_n`/`moments` (streaming Welford). Compiles once, allocs the column file once, seeds once. In-module `mod tests`. |
-| `builtins.rs` | `pub fn call(name, args, graph: &RvGraph, span)` — **pure/scalar** dispatch: `unif`,`unif_int`,`bernoulli`,`normal`,`sqrt`,`round`,`log`,`log10`,`P`,`E`,`var`,`print`, plus the **pure collection** builtins `range`/`push`/`len`/`iota`/`ones`/`zeros`/`transpose` (no graph access). Takes `&RvGraph` (immutable) — cannot build/draw nodes. |
-| `eval.rs` | `Engine { vars, funcs: HashMap<String,Rc<UserFn>>, graph, call_depth }`. `eval`; operator lifting (`lift_binary`/`lift_unary`/`operand_to_rv`); the extracted `binop`/`select`/`indicator` fold helpers; the shaped-draw `eval_sample`/`draw_shaped` and the matrix-product `eval_matmul`/`matmul`; the **collections library** (`lib_call` → `lib_sum`/`lib_dot`/… `Engine` methods, which build/draw so they need `&mut self`); the **module system** (`module_of`/`is_module`/`MODULES`, `Engine.used` set, `resolve_call`/`eval_ident` strict-scoping gates, `Expr::Use` arm); `draw(&mut, Recipe)` (only place sources are created); `call_user_fn` (fresh params-only frame, `MAX_CALL_DEPTH` guard; the new eval arms `eval_array`/`eval_index`/`eval_for` are split out to keep `eval`'s stack frame small for the recursion budget); free helpers `forbid_recipe`, `math_const`. Rust sampling API `sample`/`moments`/`run_rv`. |
-| `lib.rs` | Re-exports (incl. `RvId`, `Moments`), `run(src)` helper, the golden-test corpus in `#[cfg(test)] mod tests`. |
+
+`crates/noise-core/src/`. The **Vis** column is the module's visibility in `lib.rs` after the Phase-5a
+privatization: **pub** modules are the curated semver surface; **pub(crate)** are internal
+implementation detail; the two backends and the host seam are additionally config-gated. The curated
+public surface is the `Engine`/`run` facade plus `error`/`value`/`eval`/`input`/`doc`/`introspect`/
+`frontmatter`/`stats` (see the `lib.rs` crate rustdoc).
+
+| File | Vis | Role |
+|------|-----|------|
+| `error.rs` | pub | `Span` (+ `Span::line_col(src)` → 1-based line/col, char-counted), `NoiseError` with structured `ErrorKind` (UnexpectedChar/UnterminatedString/Parse/UndefinedName/TypeMismatch/NotDrawn/ArityMismatch/Runtime, each with a stable `code()`), `Result`. Every failure is typed + spanned. **No panics in the pipeline.** |
+| `value.rs` | pub | `Value` (`#[non_exhaustive]`): Num/Bool/Str/Unit/Recipe/Dist(RvId)/Est{val,se}/Array/Signal/Noise/Complex/Cond/Summary/Continue. `format_num` trims float dust (12 places → tiny magnitudes print `0`). |
+| `eval.rs` | pub | The `Engine` facade + tree-walking evaluator, split along its section seams into the `eval/` submodules below (finding F1). Holds the persistent state (vars, funcs, `RvGraph`, realizations, input manifest, output stream, budgets), the recursion budgets (`MAX_EVAL_DEPTH`/`MAX_CALL_DEPTH`), the `BUILTINS` name registry + `module_of` (finding F2), and the `run`/`run_to_document`/`check`/`sample`/`moments` API. |
+| `eval/ops.rs` | (in `eval`) | Scalar/complex/signal operator folding (`binop` & friends), complex arithmetic and `^`, signal materialization, and the value-materialization helpers (`select`/`indicator`/`array_index`/`expect_array`). |
+| `eval/draw_lift.rs` | (in `eval`) | Drawing recipes into the sample-DAG (`draw`, user-fn calls, `~`/`~[shape]`, noise draws) and the operator-lifting helpers (`lift_unary`/`lift_binary`/`lift_if`/`operand_to_rv`). |
+| `eval/eval_arms.rs` | (in `eval`) | AST arms: identifiers, module resolution, calls (with named-arg reordering), arrays, ranges, indexing/gather, loops, comprehensions, bindings, and `input::*`. |
+| `eval/library.rs` | (in `eval`) | The `lib_call` builtin library (needs `&mut self` to build/draw nodes): reducers, scans, linear algebra, ufuncs, the bootstrap/rotation/permutation draws, quantization, and matmul. |
+| `eval/introspect_dispatch.rs` | (in `eval`) | Conditioning (`X \| C`) and the introspection surface: `describe`/`corr`/`explain`, the `plot::*` chart dispatch, and the `stats::*` raw-data twins. |
+| `input.rs` | pub | Inline host-tunable parameters (`input::real`/`int`/`bool`): `InputSpec`/`InputValue`, resolve against overrides, clamp to `[min,max]`, snap to `step`. |
+| `doc.rs` | pub | The literate **document model** (PLAN-LITERATE §D4/§D5): `Document` (meta + flat block array + comment layer + result), source segmentation, comment attachment, and the private `LineIndex`. |
+| `introspect.rs` | pub | Variable introspection core behind `describe`/`hist`/`samples`/`corr`/`scatter`/`explain` — builds a `Summary` (two-pass/Welford moments, finding B1). |
+| `frontmatter.rs` | pub | `---`-fenced YAML frontmatter (`title`/`abstract`/`tags`/`extra`) → `Frontmatter`, recognized only at byte 0, carried as trivia so spans stay true. |
+| `stats.rs` | pub | Per-engine run-time counters (`RunStats`) for the playground's "engine" readout — draws/ops recorded through one install point (finding B8). |
+| `lexer.rs` | pub(crate) | Hand-written lexer → `Vec<Token>` ending in `Eof`; scientific-notation number literals (`1e6`), overflow-as-error, and UTF-8-safe error spans. |
+| `ast.rs` | pub(crate) | `Expr` (Number/Bool/Str/Ident/Unary/Binary/Bind/FnDef/Call/Block/If/Array/Index/For/Use/Sample/MatMul/Comprehension/Continue/Template/Cond/…), `BinOp`, `UnOp`, `BindKind`, `Spanned`, `Program`, `split_path`. |
+| `parser.rs` | pub(crate) | Pratt / precedence-climbing parser; the `infix_op` binding-power table (`\|` and `..` share level 1); depth guard (`MAX_PARSE_DEPTH`); disambiguates `f(x)=…`/`f()~…` defs from calls via `matching_paren_after`. |
+| `dist.rs` | pub(crate) | `RvId`; `Source`/`Recipe` (Uniform/UniformInt/Bernoulli/Normal/Exp/Geometric/Poisson…); `RvKind{Num,Bool}`; `RvNode{Src,ConstNum,ConstBool,Unary,Binary,Select,Gather}`; the append-only `RvGraph` arena (structural sharing / CSE, checked casts). |
+| `bytecode.rs` | pub(crate) | `compile` (DAG → flat bytecode, **iterative** lowering + CSE) and the columnar VM `run_batch`; `Inst` (incl. `Normal`/`Select`/And/Or/Gather); `BATCH = 1024`. |
+| `sampler.rs` | pub(crate) | The forcing path: `moments`/`sample_n`, the conditioning drivers `cond_moments`/`cond_sample_n` (NaN-sentinel), and the shared joint-batch loop behind `sample_pairs`/`grid_*`/`corr_matrix`. Compiles once, allocs once, seeds once. |
+| `reduce.rs` | pub(crate) | Parallel, deterministic multicore reduction (power-sum accumulators merged as an associative monoid in chunk order); the `Reducer` trait + Moments/Cond reducers. |
+| `rng.rs` | pub(crate) | Hand-rolled xoshiro256++ PRNG, SplitMix64-seeded. No OS entropy/time/threads. `fill_uniform`/`fill_uniform_int`/`fill_normal` (Box–Muller) fill a whole column. |
+| `signal.rs` | pub(crate) | `SigExpr` (lazy signal tree: `Wave`/`Konst`/`Noise{RealizationId}`/`Unary`/`Binop`/`Atan2`), `Wave{Sine,Cosine}`, `NoiseSpec`/`NoiseKind` (incl. `WhiteComplex`), `RealizationId`; `sample_f64(n)` folds a deterministic tree. |
+| `simplify.rs` | pub(crate) | Graph-level algebraic simplification: const-fold, finite-safe identities, hash-consing/CSE — **iterative** (stack-safe on deep chains, finding A4). |
+| `num.rs` | pub(crate) | Small pure-numeric helpers shared across the interpretive paths (`trim_float`, `quantile_sorted`) — the single home for the formerly copy-pasted pair (finding F5). |
+| `builtins.rs` | pub(crate) | Pure/scalar builtin dispatch via a `QueryCtx` param object (finding F6): `P`/`E`/`Var`/`Q`/`Print`/`round`/`sqrt`/`log`/… plus pure collection builtins. Takes `&RvGraph` (immutable) — cannot build/draw nodes. |
+| `backend.rs` | pub(crate) | The execution-backend seam: `Backend`/`Program`/`Runner` traits and `compile_root`, which simplifies once then selects the interpreter, the JIT (`all(feature="jit", not(wasm32))`), or the WASM host (wasm32). |
+| `kernel.rs` | pub(crate) | Backend-agnostic kernel support shared by both code generators: the cost model (`profitable`/`walk_cost`), the multi-stream policy (`choose_streams`/`latency_bound`), `seed_state`, `supported`, `cost`/`cone_size`. |
+| `approx.rs` | pub(crate) | Inlinable polynomial approximations of `ln`/`sin`/`cos` — the single reference spec both emitters transcribe op-for-op (`TRIG_MAX` range guard, finding C3). |
+| `jit.rs` | pub(crate), `feature = "jit"` | Cranelift native JIT backend: fused multi-stream kernels, inlined `ln`/`sin`/`cos`, six `nz_*` math shims (`atan`/`round`/`pow`/`sin`/`cos`/`exp`), `Drop → free_memory()` (finding C4). |
+| `wasm_emit.rs` | pub(crate) | WASM-emitter backend — the browser twin of `jit.rs`. Emits the same fused kernel in `f64.*`/`i64.*` with inlined polynomials; imports `atan`/`round`/`sin`/`cos`/`exp`/`pow` from module `"m"` only for the rare large-argument/edge paths. |
+| `wasm_host.rs` | pub(crate), `wasm32` | Browser host seam that `instantiate`s and drives an emitted module (content-addressed LRU cache, interpreter fallback). |
+| `flint.rs` | pub(crate) | The output boundary: an introspection `Summary` → `flint-chart` specs (`to_flint`/`Plot`) a host renders; re-exported from `lib.rs`. |
+| `conformance.rs` | test-only | Shared cross-backend conformance corpus (`CONST_CASES` exact, `RNG_CASES` tolerance) consumed by both the `jit` and `wasm_emit` test modules (finding C2). |
+| `lib.rs` | crate root | Curated re-exports (`Engine`, `run`, `RvId`, `Moments`, `Document`, …), the `run(src)` helper with a runnable doc-test, and one in-crate `#[ignore]` bench that reaches `pub(crate)` internals. The golden/integration test corpus now lives in `crates/noise-core/tests/` (moved out of `lib.rs` in Phase 5, finding E3). |
+
+### End-to-end document data flow
+
+The whole pipeline, source to host JSON, is one pass with a lazy sampling tail:
+
+**source `&str`** → `lexer` (→ `Vec<Token>`) → `parser` (Pratt → `Program` of `Spanned` AST) →
+`eval::Engine` walks the AST: deterministic sub-expressions fold to plain `Value`s, and every
+`~`-drawn random variable is lowered into the engine-owned append-only **`RvGraph`** (structural
+sharing/CSE, so `X + X` is one draw). A query (`P`/`E`/`Var`/`Q`/`describe`/`plot::*`) *forces*
+sampling: `backend::compile_root` runs `simplify` once, then the **cost model** (`kernel::profitable`)
+picks a backend — the columnar **bytecode** VM (default + oracle), the Cranelift **JIT**
+(`jit`, native), or the **WASM emitter** (`wasm_emit`, browser) — and `reduce` fans the chosen kernel
+across cores with a deterministic power-sum merge, yielding `Moments` (or sorted draws for `Q`, or a
+`Summary` for introspection). Emissions (`Print`, `plot::*`, `input::*`) buffer on the engine in
+source order; `run_to_document` assembles them with the frontmatter, code segmentation, and comment
+layer into the single **`Document`** contract, which each host (`noise-cli`, the WASM playground,
+`@noiselang/core`) serializes to JSON and renders. `flint` turns a `Summary` into chart specs on the
+way out.
 
 ## Build & run
 
 ```sh
-cargo test                       # 191 tests in noise-core, all pass
-cargo clippy --all-targets       # must stay clean (watch approx_constant: avoid literals near π)
+cargo test --workspace           # the full suite (the integration tests live in noise-core/tests/)
+cargo test -p noise-core --features jit   # also exercise the Cranelift JIT backend + conformance
+cargo test --doc -p noise-core   # the crate's runnable doc examples
+cargo clippy --all-targets -- -D warnings # must stay clean (watch approx_constant: avoid literals near π)
 cargo run -p noise-cli           # REPL
 cargo run -p noise-cli -- f.noise  # run a file (prints last statement's value)
+cargo run -p noise-cli -- --version
 ```
+
+The exact test count moves every phase, so it is intentionally *not* pinned here — read it off a
+`cargo test --workspace` run (or CI, `.github/workflows/ci.yml`), which is the source of truth.
 
 Modern toolchain; no future-incompat warnings (unlike `legacy/`). `Cargo.lock` is
 committed (reproducible CI and `cargo install`); CI is `.github/workflows/ci.yml`
@@ -206,7 +258,7 @@ committed (reproducible CI and `cargo install`); CI is `.github/workflows/ci.yml
 ## How to extend (practical guidance)
 
 - **`LANG.md` is the contract.** Any syntax/semantics change updates `LANG.md` *and* the
-  golden tests in `lib.rs` in the same change. Don't let them drift.
+  golden/integration tests in `crates/noise-core/tests/` in the same change. Don't let them drift.
 - **Keep the agent skill in sync.** `.claude/skills/noise-lang/SKILL.md` is the *authoring*
   guide agents load to write Noise (and doubles as human-readable docs — linkable from the
   site). When you add or change a language feature — a new builtin or module, a new
@@ -224,9 +276,11 @@ committed (reproducible CI and `cargo install`); CI is `.github/workflows/ci.yml
   must be an `Engine` method dispatched from `eval`/`Expr::Call` (needs `&mut self`), reusing
   `lift_binary`. New non-trivial `eval` arms get their own `eval_*` helper (e.g. `eval_sample`,
   `eval_matmul`) so the big `eval` match's stack frame stays small for the recursion budget.
-- **New builtin → also register its module:** add the name to `module_of()` in `eval.rs` (pick
-  `rand`/`math`/`vec`/`builtin`) or it's unreachable under strict scoping. Membership (scoping) is
-  independent of where the implementation lives (`builtins::call` vs `lib_call`).
+- **New builtin → also register its module:** add the `(name, module)` pair to the `BUILTINS`
+  registry in `eval.rs` (pick `rand`/`math`/`vec`/`signal`/`engine`/`builtin`) or it's unreachable
+  under strict scoping; the registry coverage test then checks it dispatches and appears in the
+  editor grammar (finding F2). Membership (scoping) is independent of where the implementation lives
+  (`builtins::call` vs `lib_call`).
 - **Register allocation:** `bytecode::compile` uses one register per distinct node (no
   liveness reuse). CSE (sharing) is a correctness requirement and IS done; slot reuse is
   deferred to Phase 4.
@@ -274,8 +328,9 @@ WASM emitter — plus the cost model that gates codegen. Work down this list:
   module system, TurboQuant capstone), **complex numbers** (PLAN-COMPLEX), and **signals as drawn
   values** (PLAN-SIGNALS: the `SigExpr` tree, `~`-only noise drawing + the realization cache,
   complex signals + `noise_white_complex`, `engine::set_resolution` + reducer materialization)
-  complete and green (**253 lib tests**, clippy clean). Runnable examples in `examples/` (each
-  checks an analytic value), all carrying their `use` lines; `am_vs_fm.noise` is the signal-land
-  flagship (`am_vs_fm_complex.noise` was folded into it and deleted).
+  complete and green (test count read from `cargo test --workspace`/CI, not pinned here; clippy
+  clean under `-D warnings`). Runnable examples in `examples/` (each checks an analytic value), all
+  carrying their `use` lines; `am_vs_fm.noise` is the signal-land flagship (`am_vs_fm_complex.noise`
+  was folded into it and deleted).
 - Optional perf fast-follow: the fused `Reduce` VM instruction (`plans/PLAN-COLLECTIONS.md` §3.5). The
   dynamics fork (sequential/stateful processes) remains the separate Phase-3.5 execution mode.

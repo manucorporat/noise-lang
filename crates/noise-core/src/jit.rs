@@ -448,7 +448,7 @@ fn emit_node(
         RvNode::Src(Source::Normal { mu, sigma }) => emit_normal(fb, s, *mu, *sigma),
         RvNode::Src(Source::Exp { rate }) => emit_exp(fb, s, *rate),
         RvNode::Src(Source::Geometric { p }) => emit_geometric(fb, s, *p),
-        RvNode::Src(Source::Poisson { .. }) => unreachable!("supported() excludes Poisson"),
+        RvNode::Src(Source::Poisson { .. }) => unreachable!("profitable() excludes Poisson"),
         RvNode::Gather { .. } => unreachable!("profitable() excludes Gather"),
         RvNode::ConstNum(x) => fb.ins().f64const(*x),
         RvNode::ConstBool(b) => fb.ins().f64const(if *b { 1.0 } else { 0.0 }),
