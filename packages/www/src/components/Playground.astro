@@ -11,13 +11,6 @@
   <div class="pg-split" id="pg-split" data-view="split">
     <div class="pg-editor-wrap glass">
       <div class="pg-toolbar">
-        <label class="pg-select-wrap">
-          <select id="pg-select" class="pg-select" aria-label="Choose an example"></select>
-        </label>
-        <button id="pg-run" class="btn btn-run" type="button">
-          <span class="btn-icon">▶</span> Run
-          <span class="kbd">⌘↵</span>
-        </button>
         <div class="pg-viewtabs pg-viewtabs-edit" role="group" aria-label="Choose editor and render layout">
           <button class="pg-viewtab" data-view="code" type="button" aria-pressed="false" title="Editor only">
             <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M9 8l-4 4 4 4"></path><path d="M15 8l4 4-4 4"></path></svg>
@@ -32,6 +25,13 @@
             <span>Render</span>
           </button>
         </div>
+        <label class="pg-select-wrap">
+          <select id="pg-select" class="pg-select" aria-label="Choose an example"></select>
+        </label>
+        <button id="pg-run" class="btn btn-run" type="button">
+          <span class="btn-icon">▶</span> Run
+          <span class="kbd">⌘↵</span>
+        </button>
       </div>
       <div id="editor" class="pg-editor"></div>
     </div>
@@ -47,7 +47,23 @@
 
     <div class="pg-output-wrap glass">
       <div class="pg-output-head">
-        <span class="pg-output-title"><span class="dot"></span> Render</span>
+        <div class="pg-head-left">
+          <div class="pg-viewtabs pg-viewtabs-out" role="group" aria-label="Choose editor and render layout">
+            <button class="pg-viewtab" data-view="code" type="button" aria-pressed="false" title="Editor only">
+              <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M9 8l-4 4 4 4"></path><path d="M15 8l4 4-4 4"></path></svg>
+              <span>Code</span>
+            </button>
+            <button class="pg-viewtab pg-viewtab-split" data-view="split" type="button" aria-pressed="false" title="Editor and render side by side">
+              <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="7" height="14" rx="1"></rect><rect x="13" y="5" width="7" height="14" rx="1"></rect></svg>
+              <span>Split</span>
+            </button>
+            <button class="pg-viewtab" data-view="render" type="button" aria-pressed="false" title="Render only">
+              <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="1"></rect><path d="M4 9h16"></path></svg>
+              <span>Render</span>
+            </button>
+          </div>
+          <span class="pg-output-title"><span class="dot"></span> Render</span>
+        </div>
         <div class="pg-head-right">
           <div id="pg-metrics" class="pg-metrics" hidden></div>
           <div class="pg-share" id="pg-share">
@@ -83,20 +99,6 @@
               </button>
             </div>
           </div>
-          <div class="pg-viewtabs pg-viewtabs-out" role="group" aria-label="Choose editor and render layout">
-            <button class="pg-viewtab" data-view="code" type="button" aria-pressed="false" title="Editor only">
-              <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M9 8l-4 4 4 4"></path><path d="M15 8l4 4-4 4"></path></svg>
-              <span>Code</span>
-            </button>
-            <button class="pg-viewtab pg-viewtab-split" data-view="split" type="button" aria-pressed="false" title="Editor and render side by side">
-              <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="7" height="14" rx="1"></rect><rect x="13" y="5" width="7" height="14" rx="1"></rect></svg>
-              <span>Split</span>
-            </button>
-            <button class="pg-viewtab" data-view="render" type="button" aria-pressed="false" title="Render only">
-              <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="1"></rect><path d="M4 9h16"></path></svg>
-              <span>Render</span>
-            </button>
-          </div>
         </div>
       </div>
       <div id="pg-output" class="pg-output is-preview"><span class="muted">Press Run to evaluate.</span></div>
@@ -116,12 +118,14 @@
     display: inline-flex; align-items: stretch; gap: 2px;
     padding: 2px; border: 1px solid var(--rule); border-radius: 9px; background: var(--paper-2);
   }
-  /* The editor-toolbar copy sits at the toolbar's right edge and only shows when the editor is the
+  /* The editor-toolbar copy sits at the toolbar's left edge and only shows when the editor is the
      whole view (Code); in Split the Render-header copy is the visible one. */
-  .pg-viewtabs-edit { margin-left: auto; display: none; }
+  .pg-viewtabs-edit { display: none; }
   .pg-split[data-view='code'] .pg-viewtabs-edit { display: inline-flex; }
   .pg-split[data-view='split'] .pg-viewtabs-edit,
   .pg-split[data-view='render'] .pg-viewtabs-edit { display: none; }
+  /* Left cluster of the Render header: the view toggle + the "Render" label. */
+  .pg-head-left { display: inline-flex; align-items: center; gap: 0.6rem; min-width: 0; }
   .pg-viewtab {
     font: inherit; font-size: 0.72rem; font-variant: small-caps; letter-spacing: 0.05em;
     color: var(--ink-dim); background: transparent;
