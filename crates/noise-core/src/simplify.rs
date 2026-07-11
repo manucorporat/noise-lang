@@ -30,6 +30,14 @@ pub fn simplify(graph: &RvGraph, root: RvId) -> (RvGraph, RvId) {
     (b.out, new_root)
 }
 
+/// A worklist item for the iterative post-order rewrite (see [`Builder::rewrite`]).
+enum Task {
+    /// First visit: schedule this node's rebuild after its children.
+    Visit(RvId),
+    /// Second visit: children are rebuilt (in `done`); rebuild this node.
+    Emit(RvId),
+}
+
 /// CSE key for the deterministic combinators (operands are already-interned new-graph ids).
 #[derive(PartialEq, Eq, Hash)]
 enum Key {
@@ -48,49 +56,93 @@ struct Builder {
 }
 
 impl Builder {
-    /// Post-order rewrite of `id`'s cone, memoized so a shared `RvId` is rebuilt once.
-    fn rewrite(&mut self, g: &RvGraph, id: RvId) -> RvId {
-        if let Some(&n) = self.done.get(&id) {
+    /// Post-order rewrite of `root`'s cone, memoized so a shared `RvId` is rebuilt once.
+    ///
+    /// **Iterative** post-order with an explicit `Task` worklist, *not* recursion: the cone can be
+    /// hundreds of thousands of nodes deep (a `cumsum` over `~[200000]`), which would overflow a
+    /// recursive rewriter's stack and abort (finding A4). The worklist reproduces the exact same
+    /// post-order — children rebuilt before their parent, left operand before right — so the
+    /// **relative order of surviving source nodes (hence their RNG consumption) is preserved**,
+    /// which is the correctness invariant this pass promises.
+    fn rewrite(&mut self, g: &RvGraph, root: RvId) -> RvId {
+        if let Some(&n) = self.done.get(&root) {
             return n;
         }
-        let kind = g.kind(id);
-        let new = match g.node(id) {
-            // A draw: copy as a fresh node. NEVER interned — independent draws stay independent.
-            RvNode::Src(s) => self.out.push(RvNode::Src(*s), kind),
-            RvNode::ConstNum(x) => self.num(*x),
-            RvNode::ConstBool(b) => self.boolean(*b),
-            RvNode::Unary(op, a) => {
-                let a = self.rewrite(g, *a);
-                self.unary(*op, a, kind)
+        let mut stack = vec![Task::Visit(root)];
+        while let Some(task) = stack.pop() {
+            match task {
+                Task::Visit(id) => {
+                    if self.done.contains_key(&id) {
+                        continue;
+                    }
+                    stack.push(Task::Emit(id));
+                    let done = &self.done;
+                    let mut push_child = |c: RvId| {
+                        if !done.contains_key(&c) {
+                            stack.push(Task::Visit(c));
+                        }
+                    };
+                    match g.node(id) {
+                        RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+                        RvNode::Unary(_, a) => push_child(*a),
+                        RvNode::Binary(_, l, r) => {
+                            push_child(*r);
+                            push_child(*l);
+                        }
+                        RvNode::Select { cond, a, b } => {
+                            push_child(*b);
+                            push_child(*a);
+                            push_child(*cond);
+                        }
+                        RvNode::Gather { elems, index } => {
+                            push_child(*index);
+                            for &e in elems.iter().rev() {
+                                push_child(e);
+                            }
+                        }
+                    }
+                }
+                Task::Emit(id) => {
+                    if self.done.contains_key(&id) {
+                        continue; // reached via another path already
+                    }
+                    let kind = g.kind(id);
+                    let new = match g.node(id) {
+                        // A draw: copy as a fresh node. NEVER interned — draws stay independent.
+                        RvNode::Src(s) => self.out.push(RvNode::Src(*s), kind),
+                        RvNode::ConstNum(x) => self.num(*x),
+                        RvNode::ConstBool(b) => self.boolean(*b),
+                        RvNode::Unary(op, a) => {
+                            let a = self.done[a];
+                            self.unary(*op, a, kind)
+                        }
+                        RvNode::Binary(op, l, r) => {
+                            let (l, r) = (self.done[l], self.done[r]);
+                            self.binary(*op, l, r, kind)
+                        }
+                        RvNode::Select { cond, a, b } => {
+                            let (cond, a, b) = (self.done[cond], self.done[a], self.done[b]);
+                            self.select(cond, a, b, kind)
+                        }
+                        // Gather: rebuild over the simplified operands. Not interned — distinct
+                        // gathers rarely coincide and a wrong merge would corrupt the selection.
+                        RvNode::Gather { elems, index } => {
+                            let elems: Vec<RvId> = elems.iter().map(|e| self.done[e]).collect();
+                            let index = self.done[index];
+                            self.out.push(
+                                RvNode::Gather {
+                                    elems: elems.into_boxed_slice(),
+                                    index,
+                                },
+                                kind,
+                            )
+                        }
+                    };
+                    self.done.insert(id, new);
+                }
             }
-            RvNode::Binary(op, l, r) => {
-                let l = self.rewrite(g, *l);
-                let r = self.rewrite(g, *r);
-                self.binary(*op, l, r, kind)
-            }
-            RvNode::Select { cond, a, b } => {
-                let cond = self.rewrite(g, *cond);
-                let a = self.rewrite(g, *a);
-                let b = self.rewrite(g, *b);
-                self.select(cond, a, b, kind)
-            }
-            // Gather: rebuild over the simplified operands. Not interned — distinct gathers (each
-            // hop indexes by a different RV) rarely coincide, and a wrong merge would corrupt the
-            // per-lane selection, so we copy it 1:1 like a source.
-            RvNode::Gather { elems, index } => {
-                let elems: Vec<RvId> = elems.iter().map(|&e| self.rewrite(g, e)).collect();
-                let index = self.rewrite(g, *index);
-                self.out.push(
-                    RvNode::Gather {
-                        elems: elems.into_boxed_slice(),
-                        index,
-                    },
-                    kind,
-                )
-            }
-        };
-        self.done.insert(id, new);
-        new
+        }
+        self.done[&root]
     }
 
     // --- interning constructors (the only way nodes enter `out`, besides sources) ---

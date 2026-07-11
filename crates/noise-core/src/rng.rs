@@ -10,6 +10,13 @@ pub struct Rng {
     s: [u64; 4],
 }
 
+/// Largest Poisson `lambda` sampled by the exact Knuth loop; above this `fill_poisson` uses the
+/// normal approximation (see [`Rng::fill_poisson`]). Chosen below the `(-lambda).exp()` underflow
+/// point (`lambda ≈ 745`) so the Knuth path is always exact, and low enough that its `O(lambda)`
+/// cost per draw stays a few hundred iterations. The Gaussian approximation is excellent well
+/// before here (the Poisson is already near-Gaussian by `lambda ≈ 20`).
+pub const POISSON_KNUTH_MAX: f64 = 500.0;
+
 impl Rng {
     /// Expand a `u64` seed into the 256-bit state via SplitMix64. SplitMix64 never emits an
     /// all-zero run for distinct inputs, so the xoshiro state is non-zero in practice.
@@ -79,11 +86,26 @@ impl Rng {
         }
     }
 
-    /// Fill a column with `Poisson(lambda)` counts via Knuth's algorithm (multiply uniforms
-    /// until the running product drops below `e^-lambda`). O(lambda) per draw — fine for the
-    /// teaching-language scale; large `lambda` is slow but correct.
+    /// Fill a column with `Poisson(lambda)` counts. For small `lambda` this is Knuth's algorithm
+    /// (multiply uniforms until the running product drops below `e^-lambda`), which is `O(lambda)`
+    /// per draw and exact. That algorithm is a **hang** and is **silently wrong** for large lambda:
+    /// past `lambda ≈ 745` `(-lambda).exp()` underflows to `0`, so the loop can only stop when the
+    /// running product itself underflows — many iterations, and biased low. So above
+    /// [`POISSON_KNUTH_MAX`] we switch to the standard **normal approximation**
+    /// `round(max(0, N(lambda, sqrt(lambda))))` (the CLT / de Moivre–Laplace limit): `O(1)` per
+    /// draw, deterministic, mean and variance ≈ `lambda`. `poisson(1e12)` therefore returns
+    /// promptly instead of hanging (finding A8). The threshold is well inside the Knuth-exact
+    /// regime, so every existing (small-`lambda`) result is bit-identical.
     #[inline]
     pub fn fill_poisson(&mut self, lambda: f64, out: &mut [f64]) {
+        if lambda > POISSON_KNUTH_MAX {
+            // Gaussian approximation: fill with N(lambda, lambda) then snap to non-negative integers.
+            self.fill_normal(lambda, lambda.sqrt(), out);
+            for x in out.iter_mut() {
+                *x = x.round().max(0.0);
+            }
+            return;
+        }
         let l = (-lambda).exp();
         for x in out.iter_mut() {
             let mut k = 0u64;
@@ -241,6 +263,26 @@ mod tests {
                 Rng::seed_from_u64(8)
             ]
         );
+    }
+
+    #[test]
+    fn poisson_large_lambda_is_fast_and_has_the_right_mean() {
+        // Above POISSON_KNUTH_MAX the Knuth loop would hang (and be biased low) — the normal
+        // approximation must return promptly with mean ≈ lambda and variance ≈ lambda. A huge
+        // lambda (`1e12`, the finding's repro) must not hang: this test *completing* is the proof.
+        let mut rng = Rng::seed_from_u64(3);
+        let mut col = vec![0.0f64; 200_000];
+        let lambda = 100_000.0;
+        rng.fill_poisson(lambda, &mut col);
+        let n = col.len() as f64;
+        let mean = col.iter().sum::<f64>() / n;
+        let var = col.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        assert!((mean / lambda - 1.0).abs() < 0.01, "mean = {mean}");
+        assert!((var / lambda - 1.0).abs() < 0.05, "var = {var}");
+        // The extreme case from the finding: just has to terminate, not hang.
+        let mut one = [0.0f64; 8];
+        rng.fill_poisson(1e12, &mut one);
+        assert!(one.iter().all(|&x| x.is_finite() && x >= 0.0));
     }
 
     #[test]

@@ -36,6 +36,26 @@ struct UserFn {
 /// can't be blown before the limit trips — deep recursion isn't a target use (loops unroll).
 const MAX_CALL_DEPTH: usize = 256;
 
+/// Build-time **expression**-recursion budget for [`Engine::eval`]. `MAX_CALL_DEPTH` only guards
+/// *user-function* calls; `eval` itself recurses down the left spine of a flat operator chain, so a
+/// 10 000-term `1+1+1+…` (which parses fine — the parser's own guard is far higher) would otherwise
+/// abort the process in eval. This bounds `eval`'s own recursion. `simplify::rewrite` and
+/// `bytecode::compile` walk that *same* left spine when a chain becomes a `Dist` — those are handled
+/// separately by the iterative worklists in `simplify`/`bytecode`/`kernel` (finding A4). Sized well
+/// above any realistic expression yet below what a small (1–2 MiB) stack can hold.
+const MAX_EVAL_DEPTH: usize = 2048;
+
+/// Maximum number of elements a `a..b` range may materialize. A range builds a real array (one
+/// `Value` per element), so an unbounded range OOMs or — for `a >= 2^53`, where `+= 1.0` can't
+/// advance — loops forever. ~1M elements is far beyond any teaching loop yet cheap to reject.
+const RANGE_MAX: usize = 1 << 20;
+
+/// Maximum number of leaves a shaped draw `~[n, m, …]` may build (the product of its dimensions).
+/// Each leaf is an independent draw (a fresh source node **and** a `Value`), so `~[1e15]` would
+/// `Vec::with_capacity(10^15)` and abort. ~1M leaves bounds construction while leaving every
+/// realistic shaped draw (`~[n]`, `~[d, d]`) untouched. Modeled on `complex_pow`'s 4096 cap.
+const MAX_DRAW_ELEMS: usize = 1 << 20;
+
 pub struct Engine {
     vars: HashMap<String, Value>,
     /// User functions live in their own namespace (a call resolves here before builtins).
@@ -44,6 +64,9 @@ pub struct Engine {
     graph: RvGraph,
     /// Current user-function call depth (guarded by `MAX_CALL_DEPTH`).
     call_depth: usize,
+    /// Current [`Engine::eval`] expression-recursion depth (guarded by `MAX_EVAL_DEPTH`). Distinct
+    /// from `call_depth`: this tracks the tree-walk itself (a deep flat `1+1+…` chain), not calls.
+    eval_depth: usize,
     /// Modules brought into unqualified scope via `use` (Rust-style). `builtin` is always active
     /// and is *not* stored here; `rand`/`math`/`vec` must be `use`d (or accessed as `mod::name`).
     used: HashSet<String>,
@@ -150,6 +173,7 @@ impl Engine {
             funcs: HashMap::new(),
             graph: RvGraph::default(),
             call_depth: 0,
+            eval_depth: 0,
             used: HashSet::new(),
             outputs: Vec::new(),
             current_stmt_span: Span::new(0, 0),
@@ -405,7 +429,27 @@ impl Engine {
         result
     }
 
+    /// Evaluate a node, guarding `eval`'s own recursion depth (see [`MAX_EVAL_DEPTH`]). A deep flat
+    /// chain like `1+1+1+…` recurses down its left spine one frame per term; without this it aborts
+    /// the process. On over-limit it returns a spanned error rather than crashing.
     fn eval(&mut self, node: &Spanned) -> Result<Value> {
+        self.eval_depth += 1;
+        if self.eval_depth > MAX_EVAL_DEPTH {
+            self.eval_depth -= 1;
+            return Err(NoiseError::runtime(
+                format!(
+                    "expression nests too deeply to evaluate (over {MAX_EVAL_DEPTH} levels) — a very \
+                     long operator chain or deeply nested expression; split it into smaller bindings"
+                ),
+                node.span,
+            ));
+        }
+        let r = self.eval_inner(node);
+        self.eval_depth -= 1;
+        r
+    }
+
+    fn eval_inner(&mut self, node: &Spanned) -> Result<Value> {
         match &node.expr {
             Expr::Number(n) => Ok(Value::Num(*n)),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
@@ -676,11 +720,25 @@ impl Engine {
                 span,
             ));
         }
-        let mut out = Vec::new();
-        let mut i = a;
-        while i < b {
-            out.push(Value::Num(i));
-            i += 1.0;
+        // Compute the integer length up front — never iterate an `f64` counter. `0..1e12` would
+        // otherwise allocate/iterate a trillion elements (OOM), and for `a >= 2^53` the old
+        // `i += 1.0` is a no-op (float precision), so `while i < b` never advances → a *true*
+        // infinite loop. `RANGE_MAX` caps the materialized length with a teaching error, in the
+        // spirit of `CORR_MAX`: a range this large is a mistake, not a workload.
+        let len = if b > a { b - a } else { 0.0 };
+        if len > RANGE_MAX as f64 {
+            return Err(NoiseError::runtime(
+                format!(
+                    "range {a}..{b} has {len} elements, over the {RANGE_MAX} cap — a range \
+                     materializes every element as an array; use a smaller range"
+                ),
+                span,
+            ));
+        }
+        let len = len as usize;
+        let mut out = Vec::with_capacity(len);
+        for k in 0..len {
+            out.push(Value::Num(a + k as f64));
         }
         Ok(Value::Array(Rc::new(out)))
     }
@@ -1311,6 +1369,23 @@ impl Engine {
         for dim in shape {
             let dv = self.eval(dim)?;
             dims.push(self.count_arg("~", &dv, dim.span)?);
+        }
+        // Cap the total number of leaves (product of dims) up front, before any allocation, so a
+        // `~[1e15]` can't `Vec::with_capacity` an astronomical count and abort (finding A6). The
+        // product is computed with saturating arithmetic so it can't itself overflow.
+        let leaves = dims
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .unwrap_or(usize::MAX);
+        if leaves > MAX_DRAW_ELEMS {
+            let shape_span = shape.first().map(|s| s.span).unwrap_or(body.span);
+            return Err(NoiseError::runtime(
+                format!(
+                    "draw shape {dims:?} has {leaves} leaves, over the {MAX_DRAW_ELEMS} cap — each \
+                     leaf is an independent draw; use a smaller shape"
+                ),
+                shape_span,
+            ));
         }
         // `~[n]` on a noise generator pins ONE realization to length `n` (the shape is the time
         // axis), not `n` independent realizations — so it gets its own arm.
@@ -2969,42 +3044,67 @@ impl Engine {
     /// combination through the ordinary [`Self::binop`] lifting, with the **realization cache**
     /// guaranteeing every mention of the same draw yields the same RV nodes.
     fn materialize_sig(&mut self, expr: &SigExpr, n: usize, span: Span) -> Result<Vec<Value>> {
-        if !expr.has_noise() {
-            return Ok(expr.sample_f64(n).into_iter().map(Value::Num).collect());
+        // The signal is an `Rc` **DAG**: `for k in 0..40 { s = s + s }` shares one child under both
+        // `Binop` arms, so a naive tree walk would build `O(2^depth)` RV nodes and abort (finding
+        // A3). Memoize the materialized column per node by `Rc` identity so a shared subtree is
+        // built once — this is *also* more correct (a shared subtree yields the same RV nodes, so
+        // `static - static == 0` holds structurally, not just via later CSE).
+        let mut cache: HashMap<*const SigExpr, Rc<Vec<Value>>> = HashMap::new();
+        self.materialize_sig_memo(expr, n, span, &mut cache)
+    }
+
+    fn materialize_sig_memo(
+        &mut self,
+        expr: &SigExpr,
+        n: usize,
+        span: Span,
+        cache: &mut HashMap<*const SigExpr, Rc<Vec<Value>>>,
+    ) -> Result<Vec<Value>> {
+        let key = expr as *const SigExpr;
+        if let Some(v) = cache.get(&key) {
+            return Ok((**v).clone());
         }
-        match expr {
-            SigExpr::Noise { id, spec } => self.realization(*id, *spec, n, span),
-            SigExpr::Unary(op, a) => {
-                let xs = self.materialize_sig(a, n, span)?;
-                let mut out = Vec::with_capacity(n);
-                for x in xs {
-                    out.push(self.sig_unary(*op, x, span)?);
+        // A noise-free (sub)tree folds straight to `f64`s — no RV nodes needed for it (the fast
+        // path `nyquist.noise` rides). `has_noise` is itself memoized, so this stays cheap.
+        let out = if !expr.has_noise() {
+            expr.sample_f64(n).into_iter().map(Value::Num).collect()
+        } else {
+            match expr {
+                SigExpr::Noise { id, spec } => self.realization(*id, *spec, n, span)?,
+                SigExpr::Unary(op, a) => {
+                    let xs = self.materialize_sig_memo(a, n, span, cache)?;
+                    let mut out = Vec::with_capacity(n);
+                    for x in xs {
+                        out.push(self.sig_unary(*op, x, span)?);
+                    }
+                    out
                 }
-                Ok(out)
-            }
-            SigExpr::Binop(op, a, b) => {
-                let ls = self.materialize_sig(a, n, span)?;
-                let rs = self.materialize_sig(b, n, span)?;
-                let mut out = Vec::with_capacity(n);
-                for (l, r) in ls.into_iter().zip(rs) {
-                    out.push(self.binop(*op, l, r, span)?);
+                SigExpr::Binop(op, a, b) => {
+                    let ls = self.materialize_sig_memo(a, n, span, cache)?;
+                    let rs = self.materialize_sig_memo(b, n, span, cache)?;
+                    let mut out = Vec::with_capacity(n);
+                    for (l, r) in ls.into_iter().zip(rs) {
+                        out.push(self.binop(*op, l, r, span)?);
+                    }
+                    out
                 }
-                Ok(out)
-            }
-            SigExpr::Atan2(y, x) => {
-                let ys = self.materialize_sig(y, n, span)?;
-                let xs = self.materialize_sig(x, n, span)?;
-                let mut out = Vec::with_capacity(n);
-                for (yv, xv) in ys.into_iter().zip(xs) {
-                    out.push(self.complex_atan2(yv, xv, span)?);
+                SigExpr::Atan2(y, x) => {
+                    let ys = self.materialize_sig_memo(y, n, span, cache)?;
+                    let xs = self.materialize_sig_memo(x, n, span, cache)?;
+                    let mut out = Vec::with_capacity(n);
+                    for (yv, xv) in ys.into_iter().zip(xs) {
+                        out.push(self.complex_atan2(yv, xv, span)?);
+                    }
+                    out
                 }
-                Ok(out)
+                // `has_noise` is true here, so the deterministic leaves are unreachable.
+                SigExpr::Wave { .. } | SigExpr::Konst(_) => {
+                    unreachable!("deterministic leaf under a noise-bearing walk")
+                }
             }
-            // `has_noise` is true here, so the deterministic leaves are unreachable.
-            SigExpr::Wave { .. } | SigExpr::Konst(_) => {
-                unreachable!("deterministic leaf under a noise-bearing walk")
-            }
-        }
+        };
+        cache.insert(key, Rc::new(out.clone()));
+        Ok(out)
     }
 
     /// One deferred unary step applied to a materialized element: a constant folds with the same
@@ -3660,7 +3760,16 @@ impl Engine {
         let mut levels: Vec<f64> = Vec::with_capacity(cs.len());
         for e in cs.iter() {
             match scalar_const(e) {
-                Some(n) => levels.push(n),
+                // Reject non-finite centroids like `lib_categorical` does: a NaN centroid has no
+                // order, so `sort_by(partial_cmp().unwrap())` used to panic (finding A7); an inf
+                // centroid would poison the midpoint thresholds.
+                Some(n) if n.is_finite() => levels.push(n),
+                Some(_) => {
+                    return Err(NoiseError::runtime(
+                        "quantize centroids must be finite numbers (no NaN/inf)".to_string(),
+                        span,
+                    ))
+                }
                 None => {
                     return Err(NoiseError::runtime(
                         "quantize centroids must be constant numbers, not random variables"
@@ -3670,7 +3779,9 @@ impl Engine {
                 }
             }
         }
-        levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // `total_cmp` is a total order on all `f64`, so the sort never panics even if a stray
+        // non-finite slipped through; combined with the finite check above the result is clean.
+        levels.sort_by(f64::total_cmp);
         let mut out = Vec::with_capacity(xs.len());
         for x in xs.iter() {
             out.push(self.nearest_centroid(x.clone(), &levels, span)?);

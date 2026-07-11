@@ -31,6 +31,14 @@ pub const MAX_OPS_DEFAULT: u64 = 1_000_000_000;
 /// The time-axis twin of [`P_DEFAULT_N`] — a measurement knob, not part of the question — sized
 /// so toy programs never need to mention it.
 pub const RESOLUTION_DEFAULT: usize = 256;
+/// Maximum dimension of a `rotation(d)` draw (finding A6). Drawing it Gram–Schmidt-orthonormalizes a
+/// `d×d` Gaussian seed — `O(d³)` sample-graph nodes — so an uncapped `d` (`rotation(500)`) builds
+/// ~10⁸ nodes and OOMs/aborts. Teaching rotations are small (`d ≤ ~64`; the flagship uses 20).
+const MAX_ROTATION_DIM: usize = 128;
+/// Maximum length of a `permutation(n)` draw (finding A6). It builds `O(n²)` comparison nodes (each
+/// element is the rank of its key), so `permutation(1e5)` builds ~10¹⁰ nodes and OOMs. Card decks /
+/// the prisoners riddle use `n ≤ ~365`; 2048 leaves ample headroom while bounding the blow-up.
+const MAX_PERMUTATION_N: usize = 2048;
 /// A fixed seed keeps a run reproducible; threading an explicit seed through `P` is a later
 /// refinement.
 const P_DEFAULT_SEED: u64 = 0;
@@ -181,6 +189,17 @@ pub fn call(
                     span,
                 ));
             }
+            // Drawing a rotation Gram–Schmidt-orthonormalizes a `d×d` Gaussian seed — `O(d³)` graph
+            // nodes — so an unbounded `d` OOMs/aborts at build time (finding A6). Cap it cleanly.
+            if d > MAX_ROTATION_DIM as f64 {
+                return Err(NoiseError::runtime(
+                    format!(
+                        "rotation({d}) is too large (max dimension {MAX_ROTATION_DIM}) — it builds \
+                         an O(d³) sample graph; use a smaller dimension"
+                    ),
+                    span,
+                ));
+            }
             Ok(Value::Recipe(Recipe::Rotation { d: d as usize }))
         }
         "permutation" => {
@@ -191,6 +210,17 @@ pub fn call(
             if n.fract() != 0.0 || n < 0.0 || !n.is_finite() {
                 return Err(NoiseError::runtime(
                     format!("permutation(n) needs a non-negative integer length, got {n}"),
+                    span,
+                ));
+            }
+            // Drawing a permutation builds `O(n²)` comparison nodes (each element is the rank of its
+            // key), so an unbounded `n` OOMs at build time (finding A6). Cap it cleanly.
+            if n > MAX_PERMUTATION_N as f64 {
+                return Err(NoiseError::runtime(
+                    format!(
+                        "permutation({n}) is too large (max length {MAX_PERMUTATION_N}) — it builds \
+                         an O(n²) sample graph; use a smaller length"
+                    ),
                     span,
                 ));
             }

@@ -14,6 +14,14 @@ use crate::ast::*;
 use crate::error::{NoiseError, Result, Span};
 use crate::lexer::{tokenize, TokKind, Token};
 
+/// Maximum recursive-descent nesting depth. Deeply nested source — `((((…))))`, a long unary
+/// `-`/`~`/`!` chain, a right-leaning `^` tower, or nested `[`/`{`/`if` — recurses the parser one
+/// frame per level; without a ceiling a few thousand characters of input blow the call stack and
+/// **abort the process** (worse than a panic; the wasm playground's stack is far smaller than the
+/// native 8 MiB). Past this limit the parser returns a spanned error instead. Kept well below what
+/// even a small (1–2 MiB) stack can hold, and far above any hand-written expression's nesting.
+const MAX_PARSE_DEPTH: usize = 256;
+
 pub fn parse(src: &str) -> Result<Program> {
     let tokens = tokenize(src)?;
     let newlines = newline_flags(src, &tokens);
@@ -21,6 +29,7 @@ pub fn parse(src: &str) -> Result<Program> {
         tokens,
         newlines,
         pos: 0,
+        depth: 0,
     };
     let stmts = p.parse_stmts(&[TokKind::Eof])?;
     p.expect(TokKind::Eof)?;
@@ -45,6 +54,10 @@ struct Parser {
     /// Per-token "is preceded by a line break" flags; see `newline_flags`.
     newlines: Vec<bool>,
     pos: usize,
+    /// Current recursive-descent nesting depth, guarded by [`MAX_PARSE_DEPTH`]. Incremented on
+    /// entry to each recursive core (`parse_bp`, `parse_if`) and decremented on exit, so it tracks
+    /// live stack depth rather than total nodes.
+    depth: usize,
 }
 
 impl Parser {
@@ -246,8 +259,34 @@ impl Parser {
         ))
     }
 
-    /// Precedence-climbing core for infix operators.
+    /// Increment the nesting depth, erroring past [`MAX_PARSE_DEPTH`]. Every recursive cycle in the
+    /// descent passes through `parse_bp` (and `if … else if …` chains through `parse_if`), so
+    /// guarding those two entry points bounds total stack depth. On error the depth is left
+    /// incremented — harmless, since a parse error aborts the whole parse.
+    fn enter(&mut self, span: Span) -> Result<()> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            return Err(NoiseError::parse(
+                format!(
+                    "expression nests too deeply (over {MAX_PARSE_DEPTH} levels) — deeply nested \
+                     parentheses, unary operators, or `if`/`[`/`{{` blocks; simplify or split it"
+                ),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Precedence-climbing core for infix operators. Depth-guarded (see [`Self::enter`]).
     fn parse_bp(&mut self, min_bp: u8) -> Result<Spanned> {
+        let span = self.span();
+        self.enter(span)?;
+        let r = self.parse_bp_inner(min_bp);
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_bp_inner(&mut self, min_bp: u8) -> Result<Spanned> {
         let mut lhs = self.parse_prefix()?;
         loop {
             // `..` is the lowest-binding infix form (Rust-style ranges sit below every operator,
@@ -640,7 +679,17 @@ impl Parser {
         Ok(Spanned::new(Expr::Block(stmts), span))
     }
 
+    /// Depth-guarded (see [`Self::enter`]) so an `if … else if … else if …` chain — which recurses
+    /// `parse_if → parse_if` without passing back through `parse_bp` between levels — can't overflow.
     fn parse_if(&mut self) -> Result<Spanned> {
+        let span = self.span();
+        self.enter(span)?;
+        let r = self.parse_if_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_if_inner(&mut self) -> Result<Spanned> {
         let kw = self.expect(TokKind::If)?;
         let cond = self.parse_bp(0)?;
         let then_block = self.parse_block()?;
@@ -892,6 +941,7 @@ fn parse_expr_str(src: &str, base_offset: usize) -> Result<Spanned> {
         tokens,
         newlines,
         pos: 0,
+        depth: 0,
     };
     let e = p.parse_expr()?;
     p.expect(TokKind::Eof)?;
@@ -1068,6 +1118,45 @@ mod tests {
                 err.kind
             );
         }
+    }
+
+    #[test]
+    fn deep_nesting_errors_instead_of_overflowing_the_stack() {
+        // A few thousand nested parens used to recurse the parser one frame per level and abort the
+        // process (SIGABRT / stack overflow). The depth guard now turns each of these into a clean
+        // parse error. We run on a generously-sized thread: *unoptimized* (debug) parser frames are
+        // large, so reaching the ~256-level guard needs several MiB — more than the 2 MiB default
+        // test-harness thread. The guard value is production-safe (it survives a 512 KiB release
+        // stack, well within the wasm playground's ~1 MiB). A *regression* (guard removed) either
+        // overflows even this thread (aborting the binary) or parses the balanced input to `Ok`
+        // (failing `unwrap_err`), so the guard is still genuinely exercised.
+        let body = || {
+            let deep_parens = format!("{}1{}", "(".repeat(2000), ")".repeat(2000));
+            assert!(matches!(
+                parse(&deep_parens).unwrap_err().kind,
+                ErrorKind::Parse(_)
+            ));
+            // Deep unary chains (`-`, `~`, `!`) recurse through the same `parse_bp` core.
+            assert!(matches!(
+                parse(&format!("{}1", "-".repeat(4000))).unwrap_err().kind,
+                ErrorKind::Parse(_)
+            ));
+            assert!(matches!(
+                parse(&format!("{}1", "!".repeat(4000))).unwrap_err().kind,
+                ErrorKind::Parse(_)
+            ));
+            // A deep `if … else if …` chain recurses `parse_if`; must return, never overflow.
+            let deep_if = format!("{}{{}}", "if 1 {} else ".repeat(4000));
+            let _ = parse(&deep_if);
+            // A moderate, realistic nesting still parses fine.
+            assert!(parse(&format!("{}1{}", "(".repeat(100), ")".repeat(100))).is_ok());
+        };
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(body)
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

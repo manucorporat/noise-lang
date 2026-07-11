@@ -67,11 +67,30 @@ fn to_json_string(value: &serde_json::Value) -> String {
     })
 }
 
+/// Turn a caught panic payload into a human-readable message for the `doc_error` document. Keeps the
+/// "never throws" contract honest even if some deep code path still `panic!`s / `unreachable!`s.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string());
+    format!("internal error (please report): {detail}")
+}
+
 /// Run a Noise program → one `Document` (PLAN-LITERATE §D5) as JSON. `opts_json` (optional) carries
 /// input overrides. Never throws; a lex/parse/runtime failure comes back as a document with
-/// `result.error` set (and whatever blocks ran before the failure).
+/// `result.error` set (and whatever blocks ran before the failure). A stray Rust panic (an
+/// `unreachable!` we missed) is also caught — via [`std::panic::catch_unwind`] on unwinding targets
+/// — and routed into the same `doc_error` shape rather than surfacing as an opaque JS
+/// `RuntimeError: unreachable` that poisons the instance (finding A9).
 #[wasm_bindgen]
 pub fn run(src: &str, opts_json: Option<String>) -> String {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_impl(src, opts_json)))
+        .unwrap_or_else(|payload| to_json_string(&doc_error(panic_message(payload))))
+}
+
+fn run_impl(src: &str, opts_json: Option<String>) -> String {
     let overrides = match parse_opts(opts_json) {
         Ok(o) => o,
         Err(e) => return to_json_string(&doc_error(e)),
@@ -199,6 +218,21 @@ impl PlotOut {
 /// source containing a single `describe`/`corr` call.
 #[wasm_bindgen]
 pub fn run_with_introspection(src: &str, requests_json: &str, opts_json: Option<String>) -> String {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_with_introspection_impl(src, requests_json, opts_json)
+    }))
+    .unwrap_or_else(|payload| {
+        let payload =
+            serde_json::json!({ "document": doc_error(panic_message(payload)), "bindings": [], "introspections": [] });
+        to_json_string(&payload)
+    })
+}
+
+fn run_with_introspection_impl(
+    src: &str,
+    requests_json: &str,
+    opts_json: Option<String>,
+) -> String {
     let overrides = match parse_opts(opts_json) {
         Ok(o) => o,
         Err(e) => {

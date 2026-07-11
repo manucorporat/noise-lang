@@ -77,7 +77,7 @@ pub fn const_int_exponent(graph: &RvGraph, id: RvId) -> Option<u32> {
 pub fn profitable(graph: &RvGraph, root: RvId, inline_trans: bool) -> bool {
     let mut seen = HashSet::new();
     let (mut fusible, mut libcalls) = (0u32, 0u32);
-    if walk_cost(
+    if !walk_cost(
         graph,
         root,
         &mut seen,
@@ -85,11 +85,24 @@ pub fn profitable(graph: &RvGraph, root: RvId, inline_trans: bool) -> bool {
         &mut libcalls,
         inline_trans,
     ) {
-        fusible > libcalls
-    } else {
-        false // unsupported (Poisson) → interpreter
+        return false; // unsupported (Poisson / Gather) → interpreter
     }
+    // Route very large cones to the interpreter. The code generators (`jit::emit_node`,
+    // `wasm_emit::emit_node`) emit each node **recursively**, so a hundreds-of-thousands-deep graph
+    // (`cumsum(~[200000] …)`) would overflow their emitters and abort (finding A4). The interpreter's
+    // lowering is now iterative (stack-safe at any depth), and JIT-compiling 10^4+ nodes rarely beats
+    // interpreting them, so this only ever trades a little speed for safety. `seen` is the cone's
+    // distinct-node count (walk_cost just filled it).
+    if seen.len() > MAX_CODEGEN_NODES {
+        return false;
+    }
+    fusible > libcalls
 }
+
+/// Cone-node ceiling above which codegen is declined in favor of the interpreter (see
+/// [`profitable`]). The recursive emitters would otherwise risk a stack overflow on a very deep
+/// graph, and a graph this large compiles slowly for little benefit. Far above any ordinary model.
+const MAX_CODEGEN_NODES: usize = 20_000;
 
 /// Accumulate `(fusible, libcalls)` weights over the distinct nodes of `id`'s cone (each `RvId`
 /// counted once, matching CSE). Returns `false` if the cone contains an unsupported node. See
@@ -111,55 +124,55 @@ pub fn walk_cost(
             *libcalls += weight;
         }
     };
-    if !seen.insert(id) {
-        return true; // shared node already counted
-    }
-    match graph.node(id) {
-        RvNode::Src(Source::Poisson { .. }) => false, // Knuth loop stays interpreter-only
-        RvNode::Gather { .. } => false, // data-dependent addressing stays interpreter-only
-        RvNode::Src(Source::Normal { .. }) => {
-            charge(2, fusible, libcalls);
-            true
+    // Iterative worklist (not recursion): a 200k-deep `Add` chain would otherwise overflow the
+    // stack (finding A4). Each distinct `RvId` is charged once (CSE); an unsupported node returns
+    // `false` immediately (partial counts don't matter — `profitable` ignores them when unsupported).
+    let mut stack = vec![id];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue; // shared node already counted
         }
-        RvNode::Src(Source::Exp { .. }) | RvNode::Src(Source::Geometric { .. }) => {
-            charge(1, fusible, libcalls);
-            true
-        }
-        RvNode::Src(_) => {
-            *fusible += 1; // uniform / uniform_int: cheap inline draw on every backend
-            true
-        }
-        RvNode::ConstNum(_) | RvNode::ConstBool(_) => true, // neutral
-        RvNode::Unary(op, a) => {
-            match op {
-                UnOp::Sin | UnOp::Cos | UnOp::Ln => charge(1, fusible, libcalls), // inlined on native
-                UnOp::Atan | UnOp::Round | UnOp::Exp => *libcalls += 1, // still a call everywhere
-                _ => *fusible += 1,
+        match graph.node(id) {
+            RvNode::Src(Source::Poisson { .. }) => return false, // Knuth loop stays interpreter-only
+            RvNode::Gather { .. } => return false, // data-dependent addressing stays interpreter-only
+            RvNode::Src(Source::Normal { .. }) => charge(2, fusible, libcalls),
+            RvNode::Src(Source::Exp { .. }) | RvNode::Src(Source::Geometric { .. }) => {
+                charge(1, fusible, libcalls)
             }
-            walk_cost(graph, *a, seen, fusible, libcalls, inline_trans)
-        }
-        RvNode::Binary(crate::ast::BinOp::Pow, a, b) => {
-            if const_int_exponent(graph, *b).is_some() {
-                *fusible += 1; // repeated multiply, no call
-                walk_cost(graph, *a, seen, fusible, libcalls, inline_trans)
-            } else {
-                *libcalls += 1; // pow call
-                walk_cost(graph, *a, seen, fusible, libcalls, inline_trans)
-                    && walk_cost(graph, *b, seen, fusible, libcalls, inline_trans)
+            RvNode::Src(_) => *fusible += 1, // uniform / uniform_int: cheap inline draw everywhere
+            RvNode::ConstNum(_) | RvNode::ConstBool(_) => {} // neutral
+            RvNode::Unary(op, a) => {
+                match op {
+                    UnOp::Sin | UnOp::Cos | UnOp::Ln => charge(1, fusible, libcalls), // inlined native
+                    UnOp::Atan | UnOp::Round | UnOp::Exp => *libcalls += 1, // still a call everywhere
+                    _ => *fusible += 1,
+                }
+                stack.push(*a);
+            }
+            RvNode::Binary(crate::ast::BinOp::Pow, a, b) => {
+                if const_int_exponent(graph, *b).is_some() {
+                    *fusible += 1; // repeated multiply, no call
+                    stack.push(*a);
+                } else {
+                    *libcalls += 1; // pow call
+                    stack.push(*a);
+                    stack.push(*b);
+                }
+            }
+            RvNode::Binary(_, a, b) => {
+                *fusible += 1;
+                stack.push(*a);
+                stack.push(*b);
+            }
+            RvNode::Select { cond, a, b } => {
+                *fusible += 1;
+                stack.push(*cond);
+                stack.push(*a);
+                stack.push(*b);
             }
         }
-        RvNode::Binary(_, a, b) => {
-            *fusible += 1;
-            walk_cost(graph, *a, seen, fusible, libcalls, inline_trans)
-                && walk_cost(graph, *b, seen, fusible, libcalls, inline_trans)
-        }
-        RvNode::Select { cond, a, b } => {
-            *fusible += 1;
-            walk_cost(graph, *cond, seen, fusible, libcalls, inline_trans)
-                && walk_cost(graph, *a, seen, fusible, libcalls, inline_trans)
-                && walk_cost(graph, *b, seen, fusible, libcalls, inline_trans)
-        }
     }
+    true
 }
 
 /// Pick the RNG stream count for a graph. Multi-stream pays off only when the kernel is bound by the
@@ -186,32 +199,46 @@ pub fn choose_streams(graph: &RvGraph, root: RvId) -> usize {
 /// ufunc (`sin`/`cos`/`atan`/`round`) and no non-integer `pow`. (`Poisson` returns `false` here too,
 /// but the backend selector rejects it earlier via [`profitable`].)
 fn latency_bound(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>) -> bool {
-    if !seen.insert(id) {
-        return true; // shared node already checked
+    // Iterative worklist (not recursion) so a deep chain can't overflow the stack (finding A4).
+    // Returns `false` on the first node that breaks the latency-bound predicate.
+    let mut stack = vec![id];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue; // shared node already checked
+        }
+        match graph.node(id) {
+            RvNode::Src(Source::Uniform(_) | Source::UniformInt { .. }) => {}
+            RvNode::Src(_) => return false, // normal / exp / geometric / poisson: not latency-bound
+            RvNode::Gather { .. } => return false, // interpreter-only (gated out before this)
+            RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+            RvNode::Unary(op, a) => {
+                if matches!(
+                    op,
+                    UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Round | UnOp::Exp | UnOp::Ln
+                ) {
+                    return false;
+                }
+                stack.push(*a);
+            }
+            RvNode::Binary(crate::ast::BinOp::Pow, a, b) => {
+                if const_int_exponent(graph, *b).is_none() {
+                    return false;
+                }
+                stack.push(*a);
+                stack.push(*b);
+            }
+            RvNode::Binary(_, a, b) => {
+                stack.push(*a);
+                stack.push(*b);
+            }
+            RvNode::Select { cond, a, b } => {
+                stack.push(*cond);
+                stack.push(*a);
+                stack.push(*b);
+            }
+        }
     }
-    match graph.node(id) {
-        RvNode::Src(Source::Uniform(_) | Source::UniformInt { .. }) => true,
-        RvNode::Src(_) => false, // normal / exp / geometric / poisson: not latency-bound
-        RvNode::Gather { .. } => false, // interpreter-only (gated out before this is consulted)
-        RvNode::ConstNum(_) | RvNode::ConstBool(_) => true,
-        RvNode::Unary(op, a) => {
-            !matches!(
-                op,
-                UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Round | UnOp::Exp | UnOp::Ln
-            ) && latency_bound(graph, *a, seen)
-        }
-        RvNode::Binary(crate::ast::BinOp::Pow, a, b) => {
-            const_int_exponent(graph, *b).is_some()
-                && latency_bound(graph, *a, seen)
-                && latency_bound(graph, *b, seen)
-        }
-        RvNode::Binary(_, a, b) => latency_bound(graph, *a, seen) && latency_bound(graph, *b, seen),
-        RvNode::Select { cond, a, b } => {
-            latency_bound(graph, *cond, seen)
-                && latency_bound(graph, *a, seen)
-                && latency_bound(graph, *b, seen)
-        }
-    }
+    true
 }
 
 /// Whether every node in the cone of `root` is something a code generator can emit — after "B2"
@@ -246,35 +273,46 @@ pub struct NodeCost {
 
 /// Compute the [`NodeCost`] of `root`'s cone (see [`NodeCost`]).
 pub fn cost(graph: &RvGraph, root: RvId) -> NodeCost {
-    fn go(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>, c: &mut NodeCost) {
+    // Iterative worklist (not recursion) so a deep chain can't overflow the stack (finding A4).
+    let mut seen = HashSet::new();
+    let mut c = NodeCost::default();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
         if !seen.insert(id) {
-            return;
+            continue;
         }
         c.ops += 1;
         match graph.node(id) {
+            // A `Poisson` draw is a Knuth loop of ~`lambda` iterations per lane, not one op — price
+            // it realistically (finding A8) so the op budget (`max_opts`) can see it and clamp the
+            // draw count, rather than under-charging it at a single op. Capped by the sampler's own
+            // `POISSON_KNUTH_MAX` (above which it's the `O(1)` normal approximation).
+            RvNode::Src(Source::Poisson { lambda }) => {
+                c.sources += 1;
+                // `lambda` is finite and > 0 by construction, so `clamp` is safe here.
+                let extra = lambda.clamp(0.0, crate::rng::POISSON_KNUTH_MAX) as u64;
+                c.ops += extra;
+            }
             RvNode::Src(_) => c.sources += 1,
             RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
-            RvNode::Unary(_, a) => go(graph, *a, seen, c),
+            RvNode::Unary(_, a) => stack.push(*a),
             RvNode::Binary(_, a, b) => {
-                go(graph, *a, seen, c);
-                go(graph, *b, seen, c);
+                stack.push(*a);
+                stack.push(*b);
             }
             RvNode::Select { cond, a, b } => {
-                go(graph, *cond, seen, c);
-                go(graph, *a, seen, c);
-                go(graph, *b, seen, c);
+                stack.push(*cond);
+                stack.push(*a);
+                stack.push(*b);
             }
             RvNode::Gather { elems, index } => {
                 for &e in elems.iter() {
-                    go(graph, e, seen, c);
+                    stack.push(e);
                 }
-                go(graph, *index, seen, c);
+                stack.push(*index);
             }
         }
     }
-    let mut seen = HashSet::new();
-    let mut c = NodeCost::default();
-    go(graph, root, &mut seen, &mut c);
     c
 }
 
@@ -282,31 +320,32 @@ pub fn cost(graph: &RvGraph, root: RvId) -> NodeCost {
 /// value slots a stack-machine backend (WASM) must reserve, since it memoizes every node into a
 /// local rather than an SSA value.
 pub fn cone_size(graph: &RvGraph, root: RvId) -> usize {
-    fn go(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>) {
+    // Iterative worklist (not recursion) so a deep chain can't overflow the stack (finding A4).
+    let mut seen = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
         if !seen.insert(id) {
-            return;
+            continue;
         }
         match graph.node(id) {
             RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
-            RvNode::Unary(_, a) => go(graph, *a, seen),
+            RvNode::Unary(_, a) => stack.push(*a),
             RvNode::Binary(_, a, b) => {
-                go(graph, *a, seen);
-                go(graph, *b, seen);
+                stack.push(*a);
+                stack.push(*b);
             }
             RvNode::Select { cond, a, b } => {
-                go(graph, *cond, seen);
-                go(graph, *a, seen);
-                go(graph, *b, seen);
+                stack.push(*cond);
+                stack.push(*a);
+                stack.push(*b);
             }
             RvNode::Gather { elems, index } => {
                 for &e in elems.iter() {
-                    go(graph, e, seen);
+                    stack.push(e);
                 }
-                go(graph, *index, seen);
+                stack.push(*index);
             }
         }
     }
-    let mut seen = HashSet::new();
-    go(graph, root, &mut seen);
     seen.len()
 }
