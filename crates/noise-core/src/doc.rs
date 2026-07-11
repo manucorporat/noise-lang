@@ -94,6 +94,28 @@ pub struct DocValue {
 pub struct DocError {
     pub message: String,
     pub span: Span,
+    /// 1-based line and column of the span's start (finding D1). The byte `span` is kept for
+    /// back-compat; `line`/`col` are what a host renders for a human-usable `file:line:col`.
+    pub line: usize,
+    pub col: usize,
+    /// A stable machine-readable error code (finding D2), e.g. `"undefined_name"`. Lets hosts branch
+    /// without substring-matching `message`.
+    pub code: String,
+}
+
+impl DocError {
+    /// Build a `DocError` from a spanned engine error and the source it came from, computing the
+    /// 1-based line/col and carrying the structured error code.
+    fn from_error(error: &NoiseError, src: &str) -> DocError {
+        let (line, col) = error.span.line_col(src);
+        DocError {
+            message: error.to_string(),
+            span: error.span,
+            line,
+            col,
+            code: error.code().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -114,18 +136,21 @@ pub enum Seg {
 
 impl Document {
     /// A best-effort document for a lex/parse failure before evaluation: meta (if it parsed), no
-    /// blocks or comments, and the spanned error.
-    pub fn error_only(meta: Option<Frontmatter>, error: NoiseError, stats: RunStats) -> Document {
+    /// blocks or comments, and the spanned error. `src` is the program source, used to resolve the
+    /// error's byte span to a 1-based line/col (finding D1).
+    pub fn error_only(
+        meta: Option<Frontmatter>,
+        error: NoiseError,
+        stats: RunStats,
+        src: &str,
+    ) -> Document {
         Document {
             meta,
             blocks: Vec::new(),
             comments: Vec::new(),
             result: DocResult {
                 value: None,
-                error: Some(DocError {
-                    message: error.to_string(),
-                    span: error.span,
-                }),
+                error: Some(DocError::from_error(&error, src)),
                 stats,
                 truncated: None,
                 inputs: Vec::new(),
@@ -418,10 +443,7 @@ pub fn assemble(
             text: v.to_string(),
         }),
     };
-    let doc_error = error.map(|e| DocError {
-        message: e.to_string(),
-        span: e.span,
-    });
+    let doc_error = error.map(|e| DocError::from_error(&e, src));
     let truncated = truncated.map(|(dropped, span)| Truncated {
         dropped,
         first_dropped_stmt_span: span,
@@ -546,10 +568,15 @@ impl DocResult {
             .value
             .as_ref()
             .map(|v| serde_json::json!({ "kind": v.kind, "text": v.text }));
-        let error = self
-            .error
-            .as_ref()
-            .map(|e| serde_json::json!({ "message": e.message, "span": span_json(e.span) }));
+        let error = self.error.as_ref().map(|e| {
+            serde_json::json!({
+                "message": e.message,
+                "span": span_json(e.span),
+                "line": e.line,
+                "col": e.col,
+                "code": e.code,
+            })
+        });
         let truncated = self.truncated.as_ref().map(|t| {
             serde_json::json!({
                 "dropped": t.dropped,
@@ -765,6 +792,35 @@ mod tests {
         );
         let e = d.result.error.expect("a runtime error");
         assert_eq!(e.span.start, src.find("undefined_thing").unwrap());
+    }
+
+    #[test]
+    fn error_carries_line_col_and_code_in_the_document_and_json() {
+        // A mid-file undefined name: the DocError exposes 1-based line/col (finding D1) and the
+        // structured code (finding D2), and both reach the JSON wire format.
+        let src = "a = 1\ny = foo + 1";
+        let d = doc(src);
+        let e = d.result.error.as_ref().expect("a runtime error");
+        assert_eq!((e.line, e.col), (2, 5), "points at `foo` on line 2, col 5");
+        assert_eq!(e.code, "undefined_name");
+        let at = src.find("foo").unwrap();
+        assert_eq!(e.span.start, at, "byte span retained for back-compat");
+
+        let json = d.to_json();
+        let err = &json["result"]["error"];
+        assert_eq!(err["line"], 2);
+        assert_eq!(err["col"], 5);
+        assert_eq!(err["code"], "undefined_name");
+        assert_eq!(err["span"]["start"], at);
+    }
+
+    #[test]
+    fn lex_error_line_col_reflects_frontmatter_and_position() {
+        // A malformed token on line 3 reports line 3 (the byte→line map counts the newlines).
+        let d = doc("a = 1\nb = 2\nc = ?");
+        let e = d.result.error.expect("a parse/lex error");
+        assert_eq!(e.line, 3);
+        assert_eq!(e.code, "unexpected_char");
     }
 
     #[test]

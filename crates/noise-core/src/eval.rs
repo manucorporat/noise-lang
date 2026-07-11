@@ -369,11 +369,11 @@ impl Engine {
         // Frontmatter first — a malformed fence still yields a shaped document (no meta, spanned error).
         let fm = match crate::frontmatter::parse(src) {
             Ok(fm) => fm.map(|(fm, _)| fm),
-            Err(e) => return Document::error_only(None, e, self.stats()),
+            Err(e) => return Document::error_only(None, e, self.stats(), src),
         };
         let program = match parse(src) {
             Ok(p) => p,
-            Err(e) => return Document::error_only(fm, e, self.stats()),
+            Err(e) => return Document::error_only(fm, e, self.stats(), src),
         };
 
         // Pure segmentation + comment attachment (no evaluation).
@@ -381,7 +381,7 @@ impl Engine {
         let comments = match crate::doc::comment_layer(src, &program.stmts) {
             Ok(c) => c,
             // A trivia re-lex can only fail the same way `parse` already succeeded, but stay total.
-            Err(e) => return Document::error_only(fm, e, self.stats()),
+            Err(e) => return Document::error_only(fm, e, self.stats(), src),
         };
 
         // Evaluate, catching the first runtime error (the document still carries all prior blocks).
@@ -652,10 +652,7 @@ impl Engine {
                         span,
                     ));
                 }
-                Err(NoiseError::runtime(
-                    format!("undefined variable '{name}'"),
-                    span,
-                ))
+                Err(NoiseError::undefined_name(name, span))
             }
         }
     }
@@ -1203,7 +1200,7 @@ impl Engine {
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(_, v)| *v);
-        let value = spec.resolve(over)?;
+        let value = spec.resolve(over, span)?;
         self.emit(Output::Input {
             spec: spec.clone(),
             value,
@@ -1640,7 +1637,7 @@ impl Engine {
         let result_kind = match op {
             UnOp::Neg => {
                 if kind != RvKind::Num {
-                    return Err(NoiseError::runtime(
+                    return Err(NoiseError::type_mismatch(
                         format!("cannot apply Neg to {}", kind.type_name()),
                         span,
                     ));
@@ -1649,7 +1646,7 @@ impl Engine {
             }
             UnOp::Not => {
                 if kind != RvKind::Bool {
-                    return Err(NoiseError::runtime(
+                    return Err(NoiseError::type_mismatch(
                         format!("cannot apply Not to {}", kind.type_name()),
                         span,
                     ));
@@ -1667,7 +1664,7 @@ impl Engine {
             | UnOp::Exp
             | UnOp::Ln => {
                 if kind != RvKind::Num {
-                    return Err(NoiseError::runtime(
+                    return Err(NoiseError::type_mismatch(
                         format!("cannot apply {} to {}", unop_name(op), kind.type_name()),
                         span,
                     ));
@@ -1690,7 +1687,7 @@ impl Engine {
         let result_kind = match op {
             Add | Sub | Mul | Div | Mod | Pow => {
                 if lk != RvKind::Num || rk != RvKind::Num {
-                    return Err(NoiseError::runtime(
+                    return Err(NoiseError::type_mismatch(
                         format!("arithmetic on {} and {}", lk.type_name(), rk.type_name()),
                         span,
                     ));
@@ -1699,7 +1696,7 @@ impl Engine {
             }
             Lt | Gt | Le | Ge => {
                 if lk != RvKind::Num || rk != RvKind::Num {
-                    return Err(NoiseError::runtime(
+                    return Err(NoiseError::type_mismatch(
                         format!("cannot compare {} and {}", lk.type_name(), rk.type_name()),
                         span,
                     ));
@@ -1708,7 +1705,7 @@ impl Engine {
             }
             Eq | Ne => {
                 if lk != rk {
-                    return Err(NoiseError::runtime(
+                    return Err(NoiseError::type_mismatch(
                         format!("cannot compare {} and {}", lk.type_name(), rk.type_name()),
                         span,
                     ));
@@ -1717,7 +1714,7 @@ impl Engine {
             }
             And | Or => {
                 if lk != RvKind::Bool || rk != RvKind::Bool {
-                    return Err(NoiseError::runtime(
+                    return Err(NoiseError::type_mismatch(
                         format!(
                             "logical operator needs two bool events, got {} and {}",
                             lk.type_name(),
@@ -4928,14 +4925,14 @@ fn math_const_complex(name: &str) -> bool {
 #[inline]
 fn forbid_undrawn(v: &Value, span: Span) -> Result<()> {
     match v {
-        Value::Recipe(r) => Err(NoiseError::runtime(
+        Value::Recipe(r) => Err(NoiseError::not_drawn(
             format!(
                 "`{r}` is an undrawn distribution, not a value — draw it first with `~` \
                  (e.g. `X ~ {r}`) and use `X`"
             ),
             span,
         )),
-        Value::Noise(spec) => Err(NoiseError::runtime(
+        Value::Noise(spec) => Err(NoiseError::not_drawn(
             format!(
                 "`{spec}` is an undrawn distribution, not a value — draw it first with `~` \
                  (e.g. `static ~ signal::{spec}`), or pin a length with `~[n]`"

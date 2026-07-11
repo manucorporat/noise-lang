@@ -136,11 +136,39 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
                     break;
                 }
             }
+            // Scientific-notation exponent: `1e6`, `1.5e-3`, `2E10` (finding D9). Only consume the
+            // `e`/`E` when a valid exponent (optional sign + at least one digit) actually follows —
+            // otherwise leave it for identifier lexing so `math::e` and names like `e2e` are
+            // unaffected, and a bare `1e` stays `Number(1)` then `Ident("e")`.
+            if i < n && (bytes[i] == b'e' || bytes[i] == b'E') {
+                let mut j = i + 1;
+                if j < n && (bytes[j] == b'+' || bytes[j] == b'-') {
+                    j += 1;
+                }
+                if j < n && bytes[j].is_ascii_digit() {
+                    j += 1;
+                    while j < n && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    i = j;
+                }
+            }
             let text = &src[start..i];
             let value: f64 = text.parse().map_err(|_| NoiseError {
                 kind: ErrorKind::Parse(format!("invalid number {text:?}")),
                 span: Span::new(start, i),
             })?;
+            // A finite decimal that overflows `f64` parses as `Ok(inf)` — a 300-digit literal or a
+            // `1e400`. Silently becoming infinity is a footgun (finding D9): diagnose it instead.
+            if !value.is_finite() {
+                return Err(NoiseError {
+                    kind: ErrorKind::Parse(format!(
+                        "number literal {text:?} is too large — it overflows to infinity (the \
+                         largest finite f64 is about 1.8e308)"
+                    )),
+                    span: Span::new(start, i),
+                });
+            }
             out.push(Token {
                 kind: TokKind::Number(value),
                 span: Span::new(start, i),
@@ -326,10 +354,16 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
             (',', _) => (TokKind::Comma, 1),
             (';', _) => (TokKind::Semi, 1),
             _ => {
+                // `c` was decoded via `bytes[i] as char`, which mangles any non-ASCII byte (a
+                // leading UTF-8 byte like `π`'s `0xCF` becomes `Ï`) and would emit a 1-byte span
+                // that is **not a char boundary** — a host slicing `&src[span]` for a caret then
+                // panics (finding D4). Decode the real char from the source and span its full
+                // width so the reported character is correct and the span is boundary-valid.
+                let real = src[start..].chars().next().unwrap_or(c);
                 return Err(NoiseError {
-                    kind: ErrorKind::UnexpectedChar(c),
-                    span: Span::new(start, start + 1),
-                })
+                    kind: ErrorKind::UnexpectedChar(real),
+                    span: Span::new(start, start + real.len_utf8()),
+                });
             }
         };
         i += len;
@@ -491,6 +525,58 @@ mod tests {
         let err = tokenize("1 ? 2").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedChar('?')));
         assert_eq!(err.span, Span::new(2, 3));
+    }
+
+    #[test]
+    fn non_ascii_char_reports_the_real_char_and_a_boundary_span() {
+        // `π` is two UTF-8 bytes (0xCF 0x80). Pre-fix this reported `'Ï'` with a 1-byte span at a
+        // non-char-boundary (finding D4). It must now report the actual char and a span covering
+        // the whole char — and, crucially, `&src[span]` must not panic (a caret host slices it).
+        let src = "π = 3";
+        let err = tokenize(src).unwrap_err();
+        assert!(
+            matches!(err.kind, ErrorKind::UnexpectedChar('π')),
+            "got {:?}",
+            err.kind
+        );
+        assert_eq!(err.span, Span::new(0, 2), "span covers both bytes of π");
+        // The span is a valid char boundary — slicing for a caret does not panic.
+        assert_eq!(&src[err.span.start..err.span.end], "π");
+        // And it round-trips through the line/col mapping used by the caret renderer (col 1).
+        assert_eq!(err.span.line_col(src), (1, 1));
+    }
+
+    #[test]
+    fn scientific_notation_lexes() {
+        use TokKind::*;
+        assert_eq!(kinds("1e6"), vec![Number(1_000_000.0), Eof]);
+        assert_eq!(kinds("1.5e-3"), vec![Number(0.0015), Eof]);
+        assert_eq!(kinds("2E10"), vec![Number(2e10), Eof]);
+        assert_eq!(kinds("6.022e23"), vec![Number(6.022e23), Eof]);
+        // a bare `e` with no exponent digits is not consumed into the number
+        assert_eq!(kinds("1e"), vec![Number(1.0), Ident("e".into()), Eof]);
+        // `1e+` (sign but no digit) also leaves `e` alone
+        assert_eq!(
+            kinds("1e+"),
+            vec![Number(1.0), Ident("e".into()), Plus, Eof]
+        );
+    }
+
+    #[test]
+    fn overflowing_number_literal_is_diagnosed_not_infinity() {
+        // Both a huge exponent and a 300-digit integer overflow f64 to inf; must be an error, not a
+        // silent `Number(inf)` (finding D9).
+        let err = tokenize("1e400").unwrap_err();
+        assert!(
+            matches!(err.kind, ErrorKind::Parse(_)),
+            "got {:?}",
+            err.kind
+        );
+        let huge = "9".repeat(400);
+        assert!(matches!(
+            tokenize(&huge).unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
     }
 
     #[test]

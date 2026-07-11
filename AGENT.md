@@ -118,7 +118,7 @@ GOAL.md LANG.md README.md
 ### noise-core modules
 | File | Role |
 |------|------|
-| `error.rs` | `Span`, `NoiseError` (`ErrorKind`: UnexpectedChar/UnterminatedString/Parse/Runtime), `Result`. Every failure is typed + spanned. **No panics in the pipeline.** |
+| `error.rs` | `Span` (+ `Span::line_col(src)` → 1-based line/col, char-counted), `NoiseError` (`ErrorKind`: UnexpectedChar/UnterminatedString/Parse/UndefinedName/TypeMismatch/NotDrawn/ArityMismatch/Runtime, each with a stable `code()`), `Result`. Every failure is typed + spanned. **No panics in the pipeline.** |
 | `lexer.rs` | Hand-written lexer → `Vec<Token>` ending in `Eof`. Token set is a superset of what Phase 0 evaluates (comparisons, `^`, `!`, `if/else`, strings all tokenize). |
 | `ast.rs` | `Expr` (Number/**Bool**/Str/Ident/Unary/Binary/Bind/**FnDef**/Call/Block/If/**Array**/**Index**/**For**/**Use**), `BinOp`, `UnOp`, `BindKind` (Assign=`=`, Sample=`~`), `Spanned`, `Program`, **`split_path`** (splits `mod::name`; qualified names ride inside `Ident`/`Call` name strings). |
 | `parser.rs` | Pratt / precedence-climbing parser; `infix_op` precedence table. Disambiguates `f(x)=…`/`f()~…` function defs from calls via `matching_paren_after`. In-module `mod tests`. |

@@ -750,7 +750,7 @@ fn wave(name: &str, args: &[Value], span: Span) -> Result<Value> {
 /// Pure: it only rearranges the existing element `Value`s (no graph nodes built).
 fn transpose(name: &str, args: &[Value], span: Span) -> Result<Value> {
     if args.len() != 1 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 1 argument, got {}", args.len()),
             span,
         ));
@@ -796,7 +796,7 @@ fn count_arg(name: &str, args: &[Value], span: Span) -> Result<usize> {
 /// `Len(xs)` — the number of elements (a build-time constant).
 fn len(name: &str, args: &[Value], span: Span) -> Result<Value> {
     if args.len() != 1 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 1 argument, got {}", args.len()),
             span,
         ));
@@ -809,7 +809,7 @@ fn len(name: &str, args: &[Value], span: Span) -> Result<Value> {
 fn as_array<'a>(name: &str, v: &'a Value, span: Span) -> Result<&'a Rc<Vec<Value>>> {
     match v {
         Value::Array(xs) => Ok(xs),
-        other => Err(NoiseError::runtime(
+        other => Err(NoiseError::type_mismatch(
             format!("{name} expects an array, got {}", other.type_name()),
             span,
         )),
@@ -818,7 +818,7 @@ fn as_array<'a>(name: &str, v: &'a Value, span: Span) -> Result<&'a Rc<Vec<Value
 
 fn one_num(name: &str, args: &[Value], span: Span) -> Result<f64> {
     if args.len() != 1 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 1 argument, got {}", args.len()),
             span,
         ));
@@ -828,7 +828,7 @@ fn one_num(name: &str, args: &[Value], span: Span) -> Result<f64> {
 
 fn two_nums(name: &str, args: &[Value], span: Span) -> Result<[f64; 2]> {
     if args.len() != 2 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 2 arguments, got {}", args.len()),
             span,
         ));
@@ -838,7 +838,7 @@ fn two_nums(name: &str, args: &[Value], span: Span) -> Result<[f64; 2]> {
 
 fn three_nums(name: &str, args: &[Value], span: Span) -> Result<[f64; 3]> {
     if args.len() != 3 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 3 arguments, got {}", args.len()),
             span,
         ));
@@ -888,7 +888,7 @@ fn as_num(v: &Value, span: Span) -> Result<f64> {
     match v {
         Value::Num(n) => Ok(*n),
         Value::Est { val, .. } => Ok(*val),
-        other => Err(NoiseError::runtime(
+        other => Err(NoiseError::type_mismatch(
             format!("expected a number, got {}", other.type_name()),
             span,
         )),
@@ -904,15 +904,15 @@ fn dist_arg(name: &str, v: &Value, graph: &RvGraph, span: Span) -> Result<DistAr
         Value::Num(n) => Ok(DistArg::Const(*n)),
         Value::Est { val, .. } => Ok(DistArg::Const(*val)),
         Value::Dist(id) if graph.kind(*id) == RvKind::Num => Ok(DistArg::Rv(*id)),
-        Value::Dist(id) => Err(NoiseError::runtime(
+        Value::Dist(id) => Err(NoiseError::type_mismatch(
             format!("{name} parameter must be a number or numeric random variable, got {}", graph.kind(*id).type_name()),
             span,
         )),
-        Value::Recipe(_) => Err(NoiseError::runtime(
+        Value::Recipe(_) => Err(NoiseError::not_drawn(
             format!("{name} parameter is an undrawn distribution — draw it with `~` first (e.g. `m ~ unif(0,1); {name}(…, m)`)"),
             span,
         )),
-        other => Err(NoiseError::runtime(
+        other => Err(NoiseError::type_mismatch(
             format!("{name} parameter must be a number or numeric random variable, got {}", other.type_name()),
             span,
         )),
@@ -922,7 +922,7 @@ fn dist_arg(name: &str, v: &Value, graph: &RvGraph, span: Span) -> Result<DistAr
 /// Arity-1 distribution parameter (constant or RV).
 fn one_arg(name: &str, args: &[Value], graph: &RvGraph, span: Span) -> Result<DistArg> {
     if args.len() != 1 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 1 argument, got {}", args.len()),
             span,
         ));
@@ -933,7 +933,7 @@ fn one_arg(name: &str, args: &[Value], graph: &RvGraph, span: Span) -> Result<Di
 /// Arity-2 distribution parameters (each constant or RV).
 fn two_args(name: &str, args: &[Value], graph: &RvGraph, span: Span) -> Result<[DistArg; 2]> {
     if args.len() != 2 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 2 arguments, got {}", args.len()),
             span,
         ));

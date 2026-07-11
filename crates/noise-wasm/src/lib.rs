@@ -53,7 +53,9 @@ fn doc_error(message: String) -> serde_json::Value {
         "comments": [],
         "result": {
             "value": null,
-            "error": { "message": message, "span": { "start": 0, "end": 0 } },
+            // Same error shape core emits (finding D1/D2): span + 1-based line/col + a stable code.
+            // A pre-run failure has no source location, so it points at the start of the file.
+            "error": { "message": message, "span": { "start": 0, "end": 0 }, "line": 1, "col": 1, "code": "runtime_error" },
             "stats": { "forcings": 0, "samples": 0, "ops": 0, "rng_draws": 0 },
             "truncated": null,
             "inputs": [],
@@ -63,7 +65,7 @@ fn doc_error(message: String) -> serde_json::Value {
 
 fn to_json_string(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| {
-        r#"{"meta":{"tags":[],"extra":{}},"blocks":[],"comments":[],"result":{"value":null,"error":{"message":"internal serialization error","span":{"start":0,"end":0}},"stats":{"forcings":0,"samples":0,"ops":0,"rng_draws":0},"truncated":null,"inputs":[]}}"#.into()
+        r#"{"meta":{"tags":[],"extra":{}},"blocks":[],"comments":[],"result":{"value":null,"error":{"message":"internal serialization error","span":{"start":0,"end":0},"line":1,"col":1,"code":"runtime_error"},"stats":{"forcings":0,"samples":0,"ops":0,"rng_draws":0},"truncated":null,"inputs":[]}}"#.into()
     })
 }
 

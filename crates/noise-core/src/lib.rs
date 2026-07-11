@@ -261,8 +261,6 @@ mod tests {
 
     // --- Phase 2: random-variable runtime ---
 
-    use crate::error::ErrorKind;
-
     /// Run a program, expecting the last value to be a `dist`, and return moments.
     fn moments_of(src: &str, n: usize, seed: u64) -> crate::Moments {
         let mut eng = Engine::new();
@@ -409,8 +407,11 @@ mod tests {
         ] {
             let err = run(src).expect_err(&format!("{src:?} should error"));
             assert!(
-                matches!(err.kind, ErrorKind::Runtime(_)),
-                "{src:?} should be a Runtime error, got {:?}",
+                // After the D2 ErrorKind split, these spanned eval-time errors land in the
+                // structured variants (TypeMismatch / NotDrawn / ArityMismatch) as well as the
+                // Runtime catch-all — `is_runtime()` accepts the whole runtime family.
+                err.kind.is_runtime(),
+                "{src:?} should be a spanned runtime-family error, got {:?}",
                 err.kind
             );
             assert_ne!(
@@ -482,8 +483,11 @@ mod tests {
         ] {
             let err = run(src).expect_err(&format!("{src:?} should error"));
             assert!(
-                matches!(err.kind, ErrorKind::Runtime(_)),
-                "{src:?} should be a Runtime error, got {:?}",
+                // After the D2 ErrorKind split, these spanned eval-time errors land in the
+                // structured variants (TypeMismatch / NotDrawn / ArityMismatch) as well as the
+                // Runtime catch-all — `is_runtime()` accepts the whole runtime family.
+                err.kind.is_runtime(),
+                "{src:?} should be a spanned runtime-family error, got {:?}",
                 err.kind
             );
             assert_ne!(
@@ -515,8 +519,11 @@ mod tests {
         ] {
             let err = run(src).expect_err(&format!("{src:?} should error"));
             assert!(
-                matches!(err.kind, ErrorKind::Runtime(_)),
-                "{src:?} should be a Runtime error, got {:?}",
+                // After the D2 ErrorKind split, these spanned eval-time errors land in the
+                // structured variants (TypeMismatch / NotDrawn / ArityMismatch) as well as the
+                // Runtime catch-all — `is_runtime()` accepts the whole runtime family.
+                err.kind.is_runtime(),
+                "{src:?} should be a spanned runtime-family error, got {:?}",
                 err.kind
             );
             assert_ne!(

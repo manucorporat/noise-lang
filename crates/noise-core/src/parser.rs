@@ -96,7 +96,7 @@ impl Parser {
             Ok(self.bump())
         } else {
             Err(NoiseError::parse(
-                format!("expected {:?}, found {:?}", k, self.peek()),
+                format!("expected {}, found {}", describe(&k), describe(self.peek())),
                 self.span(),
             ))
         }
@@ -130,8 +130,8 @@ impl Parser {
             } else if !terminators.contains(self.peek()) && !self.newline_before() {
                 return Err(NoiseError::parse(
                     format!(
-                        "expected `;`, a line break, or end of block, found {:?}",
-                        self.peek()
+                        "expected `;`, a line break, or end of block, found {}",
+                        describe(self.peek())
                     ),
                     self.span(),
                 ));
@@ -222,7 +222,7 @@ impl Parser {
                     TokKind::Ident(p) => params.push(p),
                     other => {
                         return Err(NoiseError::parse(
-                            format!("expected a parameter name, found {other:?}"),
+                            format!("expected a parameter name, found {}", describe(&other)),
                             t.span,
                         ))
                     }
@@ -240,8 +240,8 @@ impl Parser {
         } else {
             return Err(NoiseError::parse(
                 format!(
-                    "expected `=` or `~` in function definition, found {:?}",
-                    self.peek()
+                    "expected `=` or `~` in function definition, found {}",
+                    describe(self.peek())
                 ),
                 self.span(),
             ));
@@ -445,7 +445,10 @@ impl Parser {
                         }
                         other => {
                             return Err(NoiseError::parse(
-                                format!("expected an identifier after `::`, found {other:?}"),
+                                format!(
+                                    "expected an identifier after `::`, found {}",
+                                    describe(&other)
+                                ),
                                 seg.span,
                             ))
                         }
@@ -471,7 +474,10 @@ impl Parser {
                         Ok(Spanned::new(Expr::Use(module), span))
                     }
                     other => Err(NoiseError::parse(
-                        format!("expected a module name after `use`, found {other:?}"),
+                        format!(
+                            "expected a module name after `use`, found {}",
+                            describe(&other)
+                        ),
                         seg.span,
                     )),
                 }
@@ -491,7 +497,7 @@ impl Parser {
             }
             TokKind::LBracket => self.parse_array(),
             other => Err(NoiseError::parse(
-                format!("unexpected token {:?}", other),
+                format!("unexpected {}", describe(&other)),
                 tok.span,
             )),
         }
@@ -620,12 +626,18 @@ impl Parser {
     /// `for` loop statement wrapped in `[ ]` — a pure 1-to-1 map yielding `Len(iter)` elements.
     fn parse_comprehension(&mut self, start: usize) -> Result<Spanned> {
         self.expect(TokKind::For)?;
-        let var = match self.bump().kind {
+        // Capture the bumped token *before* consuming it, so the error underlines the offending
+        // token itself rather than the one after it (finding D5; mirrors `parse_fn_def`).
+        let var_tok = self.bump();
+        let var = match var_tok.kind {
             TokKind::Ident(name) => name,
             other => {
                 return Err(NoiseError::parse(
-                    format!("expected a loop variable name after `for`, found {other:?}"),
-                    self.span(),
+                    format!(
+                        "expected a loop variable name after `for`, found {}",
+                        describe(&other)
+                    ),
+                    var_tok.span,
                 ))
             }
         };
@@ -648,12 +660,18 @@ impl Parser {
     /// binding) so the `{` of the body isn't swallowed as a block-primary.
     fn parse_for(&mut self) -> Result<Spanned> {
         let kw = self.expect(TokKind::For)?;
-        let var = match self.bump().kind {
+        // Capture the bumped token *before* consuming it so the error underlines the offending token
+        // (e.g. the `5` in `for 5 in xs`), not the one after it (finding D5; mirrors `parse_fn_def`).
+        let var_tok = self.bump();
+        let var = match var_tok.kind {
             TokKind::Ident(name) => name,
             other => {
                 return Err(NoiseError::parse(
-                    format!("expected a loop variable name after `for`, found {other:?}"),
-                    self.span(),
+                    format!(
+                        "expected a loop variable name after `for`, found {}",
+                        describe(&other)
+                    ),
+                    var_tok.span,
                 ))
             }
         };
@@ -753,6 +771,59 @@ fn infix_op(k: &TokKind) -> Option<(BinOp, u8, u8)> {
         TokKind::Caret => (Pow, 14, 13),
         _ => return None,
     })
+}
+
+/// A human-readable name for a token, for `expected …, found …` diagnostics — so a user sees
+/// `expected `=`, found the name `foo`` / `found end of input` instead of the raw `{:?}` debug form
+/// (`Eq` / `Ident("foo")` / `Eof`) that leaked Rust internals (finding D7). Punctuation is quoted;
+/// literals and names get a short description (the name itself is included where it helps).
+fn describe(k: &TokKind) -> String {
+    use TokKind::*;
+    match k {
+        Number(_) => "a number".to_string(),
+        Ident(s) => format!("the name `{s}`"),
+        Str(_) => "a string".to_string(),
+        Template { .. } => "a template".to_string(),
+        True => "`true`".to_string(),
+        False => "`false`".to_string(),
+        Plus => "`+`".to_string(),
+        Minus => "`-`".to_string(),
+        Star => "`*`".to_string(),
+        Slash => "`/`".to_string(),
+        Percent => "`%`".to_string(),
+        Caret => "`^`".to_string(),
+        At => "`@`".to_string(),
+        Eq => "`=`".to_string(),
+        Tilde => "`~`".to_string(),
+        EqEq => "`==`".to_string(),
+        BangEq => "`!=`".to_string(),
+        Lt => "`<`".to_string(),
+        Gt => "`>`".to_string(),
+        Le => "`<=`".to_string(),
+        Ge => "`>=`".to_string(),
+        AmpAmp => "`&&`".to_string(),
+        PipePipe => "`||`".to_string(),
+        Pipe => "`|`".to_string(),
+        Bang => "`!`".to_string(),
+        LParen => "`(`".to_string(),
+        RParen => "`)`".to_string(),
+        LBrace => "`{`".to_string(),
+        RBrace => "`}`".to_string(),
+        LBracket => "`[`".to_string(),
+        RBracket => "`]`".to_string(),
+        ColonColon => "`::`".to_string(),
+        Colon => "`:`".to_string(),
+        DotDot => "`..`".to_string(),
+        Comma => "`,`".to_string(),
+        Semi => "`;`".to_string(),
+        If => "`if`".to_string(),
+        Else => "`else`".to_string(),
+        For => "`for`".to_string(),
+        In => "`in`".to_string(),
+        Continue => "`continue`".to_string(),
+        Use => "`use`".to_string(),
+        Eof => "end of input".to_string(),
+    }
 }
 
 // === Template parsing (PLAN-LITERATE §D3) ========================================================
@@ -932,7 +1003,14 @@ fn trim_trailing_blank_line(s: &str) -> String {
 /// Parse a single expression from `src`, shifting all spans by `base_offset` so diagnostics point at
 /// the original source (used for `${…}` template holes). The whole slice must be one expression.
 fn parse_expr_str(src: &str, base_offset: usize) -> Result<Spanned> {
-    let mut tokens = tokenize(src)?;
+    // A **lexer** error inside the hole carries hole-local offsets and `?` would propagate it
+    // *before* the rebase loop below runs — so rebase its span here too (finding D3). This keeps
+    // LANG.md's promise that "errors inside a hole point at the real source location" for lex errors
+    // (`` `${π}` ``, a stray char, …), not just parse errors.
+    let mut tokens = tokenize(src).map_err(|mut e| {
+        e.span = Span::new(e.span.start + base_offset, e.span.end + base_offset);
+        e
+    })?;
     let newlines = newline_flags(src, &tokens);
     for t in &mut tokens {
         t.span = Span::new(t.span.start + base_offset, t.span.end + base_offset);
@@ -1340,6 +1418,61 @@ mod tests {
             parse("1 2").unwrap_err().kind,
             ErrorKind::Parse(_)
         ));
+    }
+
+    #[test]
+    fn for_loop_bad_var_underlines_the_offender_not_the_next_token() {
+        // `for 5 in xs { }` — the error must point at `5`, not the `in` after it (finding D5).
+        let src = "for 5 in xs { }";
+        let err = parse(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::Parse(_)), "{:?}", err.kind);
+        assert_eq!(
+            &src[err.span.start..err.span.end],
+            "5",
+            "span should underline the `5`"
+        );
+        // Same for a comprehension.
+        let src2 = "[for 9 in xs { x }]";
+        let err2 = parse(src2).unwrap_err();
+        assert_eq!(&src2[err2.span.start..err2.span.end], "9");
+    }
+
+    #[test]
+    fn template_hole_lexer_error_span_points_at_the_real_source() {
+        // A stray character inside a `${…}` hole is a *lexer* error; its span must be rebased to the
+        // outer source, not left hole-local (finding D3). Here `?` sits at a known outer offset.
+        let src = "x = 1\n`val ${ ? }`";
+        let err = parse(src).unwrap_err();
+        let at = src.find('?').unwrap();
+        assert_eq!(
+            err.span,
+            Span::new(at, at + 1),
+            "the `?` error must point at its real offset in the full source"
+        );
+        // A non-ASCII stray inside a hole is also rebased and boundary-safe.
+        let src2 = "`${π}`";
+        let err2 = parse(src2).unwrap_err();
+        let at2 = src2.find('π').unwrap();
+        assert_eq!(err2.span, Span::new(at2, at2 + 'π'.len_utf8()));
+        assert_eq!(&src2[err2.span.start..err2.span.end], "π");
+    }
+
+    #[test]
+    fn unexpected_token_messages_read_in_human_terms() {
+        // No `{:?}` Rust-debug leakage: operators are quoted, names/EOF get words (finding D7).
+        let e = parse("f(x = 3").unwrap_err(); // `=` where a `,`/`)` is expected inside a call arg
+        let msg = e.to_string();
+        assert!(
+            !msg.contains("Ident("),
+            "should not print Rust debug: {msg}"
+        );
+        assert!(!msg.contains("Eof"), "should say 'end of input': {msg}");
+        // `1 2` on one line: "expected `;`, a line break, or end of block, found a number".
+        let e2 = parse("1 2").unwrap_err();
+        assert!(e2.to_string().contains("a number"), "{e2}");
+        // an unexpected primary token reads as words, not `RParen`.
+        let e3 = parse(")").unwrap_err();
+        assert!(e3.to_string().contains("`)`"), "{e3}");
     }
 
     #[test]

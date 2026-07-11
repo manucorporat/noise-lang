@@ -122,8 +122,12 @@ symbolic (a distribution) until then.
   newline *inside* an unfinished expression is insignificant, so an operator can lead a
   continuation line (`total = a\n  + b`).
 - **Comments** run to end of line, started by `#` or `//`.
-- **Numbers**: `[0-9]+` or `[0-9]*.[0-9]+` / `[0-9]+.[0-9]*`, parsed as `f64`. No exponent
-  syntax yet. A leading `-` is *not* part of the literal — it is the unary minus operator.
+- **Numbers**: `[0-9]+` or `[0-9]*.[0-9]+` / `[0-9]+.[0-9]*`, optionally followed by a
+  **scientific-notation exponent** `[eE][+-]?[0-9]+` (`1e6`, `1.5e-3`, `2E10`), parsed as `f64`.
+  A bare `e`/`E` with no exponent digits is *not* consumed into the number (so `math::e` and names
+  are unaffected). A literal that overflows `f64` (a huge exponent or a several-hundred-digit
+  integer) is a **spanned error**, not a silent `inf`. A leading `-` is *not* part of the literal —
+  it is the unary minus operator.
 - **Identifiers**: `[A-Za-z_][A-Za-z0-9_]*`. Case-sensitive. `if`, `else`, `for`, `in`, `true`,
   and `false` are reserved.
 - **Booleans**: `true` and `false` are literals — point masses on `{true, false}` (i.e.

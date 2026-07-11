@@ -200,7 +200,7 @@ fn run_file(path: &str, inputs: Vec<(String, InputValue)>) {
     // Render the one `Document`: notes as text and plots as their one-line text cards, in emission
     // order, then the final value (or the error). The CLI is just another renderer of the same
     // structure the playground uses (PLAN-LITERATE §D5).
-    let errored = render_document(&doc);
+    let errored = render_document(&doc, Some((&src, path)));
     if errored {
         std::process::exit(1);
     }
@@ -208,7 +208,9 @@ fn run_file(path: &str, inputs: Vec<(String, InputValue)>) {
 
 /// Render a `Document` to the terminal: emitted notes/plots in order, then the final value or the
 /// error. Code blocks are the input file, so they're not re-printed. Returns whether the run errored.
-fn render_document(doc: &noise_core::doc::Document) -> bool {
+/// `source`, when present, is `(src, name)` used to render a `name:line:col` header and a caret line
+/// under the offending span (finding D1).
+fn render_document(doc: &noise_core::doc::Document, source: Option<(&str, &str)>) -> bool {
     use noise_core::doc::Block;
     for block in &doc.blocks {
         match block {
@@ -229,7 +231,10 @@ fn render_document(doc: &noise_core::doc::Document) -> bool {
     }
     match &doc.result.error {
         Some(e) => {
-            eprintln!("{}", e.message);
+            match source {
+                Some((src, name)) => eprintln!("{}", render_error(src, name, e)),
+                None => eprintln!("{}", e.message),
+            }
             true
         }
         None => {
@@ -240,6 +245,74 @@ fn render_document(doc: &noise_core::doc::Document) -> bool {
             false
         }
     }
+}
+
+/// Render a spanned error the rustc way: a `name:line:col: message` header, then a two-line caret
+/// block underlining the offending span in its source line (finding D1). Columns are character-based
+/// (UTF-8-safe, coordinating with D4), and a multi-line span points at its start line. Example:
+///
+/// ```text
+/// prog.noise:2:5: runtime error: undefined variable 'foo'
+///   |
+/// 2 | y = foo + 1
+///   |     ^^^
+/// ```
+fn render_error(src: &str, name: &str, err: &noise_core::doc::DocError) -> String {
+    render_span_error(src, name, &err.message, err.span)
+}
+
+/// Core caret renderer shared by the run path (a `DocError`) and `validate` (a raw `NoiseError`).
+fn render_span_error(
+    src: &str,
+    name: &str,
+    message: &str,
+    span: noise_core::error::Span,
+) -> String {
+    use std::fmt::Write;
+    let (line, col) = span.line_col(src);
+    // The engine's message ends with a redundant " (at start..end)" byte range; the line:col header
+    // and caret replace it, so trim it for the CLI.
+    let msg = strip_span_suffix(message);
+
+    let mut out = String::new();
+    let _ = writeln!(out, "{name}:{line}:{col}: {msg}");
+
+    let src_line = src.lines().nth(line.saturating_sub(1)).unwrap_or("");
+    let gutter = line.to_string();
+    let pad = " ".repeat(gutter.len());
+    let _ = writeln!(out, "{pad} |");
+    let _ = writeln!(out, "{gutter} | {src_line}");
+
+    // Indent the caret to `col`, preserving tabs so it lines up in a tab-using terminal.
+    let indent: String = src_line
+        .chars()
+        .take(col.saturating_sub(1))
+        .map(|c| if c == '\t' { '\t' } else { ' ' })
+        .collect();
+    // Caret width = the span's character count, clamped to what remains on this line (so a
+    // multi-line span just underlines to end of the start line), at least one `^`.
+    let span_chars = src
+        .get(span.start..span.end)
+        .map(|s| s.chars().count())
+        .unwrap_or(0);
+    let line_remaining = src_line
+        .chars()
+        .count()
+        .saturating_sub(col.saturating_sub(1));
+    let carets = "^".repeat(span_chars.min(line_remaining).max(1));
+    let _ = write!(out, "{pad} | {indent}{carets}");
+    out
+}
+
+/// Drop a trailing " (at start..end)" byte-range suffix from an engine error message (the CLI shows
+/// line:col + a caret instead).
+fn strip_span_suffix(msg: &str) -> &str {
+    if msg.ends_with(')') {
+        if let Some(idx) = msg.rfind(" (at ") {
+            return &msg[..idx];
+        }
+    }
+    msg
 }
 
 /// Parse `path` and evaluate it to build the sample-DAG, reporting any errors — but without
@@ -259,7 +332,7 @@ fn validate_file(path: &str) {
     match engine.check(&src) {
         Ok(_) => println!("✓ {path}: valid"),
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{}", render_span_error(&src, path, &e.to_string(), e.span));
             std::process::exit(1);
         }
     }
@@ -290,6 +363,58 @@ fn repl() {
             continue;
         }
         let doc = engine.run_to_document(line);
-        render_document(&doc);
+        render_document(&doc, Some((line, "<repl>")));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noise_core::Engine;
+
+    /// Render the caret for the first error a program produces (the run path a user hits).
+    fn error_caret(src: &str, name: &str) -> String {
+        let doc = Engine::new().run_to_document(src);
+        let e = doc.result.error.expect("expected an error");
+        render_error(src, name, &e)
+    }
+
+    #[test]
+    fn strip_span_suffix_drops_only_the_trailing_byte_range() {
+        assert_eq!(
+            strip_span_suffix("runtime error: undefined variable 'x' (at 4..5)"),
+            "runtime error: undefined variable 'x'"
+        );
+        // no suffix → unchanged
+        assert_eq!(strip_span_suffix("boom"), "boom");
+        // a parenthesized message with no " (at " is untouched
+        assert_eq!(strip_span_suffix("f(x)"), "f(x)");
+    }
+
+    #[test]
+    fn caret_points_under_a_mid_file_error() {
+        // `foo` is undefined; it sits on line 2, column 5 — the caret must land under it.
+        let src = "a = 1\ny = foo + 1\n";
+        let rendered = error_caret(src, "prog.noise");
+        let expected = "\
+prog.noise:2:5: runtime error: undefined variable 'foo'
+  |
+2 | y = foo + 1
+  |     ^^^";
+        assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn caret_is_utf8_safe_and_does_not_panic() {
+        // A stray non-ASCII char (finding D4) must render a caret under the actual glyph without
+        // panicking on a non-char-boundary slice — the whole point of the D4 span fix.
+        let src = "x = 1\nπ = 3\n";
+        let rendered = error_caret(src, "u.noise");
+        let expected = "\
+u.noise:2:1: unexpected character 'π'
+  |
+2 | π = 3
+  | ^";
+        assert_eq!(rendered, expected);
     }
 }
