@@ -1,77 +1,71 @@
-# Shor's algorithm — the quantum factoring method that breaks RSA — run end to end: `shor(N)` takes
-# a number and returns its two factors. `shor(15)` -> [3, 5].
-#
-# The magic is ONE step: finding the PERIOD r of f(x) = a^x mod N. Classically that costs ~N tries;
-# a quantum computer reads it off in one shot by making all the inputs INTERFERE — complex amplitudes
-# that cancel everywhere except at multiples of Q/r. We reproduce that interference EXACTLY with plain
-# complex linear algebra, then the factors fall out of gcd(a^(r/2) +- 1, N).
-#
-# (This is a 2^n SIMULATION: gorgeous for small N, never efficient — "efficient Shor" needs a real
-# quantum computer. What's faithful here is the PHYSICS: the amplitudes and their interference.)
+---
+title: "Shor's period-finding"
+abstract: >
+  RSA's security is a bet that nobody can factor a large number back into its primes fast enough to
+  matter. Shor's algorithm wins that bet by recasting factoring as a hunt for a repeating pattern —
+  the period of a^x mod N — which quantum interference pins down in a single shot. Here that
+  interference is reproduced exactly with complex arithmetic; pick a number and watch its factors
+  fall out.
+tags: [quantum, classic]
+extra:
+  blurb: "How a quantum computer factors numbers — and breaks RSA."
+  category: "Quantum"
+---
 use math;   # i, exp, pi (complex amplitudes), gcd, modpow (modular arithmetic — exact, no overflow)
 use vec;    # outer, normsq, count
+
+# A 2^n simulation: gorgeous for small N, never efficient — what's faithful is the PHYSICS, the
+# amplitudes and their interference. (Efficient Shor needs a real quantum computer.)
 
 # one-hot encode a value v as a length-`width` row: 1 in column v, 0 elsewhere.
 onehot(v, width) = [for w in 0..width { if v == w { 1 } else { 0 } }];
 
+# the counting register: the smallest power of two >= N.
+reg_size(N) = { Q = 1; for i in 0..16 { if Q < N { Q = Q * 2 } }; Q };
+
 # --- the QUANTUM subroutine: the period r of a^x mod N, read off the interference comb ---
-# Build the Q-input superposition, inverse-QFT it, and the readout probabilities form a comb of
-# exactly r equally-spaced spikes — so the period is just the number of spikes. (A real machine
-# measures the comb and uses continued fractions; in simulation we hold the whole comb and count.)
+# Build the superposition over all inputs, inverse-QFT it, and the readout probabilities form a comb
+# of exactly r equally-spaced spikes — so the period is just the number of spikes.
 period(a, N, Q) = {
   ks  = 0..Q;
-  fx  = [for x in 0..Q { math::modpow(a, x, N) }];           # the oracle on every input
+  fx  = [for x in 0..Q { math::modpow(a, x, N) }];          # the oracle on every input
   Psi = [for x in 0..Q { onehot(fx[x], N) }] / Q ^ 0.5;     # entangle + normalize the state
-  # QFT[y][x] = e^{-2pi i x y / Q}/sqrt(Q): one complex `exp` over the index outer product. The matmul
-  # `@` adds the phasors over C — same-residue amplitudes REINFORCE, the rest CANCEL (the reason ℂ is here).
+  # Same-residue amplitudes REINFORCE, the rest CANCEL — the one place ℂ is doing real work.
   QFT = math::exp(math::i * (-2 * math::pi / Q) * vec::outer(ks, ks)) / Q ^ 0.5;
   vec::count([for p in QFT @ Psi { vec::normsq(p) > 0.0001 }])   # r = number of spikes in the comb
 };
 
 # --- Shor's algorithm: factor N ---
-# Pick the smallest base a (if it already shares a factor with N, gcd hands us one for free); else use
-# the quantum period r and read the factors out of gcd(a^(r/2) +- 1, N). Returns the two factors.
+# Try a handful of bases (a real machine picks them at random). If a already shares a factor, gcd
+# hands one over; otherwise use the quantum period r and read factors from gcd(a^(r/2) +- 1, N).
 shor(N) = {
-  Q = 1; for i in 0..16 { if Q < N { Q = Q * 2 } };   # counting register size: smallest 2^t >= N
-  p = 1; q = N;                                        # p == 1 means "no nontrivial factor found yet"
-  for a in 2..N {
-    if p == 1 {
-      if math::gcd(a, N) > 1 {
-        p = math::gcd(a, N); q = N / p                 # lucky: a already shares a factor with N
-      } else {
-        r = period(a, N, Q);                           # the quantum step
-        if r % 2 == 0 {                                # need an even period
-          s = math::modpow(a, r / 2, N);               # a^(r/2) mod N
-          g = math::gcd(s - 1, N);
-          if g > 1 { if g < N { p = g; q = N / g } }   # a nontrivial factor — done
-        }
+  Q = reg_size(N);
+  p = 1; q = N;                                       # p == 1 means "no nontrivial factor yet"
+  for a in 2..14 { if a < N { if p == 1 {
+    if math::gcd(a, N) > 1 { p = math::gcd(a, N); q = N / p }
+    else {
+      r = period(a, N, Q);                            # the quantum step
+      if r % 2 == 0 {                                 # need an even period
+        s = math::modpow(a, r / 2, N);
+        g = math::gcd(s - 1, N);
+        if g > 1 { if g < N { p = g; q = N / g } }    # a nontrivial factor — done
       }
     }
-  };
+  } } };
   [p, q]
 };
 
-# 7^x mod 15 has period 4, and 15's counting register has Q = 16 inputs — so the comb is 4 clean
-# spikes and the quantum subroutine genuinely carries the factorization.
-# The interference comb for 7^x mod 15: 4 evenly-spaced spikes, one per period step.
-combQFT = math::exp(math::i * (-2 * math::pi / 16) * vec::outer(0..16, 0..16)) / 16 ^ 0.5;
-combPsi = [for x in 0..16 { onehot(math::modpow(7, x, 15), 15) }] / 16 ^ 0.5;
-comb    = [for p in combQFT @ combPsi { vec::normsq(p) }];
+# Composites split into their two primes; a prime returns itself — nothing to break, which is
+# exactly the wall RSA hides behind.
+n_to_factor = input::int(min: 15, max: 35, step: 2, default: 15);
+
+# The interference comb for 2^x mod N: Q readout slots where the amplitudes pile into evenly-spaced
+# spikes, one per period step. Counting the spikes IS the quantum measurement the whole trick rests on.
+Q    = reg_size(n_to_factor);
+Psi  = [for x in 0..Q { onehot(math::modpow(2, x, n_to_factor), n_to_factor) }] / Q ^ 0.5;
+comb = [for y in (math::exp(math::i * (-2 * math::pi / Q) * vec::outer(0..Q, 0..Q)) / Q ^ 0.5) @ Psi { vec::normsq(y) }];
 plot::line(comb);
 
 ```md
-The period of 7^x mod 15 (the quantum step) is **${period(7, 15, 16)}**.
+Shor factors **${n_to_factor}** into **${shor(n_to_factor)}**.
 ```
-# 4
-```md
-shor(15) = **${shor(15)}**
-```
-# [3, 5] — factored
-```md
-shor(21) = **${shor(21)}**
-```
-# [3, 7]
-```md
-shor(35) = **${shor(35)}**
-```
-# [5, 7]

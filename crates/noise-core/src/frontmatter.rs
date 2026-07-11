@@ -1,12 +1,13 @@
-//! Frontmatter + knobs (PLAN-LITERATE §D1/D2). A `.noise` file may open with a `---`-fenced
-//! metadata block that turns it into a self-describing document: a `title`, and a set of typed
-//! **knobs** — host-tunable globals injected as point masses before statement 1.
+//! Frontmatter (PLAN-LITERATE §D1). A `.noise` file may open with a `---`-fenced metadata block that
+//! turns it into a self-describing document: a `title`, an `abstract`, `tags`, and an `extra:` map
+//! for host-specific metadata. Frontmatter is **purely descriptive** — host-tunable parameters are
+//! no longer declared here; they are inline `input::…` calls in the program body (PLAN-INPUTS).
 //!
 //! The fence is recognized **only at byte 0** (line 1 is exactly `---`); anywhere else `---` keeps
 //! meaning three unary minuses, so no existing program breaks. The lexer treats the whole block as
 //! trivia — it skips it *in place* (see [`block_end`]) so every downstream span keeps pointing into
 //! the original source. This module is the separate entry a host calls to read the metadata without
-//! running the program (`meta(src)` in wasm, `--knob`/`validate` in the CLI).
+//! running the program (`meta(src)` in wasm, `validate` in the CLI).
 //!
 //! Content is parsed by `serde_yaml` (wasm-clean, pure-Rust `unsafe-libyaml`). YAML is a superset of
 //! JSON, so the same pass handles both the YAML `key: value` form and the `{ … }` JSON escape hatch;
@@ -15,11 +16,11 @@
 
 use crate::error::{NoiseError, Result, Span};
 
-/// A parsed frontmatter block. `knobs` keeps **source order** (a `Vec`, not a map) because that is
-/// the order a host renders the knob UI in; `extra` is the file's explicit `extra:` map — raw JSON
-/// the engine passes through untouched, so host-specific metadata (blurb, category, seed…) can grow
-/// without an engine release. Only `title`/`abstract`/`tags`/`knobs`/`extra` are recognized at the
-/// top level; any other key is a validation error (§D2).
+/// A parsed frontmatter block. `extra` is the file's explicit `extra:` map — raw JSON the engine
+/// passes through untouched, so host-specific metadata (blurb, category, seed…) can grow without an
+/// engine release. Only `title`/`abstract`/`tags`/`extra` are recognized at the top level; any
+/// other key is a validation error (§D2). Tunable parameters are inline `input::…` calls, not
+/// frontmatter (PLAN-INPUTS).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frontmatter {
     pub title: Option<String>,
@@ -28,129 +29,11 @@ pub struct Frontmatter {
     pub abstract_: Option<String>,
     /// Free-form keyword tags (a paper's "Keywords:" line).
     pub tags: Vec<String>,
-    pub knobs: Vec<Knob>,
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// A typed, host-tunable global. Bound as a plain deterministic point mass before statement 1
-/// (exactly like `dice_sides = 6`); a program may shadow the name with a normal rebind.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Knob {
-    pub name: String,
-    pub kind: KnobKind,
-    pub min: Option<f64>,
-    pub max: Option<f64>,
-    pub step: Option<f64>,
-    pub default: KnobValue,
-    /// Optional human label for the UI (falls back to the name).
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KnobKind {
-    Int,
-    Float,
-    Bool,
-    // Choice deferred to LT5 (int/float/bool cover every current example).
-}
-
-impl KnobKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            KnobKind::Int => "int",
-            KnobKind::Float => "float",
-            KnobKind::Bool => "bool",
-        }
-    }
-}
-
-/// A concrete knob value — a number (int/float) or a bool. Injected into the engine as a
-/// [`crate::Value`] point mass.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum KnobValue {
-    Num(f64),
-    Bool(bool),
-}
-
-impl KnobValue {
-    fn to_json(self) -> serde_json::Value {
-        match self {
-            KnobValue::Num(n) => serde_json::json!(n),
-            KnobValue::Bool(b) => serde_json::json!(b),
-        }
-    }
-}
-
-impl Knob {
-    fn to_json(&self) -> serde_json::Value {
-        let mut m = serde_json::Map::new();
-        m.insert("name".into(), serde_json::json!(self.name));
-        m.insert("type".into(), serde_json::json!(self.kind.as_str()));
-        if let Some(v) = self.min {
-            m.insert("min".into(), serde_json::json!(v));
-        }
-        if let Some(v) = self.max {
-            m.insert("max".into(), serde_json::json!(v));
-        }
-        if let Some(v) = self.step {
-            m.insert("step".into(), serde_json::json!(v));
-        }
-        m.insert("default".into(), self.default.to_json());
-        if let Some(l) = &self.label {
-            m.insert("label".into(), serde_json::json!(l));
-        }
-        serde_json::Value::Object(m)
-    }
-
-    /// Validate + resolve a host override (or, with `override_ = None`, the default) into the
-    /// concrete value to bind. Type-checks against the knob kind, then clamps to `[min, max]` and
-    /// snaps to `step` — one implementation, so every host clamps identically (PLAN-LITERATE §D2).
-    pub fn resolve(&self, override_: Option<KnobValue>) -> Result<KnobValue> {
-        let raw = override_.unwrap_or(self.default);
-        match (self.kind, raw) {
-            (KnobKind::Bool, KnobValue::Bool(b)) => Ok(KnobValue::Bool(b)),
-            (KnobKind::Bool, KnobValue::Num(_)) => Err(NoiseError::runtime(
-                format!("knob `{}` is a bool; got a number", self.name),
-                Span::new(0, 0),
-            )),
-            (KnobKind::Int | KnobKind::Float, KnobValue::Bool(_)) => Err(NoiseError::runtime(
-                format!("knob `{}` is a number; got a bool", self.name),
-                Span::new(0, 0),
-            )),
-            (kind, KnobValue::Num(n)) => {
-                let mut v = n;
-                if let Some(min) = self.min {
-                    v = v.max(min);
-                }
-                if let Some(max) = self.max {
-                    v = v.min(max);
-                }
-                if let Some(step) = self.step {
-                    if step > 0.0 {
-                        let base = self.min.unwrap_or(0.0);
-                        v = base + ((v - base) / step).round() * step;
-                    }
-                }
-                if kind == KnobKind::Int {
-                    v = v.round();
-                }
-                // A snap can push us a hair past a bound; re-clamp.
-                if let Some(min) = self.min {
-                    v = v.max(min);
-                }
-                if let Some(max) = self.max {
-                    v = v.min(max);
-                }
-                Ok(KnobValue::Num(v))
-            }
-        }
-    }
-}
-
 impl Frontmatter {
-    /// Serialize to the JSON shape hosts consume (`meta(src)`): `{ title?, knobs: [...], extra }`.
-    /// `knobs` is an **array** (not an object) so source order survives without a `preserve_order`
-    /// serde feature; a host renders sliders top-to-bottom in that order.
+    /// Serialize to the JSON shape hosts consume (`meta(src)`): `{ title?, abstract?, tags, extra }`.
     pub fn to_json(&self) -> serde_json::Value {
         let mut m = serde_json::Map::new();
         if let Some(t) = &self.title {
@@ -162,10 +45,6 @@ impl Frontmatter {
         m.insert(
             "tags".into(),
             serde_json::Value::Array(self.tags.iter().map(|t| serde_json::json!(t)).collect()),
-        );
-        m.insert(
-            "knobs".into(),
-            serde_json::Value::Array(self.knobs.iter().map(Knob::to_json).collect()),
         );
         m.insert("extra".into(), serde_json::Value::Object(self.extra.clone()));
         serde_json::Value::Object(m)
@@ -245,7 +124,7 @@ fn starts_with_fence_line(bytes: &[u8]) -> bool {
 
 /// Parse the frontmatter of `src`. `Ok(None)` when the file has no fence; `Ok(Some((fm, span)))`
 /// with the block's content span otherwise. A malformed fence or invalid metadata is a spanned
-/// `Err`. Pure — hosts call this to build knob UIs without running the program.
+/// `Err`. Pure — hosts call this to read the paper header without running the program.
 pub fn parse(src: &str) -> Result<Option<(Frontmatter, Span)>> {
     let (content, span, _end) = match fence_content(src)? {
         Some(x) => x,
@@ -306,15 +185,14 @@ fn from_value(value: serde_json::Value, span: Span) -> Result<Frontmatter> {
         Some(_) => return Err(NoiseError::parse("frontmatter `tags` must be a list of strings", span)),
     };
 
-    let mut knobs = Vec::new();
-    if let Some(knobs_val) = obj.remove("knobs") {
-        let knob_map = match knobs_val {
-            serde_json::Value::Object(m) => m,
-            _ => return Err(NoiseError::parse("frontmatter `knobs` must be a map", span)),
-        };
-        for (name, spec) in knob_map {
-            knobs.push(parse_knob(&name, spec, span)?);
-        }
+    // `knobs:` is retired (PLAN-INPUTS): tunable parameters are now inline `input::…` calls in the
+    // program body. Catch the old key with a migration hint instead of the generic unknown-key error.
+    if obj.contains_key("knobs") {
+        return Err(NoiseError::parse(
+            "frontmatter `knobs:` is no longer supported — declare tunable parameters inline with \
+             `input::real(min: …, max: …, default: …)` in the program body (PLAN-INPUTS)",
+            span,
+        ));
     }
 
     // `extra` is the explicit escape hatch for host-specific metadata (blurb, category, seed…): a
@@ -330,137 +208,13 @@ fn from_value(value: serde_json::Value, span: Span) -> Result<Frontmatter> {
         return Err(NoiseError::parse(
             format!(
                 "frontmatter has unknown key `{key}` \
-                 (allowed: title, abstract, tags, knobs, extra — put custom metadata under `extra:`)"
+                 (allowed: title, abstract, tags, extra — put custom metadata under `extra:`)"
             ),
             span,
         ));
     }
 
-    Ok(Frontmatter { title, abstract_, tags, knobs, extra })
-}
-
-fn parse_knob(name: &str, spec: serde_json::Value, span: Span) -> Result<Knob> {
-    if !is_ident(name) {
-        return Err(NoiseError::parse(
-            format!("knob name `{name}` is not a valid identifier"),
-            span,
-        ));
-    }
-    let map = match spec {
-        serde_json::Value::Object(m) => m,
-        _ => {
-            return Err(NoiseError::parse(
-                format!("knob `{name}` must be a map with a `type`"),
-                span,
-            ))
-        }
-    };
-    // Reject unknown fields — this also catches the common YAML footgun `min:1` (no space), which
-    // parses as a *key* `min:1` with a null value, silently dropping the bound. Require `min: 1`.
-    const ALLOWED: &[&str] = &["type", "min", "max", "step", "default", "options", "label"];
-    for key in map.keys() {
-        if !ALLOWED.contains(&key.as_str()) {
-            return Err(NoiseError::parse(
-                format!("knob `{name}` has unknown field `{key}` (need a space after each `:`, e.g. `min: 1`)"),
-                span,
-            ));
-        }
-    }
-    let type_str = map
-        .get("type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| NoiseError::parse(format!("knob `{name}` needs a `type`"), span))?;
-    let kind = match type_str {
-        "int" => KnobKind::Int,
-        "float" => KnobKind::Float,
-        "bool" => KnobKind::Bool,
-        other => {
-            return Err(NoiseError::parse(
-                format!("knob `{name}` has unknown type `{other}` (want int/float/bool)"),
-                span,
-            ))
-        }
-    };
-    let num = |key: &str| -> Result<Option<f64>> {
-        match map.get(key) {
-            None => Ok(None),
-            Some(v) => v.as_f64().map(Some).ok_or_else(|| {
-                NoiseError::parse(format!("knob `{name}` field `{key}` must be a number"), span)
-            }),
-        }
-    };
-    let (min, max, step) = (num("min")?, num("max")?, num("step")?);
-    if let (Some(lo), Some(hi)) = (min, max) {
-        if lo > hi {
-            return Err(NoiseError::parse(
-                format!("knob `{name}` has min {lo} > max {hi}"),
-                span,
-            ));
-        }
-    }
-    let default = match map.get("default") {
-        Some(serde_json::Value::Bool(b)) => KnobValue::Bool(*b),
-        Some(v) => match v.as_f64() {
-            Some(n) => KnobValue::Num(n),
-            None => {
-                return Err(NoiseError::parse(
-                    format!("knob `{name}` default must be a number or bool"),
-                    span,
-                ))
-            }
-        },
-        None => {
-            return Err(NoiseError::parse(
-                format!("knob `{name}` needs a `default`"),
-                span,
-            ))
-        }
-    };
-    // Type coherence + default within range.
-    match (kind, default) {
-        (KnobKind::Bool, KnobValue::Num(_)) => {
-            return Err(NoiseError::parse(
-                format!("knob `{name}` is a bool but its default is a number"),
-                span,
-            ))
-        }
-        (KnobKind::Int | KnobKind::Float, KnobValue::Bool(_)) => {
-            return Err(NoiseError::parse(
-                format!("knob `{name}` is numeric but its default is a bool"),
-                span,
-            ))
-        }
-        (_, KnobValue::Num(n)) => {
-            if let Some(lo) = min {
-                if n < lo {
-                    return Err(NoiseError::parse(
-                        format!("knob `{name}` default {n} is below min {lo}"),
-                        span,
-                    ));
-                }
-            }
-            if let Some(hi) = max {
-                if n > hi {
-                    return Err(NoiseError::parse(
-                        format!("knob `{name}` default {n} is above max {hi}"),
-                        span,
-                    ));
-                }
-            }
-        }
-        _ => {}
-    }
-    let label = map.get("label").and_then(|v| v.as_str()).map(str::to_string);
-    Ok(Knob { name: name.to_string(), kind, min, max, step, default, label })
-}
-
-fn is_ident(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    Ok(Frontmatter { title, abstract_, tags, extra })
 }
 
 #[cfg(test)]
@@ -486,62 +240,31 @@ mod tests {
     }
 
     #[test]
-    fn yaml_title_and_knobs() {
-        let src = "---\ntitle: \"Roll a die\"\nknobs:\n  dice_sides: { type: int, min: 1, max: 100, step: 1, default: 6 }\n  target: { type: int, min: 1, max: 100, default: 4 }\n---\nDice ~ unif_int(1, dice_sides)\n";
+    fn yaml_title_and_tags() {
+        let src = "---\ntitle: \"Roll a die\"\ntags: [games, basics]\n---\nDice ~ unif_int(1, 6)\n";
         let (fm, _span) = parse(src).unwrap().unwrap();
         assert_eq!(fm.title.as_deref(), Some("Roll a die"));
-        assert_eq!(fm.knobs.len(), 2);
-        assert_eq!(fm.knobs[0].name, "dice_sides");
-        assert_eq!(fm.knobs[0].kind, KnobKind::Int);
-        assert_eq!(fm.knobs[0].min, Some(1.0));
-        assert_eq!(fm.knobs[0].default, KnobValue::Num(6.0));
-        assert_eq!(fm.knobs[1].name, "target");
+        assert_eq!(fm.tags, vec!["games".to_string(), "basics".to_string()]);
         // block_end points past the closing fence.
         let end = block_end(src).unwrap().unwrap();
         assert_eq!(&src[end..end + 4], "Dice");
     }
 
     #[test]
-    fn knobs_keep_source_order_not_alphabetical() {
-        // `zebra` before `apple` in source must stay that way (preserve_order), so knob UIs render
-        // top-to-bottom as written.
-        let src = "---\nknobs:\n  zebra: { type: int, default: 1 }\n  apple: { type: int, default: 2 }\n---\n";
-        let (fm, _) = parse(src).unwrap().unwrap();
-        assert_eq!(fm.knobs[0].name, "zebra");
-        assert_eq!(fm.knobs[1].name, "apple");
-    }
-
-    #[test]
     fn json_frontmatter() {
-        let src = "---\n{ \"title\": \"J\", \"knobs\": { \"n\": { \"type\": \"float\", \"default\": 0.5 } } }\n---\nx = 1\n";
+        let src = "---\n{ \"title\": \"J\", \"tags\": [\"a\"] }\n---\nx = 1\n";
         let (fm, _) = parse(src).unwrap().unwrap();
         assert_eq!(fm.title.as_deref(), Some("J"));
-        assert_eq!(fm.knobs[0].kind, KnobKind::Float);
+        assert_eq!(fm.tags, vec!["a".to_string()]);
     }
 
     #[test]
-    fn default_out_of_range_errors() {
-        let src = "---\nknobs:\n  n: { type: int, min: 1, max: 6, default: 20 }\n---\n";
-        let err = parse(src).unwrap_err();
-        assert!(format!("{err}").contains("above max"));
-    }
-
-    #[test]
-    fn resolve_clamps_and_snaps() {
-        let k = Knob {
-            name: "n".into(),
-            kind: KnobKind::Int,
-            min: Some(1.0),
-            max: Some(10.0),
-            step: Some(2.0),
-            default: KnobValue::Num(1.0),
-            label: None,
-        };
-        // 20 clamps hard to the max (10); 6.4 snaps to the step grid (1,3,5,7,9) → 7.
-        assert_eq!(k.resolve(Some(KnobValue::Num(20.0))).unwrap(), KnobValue::Num(10.0));
-        assert_eq!(k.resolve(Some(KnobValue::Num(6.4))).unwrap(), KnobValue::Num(7.0));
-        // wrong type
-        assert!(k.resolve(Some(KnobValue::Bool(true))).is_err());
+    fn knobs_key_is_retired_with_a_migration_hint() {
+        // The old `knobs:` block is gone (PLAN-INPUTS); the error points at `input::`.
+        let err = parse("---\nknobs:\n  n: { type: int, default: 6 }\n---\n").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("no longer supported"), "got: {msg}");
+        assert!(msg.contains("input::real"), "should point at input::; got: {msg}");
     }
 
     #[test]
@@ -589,12 +312,13 @@ mod tests {
 
     #[test]
     fn to_json_shape() {
-        let src = "---\ntitle: T\nknobs:\n  a: { type: int, min: 1, max: 6, default: 3 }\n---\n";
+        let src = "---\ntitle: T\ntags: [a, b]\nextra:\n  blurb: hi\n---\n";
         let (fm, _) = parse(src).unwrap().unwrap();
         let j = fm.to_json();
         assert_eq!(j["title"], serde_json::json!("T"));
-        assert_eq!(j["knobs"][0]["name"], serde_json::json!("a"));
-        assert_eq!(j["knobs"][0]["type"], serde_json::json!("int"));
-        assert_eq!(j["knobs"][0]["default"], serde_json::json!(3.0));
+        assert_eq!(j["tags"], serde_json::json!(["a", "b"]));
+        assert_eq!(j["extra"]["blurb"], serde_json::json!("hi"));
+        // `knobs` is no longer part of the meta payload.
+        assert!(j.get("knobs").is_none());
     }
 }

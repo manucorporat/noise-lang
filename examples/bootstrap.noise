@@ -1,30 +1,41 @@
-# The bootstrap: don't assume a bell curve — reshuffle history itself.
-# You have 24 days of real returns for a stock, including one ugly -4% crash day. What might
-# tomorrow look like? The textbook move is to fit a normal distribution to the data — but real
-# markets have fat tails, and fitting would average the crash away into a polite sigma. The
-# bootstrap skips the fitting entirely: make tomorrow a random draw FROM the history. If history
-# crashed 1 day in 24, your model crashes 1 day in 24 — no Gaussian assumed anywhere.
+---
+title: "The bootstrap"
+abstract: >
+  You have 24 days of a stock's real returns, including one ugly crash day. What might
+  tomorrow look like? The textbook move is to fit a bell curve — but that quietly averages
+  the crash away into a polite standard deviation. The bootstrap refuses to fit anything:
+  it makes tomorrow a random draw from the history itself, so the fat tails stay fat and
+  the crash keeps exactly its 1-in-24 share of the future.
+tags: [statistics, resampling]
+extra:
+  blurb: "Model tomorrow by resampling real history, not a bell curve."
+  category: "Statistics"
+  analytic: "P(-4% day) = 1/24 ≈ 4.2%"
+---
 use rand; use vec;
 
-# Step 1 — paste the data: 24 daily returns (0.012 = +1.2%). Days 11-14 are a panic streak
-# around the -4% crash — real markets have bad WEEKS, not just isolated bad days.
+# The data: 24 daily returns (0.012 = +1.2%). Days 11-14 are a panic streak around the -4%
+# crash — real markets have bad WEEKS, not just isolated bad days, and that will matter below.
 rets = [ 0.004, -0.006,  0.012,  0.003, -0.002,
          0.007,  0.001, -0.005,  0.008,  0.002,
         -0.012, -0.040, -0.018, -0.009,  0.011,
          0.006, -0.003,  0.009, -0.001,  0.013,
         -0.007,  0.002,  0.010, -0.004 ];
 
-# Step 2 — tomorrow is a uniformly-random day from history (the iid bootstrap).
+# Tomorrow is a uniformly-random day pulled straight from history (the iid bootstrap).
 tomorrow ~ rand::empirical(rets);
 ```md
 E(tomorrow) = **${E(tomorrow)}** (sample mean: ${mean(rets)})
 1-day VaR (Q05) = **${Q(tomorrow, 0.05)}** — straight from history, crash included
-P(another -4% day) = **${P(tomorrow <= -0.04)}** (= 1/24, its share of history)
+P(another -4% day) = **${P(tomorrow <= -0.04) * 100}%** (= 1/24, its share of history)
 ```
 
-# Step 3 — a WEEK is not 5 independent days: losses cluster. Shuffling days one at a time
-# (iid) destroys those streaks, so it understates weekly risk. The BLOCK bootstrap instead
-# glues random contiguous 5-day runs of history together, keeping each streak intact.
+# No bell curve anywhere: a spike at each of the 24 real days, the lone -4% crash out in the tail.
+plot::histogram(tomorrow);
+
+# A WEEK is not 5 independent days: losses cluster. Shuffling days one at a time (iid) destroys
+# those streaks, so it understates weekly risk. The BLOCK bootstrap instead glues random
+# contiguous 5-day runs of history together, keeping each streak intact.
 iid_days ~[5] rand::empirical(rets);
 iid_week = sum(iid_days);
 

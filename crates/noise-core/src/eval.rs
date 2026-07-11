@@ -14,6 +14,7 @@ use crate::ast::*;
 use crate::builtins;
 use crate::dist::{DataId, DistArg, Recipe, RvGraph, RvId, RvKind, RvNode, Source, Uniform};
 use crate::error::{NoiseError, Result, Span};
+use crate::input::{InputKind, InputSpec, InputValue, ResolvedInput};
 use crate::parser::parse;
 use crate::sampler::{self, Moments};
 use crate::signal::{NoiseKind, NoiseSpec, RealizationId, SigExpr, SigUnOp};
@@ -88,6 +89,14 @@ pub struct Engine {
     /// `rand::block_bootstrap`), referenced by [`DataId`] so the recipes stay `Copy`.
     /// Append-only, like the graph.
     datasets: Vec<Rc<Vec<f64>>>,
+    /// Host-supplied **input overrides** (PLAN-INPUTS §5): `name -> value` set before a run via
+    /// [`Engine::set_input_overrides`]. Each feeds `input::` resolution by name (clamped/snapped
+    /// like a knob). An override naming an input the program never declares is a post-run error.
+    input_overrides: Vec<(String, InputValue)>,
+    /// The run's **input manifest**: every `input::` declaration in evaluation order, resolved to a
+    /// value. First evaluation of a name registers here; later mentions reuse it. Drives host
+    /// discovery (`Document.result.inputs`) and dedup / redeclaration checks (PLAN-INPUTS §3).
+    input_manifest: Vec<ResolvedInput>,
 }
 
 /// One item in a program's output stream — the unit `take_output` returns, in source order. `Print`
@@ -103,6 +112,10 @@ pub enum Output {
     Note { text: String, syntax: Option<String> },
     /// A `plot::*` chart — the same summary the introspection core produces.
     Plot(Rc<crate::introspect::Summary>),
+    /// An `input::*` control (PLAN-INPUTS §4): a host-tunable parameter declared inline. Carries the
+    /// spec and its resolved current value so the doc model can render a slider/checkbox right after
+    /// the code that declares it. Emitted once per input (at its first declaration).
+    Input { spec: InputSpec, value: InputValue },
 }
 
 /// One emitted output tagged with the **top-level statement** that produced it (PLAN-LITERATE §D5).
@@ -146,7 +159,24 @@ impl Engine {
             next_realization: 0,
             resolution: builtins::RESOLUTION_DEFAULT,
             datasets: Vec::new(),
+            input_overrides: Vec::new(),
+            input_manifest: Vec::new(),
         }
+    }
+
+    /// Set the host **input overrides** for the next run (PLAN-INPUTS §5): `name -> value`, applied
+    /// to matching `input::` declarations by name. Values are clamped/snapped to each input's spec
+    /// exactly like the default. Overriding a name the program never declares is a post-run error
+    /// (surfaced by [`run_with_inputs`](Engine::run_with_inputs) / embedded in the document).
+    pub fn set_input_overrides(&mut self, overrides: Vec<(String, InputValue)>) {
+        self.input_overrides = overrides;
+    }
+
+    /// The input manifest accumulated by the most recent run (PLAN-INPUTS §3) — every declared
+    /// input, resolved, in declaration order. Hosts read this to render controls and prune stale
+    /// overrides.
+    pub fn input_manifest(&self) -> &[ResolvedInput] {
+        &self.input_manifest
     }
 
     /// Take the program's whole output stream so far (`Print` lines and `plot::*` charts, in source
@@ -166,7 +196,7 @@ impl Engine {
                     s.push_str(line);
                     s.push('\n');
                 }
-                Output::Plot(_) => {}
+                Output::Plot(_) | Output::Input { .. } => {}
             }
         }
         s
@@ -221,33 +251,47 @@ impl Engine {
         out
     }
 
-    /// Parse and evaluate a whole program, returning the value of the last statement
-    /// (or `Unit` for an empty program). Frontmatter knobs (if any) bind at their defaults.
+    /// Parse and evaluate a whole program, returning the value of the last statement (or `Unit` for
+    /// an empty program). Inline `input::` declarations resolve against any host overrides set with
+    /// [`set_input_overrides`](Engine::set_input_overrides); with none, each input uses its default.
     pub fn run(&mut self, src: &str) -> Result<Value> {
-        self.run_with_knobs(src, &[])
-    }
-
-    /// Like [`run`](Engine::run), but with host-supplied **knob overrides** (PLAN-LITERATE §D2).
-    /// Each frontmatter knob binds as a plain deterministic global (a point mass) *before* the first
-    /// statement — its default, or the override when one is supplied, type-checked and clamped/snapped
-    /// here (one implementation, so every host clamps identically). An override naming a knob the
-    /// file doesn't declare is a spanned error. A program may shadow a knob name with a normal rebind.
-    pub fn run_with_knobs(
-        &mut self,
-        src: &str,
-        overrides: &[(String, crate::frontmatter::KnobValue)],
-    ) -> Result<Value> {
         // Fresh run-time counters for this program (the playground reads them after `run`).
         crate::stats::reset();
         self.dropped = 0;
         self.first_dropped_span = None;
-        self.inject_knobs(src, overrides)?;
+        self.input_manifest.clear();
         let program = parse(src)?;
         let mut last = Value::Unit;
         for stmt in &program.stmts {
             last = self.eval_top(stmt)?;
         }
+        self.check_input_overrides()?;
         Ok(last)
+    }
+
+    /// Like [`run`](Engine::run), but with host-supplied **input overrides** (PLAN-INPUTS §5). Sets
+    /// the overrides, runs, and reports an override that names an input the program never declared.
+    pub fn run_with_inputs(
+        &mut self,
+        src: &str,
+        overrides: Vec<(String, InputValue)>,
+    ) -> Result<Value> {
+        self.set_input_overrides(overrides);
+        self.run(src)
+    }
+
+    /// Verify every host input override named a declared input. The manifest is known only *after*
+    /// the run (inputs are discovered dynamically, §3), so this is a post-run check.
+    fn check_input_overrides(&self) -> Result<()> {
+        for (name, _) in &self.input_overrides {
+            if !self.input_manifest.iter().any(|r| &r.spec.name == name) {
+                return Err(NoiseError::runtime(
+                    format!("override for unknown input `{name}` (the program declares no such input)"),
+                    Span::new(0, 0),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Evaluate one **top-level** statement: stamp its span for emission attribution, and handle the
@@ -264,82 +308,25 @@ impl Engine {
         }
     }
 
-    /// Bind each declared knob as a point-mass global. Called before statement 1 by
-    /// [`run_with_knobs`](Engine::run_with_knobs).
-    fn inject_knobs(
-        &mut self,
-        src: &str,
-        overrides: &[(String, crate::frontmatter::KnobValue)],
-    ) -> Result<()> {
-        let fm = crate::frontmatter::parse(src)?.map(|(fm, _span)| fm);
-        self.inject_knobs_fm(fm.as_ref(), overrides)
-    }
-
-    /// Bind knobs from an already-parsed frontmatter (so [`run_to_document`](Engine::run_to_document)
-    /// parses the fence once). `None` = no frontmatter, so any override is an error.
-    fn inject_knobs_fm(
-        &mut self,
-        fm: Option<&crate::frontmatter::Frontmatter>,
-        overrides: &[(String, crate::frontmatter::KnobValue)],
-    ) -> Result<()> {
-        use crate::frontmatter::KnobValue;
-        let fm = match fm {
-            Some(fm) => fm,
-            None => {
-                if let Some((name, _)) = overrides.first() {
-                    return Err(NoiseError::runtime(
-                        format!("override for unknown knob `{name}` (file declares no knobs)"),
-                        Span::new(0, 0),
-                    ));
-                }
-                return Ok(());
-            }
-        };
-        // Every override must name a declared knob.
-        for (name, _) in overrides {
-            if !fm.knobs.iter().any(|k| &k.name == name) {
-                return Err(NoiseError::runtime(
-                    format!("override for unknown knob `{name}`"),
-                    Span::new(0, 0),
-                ));
-            }
-        }
-        for knob in &fm.knobs {
-            let over = overrides.iter().find(|(n, _)| n == &knob.name).map(|(_, v)| *v);
-            let resolved = knob.resolve(over)?;
-            let value = match resolved {
-                KnobValue::Num(n) => Value::Num(n),
-                KnobValue::Bool(b) => Value::Bool(b),
-            };
-            self.vars.insert(knob.name.clone(), value);
-        }
-        Ok(())
-    }
-
     /// Run a program and assemble the single [`Document`](crate::doc::Document) contract
-    /// (PLAN-LITERATE §D5) — meta + a flat, ordered block array (code / notes / plots) + the comment
-    /// layer + the result. Never returns `Err`: a lex/parse failure yields a best-effort document
-    /// (meta if the frontmatter parsed, empty blocks, spanned error); a runtime failure returns all
-    /// blocks emitted up to the failing statement, with the error spanned. Both hosts (CLI, wasm)
-    /// render *this*, so they can't drift.
-    pub fn run_to_document(
-        &mut self,
-        src: &str,
-        overrides: &[(String, crate::frontmatter::KnobValue)],
-    ) -> crate::doc::Document {
+    /// (PLAN-LITERATE §D5) — meta + a flat, ordered block array (code / notes / plots / inputs) +
+    /// the comment layer + the result. Never returns `Err`: a lex/parse failure yields a best-effort
+    /// document (meta if the frontmatter parsed, empty blocks, spanned error); a runtime failure
+    /// returns all blocks emitted up to the failing statement, with the error spanned. Inline
+    /// `input::` declarations resolve against overrides set with
+    /// [`set_input_overrides`](Engine::set_input_overrides). Both hosts (CLI, wasm) render *this*.
+    pub fn run_to_document(&mut self, src: &str) -> crate::doc::Document {
         use crate::doc::Document;
         crate::stats::reset();
         self.dropped = 0;
         self.first_dropped_span = None;
+        self.input_manifest.clear();
 
         // Frontmatter first — a malformed fence still yields a shaped document (no meta, spanned error).
         let fm = match crate::frontmatter::parse(src) {
             Ok(fm) => fm.map(|(fm, _)| fm),
             Err(e) => return Document::error_only(None, e, self.stats()),
         };
-        if let Err(e) = self.inject_knobs_fm(fm.as_ref(), overrides) {
-            return Document::error_only(fm, e, self.stats());
-        }
         let program = match parse(src) {
             Ok(p) => p,
             Err(e) => return Document::error_only(fm, e, self.stats()),
@@ -365,10 +352,18 @@ impl Engine {
                 }
             }
         }
+        // A stray input override is a post-run error (the manifest exists only now); it never
+        // discards the blocks that ran, and defers to a real runtime error if one occurred first.
+        if error.is_none() {
+            if let Err(e) = self.check_input_overrides() {
+                error = Some(e);
+            }
+        }
         let emissions = self.take_output();
+        let inputs = std::mem::take(&mut self.input_manifest);
         let truncated = self.first_dropped_span.map(|span| (self.dropped, span));
         crate::doc::assemble(
-            src, fm, segs, comments, emissions, last, error, self.stats(), truncated,
+            src, fm, segs, comments, emissions, inputs, last, error, self.stats(), truncated,
         )
     }
 
@@ -406,21 +401,9 @@ impl Engine {
                 forbid_undrawn(&rv, r.span)?;
                 self.binop(*op, lv, rv, node.span)
             }
-            Expr::Bind(kind, name, rhs) => {
-                let v = self.eval(rhs)?;
-                // The core-model split (LANG.md §2): `~` is the *only* thing that draws.
-                //   `~` on a recipe instantiates a FRESH random variable (a sample-DAG node);
-                //        on a point mass / already-drawn value it binds as-is (a Dirac draw is
-                //        just the constant — no new randomness, nothing to instantiate).
-                //   `=` binds the evaluated value verbatim — crucially, a recipe STAYS a recipe,
-                //        so a later `~` on it draws an independent copy.
-                let bound = match kind {
-                    BindKind::Sample => self.draw_if_recipe(v)?,
-                    BindKind::Assign => v,
-                };
-                self.vars.insert(name.clone(), bound.clone());
-                Ok(bound)
-            }
+            // Extracted into a method (like the other arms) to keep `eval`'s stack frame small for
+            // the recursion-depth budget — see `MAX_CALL_DEPTH`.
+            Expr::Bind(kind, name, rhs) => self.eval_bind(*kind, name, rhs),
             Expr::Sample { shape, body } => self.eval_sample(shape, body),
             Expr::MatMul(l, r) => self.eval_matmul(l, r, node.span),
             Expr::FnDef { kind, name, params, body } => {
@@ -471,61 +454,9 @@ impl Engine {
                     )),
                 }
             }
-            Expr::Call(name, args) => {
-                let mut arg_vals = Vec::with_capacity(args.len());
-                for a in args {
-                    arg_vals.push(self.eval(a)?);
-                }
-                let (module, base) = split_path(name);
-                // `plot::*` — the charting surface for examples. Computes a summary (reusing the
-                // introspection core) and *captures* it like `Print`, returning unit.
-                if module == Some("plot") {
-                    return self.plot_call(base, args, &arg_vals, node.span);
-                }
-                // `stats::*` — the same computations, handed back as numbers instead of a chart.
-                if module == Some("stats") {
-                    return self.stats_call(base, &arg_vals, node.span);
-                }
-                // A user function (unqualified) shadows a builtin of the same name.
-                if module.is_none() {
-                    if let Some(f) = self.funcs.get(base).cloned() {
-                        return self.call_user_fn(base, &f, arg_vals, node.span);
-                    }
-                    // A query over a conditioned value — `P(a)` / `E(a)` / `Var(a)` / `Q(a, q)` where
-                    // `a` is `X | C`. Fuse the condition into `select(C, quantity, NaN)` here (needs
-                    // `&mut` graph) and hand the root to the conditional estimators.
-                    if matches!(base, "P" | "E" | "Var" | "Q")
-                        && matches!(arg_vals.first(), Some(Value::Cond { .. }))
-                    {
-                        return self.query_cond(base, &arg_vals, node.span);
-                    }
-                    // Variable introspection — `describe`/`hist`/`samples`/`corr`/`scatter`/`explain`.
-                    // Always-on builtins that build sampling roots (so they need `&mut` graph) and,
-                    // for `explain`, read the variable scope; routed here before module resolution.
-                    if is_introspection(base) {
-                        return self.introspect_call(base, args, &arg_vals, node.span);
-                    }
-                }
-                // Strict module scoping: a `rand`/`math`/`vec` name needs `use` or a `mod::` path.
-                self.resolve_call(module, base, node.span)?;
-                if let Some(result) = self.lib_call(base, &arg_vals, node.span) {
-                    // Library reducers/constructors build graph nodes and/or draw, so they need
-                    // `&mut self` — intercepted here before the pure-builtin fallback (§0).
-                    result
-                } else if base == "Print" {
-                    // `Print` needs `&mut self` to append to the capture buffer, so it can't live
-                    // in the pure `builtins::call`. (A user `Print` would have been resolved above.)
-                    let line = arg_vals
-                        .iter()
-                        .map(|v| v.to_string())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    self.emit(Output::Text(line));
-                    Ok(Value::Unit)
-                } else {
-                    builtins::call(base, &arg_vals, &self.graph, self.max_samples, self.max_opts, node.span, self.check_mode)
-                }
-            }
+            // Extracted into a method (like the other arms) to keep `eval`'s stack frame small for
+            // the recursion-depth budget — see `MAX_CALL_DEPTH`.
+            Expr::Call(name, call_args) => self.eval_call(name, call_args, node.span),
             // Extracted into methods to keep `eval`'s stack frame small (recursion-depth budget).
             Expr::Array(elems) => self.eval_array(elems),
             Expr::Comprehension { body, var, iter } => self.eval_comprehension(body, var, iter),
@@ -860,6 +791,322 @@ impl Engine {
     /// — functions are pure in their arguments and may call other functions, but do not capture
     /// outer variables), evaluate the body, then restore the caller's frame. A `~` function
     /// additionally draws its result, so each call is an independent draw.
+    /// Evaluate a binding `name <bind> rhs`. Split out of [`eval`](Engine::eval) to keep that
+    /// function's frame small (recursion-depth budget). Handles input name inference (§2).
+    fn eval_bind(&mut self, kind: BindKind, name: &str, rhs: &Spanned) -> Result<Value> {
+        // Name inference (PLAN-INPUTS §2): when `input::…` is the *direct* RHS of a bind, the input's
+        // name defaults to the binding's LHS identifier — so `dice_sides = input::real(min: 1, max:
+        // 100)` needs no explicit `name:`. Only a direct RHS qualifies; a nested `input::` elsewhere
+        // still requires its own `name:`.
+        let v = match as_input_call(&rhs.expr) {
+            Some((base, call_args)) => self.input_call(base, call_args, Some(name), rhs.span)?,
+            None => self.eval(rhs)?,
+        };
+        // The core-model split (LANG.md §2): `~` is the *only* thing that draws.
+        //   `~` on a recipe instantiates a FRESH random variable (a sample-DAG node); on a point
+        //        mass / already-drawn value it binds as-is (a Dirac draw is just the constant).
+        //   `=` binds the evaluated value verbatim — a recipe STAYS a recipe, so a later `~` on it
+        //        draws an independent copy.
+        let bound = match kind {
+            BindKind::Sample => self.draw_if_recipe(v)?,
+            BindKind::Assign => v,
+        };
+        self.vars.insert(name.to_string(), bound.clone());
+        Ok(bound)
+    }
+
+    /// Evaluate a call expression `name(args)`. Split out of [`eval`](Engine::eval) to keep that
+    /// function's stack frame small (the recursion-depth budget, `MAX_CALL_DEPTH`). Resolves
+    /// `input::`/`plot::`/`stats::` namespaces, user functions, queries, introspection, and the
+    /// builtin library — after reordering any named arguments into positional order (§2).
+    fn eval_call(&mut self, name: &str, call_args: &CallArgs, span: Span) -> Result<Value> {
+        let (module, base) = split_path(name);
+        // `input::*` — an inline host-tunable parameter (PLAN-INPUTS). It consumes its own named
+        // arguments (the spec), so it is intercepted before the generic named→positional reorder. A
+        // standalone call has no binding LHS to infer a name from (`None`); the `x = input::…` form
+        // routes through `Expr::Bind` with the name inferred.
+        if module == Some("input") {
+            return self.input_call(base, call_args, None, span);
+        }
+        // Named arguments bind to parameters by name (PLAN-INPUTS §2). Reorder them into positional
+        // order here — before evaluating anything — so the rest of dispatch runs on the exact
+        // positional code path. Positional calls skip this entirely.
+        let reordered;
+        let args: &[Spanned] = match call_args {
+            CallArgs::Positional(a) => a,
+            CallArgs::Named(named) => {
+                reordered = self.reorder_named_args(module, base, named, span)?;
+                &reordered
+            }
+        };
+        let mut arg_vals = Vec::with_capacity(args.len());
+        for a in args {
+            arg_vals.push(self.eval(a)?);
+        }
+        // `plot::*` — the charting surface for examples. Computes a summary (reusing the
+        // introspection core) and *captures* it like `Print`, returning unit.
+        if module == Some("plot") {
+            return self.plot_call(base, args, &arg_vals, span);
+        }
+        // `stats::*` — the same computations, handed back as numbers instead of a chart.
+        if module == Some("stats") {
+            return self.stats_call(base, &arg_vals, span);
+        }
+        // A user function (unqualified) shadows a builtin of the same name.
+        if module.is_none() {
+            if let Some(f) = self.funcs.get(base).cloned() {
+                return self.call_user_fn(base, &f, arg_vals, span);
+            }
+            // A query over a conditioned value — `P(a)` / `E(a)` / `Var(a)` / `Q(a, q)` where
+            // `a` is `X | C`. Fuse the condition into `select(C, quantity, NaN)` here (needs
+            // `&mut` graph) and hand the root to the conditional estimators.
+            if matches!(base, "P" | "E" | "Var" | "Q")
+                && matches!(arg_vals.first(), Some(Value::Cond { .. }))
+            {
+                return self.query_cond(base, &arg_vals, span);
+            }
+            // Variable introspection — `describe`/`hist`/`samples`/`corr`/`scatter`/`explain`.
+            // Always-on builtins that build sampling roots (so they need `&mut` graph) and,
+            // for `explain`, read the variable scope; routed here before module resolution.
+            if is_introspection(base) {
+                return self.introspect_call(base, args, &arg_vals, span);
+            }
+        }
+        // Strict module scoping: a `rand`/`math`/`vec` name needs `use` or a `mod::` path.
+        self.resolve_call(module, base, span)?;
+        if let Some(result) = self.lib_call(base, &arg_vals, span) {
+            // Library reducers/constructors build graph nodes and/or draw, so they need
+            // `&mut self` — intercepted here before the pure-builtin fallback (§0).
+            result
+        } else if base == "Print" {
+            // `Print` needs `&mut self` to append to the capture buffer, so it can't live
+            // in the pure `builtins::call`. (A user `Print` would have been resolved above.)
+            let line = arg_vals
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.emit(Output::Text(line));
+            Ok(Value::Unit)
+        } else {
+            builtins::call(base, &arg_vals, &self.graph, self.max_samples, self.max_opts, span, self.check_mode)
+        }
+    }
+
+    /// Reorder a **named** argument list into positional order for the callee (PLAN-INPUTS §2).
+    /// Named arguments are supported for **user functions** only: each parameter must be named
+    /// exactly once, an unknown name is an error, and a missing parameter is an error. The result
+    /// is a fresh `Vec<Spanned>` in parameter order — dispatch then proceeds on the positional path.
+    /// (`input::` intercepts its own named args before reaching here; every other builtin accepts
+    /// positional arguments only.)
+    fn reorder_named_args(
+        &self,
+        module: Option<&str>,
+        base: &str,
+        named: &[(String, Spanned)],
+        span: Span,
+    ) -> Result<Vec<Spanned>> {
+        let params = match (module, self.funcs.get(base)) {
+            (None, Some(f)) => f.params.clone(),
+            _ => {
+                let full = match module {
+                    Some(m) => format!("{m}::{base}"),
+                    None => base.to_string(),
+                };
+                return Err(NoiseError::runtime(
+                    format!(
+                        "`{full}` does not accept named arguments — only user-defined functions and \
+                         `input::` take `name: value` arguments; call it positionally"
+                    ),
+                    span,
+                ));
+            }
+        };
+        let mut slots: Vec<Option<Spanned>> = vec![None; params.len()];
+        for (arg_name, value) in named {
+            let idx = params.iter().position(|p| p == arg_name).ok_or_else(|| {
+                NoiseError::runtime(
+                    format!("`{base}` has no parameter named `{arg_name}`"),
+                    value.span,
+                )
+            })?;
+            // A duplicate name is already rejected by the parser, but guard anyway.
+            if slots[idx].is_some() {
+                return Err(NoiseError::runtime(
+                    format!("parameter `{arg_name}` of `{base}` bound more than once"),
+                    value.span,
+                ));
+            }
+            slots[idx] = Some(value.clone());
+        }
+        let mut ordered = Vec::with_capacity(params.len());
+        for (p, slot) in params.iter().zip(slots) {
+            match slot {
+                Some(v) => ordered.push(v),
+                None => {
+                    return Err(NoiseError::runtime(
+                        format!("missing argument `{p}` in named call to `{base}`"),
+                        span,
+                    ))
+                }
+            }
+        }
+        Ok(ordered)
+    }
+
+    /// Evaluate an `input::{real,int,bool}(…)` call (PLAN-INPUTS §1). Reads the spec from named
+    /// arguments, resolves the current value (host override, else default — clamped/snapped), records
+    /// the input in the run manifest, and emits an inline control. Returns the value as a point mass
+    /// so downstream code reads it like any number. `inferred_name` is the binding LHS when the call
+    /// is the direct RHS of `x = input::…` (name inference, §2); `None` for a standalone call.
+    ///
+    /// First evaluation of a given name registers + emits; a later mention of the same name returns
+    /// the same value without re-emitting. Re-declaring a name with a *different* spec is an error.
+    fn input_call(
+        &mut self,
+        base: &str,
+        call_args: &CallArgs,
+        inferred_name: Option<&str>,
+        span: Span,
+    ) -> Result<Value> {
+        let kind = InputKind::from_base(base).ok_or_else(|| {
+            NoiseError::runtime(
+                format!("unknown input type `input::{base}` (want input::real / input::int / input::bool)"),
+                span,
+            )
+        })?;
+
+        // The spec arrives as named arguments; an empty argument list is allowed (`default` may be
+        // inferred to be required below). A positional argument list is a usage error.
+        let named: &[(String, Spanned)] = match call_args {
+            CallArgs::Named(n) => n,
+            CallArgs::Positional(p) if p.is_empty() => &[],
+            CallArgs::Positional(_) => {
+                return Err(NoiseError::runtime(
+                    format!(
+                        "input::{base} takes named arguments, e.g. \
+                         `input::{base}(min: 1, max: 10, default: 5)`"
+                    ),
+                    span,
+                ))
+            }
+        };
+
+        // Collect the recognized spec fields; an unknown field name is an error.
+        let mut name_field: Option<String> = None;
+        let mut label: Option<String> = None;
+        let mut min: Option<f64> = None;
+        let mut max: Option<f64> = None;
+        let mut step: Option<f64> = None;
+        let mut default: Option<InputValue> = None;
+        for (key, value_expr) in named {
+            match key.as_str() {
+                "name" => name_field = Some(self.eval_input_str(base, "name", value_expr)?),
+                "label" => label = Some(self.eval_input_str(base, "label", value_expr)?),
+                "min" => min = Some(self.eval_input_num(base, "min", value_expr)?),
+                "max" => max = Some(self.eval_input_num(base, "max", value_expr)?),
+                "step" => step = Some(self.eval_input_num(base, "step", value_expr)?),
+                "default" => default = Some(self.eval_input_value(base, value_expr)?),
+                other => {
+                    return Err(NoiseError::runtime(
+                        format!(
+                            "input::{base} has no field `{other}` \
+                             (fields: name, min, max, step, default, label)"
+                        ),
+                        value_expr.span,
+                    ))
+                }
+            }
+        }
+
+        // The name: an explicit `name:` wins; otherwise the binding LHS (name inference). A
+        // standalone `input::…` with neither is an error.
+        let name = match (name_field, inferred_name) {
+            (Some(n), _) => {
+                if !crate::input::is_ident(&n) {
+                    return Err(NoiseError::runtime(
+                        format!("input name `{n}` is not a valid identifier"),
+                        span,
+                    ));
+                }
+                n
+            }
+            (None, Some(n)) => n.to_string(),
+            (None, None) => {
+                return Err(NoiseError::runtime(
+                    format!(
+                        "input::{base} needs a name — bind it (`x = input::{base}(…)`) or pass \
+                         `name: \"x\"`"
+                    ),
+                    span,
+                ))
+            }
+        };
+
+        let default = default.ok_or_else(|| {
+            NoiseError::runtime(format!("input `{name}` needs a `default`"), span)
+        })?;
+
+        let spec = InputSpec { name: name.clone(), kind, min, max, step, default, label };
+        spec.validate(span)?;
+
+        // Dedup by name. A repeat with the same spec reuses the resolved value; a repeat with a
+        // different spec is a redeclaration conflict.
+        if let Some(existing) = self.input_manifest.iter().find(|r| r.spec.name == name) {
+            if existing.spec != spec {
+                return Err(NoiseError::runtime(
+                    format!("input `{name}` redeclared with a different spec"),
+                    span,
+                ));
+            }
+            return Ok(input_value_to_value(existing.value));
+        }
+
+        let over = self
+            .input_overrides
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| *v);
+        let value = spec.resolve(over)?;
+        self.emit(Output::Input { spec: spec.clone(), value });
+        self.input_manifest.push(ResolvedInput { spec, value, stmt_span: self.current_stmt_span });
+        Ok(input_value_to_value(value))
+    }
+
+    /// Evaluate an `input::` spec field expected to be a number (`min`/`max`/`step`).
+    fn eval_input_num(&mut self, base: &str, field: &str, e: &Spanned) -> Result<f64> {
+        match self.eval(e)? {
+            Value::Num(n) => Ok(n),
+            other => Err(NoiseError::runtime(
+                format!("input::{base} field `{field}` must be a number, got {}", other.type_name()),
+                e.span,
+            )),
+        }
+    }
+
+    /// Evaluate an `input::` spec field expected to be a string (`name`/`label`).
+    fn eval_input_str(&mut self, base: &str, field: &str, e: &Spanned) -> Result<String> {
+        match self.eval(e)? {
+            Value::Str(s) => Ok(s),
+            other => Err(NoiseError::runtime(
+                format!("input::{base} field `{field}` must be a string, got {}", other.type_name()),
+                e.span,
+            )),
+        }
+    }
+
+    /// Evaluate an `input::` `default` — a number or a bool (the two input value kinds).
+    fn eval_input_value(&mut self, base: &str, e: &Spanned) -> Result<InputValue> {
+        match self.eval(e)? {
+            Value::Num(n) => Ok(InputValue::Num(n)),
+            Value::Bool(b) => Ok(InputValue::Bool(b)),
+            other => Err(NoiseError::runtime(
+                format!("input::{base} `default` must be a number or bool, got {}", other.type_name()),
+                e.span,
+            )),
+        }
+    }
+
     fn call_user_fn(
         &mut self,
         name: &str,
@@ -3724,6 +3971,26 @@ impl Engine {
 #[inline]
 fn is_dist(v: &Value) -> bool {
     matches!(v, Value::Dist(_))
+}
+
+/// If `expr` is a direct `input::<base>(…)` call, return `(base, args)` — the hook the `Expr::Bind`
+/// arm uses to infer the input's name from the binding LHS (PLAN-INPUTS §2). `None` otherwise.
+fn as_input_call(expr: &Expr) -> Option<(&str, &CallArgs)> {
+    if let Expr::Call(name, args) = expr {
+        let (module, base) = split_path(name);
+        if module == Some("input") {
+            return Some((base, args));
+        }
+    }
+    None
+}
+
+/// Bind an [`InputValue`] as an engine [`Value`] point mass.
+fn input_value_to_value(v: InputValue) -> Value {
+    match v {
+        InputValue::Num(n) => Value::Num(n),
+        InputValue::Bool(b) => Value::Bool(b),
+    }
 }
 
 /// The always-on variable-introspection builtins (see [`crate::introspect`]). Routed before module

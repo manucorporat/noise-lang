@@ -1,9 +1,9 @@
 ---
 title: "Conditional probability"
 abstract: >
-  A conditional probability P(A | B) scopes a query to the worlds where B holds.
-  Here: given a die rolled above 3, how likely was it a 6? The `|` bar gives 1/3
-  directly — exactly P(A and B) / P(B), with no global state.
+  Someone rolls a die, peeks, and tells you only that it beat a 3. Given that hint,
+  how likely is it actually a 6? The answer is 1 in 3 — once you know the roll landed
+  on 4, 5, or 6, those three faces are equally in the running.
 tags: [probability, bayes]
 extra:
   blurb: "P(A | B) as a ratio of probabilities."
@@ -14,7 +14,7 @@ use rand;
 
 D ~ unif_int(1, 6);
 ```md
-The chance a die known to have beaten 3 is actually a 6 is **${P(D == 6 | D > 3)}**.
+The chance a die known to have beaten 3 is actually a 6 is **${P(D == 6 | D > 3) * 100}%**.
 ```
 
 # A conditioned value is first-class: bind it once, then ask several questions of it.

@@ -1,9 +1,10 @@
 ---
 title: "User functions"
 abstract: >
-  f(a,b) = … is a pure function that lifts over random variables (max here).
-  roll() ~ unif_int(1,6) is stochastic: every call draws fresh, so roll() + roll()
-  is genuinely two dice. The = / ~ split applies to functions just like bindings.
+  When you call a function twice, should it hand back the same answer or a fresh one?
+  It depends how you wrote it. A deterministic rule always gives the same output for
+  the same inputs, but a random one draws anew on every call — so rolling the same die
+  function twice is genuinely two independent dice, not one die counted twice.
 tags: [functions, language]
 extra:
   blurb: "Deterministic (=) vs stochastic (~) functions."
@@ -17,9 +18,9 @@ roll() ~ unif_int(1, 6);
 A ~ unif_int(1, 6);
 B ~ unif_int(1, 6);
 ```md
-P(higher of two d6 is a 6) = **${P(max(A, B) == 6)}**
-P(two independent rolls sum to 7) = **${P(roll() + roll() == 7)}**
+P(higher of two d6 is a 6) = **${P(max(A, B) == 6) * 100}%**
+P(two independent rolls sum to 7) = **${P(roll() + roll() == 7) * 100}%**
 ```
 
-# The higher of two dice leans toward big numbers — here's its whole distribution.
+# The max of two dice leans high: a 6 is far likelier than a 1, since either die can supply it.
 plot::histogram(max(A, B))

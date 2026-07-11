@@ -1,5 +1,15 @@
-# Dithering: how a single yes/no comparator can MEASURE an analog value — if you add noise first.
-# This is the trick inside 1-bit (sigma-delta) audio and stochastic ADCs: noise buys resolution.
+---
+title: "Dithering"
+abstract: >
+  A 1-bit sensor can only answer "positive or negative?" — so how could it ever tell that a
+  level is 0.3 and not 0.8? Add a little random noise before you ask, average many yes/no
+  answers, and the exact analog value falls out. Counterintuitively, a pinch of noise buys
+  real resolution — the trick inside 1-bit audio and stochastic ADCs.
+tags: [signals, dsp]
+extra:
+  blurb: "How noise buys resolution for a 1-bit sensor."
+  category: "Signals & DSP"
+---
 use rand;   # unif
 use math;   # sign
 
@@ -15,7 +25,11 @@ no dither: E[sign(v)] = **${E(sign(v))}** (stuck at +1 — says nothing about v 
 # Now add uniform dither in [-1, 1] BEFORE the comparator and average many comparisons. The noise
 # randomizes the threshold crossing so that, for |v| < 1, E[sign(v + u)] = v EXACTLY: the average
 # of the 1-bit answers reconstructs the analog level. One noisy bit, repeated, becomes a ruler.
-u ~ unif(-1, 1);
+# Drag the dither amount: too little (< the level) and the comparator stays stuck; enough to span the
+# range and the average goes perfectly linear. At 1.0 the dither covers [-1, 1] and recovery is exact.
+dither = input::real(min: 0, max: 2, step: 0.1, default: 1);
+
+u ~ unif(-dither, dither);
 ```md
 dithered: E[sign(v + u)] = **${E(sign(v + u))}** (recovers v = ${v})
 ```

@@ -418,18 +418,70 @@ impl Parser {
         }
     }
 
-    fn parse_call_args(&mut self) -> Result<(Vec<Spanned>, usize)> {
+    /// Parse a call's parenthesized argument list into [`CallArgs`]. A call is **either all
+    /// positional or all named — never mixed** (PLAN-INPUTS §2). The two forms are told apart by a
+    /// one-token lookahead: an argument that begins `IDENT :` is a *named* entry, and the moment one
+    /// appears the whole list must be named. A duplicate name, or a positional entry mixed in among
+    /// named ones (or vice-versa), is a spanned error.
+    fn parse_call_args(&mut self) -> Result<(CallArgs, usize)> {
         self.expect(TokKind::LParen)?;
-        let mut args = Vec::new();
-        if *self.peek() != TokKind::RParen {
-            loop {
-                args.push(self.parse_expr()?);
-                if !self.eat(&TokKind::Comma) {
-                    break;
+        // Empty argument list is positional (`f()`).
+        if *self.peek() == TokKind::RParen {
+            let close = self.bump();
+            return Ok((CallArgs::Positional(Vec::new()), close.span.end));
+        }
+
+        let mut positional: Vec<Spanned> = Vec::new();
+        let mut named: Vec<(String, Spanned)> = Vec::new();
+        loop {
+            // A named entry is `IDENT :` — but *not* `IDENT ::` (a module path). Peek two tokens.
+            let is_named = matches!(&self.tokens[self.pos].kind, TokKind::Ident(_))
+                && self.tokens[self.pos + 1].kind == TokKind::Colon;
+            if is_named {
+                let name_tok = self.bump();
+                let name = match name_tok.kind {
+                    TokKind::Ident(s) => s,
+                    _ => unreachable!("guarded by is_named"),
+                };
+                self.expect(TokKind::Colon)?;
+                let value = self.parse_expr()?;
+                if !positional.is_empty() {
+                    return Err(NoiseError::parse(
+                        "cannot mix positional and named arguments in one call — use all positional \
+                         or all named"
+                            .to_string(),
+                        Span::new(name_tok.span.start, value.span.end),
+                    ));
                 }
+                if named.iter().any(|(n, _)| *n == name) {
+                    return Err(NoiseError::parse(
+                        format!("duplicate named argument `{name}`"),
+                        name_tok.span,
+                    ));
+                }
+                named.push((name, value));
+            } else {
+                let value = self.parse_expr()?;
+                if !named.is_empty() {
+                    return Err(NoiseError::parse(
+                        "cannot mix positional and named arguments in one call — use all positional \
+                         or all named"
+                            .to_string(),
+                        value.span,
+                    ));
+                }
+                positional.push(value);
+            }
+            if !self.eat(&TokKind::Comma) {
+                break;
             }
         }
         let close = self.expect(TokKind::RParen)?;
+        let args = if named.is_empty() {
+            CallArgs::Positional(positional)
+        } else {
+            CallArgs::Named(named)
+        };
         Ok((args, close.span.end))
     }
 
@@ -883,6 +935,36 @@ mod tests {
     }
 
     #[test]
+    fn call_args_are_positional_or_named() {
+        // all-positional → Positional
+        match parse_one("f(1, 2)") {
+            Expr::Call(_, CallArgs::Positional(a)) => assert_eq!(a.len(), 2),
+            other => panic!("got {other:?}"),
+        }
+        // empty → Positional
+        assert!(matches!(parse_one("f()"), Expr::Call(_, CallArgs::Positional(a)) if a.is_empty()));
+        // all-named → Named, keeps source order and names
+        match parse_one("f(b: 2, a: 1)") {
+            Expr::Call(_, CallArgs::Named(a)) => {
+                assert_eq!(a.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+            }
+            other => panic!("got {other:?}"),
+        }
+        // a `::` path in argument position is NOT mistaken for a named entry
+        assert!(matches!(parse_one("f(rand::pi)"), Expr::Call(_, CallArgs::Positional(_))));
+    }
+
+    #[test]
+    fn mixed_and_duplicate_named_args_are_errors() {
+        // positional then named
+        assert!(matches!(parse("f(1, b: 2)").unwrap_err().kind, ErrorKind::Parse(_)));
+        // named then positional
+        assert!(matches!(parse("f(a: 1, 2)").unwrap_err().kind, ErrorKind::Parse(_)));
+        // duplicate name
+        assert!(matches!(parse("f(a: 1, a: 2)").unwrap_err().kind, ErrorKind::Parse(_)));
+    }
+
+    #[test]
     fn parse_errors_are_typed_and_dont_panic() {
         for src in ["3 +", "(1 + 2", "f(x = 3", "1 2", "f(1,) = 1", "[1, 2", "for in xs {}"] {
             let err = parse(src).unwrap_err();
@@ -1005,7 +1087,7 @@ mod tests {
         }
         // inside a query call it is a single argument: `P(D == 6 | D > 3)`.
         match parse_one("P(D == 6 | D > 3)") {
-            Expr::Call(n, args) => {
+            Expr::Call(n, CallArgs::Positional(args)) => {
                 assert_eq!(n, "P");
                 assert_eq!(args.len(), 1);
                 assert!(matches!(args[0].expr, Expr::Cond { .. }));

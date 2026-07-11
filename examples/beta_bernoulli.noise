@@ -1,34 +1,43 @@
-# Learning a coin's bias from data — a tiny Bayesian update, end to end.
-# You flip a mystery coin 10 times and see 7 heads. What's its real bias, and what's the
-# next flip? We DON'T assume a fair coin: we put a flat prior on the bias, let the data
-# speak, and read off the posterior. (Beta-Bernoulli; the textbook answers are the checks.)
+---
+title: "Learning a coin's bias"
+abstract: >
+  You flip a mystery coin 10 times and get 7 heads. Is it a fair coin having a lucky run, or
+  is it genuinely biased — and how sure can you be? Rather than assume anything, start from
+  "the bias could be anything at all" and let the 10 flips reshape that belief into a
+  posterior. The data pulls your best guess to about 0.67, notably shy of the raw 7-in-10.
+tags: [bayesian, inference]
+extra:
+  blurb: "A Bayesian update: from a flat prior to a coin's posterior bias."
+  category: "Statistics"
+  analytic: "E[bias | 7/10] = 0.6667"
+---
 use rand; use vec;
 
 bias  ~ unif(0, 1);            # prior: the bias could be anything in [0, 1], equally likely
-flips ~[10] bernoulli(bias);  # 10 flips of THIS coin — a random parameter feeding bernoulli
+flips ~[10] bernoulli(bias);  # a RANDOM parameter feeding bernoulli — 10 flips of THIS coin
 next  ~ bernoulli(bias);      # an 11th flip from the same coin (for the prediction below)
 
-heads = count(flips);         # how many of the 10 came up heads
+heads = count(flips);
 
-# Before any data, the bias averages 1/2 — that's just the prior.
+# Before any data, the bias averages 1/2 — that is just the flat prior showing through.
 ```latex
 E[\text{bias}] = ${E(bias)} \quad (0.5)
 ```
 
-# Now CONDITION on what we saw (7 heads). `| heads == 7` keeps the worlds matching the data;
-# the posterior mean of a flat prior after h of n heads is (h+1)/(n+2) = 8/12 = 0.6667.
+# Conditioning is the whole trick: `| heads == 7` keeps only the worlds that produced our data,
+# and the posterior mean of a flat prior after h of n heads is (h+1)/(n+2) = 8/12 = 0.6667.
 ```latex
 E[\text{bias} \mid 7/10] = ${E(bias | heads == 7)} \quad (0.6667)
 \text{90\% interval} = [\, ${Q(bias | heads == 7, 0.05)},\ ${Q(bias | heads == 7, 0.95)} \,]
 ```
 
-# The posterior PREDICTIVE: how likely is the NEXT flip heads, given the data? Same 8/12.
+# The posterior predictive lands on the same 8/12: your belief about the coin IS your bet on it.
 ```latex
 P(\text{next flip heads} \mid 7/10) = ${P(next | heads == 7)} \quad (0.6667)
 ```
 
-# Before any flips, every bias is equally likely — the prior is flat.
+# Prior vs posterior, side by side: a flat slab of equal possibilities...
 plot::histogram(bias);
 
-# After seeing 7 of 10 heads, the data pulls the bias toward ~0.7 — a clear peak appears.
+# ...collapsing into a clear peak near 0.7 once the 7-of-10 evidence lands.
 plot::histogram(bias | heads == 7)

@@ -14,6 +14,7 @@ use crate::ast::{Expr, Spanned};
 use crate::error::{NoiseError, Result, Span};
 use crate::eval::{Emission, Output};
 use crate::frontmatter::Frontmatter;
+use crate::input::{InputSpec, InputValue, ResolvedInput};
 use crate::stats::RunStats;
 use crate::value::Value;
 
@@ -37,6 +38,9 @@ pub enum Block {
     Code { source: String, span: Span },
     Note { text: String, syntax: Option<String>, stmt_span: Span },
     Plot { title: String, text: String, charts: Vec<serde_json::Value>, stmt_span: Span },
+    /// An inline **input control** (PLAN-INPUTS §4): a host-tunable parameter declared with
+    /// `input::…`, rendered as a slider/checkbox right after the code group that declares it.
+    Input { spec: InputSpec, value: InputValue, stmt_span: Span },
 }
 
 /// One comment in the layer. `self_span` is where the comment text lives in the source; `code_span`
@@ -58,6 +62,10 @@ pub struct DocResult {
     pub stats: RunStats,
     /// Set when the run hit the emission cap: how many blocks were dropped and where it first hit.
     pub truncated: Option<Truncated>,
+    /// The run's **input manifest** (PLAN-INPUTS §3): every `input::` declared, resolved, in
+    /// declaration order. A host reads this to render controls and prune stale overrides. Empty
+    /// when the program declares no inputs.
+    pub inputs: Vec<ResolvedInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +109,7 @@ impl Document {
                 error: Some(DocError { message: error.to_string(), span: error.span }),
                 stats,
                 truncated: None,
+                inputs: Vec::new(),
             },
         }
     }
@@ -305,6 +314,7 @@ pub fn assemble(
     segs: Vec<Seg>,
     comments: Vec<Comment>,
     emissions: Vec<Emission>,
+    inputs: Vec<ResolvedInput>,
     last: Value,
     error: Option<NoiseError>,
     stats: RunStats,
@@ -332,6 +342,11 @@ pub fn assemble(
                 stmt_span: em.stmt_span,
             });
         }
+        Output::Input { spec, value } => blocks.push(Block::Input {
+            spec: spec.clone(),
+            value: *value,
+            stmt_span: em.stmt_span,
+        }),
     };
 
     for seg in &segs {
@@ -379,7 +394,7 @@ pub fn assemble(
         meta,
         blocks,
         comments,
-        result: DocResult { value, error: doc_error, stats, truncated },
+        result: DocResult { value, error: doc_error, stats, truncated, inputs },
     }
 }
 
@@ -405,11 +420,11 @@ fn value_kind(v: &Value) -> &'static str {
 
 impl Document {
     /// Serialize to the kind-tagged JSON the hosts consume: `{ meta, blocks, comments, result }`
-    /// where each block is `{ "kind": "code" | "note" | "plot", … }`.
+    /// where each block is `{ "kind": "code" | "note" | "plot" | "input", … }`.
     pub fn to_json(&self) -> serde_json::Value {
         let meta = match &self.meta {
             Some(fm) => fm.to_json(),
-            None => serde_json::json!({ "tags": [], "knobs": [], "extra": {} }),
+            None => serde_json::json!({ "tags": [], "extra": {} }),
         };
         let blocks: Vec<serde_json::Value> = self.blocks.iter().map(Block::to_json).collect();
         let comments: Vec<serde_json::Value> = self.comments.iter().map(Comment::to_json).collect();
@@ -447,6 +462,14 @@ impl Block {
                 "charts": charts,
                 "stmt_span": span_json(*stmt_span),
             }),
+            Block::Input { spec, value, stmt_span } => {
+                let mut m = match spec.to_json_entry(*value, *stmt_span) {
+                    serde_json::Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                m.insert("kind".into(), serde_json::json!("input"));
+                serde_json::Value::Object(m)
+            }
         }
     }
 }
@@ -467,7 +490,7 @@ mod tests {
     use crate::Engine;
 
     fn doc(src: &str) -> Document {
-        Engine::new().run_to_document(src, &[])
+        Engine::new().run_to_document(src)
     }
     fn kinds(d: &Document) -> Vec<&'static str> {
         d.blocks
@@ -476,6 +499,7 @@ mod tests {
                 Block::Code { .. } => "code",
                 Block::Note { .. } => "note",
                 Block::Plot { .. } => "plot",
+                Block::Input { .. } => "input",
             })
             .collect()
     }
@@ -494,6 +518,23 @@ mod tests {
         let d = doc("X ~ rand::unif_int(1, 6)\nPrint(\"hi\")\nplot::histogram(X)");
         assert_eq!(kinds(&d), vec!["code", "note", "plot"]);
         assert_eq!(note_texts(&d), vec!["hi"]);
+    }
+
+    #[test]
+    fn input_declaration_emits_an_inline_control_block() {
+        // `input::` renders as its own block right after the code group that declares it, and shows
+        // up in the run manifest (PLAN-INPUTS §3/§4).
+        let d = doc("n = input::real(min: 1, max: 10, default: 4)\nx = n + 1");
+        assert_eq!(kinds(&d), vec!["code", "input"]);
+        match &d.blocks[1] {
+            Block::Input { spec, value, .. } => {
+                assert_eq!(spec.name, "n");
+                assert_eq!(*value, crate::input::InputValue::Num(4.0));
+            }
+            other => panic!("expected an input block, got {other:?}"),
+        }
+        assert_eq!(d.result.inputs.len(), 1);
+        assert_eq!(d.result.inputs[0].spec.name, "n");
     }
 
     #[test]
@@ -657,6 +698,7 @@ impl DocResult {
                 "first_dropped_stmt_span": span_json(t.first_dropped_stmt_span),
             })
         });
+        let inputs: Vec<serde_json::Value> = self.inputs.iter().map(ResolvedInput::to_json).collect();
         serde_json::json!({
             "value": value,
             "error": error,
@@ -667,6 +709,7 @@ impl DocResult {
                 "rng_draws": self.stats.rng_draws,
             },
             "truncated": truncated,
+            "inputs": inputs,
         })
     }
 }

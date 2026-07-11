@@ -1,45 +1,44 @@
 //! WebAssembly bindings for Noise — the bridge the browser playground runs against.
 //!
 //! One contract (PLAN-LITERATE §D5): [`run`] parses and evaluates a program and returns **one**
-//! `Document` as JSON — meta (frontmatter/knobs) + a flat, ordered array of typed blocks (code,
-//! notes, plots) + the comment layer + the result. Every playground view (Preview, plots-only,
-//! output-only) is a pure filter over that one array. [`run_with_introspection`] returns the same
-//! `Document` next to the hover sidecar (live bindings + per-request plots). [`meta`] reads the
-//! frontmatter without running, so a host can build a knob UI first.
+//! `Document` as JSON — meta (frontmatter) + a flat, ordered array of typed blocks (code, notes,
+//! plots, inputs) + the comment layer + the result (which carries the input manifest). Every
+//! playground view (Preview, plots-only, output-only) is a pure filter over that one array.
+//! [`run_with_introspection`] returns the same `Document` next to the hover sidecar (live bindings +
+//! per-request plots). [`meta`] reads the frontmatter without running, for the pre-run paper header.
 
 use noise_core::flint::to_flint;
-use noise_core::frontmatter::KnobValue;
 use noise_core::introspect::Summary;
-use noise_core::{Engine, Value};
+use noise_core::{Engine, InputValue, Value};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
-/// Run options a host may pass: knob overrides for now (`{ "knobs": { name: value, … } }`), sample
-/// budget/seed later. Absent or empty → the program runs at knob defaults.
+/// Run options a host may pass: input overrides (`{ "inputs": { name: value, … } }`), sample
+/// budget/seed later. Absent or empty → each input uses its declared default.
 #[derive(Deserialize, Default)]
 struct Opts {
     #[serde(default)]
-    knobs: serde_json::Map<String, serde_json::Value>,
+    inputs: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Parse the optional `opts_json` into engine knob overrides. Returns an error string (surfaced as a
-/// failed document) if the JSON or a knob value is malformed.
-fn parse_opts(opts_json: Option<String>) -> Result<Vec<(String, KnobValue)>, String> {
+/// Parse the optional `opts_json` into engine input overrides. Returns an error string (surfaced as
+/// a failed document) if the JSON or an input value is malformed.
+fn parse_opts(opts_json: Option<String>) -> Result<Vec<(String, InputValue)>, String> {
     let json = match opts_json {
         Some(j) if !j.trim().is_empty() => j,
         _ => return Ok(Vec::new()),
     };
     let opts: Opts = serde_json::from_str(&json).map_err(|e| format!("invalid opts JSON: {e}"))?;
-    let mut out = Vec::with_capacity(opts.knobs.len());
-    for (name, v) in opts.knobs {
-        let kv = match v {
-            serde_json::Value::Bool(b) => KnobValue::Bool(b),
+    let mut out = Vec::new();
+    for (name, v) in opts.inputs {
+        let iv = match v {
+            serde_json::Value::Bool(b) => InputValue::Bool(b),
             serde_json::Value::Number(n) => {
-                KnobValue::Num(n.as_f64().ok_or_else(|| format!("knob `{name}` is not a number"))?)
+                InputValue::Num(n.as_f64().ok_or_else(|| format!("input `{name}` is not a number"))?)
             }
-            _ => return Err(format!("knob `{name}` override must be a number or bool")),
+            _ => return Err(format!("input `{name}` override must be a number or bool")),
         };
-        out.push((name, kv));
+        out.push((name, iv));
     }
     Ok(out)
 }
@@ -48,7 +47,7 @@ fn parse_opts(opts_json: Option<String>) -> Result<Vec<(String, KnobValue)>, Str
 /// always receive, so there is never a second error channel.
 fn doc_error(message: String) -> serde_json::Value {
     serde_json::json!({
-        "meta": { "knobs": [], "extra": {} },
+        "meta": { "tags": [], "extra": {} },
         "blocks": [],
         "comments": [],
         "result": {
@@ -56,18 +55,19 @@ fn doc_error(message: String) -> serde_json::Value {
             "error": { "message": message, "span": { "start": 0, "end": 0 } },
             "stats": { "forcings": 0, "samples": 0, "ops": 0, "rng_draws": 0 },
             "truncated": null,
+            "inputs": [],
         },
     })
 }
 
 fn to_json_string(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| {
-        r#"{"meta":{"knobs":[],"extra":{}},"blocks":[],"comments":[],"result":{"value":null,"error":{"message":"internal serialization error","span":{"start":0,"end":0}},"stats":{"forcings":0,"samples":0,"ops":0,"rng_draws":0},"truncated":null}}"#.into()
+        r#"{"meta":{"tags":[],"extra":{}},"blocks":[],"comments":[],"result":{"value":null,"error":{"message":"internal serialization error","span":{"start":0,"end":0}},"stats":{"forcings":0,"samples":0,"ops":0,"rng_draws":0},"truncated":null,"inputs":[]}}"#.into()
     })
 }
 
 /// Run a Noise program → one `Document` (PLAN-LITERATE §D5) as JSON. `opts_json` (optional) carries
-/// knob overrides. Never throws; a lex/parse/runtime failure comes back as a document with
+/// input overrides. Never throws; a lex/parse/runtime failure comes back as a document with
 /// `result.error` set (and whatever blocks ran before the failure).
 #[wasm_bindgen]
 pub fn run(src: &str, opts_json: Option<String>) -> String {
@@ -76,14 +76,16 @@ pub fn run(src: &str, opts_json: Option<String>) -> String {
         Err(e) => return to_json_string(&doc_error(e)),
     };
     let mut engine = Engine::new();
-    let document = engine.run_to_document(src, &overrides);
+    engine.set_input_overrides(overrides);
+    let document = engine.run_to_document(src);
     to_json_string(&document.to_json())
 }
 
-/// Read a program's frontmatter *without running it* — the pure entry a host calls to build a knob
-/// UI (PLAN-LITERATE §D2). Returns `{ ok, title, knobs, extra }` on success (`knobs` is an ordered
-/// array of `{ name, type, min?, max?, step?, default, label? }`), or `{ ok: false, error }` if the
-/// fence is malformed. A file with no frontmatter is `ok: true` with a null title and empty knobs.
+/// Read a program's frontmatter *without running it* — the pure entry a host calls to build the
+/// pre-run paper header. Returns `{ ok, title, abstract?, tags, extra }` on success, or
+/// `{ ok: false, error }` if the fence is malformed. A file with no frontmatter is `ok: true` with a
+/// null title and empty tags. Inputs are discovered from the run (`Document.result.inputs`), not
+/// here (PLAN-INPUTS §3).
 #[wasm_bindgen]
 pub fn meta(src: &str) -> String {
     let value = match noise_core::frontmatter::parse(src) {
@@ -95,7 +97,7 @@ pub fn meta(src: &str) -> String {
             m.insert("ok".into(), serde_json::json!(true));
             serde_json::Value::Object(m)
         }
-        Ok(None) => serde_json::json!({ "ok": true, "tags": [], "knobs": [], "extra": {} }),
+        Ok(None) => serde_json::json!({ "ok": true, "tags": [], "extra": {} }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     serde_json::to_string(&value)
@@ -195,7 +197,8 @@ pub fn run_with_introspection(src: &str, requests_json: &str, opts_json: Option<
         }
     };
     let mut engine = Engine::new();
-    let document = engine.run_to_document(src, &overrides);
+    engine.set_input_overrides(overrides);
+    let document = engine.run_to_document(src);
     let ran_ok = document.result.error.is_none();
 
     let bindings: Vec<Binding> = engine

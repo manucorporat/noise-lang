@@ -1,9 +1,10 @@
 ---
 title: "Monty Hall"
 abstract: >
-  Reframed cleanly: switching wins exactly when your first pick was wrong, which
-  happens 2/3 of the time. Sampling the first pick and checking that condition
-  reproduces the famous counterintuitive answer.
+  You pick one of three doors; a car hides behind one, goats behind the other two.
+  The host opens a losing door and offers to let you switch. Should you? Switching
+  wins two times out of three — twice as often as staying — even though it feels
+  like a coin toss.
 tags: [classic, modeling]
 extra:
   blurb: "Switching doors wins 2/3 of the time."
@@ -12,13 +13,16 @@ extra:
 ---
 use rand;
 
-car  ~ unif_int(1, 3);
-pick ~ unif_int(1, 3);
+# Slide the doors: with 3, switching wins 2/3; crank it to 100 and you win 99 times out of 100.
+doors = input::int(min: 3, max: 100, step: 1, default: 3);
+
+car  ~ unif_int(1, doors);
+pick ~ unif_int(1, doors);
+
+# Switching wins in exactly the worlds where your first guess missed the car.
 p = P(pick != car);
-# The answer as a dot with its error bars — it should sit right around 2/3.
-plot::value(p)
 if p > 0.5 {
-  Print(`Switch! You win ${p} of the time.`)
+  Print(`Switch! You win ${p * 100}% of the time.`)
 } else {
-  Print(`Stay. Switching only wins ${p} of the time.`)
+  Print(`Stay. Switching only wins ${p * 100}% of the time.`)
 }

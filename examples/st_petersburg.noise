@@ -1,15 +1,25 @@
-# The St. Petersburg paradox: a game whose FAIR price is infinite — yet nobody would pay much.
-# Flip a coin until it lands heads. If the first head is on flip k, you win 2^k dollars.
+---
+title: "St. Petersburg paradox"
+abstract: >
+  A casino offers a game: flip a coin until it lands heads, and if the first head shows up
+  on flip k, you win 2^k dollars. Work out the expected payout and it comes to infinity — a
+  mathematically fair ticket would cost more than all the money in the world. So why would
+  nobody in their right mind pay more than a few dollars to play?
+tags: [paradox, expectation]
+extra:
+  blurb: "A game with infinite expected value that nobody would pay for."
+  category: "Games & risk"
+  analytic: "E ≈ rounds (unbounded)"
+---
 
-# E[payout] = sum_k 2^k * (1/2)^k = 1 + 1 + 1 + ... = infinity: every round adds another $1 of
-# expected value, forever. We can only ever play finitely many rounds, so capping the game at
-# `rounds` flips makes E[payout] ~ rounds — and watching it climb with no ceiling IS the paradox.
+# The trick behind the infinity: each round contributes exactly $1 to the expectation
+# (a 2^k prize paid with probability 1/2^k), so capping at N rounds gives E ≈ N — forever.
 play(rounds) = {
-  flips  ~[rounds] rand::bernoulli(0.5);        # `rounds` independent coin flips
+  flips  ~[rounds] rand::bernoulli(0.5);
   payout = 0;
-  live   = true;                          # still playing? (no head has landed yet)
+  live   = true;
   for k in 0..rounds {
-    first  = flips[k] && live;            # the first head — this ends the game
+    first  = flips[k] && live;            # the first head lands here — it ends the game
     payout = if first { 2 ^ (k + 1) } else { payout };
     live   = live && !flips[k];
   };
@@ -24,8 +34,17 @@ E[\text{payout up to 4 rounds}] = ${E(play(4))} \quad (\approx 4)
 E[\text{payout up to 8 rounds}] = ${E(play(8))} \quad (\approx 8)
 E[\text{payout up to 12 rounds}] = ${E(play(12))} \quad (\approx 12)
 ```
+
+# Drag the cap on rounds: the expected payout just keeps climbing (~$1 per round), never settling
+# on a finite fair price — the "infinite" expectation is real, watch it refuse to converge.
+rounds = input::int(min: 1, max: 20, step: 1, default: 8);
+
+```latex
+E[\text{payout up to } ${rounds} \text{ rounds}] = ${E(play(rounds))} \quad (\approx ${rounds})
+```
+
 # The mean hides in rare jackpots — the histogram shows that long, heavy tail.
-plot::histogram(play(8));
+plot::histogram(play(rounds));
 ```md
 Each extra round adds about $1 of expected value forever, so no finite price is fair.
 (The mean lives in ever-rarer jackpots, so longer games need exponentially more samples.)

@@ -19,19 +19,19 @@ export function decodeCode(s: string): string | null {
   }
 }
 
-/** A knob override value carried in a share link — a number or a bool. */
-export type KnobHashValue = number | boolean;
+/** An input override value carried in a share link — a number or a bool. */
+export type InputHashValue = number | boolean;
 
-/** Encode non-default knob overrides as `name:value,name2:value2` for the `k=` fragment param. */
-export function encodeKnobs(knobs: Record<string, KnobHashValue>): string {
-  return Object.entries(knobs)
+/** Encode non-default input overrides as `name:value,name2:value2` for the `i=` fragment param. */
+export function encodeInputs(inputs: Record<string, InputHashValue>): string {
+  return Object.entries(inputs)
     .map(([k, v]) => `${encodeURIComponent(k)}:${v}`)
     .join(',');
 }
 
-/** Parse a `k=` fragment value back into knob overrides. Unparseable pairs are skipped. */
-export function parseKnobs(s: string): Record<string, KnobHashValue> {
-  const out: Record<string, KnobHashValue> = {};
+/** Parse an `i=` fragment value into input overrides. Unparseable pairs are skipped. */
+export function parseInputs(s: string): Record<string, InputHashValue> {
+  const out: Record<string, InputHashValue> = {};
   for (const pair of s.split(',')) {
     const idx = pair.indexOf(':');
     if (idx < 0) continue;
@@ -46,8 +46,8 @@ export function parseKnobs(s: string): Record<string, KnobHashValue> {
 export interface ParsedHash {
   exampleId?: string;
   code?: string;
-  /** Knob overrides carried alongside `x=`/`c=` (a tuned example is shareable as tuned). */
-  knobs?: Record<string, KnobHashValue>;
+  /** Input overrides carried alongside `x=`/`c=` (a tuned example is shareable as tuned). */
+  inputs?: Record<string, InputHashValue>;
 }
 
 /** Parse the current location hash into a share target. */
@@ -55,16 +55,16 @@ export function parseHash(hash: string): ParsedHash {
   const h = hash.replace(/^#/, '');
   if (!h) return {};
   const params = new URLSearchParams(h);
-  const k = params.get('k');
-  const knobs = k ? parseKnobs(k) : undefined;
+  const raw = params.get('i');
+  const inputs = raw ? parseInputs(raw) : undefined;
   const id = params.get('x');
-  if (id) return { exampleId: id, knobs };
+  if (id) return { exampleId: id, inputs };
   const c = params.get('c');
   if (c) {
     const code = decodeCode(c);
-    if (code !== null) return { code, knobs };
+    if (code !== null) return { code, inputs };
   }
-  return { knobs };
+  return { inputs };
 }
 
 /** Build a shareable absolute URL: a clean `#x=id` when the code is an unmodified example,

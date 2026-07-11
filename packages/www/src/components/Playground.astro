@@ -3,8 +3,8 @@
 // The Preview typesets the one `Document` a run returns (PLAN-LITERATE §D5) as a journal-style paper:
 // a header (title + abstract + keywords, all from the file's frontmatter), emitted notes as body
 // prose, plots as numbered figures, and code as clean listings whose comments hide into margin notes.
-// Frontmatter knobs become sliders that re-run on change; the URL fragment stays live and shareable
-// (#x=<id> / #c=<encoded>, plus #k=name:value for tuned knobs).
+// Inline `input::…` parameters render as sliders in the paper flow that re-run on change; the URL
+// fragment stays live and shareable (#x=<id> / #c=<encoded>, plus #i=name:value for tuned inputs).
 ---
 
 <section id="playground" class="playground">
@@ -34,9 +34,43 @@
     <div class="pg-output-wrap glass">
       <div class="pg-output-head">
         <span class="pg-output-title"><span class="dot"></span> Render</span>
-        <div id="pg-metrics" class="pg-metrics" hidden></div>
+        <div class="pg-head-right">
+          <div id="pg-metrics" class="pg-metrics" hidden></div>
+          <div class="pg-share" id="pg-share">
+            <button
+              id="pg-share-btn"
+              class="pg-share-btn"
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              aria-label="Share this program"
+            >
+              <svg class="pg-share-ico" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+                <circle cx="18" cy="5" r="2.6"></circle>
+                <circle cx="6" cy="12" r="2.6"></circle>
+                <circle cx="18" cy="19" r="2.6"></circle>
+                <line x1="8.2" y1="10.8" x2="15.8" y2="6.2"></line>
+                <line x1="8.2" y1="13.2" x2="15.8" y2="17.8"></line>
+              </svg>
+              <span>Share</span>
+            </button>
+            <div class="pg-share-menu" id="pg-share-menu" role="menu" hidden>
+              <div class="pg-share-menu-label">Copy link</div>
+              <button class="pg-share-url" id="pg-share-url" type="button" role="menuitem" title="Copy link to clipboard">
+                <span class="pg-share-url-text" id="pg-share-url-text"></span>
+                <span class="pg-share-copy" id="pg-share-copy">Copy</span>
+              </button>
+              <button class="pg-share-pdf" id="pg-share-pdf" type="button" role="menuitem">
+                <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+                  <path d="M12 3v11m0 0l-4-4m4 4l4-4"></path>
+                  <path d="M5 20h14"></path>
+                </svg>
+                Download as PDF
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
-      <div id="pg-knobs" class="pg-knobs" hidden></div>
       <div id="pg-output" class="pg-output is-preview"><span class="muted">Press Run to evaluate.</span></div>
     </div>
   </div>
@@ -156,37 +190,6 @@
   .pg-output-title { display: inline-flex; align-items: center; gap: 0.5rem; }
   .pg-output-head .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 
-  /* Knob bar: sliders/inputs generated from frontmatter. */
-  .pg-knobs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem 1.1rem;
-    padding: 0.6rem 0.85rem;
-    border-bottom: 1px solid var(--rule);
-    background: var(--paper);
-  }
-  .pg-knobs[hidden] { display: none; }
-  .pg-knob {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-    font-size: 0.78rem;
-    color: var(--ink-dim);
-  }
-  .pg-knob-name { font-variant: small-caps; letter-spacing: 0.03em; }
-  .pg-knob input[type='range'] { width: 108px; accent-color: var(--accent); cursor: pointer; }
-  .pg-knob-num {
-    width: 4.2rem;
-    font: inherit; font-size: 0.78rem;
-    font-family: var(--mono);
-    color: var(--ink);
-    background: var(--paper-2);
-    border: 1px solid var(--rule);
-    border-radius: 4px;
-    padding: 0.12rem 0.35rem;
-  }
-  .pg-knob input[type='checkbox'] { accent-color: var(--accent); cursor: pointer; }
-
   .pg-output {
     margin: 0; padding: 0.85rem; flex: 1; overflow: auto;
     font-family: var(--mono); font-size: 0.86rem; line-height: 1.5;
@@ -213,6 +216,64 @@
   .pg-metric .m-val { color: var(--ink); font-weight: 700; }
   .pg-metric.m-rate .m-val { color: var(--accent); }
   .m-sep { color: var(--ink-faint); opacity: 0.6; }
+
+  /* The right cluster of the Render header: the engine readout + the Share pill. */
+  .pg-head-right { display: inline-flex; align-items: center; gap: 0.6rem; min-width: 0; }
+
+  /* Share pill + its dropdown (copy link / download PDF). */
+  .pg-share { position: relative; flex: none; }
+  .pg-share-btn {
+    display: inline-flex; align-items: center; gap: 0.34rem;
+    font-family: var(--sans, inherit); font-size: 0.7rem; font-variant: small-caps; letter-spacing: 0.05em;
+    color: var(--ink-dim); background: var(--paper);
+    border: 1px solid var(--rule); border-radius: 999px;
+    padding: 0.18rem 0.6rem; cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+  .pg-share-btn:hover, .pg-share-btn[aria-expanded='true'] {
+    color: var(--ink); border-color: var(--accent); background: var(--paper-2);
+  }
+  .pg-share-ico { stroke: currentColor; stroke-width: 1.8; fill: none; }
+  .pg-share-ico circle { fill: currentColor; stroke: none; }
+
+  .pg-share-menu {
+    position: absolute; top: calc(100% + 0.4rem); right: 0; z-index: 30;
+    width: min(340px, 78vw);
+    display: flex; flex-direction: column; gap: 0.25rem;
+    padding: 0.5rem; box-sizing: border-box;
+    background: var(--paper); border: 1px solid var(--rule); border-radius: 8px;
+    box-shadow: 0 10px 30px -8px rgba(0, 0, 0, 0.25);
+  }
+  .pg-share-menu[hidden] { display: none; }
+  .pg-share-menu-label {
+    font-size: 0.64rem; font-variant: small-caps; letter-spacing: 0.08em;
+    color: var(--ink-faint); padding: 0.1rem 0.25rem 0.15rem;
+  }
+  .pg-share-url {
+    display: flex; align-items: center; gap: 0.5rem; width: 100%;
+    padding: 0.4rem 0.5rem; text-align: left; cursor: pointer;
+    background: var(--paper-2); border: 1px solid var(--rule); border-radius: 6px;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .pg-share-url:hover { border-color: var(--accent); }
+  .pg-share-url-text {
+    flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    font-family: var(--mono); font-size: 0.72rem; color: var(--ink-dim); direction: rtl; text-align: left;
+  }
+  .pg-share-copy {
+    flex: none; font-size: 0.66rem; font-variant: small-caps; letter-spacing: 0.05em; font-weight: 700;
+    color: var(--accent);
+  }
+  .pg-share.copied .pg-share-copy { color: #2e7d32; }
+  .pg-share-pdf {
+    display: flex; align-items: center; gap: 0.45rem; width: 100%;
+    padding: 0.42rem 0.5rem; text-align: left; cursor: pointer;
+    font-family: var(--sans, inherit); font-size: 0.78rem; color: var(--ink);
+    background: transparent; border: 1px solid transparent; border-radius: 6px;
+    transition: background 0.15s ease;
+  }
+  .pg-share-pdf:hover { background: var(--paper-2); }
+  .pg-share-pdf svg { stroke: currentColor; stroke-width: 1.9; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 
   /* --- Result cards (one per `plot::*` / introspection item) --- */
   .pg-card { border: 1px solid var(--rule); border-radius: 6px; background: var(--paper); padding: 0.6rem 0.7rem; }
@@ -288,6 +349,25 @@
   }
   #pg-output .pg-figure.has-note { position: relative; cursor: help; }
   #pg-output .pg-figure.has-note .figure-frame { box-shadow: inset 3px 0 0 var(--accent); }
+
+  /* Inline input control (`input::…`): a small framed widget sitting in the paper flow, right after
+     the code that declares it. A slider + number box (or a checkbox), so a reader tunes the
+     parameter and the page re-runs in place. */
+  #pg-output .pg-input {
+    position: relative;
+    display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap;
+    margin: 1.1rem 0; padding: 0.5rem 0.75rem;
+    border: 1px solid var(--rule); border-radius: 6px; background: var(--paper-2);
+    font-family: var(--sans); font-size: 0.82rem; color: var(--ink-dim);
+  }
+  #pg-output .pg-input.has-note { cursor: help; box-shadow: inset 3px 0 0 var(--accent); }
+  #pg-output .pg-input-name { font-variant: small-caps; letter-spacing: 0.03em; color: var(--ink); }
+  #pg-output .pg-input input[type='range'] { flex: 1; min-width: 120px; accent-color: var(--accent); cursor: pointer; }
+  #pg-output .pg-input input[type='checkbox'] { accent-color: var(--accent); cursor: pointer; }
+  #pg-output .pg-input-num {
+    width: 4.6rem; font-family: var(--mono); font-size: 0.8rem; color: var(--ink);
+    background: var(--paper); border: 1px solid var(--rule); border-radius: 4px; padding: 0.12rem 0.35rem;
+  }
   #pg-output .pg-note-tag {
     position: absolute; top: 0.4rem; right: 0.55rem;
     font-family: var(--sans); font-size: 0.68rem; font-style: normal; color: var(--ink-faint);
@@ -341,6 +421,22 @@
   #pg-output .pg-chart summary { display: none; }
   #pg-output .pg-card-text { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-dim); line-height: 1.5; overflow-wrap: anywhere; }
   #pg-output .pg-inspect-err { font-family: var(--mono); font-size: 0.76rem; color: #a4262c; }
+
+  /* "Download as PDF" prints just the typeset paper — everything else is hidden, and the output
+     panel is lifted to the top-left of the page so the browser's "Save as PDF" captures the article
+     alone (the hover-only margin notes stay hidden, which is what we want on paper). */
+  @media print {
+    @page { margin: 1.6cm; }
+    body * { visibility: hidden !important; }
+    #pg-output, #pg-output * { visibility: visible !important; }
+    #pg-output {
+      position: absolute !important; left: 0 !important; top: 0 !important;
+      width: 100% !important; height: auto !important; overflow: visible !important;
+      padding: 0 !important; background: #fff !important;
+    }
+    #pg-output .pg-paper { max-width: 100% !important; margin: 0 !important; }
+    #pg-output .pg-annot { display: none !important; }
+  }
 </style>
 
 <script>
@@ -354,11 +450,11 @@
     type Plot,
     type Block,
     type Span,
-    type Knob,
-    type KnobValue,
+    type InputBlock,
+    type InputValue,
   } from '../lib/noise';
   import { examples, defaultExampleId, examplesByCategory } from '../data/examples';
-  import { parseHash, encodeCode, encodeKnobs, type KnobHashValue } from '../lib/share';
+  import { parseHash, encodeCode, encodeInputs, type InputHashValue } from '../lib/share';
   import { LISTING_HL } from '../lib/highlight';
   import katex from 'katex';
   import 'katex/dist/katex.min.css';
@@ -368,7 +464,6 @@
   const $ = (id: string) => document.getElementById(id)!;
   const outEl = $('pg-output');
   const metricsEl = $('pg-metrics');
-  const knobsEl = $('pg-knobs');
   const select = $('pg-select') as HTMLSelectElement;
 
   registerNoise(monaco);
@@ -397,11 +492,11 @@
 
   let currentId: string | null = defaultExampleId;
   let suppressHash = false;
-  // `lastResult` is the last `Document`, so a knob re-render never needs a fresh run of everything.
+  // `lastResult` is the last `Document`, so re-rendering never needs a fresh run of everything.
   let lastResult: NoiseIntrospectResult | null = null;
-  // Knob declarations (from `meta`) and their current values (defaults + user/shared overrides).
-  let currentKnobs: Knob[] = [];
-  let knobValues: Record<string, KnobValue> = {};
+  // Host **input overrides** keyed by input name (defaults + user/shared overrides). Inputs
+  // themselves are discovered from the run (`result.inputs`), so there is no pre-run declaration list.
+  let inputValues: Record<string, InputValue> = {};
   // The title/abstract/tags to typeset in the paper header (from the selected file's frontmatter),
   // so the header shows before the first run too. After a run, `renderPreview` uses `res.meta`.
   let currentHeaderMeta: { title?: string; abstract?: string; tags?: string[] } | null = null;
@@ -453,146 +548,131 @@
     setTimeout(() => (suppressHash = false), 0);
   }
 
-  /** Knob overrides that differ from their declared default — the only ones a share link carries. */
-  function nonDefaultKnobs(): Record<string, KnobHashValue> {
-    const out: Record<string, KnobHashValue> = {};
-    for (const k of currentKnobs) {
-      const v = knobValues[k.name];
-      if (v !== undefined && v !== k.default) out[k.name] = v as KnobHashValue;
+  /** Input overrides that differ from their declared default — the only ones a share link carries.
+   *  Inputs are known only after a run (`result.inputs`), so this reads the last run's manifest. */
+  function nonDefaultInputs(): Record<string, InputHashValue> {
+    const out: Record<string, InputHashValue> = {};
+    for (const s of lastResult?.result.inputs ?? []) {
+      const v = inputValues[s.name];
+      if (v !== undefined && v !== s.default) out[s.name] = v as InputHashValue;
     }
     return out;
   }
 
-  // The shareable fragment: #x=id (unmodified example) or #c=snapshot, plus #k=name:value for any
-  // tuned knobs — so a tuned example is shareable exactly as tuned.
+  // The shareable fragment: #x=id (unmodified example) or #c=snapshot, plus #i=name:value for any
+  // tuned inputs — so a tuned example is shareable exactly as tuned.
   function shareHash(): string {
     const code = editor.getValue();
     const ex = currentId ? byId.get(currentId) : undefined;
     const base = ex && ex.code.trim() === code.trim() ? `#x=${currentId}` : `#c=${encodeCode(code)}`;
-    const nd = nonDefaultKnobs();
-    return Object.keys(nd).length ? `${base}&k=${encodeKnobs(nd)}` : base;
+    const nd = nonDefaultInputs();
+    return Object.keys(nd).length ? `${base}&i=${encodeInputs(nd)}` : base;
   }
 
-  /** Read the program's frontmatter and (re)build the knob bar, keeping any still-valid overrides. */
-  async function refreshKnobs(seed?: Record<string, KnobHashValue>) {
+  /** Read the program's frontmatter and refresh the pre-run paper header (title/abstract/tags), so
+   *  editing them updates the header live before the first run. Inputs are no longer parsed here —
+   *  they come from the run itself (`result.inputs`). */
+  async function refreshHeader() {
     const code = editor.getValue();
-    let knobs: Knob[] = [];
-    // The same pure `meta()` parse feeds both the knob sliders and the paper header — one read of the
-    // frontmatter, no run. So editing the title/abstract updates the header live, custom code included.
     let headerMeta = currentHeaderMeta;
     try {
       const m = await noiseMeta(code);
-      if (m.ok) {
-        knobs = m.knobs;
-        headerMeta = { title: m.title, abstract: m.abstract, tags: m.tags };
-      }
+      if (m.ok) headerMeta = { title: m.title, abstract: m.abstract, tags: m.tags };
     } catch {
-      knobs = [];
+      /* keep the previous header on a parse hiccup */
     }
     // Guard against a race: only apply if the code hasn't changed since we asked.
     if (code !== editor.getValue()) return;
-    currentKnobs = knobs;
     currentHeaderMeta = headerMeta;
-    const prev = { ...knobValues, ...(seed ?? {}) };
-    const next: Record<string, KnobValue> = {};
-    for (const k of knobs) next[k.name] = k.name in prev ? prev[k.name] : k.default;
-    knobValues = next;
-    renderKnobBar();
     // Reflect a freshly-parsed header while the user hasn't run yet (a run repaints it from res.meta).
     if (!lastResult) showPreRunPage();
   }
 
-  function renderKnobBar() {
-    knobsEl.innerHTML = '';
-    if (currentKnobs.length === 0) {
-      knobsEl.hidden = true;
-      return;
+  /** Render one inline input control (PLAN-INPUTS §4): a labelled slider + number box, or a checkbox
+   *  for a bool. Dragging it overrides that input by name and re-runs (debounced), in place. */
+  function renderInputControl(b: InputBlock): HTMLElement {
+    const row = document.createElement('label');
+    row.className = 'pg-input';
+    const name = document.createElement('span');
+    name.className = 'pg-input-name';
+    name.textContent = b.label ?? b.name;
+    row.appendChild(name);
+    const val = inputValues[b.name] ?? b.value;
+    if (b.type === 'bool') {
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = Boolean(val);
+      cb.addEventListener('change', () => setInput(b.name, cb.checked));
+      row.appendChild(cb);
+    } else {
+      const step = b.step !== undefined ? String(b.step) : b.type === 'int' ? '1' : 'any';
+      const range = document.createElement('input');
+      range.type = 'range';
+      if (b.min !== undefined) range.min = String(b.min);
+      if (b.max !== undefined) range.max = String(b.max);
+      range.step = step;
+      range.value = String(val);
+      const num = document.createElement('input');
+      num.type = 'number';
+      num.className = 'pg-input-num';
+      if (b.min !== undefined) num.min = String(b.min);
+      if (b.max !== undefined) num.max = String(b.max);
+      num.step = step;
+      num.value = String(val);
+      const sync = (v: number) => {
+        range.value = String(v);
+        num.value = String(v);
+        setInput(b.name, v);
+      };
+      range.addEventListener('input', () => sync(Number(range.value)));
+      num.addEventListener('change', () => sync(Number(num.value)));
+      row.appendChild(range);
+      row.appendChild(num);
     }
-    knobsEl.hidden = false;
-    for (const k of currentKnobs) {
-      const row = document.createElement('label');
-      row.className = 'pg-knob';
-      const name = document.createElement('span');
-      name.className = 'pg-knob-name';
-      name.textContent = k.label ?? k.name;
-      row.appendChild(name);
-      const val = knobValues[k.name] ?? k.default;
-      if (k.type === 'bool') {
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.checked = Boolean(val);
-        cb.addEventListener('change', () => setKnob(k.name, cb.checked));
-        row.appendChild(cb);
-      } else {
-        const step = k.step !== undefined ? String(k.step) : k.type === 'int' ? '1' : 'any';
-        const range = document.createElement('input');
-        range.type = 'range';
-        if (k.min !== undefined) range.min = String(k.min);
-        if (k.max !== undefined) range.max = String(k.max);
-        range.step = step;
-        range.value = String(val);
-        const num = document.createElement('input');
-        num.type = 'number';
-        num.className = 'pg-knob-num';
-        if (k.min !== undefined) num.min = String(k.min);
-        if (k.max !== undefined) num.max = String(k.max);
-        num.step = step;
-        num.value = String(val);
-        const sync = (v: number) => {
-          range.value = String(v);
-          num.value = String(v);
-          setKnob(k.name, v);
-        };
-        range.addEventListener('input', () => sync(Number(range.value)));
-        num.addEventListener('change', () => sync(Number(num.value)));
-        row.appendChild(range);
-        row.appendChild(num);
-      }
-      knobsEl.appendChild(row);
-    }
+    return row;
   }
 
-  let knobTimer = 0;
-  function setKnob(name: string, value: KnobValue) {
-    knobValues[name] = value;
+  let inputTimer = 0;
+  function setInput(name: string, value: InputValue) {
+    inputValues[name] = value;
     setHash(shareHash());
     // Debounced re-run so dragging a slider stays responsive.
-    window.clearTimeout(knobTimer);
-    knobTimer = window.setTimeout(execute, 180);
+    window.clearTimeout(inputTimer);
+    inputTimer = window.setTimeout(execute, 180);
   }
 
-  function selectExample(id: string, opts: { loadCode?: boolean; updateHash?: boolean; knobs?: Record<string, KnobHashValue>; autoRun?: boolean } = {}) {
-    const { loadCode = true, updateHash = true, knobs, autoRun = false } = opts;
+  function selectExample(id: string, opts: { loadCode?: boolean; updateHash?: boolean; inputs?: Record<string, InputHashValue>; autoRun?: boolean } = {}) {
+    const { loadCode = true, updateHash = true, inputs, autoRun = false } = opts;
     const ex = byId.get(id);
     if (!ex) return;
     currentId = id;
     currentHeaderMeta = { title: ex.title, abstract: ex.abstract, tags: ex.tags };
     select.value = id;
-    knobValues = {};
+    inputValues = { ...(inputs ?? {}) };
     if (loadCode) editor.setValue(ex.code);
     if (updateHash) setHash(`#x=${id}`);
     clearOutput();
-    // Resolve knobs first (so `knobValues` is set), then auto-run — no need to press Run.
-    void refreshKnobs(knobs).then(() => { if (autoRun) void execute(); });
+    // Refresh the header, then auto-run — inputs (and their controls) come from the run itself.
+    void refreshHeader().then(() => { if (autoRun) void execute(); });
   }
 
-  function loadCustom(code: string, knobs?: Record<string, KnobHashValue>, opts: { autoRun?: boolean } = {}) {
+  function loadCustom(code: string, inputs?: Record<string, InputHashValue>, opts: { autoRun?: boolean } = {}) {
     currentId = null;
     // A shared/edited program carries its own frontmatter; the header fills in from `res.meta` on run.
     currentHeaderMeta = null;
     select.value = CUSTOM_VALUE;
-    knobValues = {};
+    inputValues = { ...(inputs ?? {}) };
     editor.setValue(code);
     clearOutput();
-    void refreshKnobs(knobs).then(() => { if (opts.autoRun) void execute(); });
+    void refreshHeader().then(() => { if (opts.autoRun) void execute(); });
   }
 
   function loadFromHash({ updateHash = false } = {}) {
     const parsed = parseHash(location.hash);
     if (parsed.exampleId && byId.has(parsed.exampleId)) {
-      selectExample(parsed.exampleId, { loadCode: true, updateHash, knobs: parsed.knobs, autoRun: true });
+      selectExample(parsed.exampleId, { loadCode: true, updateHash, inputs: parsed.inputs, autoRun: true });
     } else if (parsed.code !== undefined) {
-      loadCustom(parsed.code, parsed.knobs, { autoRun: true });
+      loadCustom(parsed.code, parsed.inputs, { autoRun: true });
     } else {
       selectExample(defaultExampleId, { loadCode: false, updateHash: false, autoRun: true });
     }
@@ -612,7 +692,7 @@
     if (!lastResult) outEl.innerHTML = '<span class="muted">running…</span>';
     metricsEl.hidden = true;
     try {
-      const res = await runNoiseWithIntrospection(editor.getValue(), [], { knobs: knobValues });
+      const res = await runNoiseWithIntrospection(editor.getValue(), [], { inputs: inputValues });
       lastResult = res;
       renderActive();
       renderMetrics(res);
@@ -689,6 +769,12 @@
           carried = annotsFor[i];
           return;
         }
+        // Fold a pure `input::` declaration group: the inline control(s) render on their own (with
+        // the block's comment carried onto the first), so the redundant listing is dropped.
+        if (isInputOnlyBlock(b.source)) {
+          carried = annotsFor[i];
+          return;
+        }
         // Drop `use`-only import blocks — boilerplate that adds nothing to the typeset paper.
         if (isUseOnlyBlock(b.source)) {
           carried = [];
@@ -700,6 +786,10 @@
         carried = [];
         page.appendChild(withMarginNote(renderPara(b), annotsFor[i]));
         emissions++;
+      } else if (b.kind === 'input') {
+        const annots = [...carried, ...annotsFor[i]];
+        carried = [];
+        page.appendChild(withMarginNote(renderInputControl(b), annots));
       } else {
         figN++;
         const annots = [...carried, ...annotsFor[i]];
@@ -820,6 +910,17 @@
       .map((l) => l.trim())
       .filter((l) => l.length > 0);
     return lines.length > 0 && lines.every((l) => /^use\b/.test(l));
+  }
+
+  /** A code block whose every statement is an `input::` declaration (`name = input::…`). The inline
+   * controls stand in for the listing, so the raw source is dropped from the typeset page. Matches
+   * one statement per line — the shape the migrated examples use. */
+  function isInputOnlyBlock(source: string): boolean {
+    const lines = stripComments(source)
+      .split('\n')
+      .map((l) => l.trim().replace(/;$/, ''))
+      .filter((l) => l.length > 0);
+    return lines.length > 0 && lines.every((l) => /^[A-Za-z_]\w*\s*=\s*input\s*::/.test(l));
   }
 
   /** Strip line comments (`#` / `//`, outside strings) from a code listing for the typeset page,
@@ -1061,6 +1162,85 @@
   $('pg-run').addEventListener('click', execute);
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, execute);
 
+  // --- Share pill: a dropdown with a copy-the-link row + "Download as PDF" ---
+  {
+    const shareWrap = $('pg-share');
+    const shareBtn = $('pg-share-btn') as HTMLButtonElement;
+    const shareMenu = $('pg-share-menu');
+    const urlBtn = $('pg-share-url') as HTMLButtonElement;
+    const urlText = $('pg-share-url-text');
+    const copyLabel = $('pg-share-copy');
+    const pdfBtn = $('pg-share-pdf') as HTMLButtonElement;
+    let copyTimer = 0;
+
+    // The full, shareable URL for the current program (same fragment the live hash carries).
+    const shareUrl = () => `${location.origin}${location.pathname}${location.search}${shareHash()}`;
+
+    const openMenu = () => {
+      urlText.textContent = shareUrl();
+      shareMenu.hidden = false;
+      shareBtn.setAttribute('aria-expanded', 'true');
+      shareWrap.classList.remove('copied');
+      copyLabel.textContent = 'Copy';
+    };
+    const closeMenu = () => {
+      shareMenu.hidden = true;
+      shareBtn.setAttribute('aria-expanded', 'false');
+    };
+
+    shareBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      shareMenu.hidden ? openMenu() : closeMenu();
+    });
+
+    const copyToClipboard = (text: string) => {
+      // A hidden-textarea copy always works in a secure, user-gesture context; try the async
+      // Clipboard API first and fall back to it. Fire-and-forget so the visual feedback below is
+      // never blocked on the promise resolving.
+      const fallback = () => {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch {}
+        ta.remove();
+      };
+      try {
+        navigator.clipboard?.writeText(text).catch(fallback) ?? fallback();
+      } catch {
+        fallback();
+      }
+    };
+
+    urlBtn.addEventListener('click', () => {
+      copyToClipboard(shareUrl());
+      // Immediate feedback — independent of the clipboard promise so it always shows.
+      shareWrap.classList.add('copied');
+      copyLabel.textContent = 'Copied';
+      window.clearTimeout(copyTimer);
+      copyTimer = window.setTimeout(() => {
+        shareWrap.classList.remove('copied');
+        copyLabel.textContent = 'Copy';
+      }, 1600);
+    });
+
+    pdfBtn.addEventListener('click', () => {
+      closeMenu();
+      // Let the menu paint away before the print snapshot is taken.
+      window.setTimeout(() => window.print(), 60);
+    });
+
+    // Dismiss on an outside click or Escape.
+    document.addEventListener('click', (e) => {
+      if (!shareMenu.hidden && !shareWrap.contains(e.target as Node)) closeMenu();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !shareMenu.hidden) closeMenu();
+    });
+  }
+
   /** Make the selector read the current example when the code matches it verbatim, and "Custom" once
    * the user edits it away (or types a program of their own). */
   function syncSelectToCode() {
@@ -1069,14 +1249,14 @@
     select.value = ex && ex.code.trim() === code ? currentId! : CUSTOM_VALUE;
   }
 
-  // Keep the hash live, knobs in sync, and the selector label honest as the user edits.
+  // Keep the hash live, the header in sync, and the selector label honest as the user edits.
   let hashTimer = 0;
   editor.onDidChangeModelContent(() => {
     window.clearTimeout(hashTimer);
     hashTimer = window.setTimeout(() => {
       setHash(shareHash());
       syncSelectToCode();
-      void refreshKnobs();
+      void refreshHeader();
     }, 350);
   });
 

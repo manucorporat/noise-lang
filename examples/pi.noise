@@ -1,10 +1,10 @@
 ---
 title: "Estimate π"
 abstract: >
-  Throw darts uniformly at the 2×2 square around the origin. A dart lands inside
-  the unit circle when X²+Y² < 1. The fraction that do is the ratio of areas, π/4 —
-  so 4·P(inside) ≈ π. This is the "hello world" of Monte Carlo: a geometric
-  probability turned into a number by sampling.
+  Scatter darts at random across a square and count how many land inside a circle
+  drawn in it. That fraction alone is enough to recover π — no formula for the
+  circle, just a tally of hits. It's the classic first taste of Monte Carlo:
+  turning a question about geometry into a number by sampling.
 tags: [basics, monte carlo]
 extra:
   blurb: "Monte Carlo π from random darts in a square."
@@ -18,8 +18,5 @@ pi = 4 * P(X^2 + Y^2 < 1);
 \pi \approx 4 \cdot P\!\left(X^2 + Y^2 < 1\right) = ${pi}
 ```
 
-# Each dot is one random point; together they fill the square and reveal the round circle inside.
-plot::scatter(X, Y);
-
-# The pi estimate with its error bar — how sure we are of the answer.
-plot::value(pi)
+# Every dart lands somewhere in the square, yet the hits alone trace out a circle no one drew.
+plot::scatter(X, Y)

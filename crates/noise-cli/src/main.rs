@@ -4,8 +4,7 @@
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use noise_core::frontmatter::KnobValue;
-use noise_core::Engine;
+use noise_core::{Engine, InputValue};
 
 /// The VS Code / Cursor syntax extension, baked into the binary so `ide-integration`
 /// is self-contained no matter where `noise` runs from. These are a vendored copy of
@@ -34,32 +33,32 @@ fn main() {
     }
 }
 
-/// Parse the `noise <file> [--knob k=v]...` invocation, then run it. Splits `--knob name=value`
+/// Parse the `noise <file> [--input k=v]...` invocation, then run it. Splits `--input name=value`
 /// flags (repeatable) from the single positional file path.
 fn run_cli(args: &[String]) {
     let mut path: Option<&str> = None;
-    let mut knobs: Vec<(String, KnobValue)> = Vec::new();
+    let mut inputs: Vec<(String, InputValue)> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
-        if a == "--knob" || a == "-k" {
+        if a == "--input" || a == "-i" {
             match args.get(i + 1) {
-                Some(kv) => match parse_knob_arg(kv) {
-                    Ok(pair) => knobs.push(pair),
+                Some(kv) => match parse_input_arg(kv) {
+                    Ok(pair) => inputs.push(pair),
                     Err(e) => {
                         eprintln!("error: {e}");
                         std::process::exit(1);
                     }
                 },
                 None => {
-                    eprintln!("error: `--knob` needs a `name=value` argument");
+                    eprintln!("error: `{a}` needs a `name=value` argument");
                     std::process::exit(1);
                 }
             }
             i += 2;
-        } else if let Some(kv) = a.strip_prefix("--knob=") {
-            match parse_knob_arg(kv) {
-                Ok(pair) => knobs.push(pair),
+        } else if let Some(kv) = a.strip_prefix("--input=") {
+            match parse_input_arg(kv) {
+                Ok(pair) => inputs.push(pair),
                 Err(e) => {
                     eprintln!("error: {e}");
                     std::process::exit(1);
@@ -75,7 +74,7 @@ fn run_cli(args: &[String]) {
         }
     }
     match path {
-        Some(p) => run_file(p, &knobs),
+        Some(p) => run_file(p, inputs),
         None => {
             eprintln!("error: no file to run");
             std::process::exit(1);
@@ -83,24 +82,24 @@ fn run_cli(args: &[String]) {
     }
 }
 
-/// Parse a `name=value` knob override. `true`/`false` become bools; everything else parses as a
-/// number (the engine type-checks it against the knob's declared kind).
-fn parse_knob_arg(kv: &str) -> std::result::Result<(String, KnobValue), String> {
+/// Parse a `name=value` input override. `true`/`false` become bools; everything else parses as a
+/// number (the engine type-checks it against the input's declared kind).
+fn parse_input_arg(kv: &str) -> std::result::Result<(String, InputValue), String> {
     let (name, value) = kv
         .split_once('=')
-        .ok_or_else(|| format!("bad --knob {kv:?}: expected name=value"))?;
+        .ok_or_else(|| format!("bad --input {kv:?}: expected name=value"))?;
     let name = name.trim();
     if name.is_empty() {
-        return Err(format!("bad --knob {kv:?}: empty knob name"));
+        return Err(format!("bad --input {kv:?}: empty input name"));
     }
     let value = value.trim();
     let v = match value {
-        "true" => KnobValue::Bool(true),
-        "false" => KnobValue::Bool(false),
-        _ => KnobValue::Num(
+        "true" => InputValue::Bool(true),
+        "false" => InputValue::Bool(false),
+        _ => InputValue::Num(
             value
                 .parse::<f64>()
-                .map_err(|_| format!("bad --knob {kv:?}: {value:?} is not a number or bool"))?,
+                .map_err(|_| format!("bad --input {kv:?}: {value:?} is not a number or bool"))?,
         ),
     };
     Ok((name.to_string(), v))
@@ -109,11 +108,11 @@ fn parse_knob_arg(kv: &str) -> std::result::Result<(String, KnobValue), String> 
 fn print_help() {
     println!("noise — the Noise probabilistic language");
     println!("usage:");
-    println!("  noise                   start a REPL");
-    println!("  noise <file>            run a program file");
-    println!("  noise <file> --knob k=v tune a frontmatter knob (repeatable)");
-    println!("  noise validate <file>   parse and build the graph without producing output");
-    println!("  noise ide-integration   install the VS Code / Cursor syntax extension");
+    println!("  noise                    start a REPL");
+    println!("  noise <file>             run a program file");
+    println!("  noise <file> --input k=v tune an inline input (repeatable)");
+    println!("  noise validate <file>    parse and build the graph without producing output");
+    println!("  noise ide-integration    install the VS Code / Cursor syntax extension");
 }
 
 /// Install the bundled syntax-highlighting extension into every editor we can find.
@@ -181,7 +180,7 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn run_file(path: &str, knobs: &[(String, KnobValue)]) {
+fn run_file(path: &str, inputs: Vec<(String, InputValue)>) {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -190,7 +189,8 @@ fn run_file(path: &str, knobs: &[(String, KnobValue)]) {
         }
     };
     let mut engine = Engine::new();
-    let doc = engine.run_to_document(&src, knobs);
+    engine.set_input_overrides(inputs);
+    let doc = engine.run_to_document(&src);
     // Render the one `Document`: notes as text and plots as their one-line text cards, in emission
     // order, then the final value (or the error). The CLI is just another renderer of the same
     // structure the playground uses (PLAN-LITERATE §D5).
@@ -209,6 +209,13 @@ fn render_document(doc: &noise_core::doc::Document) -> bool {
             Block::Code { .. } => {}
             Block::Note { text, .. } => println!("{text}"),
             Block::Plot { text, .. } => println!("{text}"),
+            Block::Input { spec, value, .. } => {
+                let shown = match value {
+                    InputValue::Num(n) => format!("{n}"),
+                    InputValue::Bool(b) => format!("{b}"),
+                };
+                println!("input {} = {shown}", spec.name);
+            }
         }
     }
     if let Some(t) = &doc.result.truncated {
@@ -276,7 +283,7 @@ fn repl() {
         if line.is_empty() {
             continue;
         }
-        let doc = engine.run_to_document(line, &[]);
+        let doc = engine.run_to_document(line);
         render_document(&doc);
     }
 }

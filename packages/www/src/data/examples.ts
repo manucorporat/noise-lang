@@ -44,8 +44,10 @@ export const categories = [
   "Probability",
   "Games & risk",
   "Continuous & CLT",
+  "Statistics",
   "Signals & DSP",
   "Functions & research",
+  "Quantum",
 ] as const;
 
 /**
@@ -56,6 +58,7 @@ export const categories = [
  */
 const galleryOrder = [
   "pi",
+  "buffon",
   "dice",
   "dice_sum",
   "coin_streak",
@@ -63,26 +66,36 @@ const galleryOrder = [
   "birthday",
   "monty_hall",
   "conditional_bayes",
+  "prisoners",
+  "secretary",
   "advantage",
   "max_of_dice",
   "dice_bet",
+  "st_petersburg",
+  "kelly",
   "insurance",
   "reliability",
+  "barrier_option",
   "irwin_hall",
   "clt_normal",
+  "beta_bernoulli",
+  "bootstrap",
   "am_vs_fm",
   "nyquist",
+  "dithering",
+  "noise_colors",
   "functions",
   "qjl_scalar",
   "turboquant",
+  "shor_period",
 ] as const;
 
 interface FrontmatterFields {
   title?: string;
   abstract?: string;
   tags?: string[];
-  /** Host-specific metadata lives under `extra:` — only title/abstract/tags/knobs are first-class
-   *  in the engine (see crates/noise-core/src/frontmatter.rs). `blurb`/`category`/`analytic` are the
+  /** Host-specific metadata lives under `extra:` — only title/abstract/tags are first-class in the
+   *  engine (see crates/noise-core/src/frontmatter.rs). `blurb`/`category`/`analytic` are the
    *  gallery's own fields, so the site reads them from here. */
   extra?: { blurb?: string; category?: string; analytic?: string };
 }

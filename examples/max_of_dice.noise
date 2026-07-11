@@ -1,9 +1,9 @@
 ---
 title: "Max of two dice"
 abstract: >
-  if cond { a } else { b } over a random condition is not control flow — it is a
-  per-sample select that builds a new random variable. That gives you max/min/abs
-  over distributions for free. Here P(higher of 2d6 == 6) ≈ 11/36.
+  Roll two ordinary dice and keep the higher number. How often does that top die
+  show a 6? Just over 1 in 3 — because a 6 turns up whenever either die rolls it,
+  far more often than a single die's 1 in 6.
 tags: [lifted if]
 extra:
   blurb: "max over random variables via a lifted if."
@@ -17,7 +17,7 @@ B ~ unif_int(1, 6);
 higher = if A > B { A } else { B };
 p = P(higher == 6);
 ```md
-The chance the higher of 2d6 is a 6 is **${p}**.
+The chance the higher of 2d6 is a 6 is **${p * 100}%**.
 ```
 
 # Keeping the bigger die skews things high: 6 is by far the most common result.

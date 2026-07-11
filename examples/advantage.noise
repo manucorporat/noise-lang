@@ -1,9 +1,10 @@
 ---
 title: "D&D advantage"
 abstract: >
-  Rolling with "advantage" means taking the max of two twenty-sided dice. A lifted
-  if (if A > B { A } else { B }) builds the max as a new random variable, then
-  P(result ≥ 15) shows how much advantage shifts the odds.
+  In Dungeons & Dragons, rolling "with advantage" means rolling two twenty-sided
+  dice and keeping the higher one. How much does that actually help? Enough to turn
+  a hard roll into better-than-even odds — keeping the best of two pulls your result
+  sharply toward 20.
 tags: [games, lifted if]
 extra:
   blurb: "Keep the higher of two d20s."
@@ -16,7 +17,7 @@ B ~ unif_int(1, 20);
 higher = if A > B { A } else { B };
 p = P(higher >= 15);
 ```md
-The chance an advantage roll lands **≥ 15** is **${p}**.
+The chance an advantage roll lands **≥ 15** is **${p * 100}%**.
 ```
 
 # Advantage leans the d20 toward the high end: big numbers get the tallest bars.

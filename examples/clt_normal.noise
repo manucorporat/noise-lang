@@ -1,9 +1,10 @@
 ---
 title: "Central limit theorem"
 abstract: >
-  Summing twelve U(0,1) draws and centering gives an approximately standard-normal
-  variable (a classic CLT trick). A tail probability of that sum lands near the
-  true normal tail — the CLT made tangible.
+  Why does the bell curve turn up everywhere — in heights, test scores, measurement
+  errors? Because adding up many small random effects always drifts toward the same
+  shape, whatever the pieces look like. Here twelve flat, featureless random numbers
+  add up to something almost indistinguishable from a true standard normal.
 tags: [continuous, clt]
 extra:
   blurb: "A normal built from twelve uniforms."
@@ -11,19 +12,18 @@ extra:
 ---
 use rand;   # unif, normal
 
-# Add n uniforms and recenter to mean 0 — by the CLT its right tail should match a bell curve.
+# Twelve is the magic count: a U(0,1) has variance 1/12, so twelve of them sum to variance exactly 1 — a ready-made standard normal.
 n     = 12;
 draws ~[n] unif(0, 1);
 clt   = vec::sum(draws) - n / 2;
 ```latex
-P(Z > 1) \approx ${P(clt > 1)} \qquad (\text{CLT: sum of } ${n} \text{ uniforms})
+P(Z > 1) \approx ${P(clt > 1) * 100}\% \qquad (\text{sum of } ${n} \text{ uniforms})
 ```
 
-# Compare against an actual standard normal: the two tail probabilities should agree (~0.16).
+# The tail from stacked-up noise lands on the same ~16% as the real thing.
 Z ~ normal(0, 1);
 ```latex
-P(Z > 1) = ${P(Z > 1)} \qquad (\text{native normal})
+P(Z > 1) = ${P(Z > 1) * 100}\% \qquad (\text{native normal})
 ```
 
-# Stack up 12 random numbers and the totals trace the classic bell curve all on their own.
 plot::histogram(clt)

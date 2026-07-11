@@ -15,6 +15,7 @@ pub mod error;
 pub mod eval;
 pub mod flint;
 pub mod frontmatter;
+pub mod input;
 pub mod introspect;
 #[cfg(feature = "jit")]
 pub mod jit;
@@ -36,7 +37,8 @@ pub use dist::RvId;
 pub use doc::Document;
 pub use error::{NoiseError, Result};
 pub use eval::{Emission, Engine, Output};
-pub use frontmatter::{Frontmatter, Knob, KnobKind, KnobValue};
+pub use frontmatter::Frontmatter;
+pub use input::{InputKind, InputSpec, InputValue, ResolvedInput};
 pub use sampler::Moments;
 pub use stats::RunStats;
 pub use value::Value;
@@ -788,6 +790,83 @@ mod tests {
         assert!(run("n = 10; f(x) = x + n; f(1)").is_err());
         // params shadow nothing leaks back out: the call's frame is discarded.
         assert_eq!(num("x = 100; id(x) = x; id(5); x"), 100.0);
+    }
+
+    #[test]
+    fn named_arguments_bind_to_user_function_parameters() {
+        // named args bind by name, in any order (PLAN-INPUTS §2).
+        assert_eq!(num("sub(a, b) = a - b; sub(b: 2, a: 10)"), 8.0);
+        // same as the positional call
+        assert_eq!(num("sub(a, b) = a - b; sub(10, 2)"), 8.0);
+        // a single named arg
+        assert_eq!(num("dbl(x) = x + x; dbl(x: 21)"), 42.0);
+    }
+
+    #[test]
+    fn named_argument_errors() {
+        // unknown parameter name
+        let e = run("f(a, b) = a + b; f(a: 1, z: 2)").unwrap_err().to_string();
+        assert!(e.contains("no parameter named `z`"), "{e}");
+        // a parameter left unbound
+        let e = run("f(a, b) = a + b; f(a: 1)").unwrap_err().to_string();
+        assert!(e.contains("missing argument `b`"), "{e}");
+        // a builtin does not accept named arguments
+        let e = run("unif(lo: 0, hi: 1)").unwrap_err().to_string();
+        assert!(e.contains("does not accept named arguments"), "{e}");
+    }
+
+    #[test]
+    fn input_resolves_to_its_default_value() {
+        // With no host override, an input evaluates to its (clamped/snapped) default — the program
+        // runs deterministically, no UI needed (PLAN-INPUTS §1).
+        assert_eq!(num("n = input::real(min: 1, max: 100, default: 6); n"), 6.0);
+        assert_eq!(num("k = input::int(min: 0, max: 10, step: 2, default: 5); k"), 6.0); // snap 5→6
+        assert!(boolean("b = input::bool(default: true); b"));
+        // name inference: the LHS names the input, no explicit `name:` needed.
+        assert_eq!(num("sides = input::real(min: 2, max: 20, default: 6); sides * 2"), 12.0);
+    }
+
+    #[test]
+    fn input_override_is_clamped_and_snapped() {
+        let mut e = Engine::new();
+        e.set_input_overrides(vec![("n".into(), crate::input::InputValue::Num(250.0))]);
+        // 250 clamps to max 100.
+        let v = e.run(&with_prelude("n = input::real(min: 1, max: 100, default: 6); n")).unwrap();
+        assert!(matches!(v, Value::Num(x) if x == 100.0), "got {v:?}");
+    }
+
+    #[test]
+    fn input_errors() {
+        // a standalone input with no name and no binding LHS
+        let e = run("input::real(min: 1, max: 10, default: 5)").unwrap_err().to_string();
+        assert!(e.contains("needs a name"), "{e}");
+        // missing default
+        let e = run("n = input::real(min: 1, max: 10)").unwrap_err().to_string();
+        assert!(e.contains("needs a `default`"), "{e}");
+        // unknown field
+        let e = run("n = input::real(minn: 1, default: 5)").unwrap_err().to_string();
+        assert!(e.contains("no field `minn`"), "{e}");
+        // unknown input type
+        let e = run("n = input::color(default: 5)").unwrap_err().to_string();
+        assert!(e.contains("unknown input type"), "{e}");
+        // override for an input the program never declares
+        let mut eng = Engine::new();
+        eng.set_input_overrides(vec![("ghost".into(), crate::input::InputValue::Num(1.0))]);
+        let err = eng.run(&with_prelude("x = 1")).unwrap_err().to_string();
+        assert!(err.contains("unknown input `ghost`"), "{err}");
+    }
+
+    #[test]
+    fn input_redeclared_with_different_spec_errors() {
+        // Same name, same spec: fine (dedup). Different spec: conflict.
+        assert_eq!(
+            num("a = input::real(min: 0, max: 9, default: 3); b = input::real(min: 0, max: 9, default: 3); a + b"),
+            6.0
+        );
+        let e = run("a = input::real(min: 0, max: 9, default: 3); c = input::real(name: \"a\", min: 0, max: 9, default: 5); c")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("redeclared with a different spec"), "{e}");
     }
 
     #[test]
@@ -3014,7 +3093,7 @@ mod tests {
             .iter()
             .filter_map(|o| match &o.output {
                 crate::Output::Plot(s) => Some(s),
-                crate::Output::Text(_) | crate::Output::Note { .. } => None,
+                crate::Output::Text(_) | crate::Output::Note { .. } | crate::Output::Input { .. } => None,
             })
             .collect();
         assert_eq!(plots.len(), 2);
@@ -3354,45 +3433,33 @@ mod tests {
         assert_eq!(eng.stats().samples, 0, "check mode must not draw");
     }
 
-    // --- frontmatter knobs (PLAN-LITERATE LT1) ---
+    // --- inline inputs (PLAN-INPUTS) ---
 
-    /// A knob binds as a point-mass global before statement 1, at its default, and the program
-    /// reads it like any variable. The fence is skipped as trivia, so the error-free run needs no
-    /// prelude tweak.
+    /// An input binds its (clamped/snapped) default and the program reads it like any variable.
     #[test]
-    fn knob_default_binds_as_global() {
-        let src = "---\nknobs:\n  sides: { type: int, min: 1, max: 100, default: 6 }\n---\nsides + 1\n";
-        assert_eq!(super::run(src).unwrap(), Value::Num(7.0));
+    fn input_default_binds_as_value() {
+        assert_eq!(super::run("sides = input::int(min: 1, max: 100, default: 6); sides + 1").unwrap(), Value::Num(7.0));
     }
 
     /// A host override wins over the default and is clamped/snapped by the engine.
     #[test]
-    fn knob_override_clamped() {
-        use crate::frontmatter::KnobValue;
-        let src = "---\nknobs:\n  sides: { type: int, min: 1, max: 20, default: 6 }\n---\nsides\n";
+    fn input_override_clamped() {
+        use crate::input::InputValue;
         let mut eng = Engine::new();
+        eng.set_input_overrides(vec![("sides".into(), InputValue::Num(999.0))]);
         // 999 clamps to the max (20).
-        let v = eng.run_with_knobs(src, &[("sides".into(), KnobValue::Num(999.0))]).unwrap();
+        let v = eng.run("sides = input::int(min: 1, max: 20, default: 6); sides").unwrap();
         assert_eq!(v, Value::Num(20.0));
     }
 
-    /// An override naming a knob the file doesn't declare is a clear error, not a silent no-op.
+    /// An override naming an input the program doesn't declare is a clear error, not a silent no-op.
     #[test]
-    fn unknown_knob_override_errors() {
-        use crate::frontmatter::KnobValue;
-        let src = "---\nknobs:\n  sides: { type: int, default: 6 }\n---\nsides\n";
+    fn unknown_input_override_errors() {
+        use crate::input::InputValue;
         let mut eng = Engine::new();
-        let err = eng
-            .run_with_knobs(src, &[("nope".into(), KnobValue::Num(1.0))])
-            .unwrap_err();
-        assert!(format!("{err}").contains("unknown knob"), "{err}");
-    }
-
-    /// A program may shadow a knob with a normal rebind.
-    #[test]
-    fn knob_can_be_shadowed() {
-        let src = "---\nknobs:\n  n: { type: int, default: 3 }\n---\nn = 10\nn\n";
-        assert_eq!(super::run(src).unwrap(), Value::Num(10.0));
+        eng.set_input_overrides(vec![("nope".into(), InputValue::Num(1.0))]);
+        let err = eng.run("sides = input::int(default: 6); sides").unwrap_err();
+        assert!(format!("{err}").contains("unknown input"), "{err}");
     }
 
     // --- template blocks (PLAN-LITERATE LT2) ---

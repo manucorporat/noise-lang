@@ -1,22 +1,31 @@
-# Buffon's needle: drop a needle on a lined floor and the chance it crosses a line gives you pi.
-# A 250-year-old way to "measure" pi with nothing but a needle and a counting finger.
+---
+title: "Buffon's needle"
+abstract: >
+  Drop a needle on a floor of evenly spaced boards and it sometimes lands across a
+  seam. Astonishingly, how often it crosses is tied to π itself — so by dropping
+  the needle again and again and counting the crossings, you can measure π with
+  nothing but a needle and a tally. A 250-year-old Monte Carlo trick.
+tags: [monte carlo, geometry]
+extra:
+  blurb: "Measure π by dropping a needle on a lined floor."
+  category: "Basics"
+  analytic: "3.14159…"
+---
 use rand;   # unif
 use math;   # pi, sin
 
-# Floorboards spaced 1 apart, needle of length 1. When it lands, its center sits a random
-# distance `d` from the nearest line, tilted at a random `angle`. It crosses iff the needle's
-# half-reach toward the line, (1/2)*sin(angle), covers that gap.
-d     ~ unif(0, 0.5);      # center-to-nearest-line distance, in [0, t/2] with spacing t = 1
-angle ~ unif(0, pi / 2);   # orientation; by symmetry it's enough to look at [0, pi/2]
+# When it lands, the needle's center falls a random distance from the nearest seam at a random tilt;
+# it crosses only when its half-length, leaning toward the line, reaches across that gap.
+d     ~ unif(0, 0.5);      # center-to-nearest-line distance, spacing t = 1 so d lands in [0, 1/2]
+angle ~ unif(0, pi / 2);   # tilt; by symmetry, [0, pi/2] already covers every case
 cross = d <= 0.5 * sin(angle);
 
-# Geometry says P(cross) = 2L / (pi t) = 2/pi, so pi = 2 / P(cross). The estimate's standard
-# error rides through the division, so the printed pi shows only the digits it has earned.
+# Geometry pins the crossing chance to exactly 2/π, so inverting it turns a mere tally back into π.
 p = P(cross);
 ```latex
 P(\text{needle crosses a line}) = ${p} \approx \frac{2}{\pi} = ${2 / pi}
-\pi \approx \frac{2}{P(\text{cross})} = ${2 / p} \qquad (\text{true } \pi = ${pi})
+\pi \approx \frac{2}{P(\text{cross})} \qquad (\text{true } \pi = ${pi})
 ```
 
-# The pi we squeezed out of the needle drops, shown with its error bar.
+# The π squeezed out of the needle, shown with only the error bar it has earned.
 plot::value(2 / p)

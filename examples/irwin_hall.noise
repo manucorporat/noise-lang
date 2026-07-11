@@ -1,9 +1,10 @@
 ---
 title: "Sum of uniforms"
 abstract: >
-  Add three independent U(0,1) draws and ask P(sum > 2). The sum has a bell-ish
-  (Irwin–Hall) shape; sampling recovers the tail probability without any density
-  algebra.
+  Add up a handful of plain, featureless random numbers between 0 and 1. Their total
+  is not flat at all — it clusters in the middle and falls off toward the edges, and
+  the more you add the more that hump sharpens into a bell. This is the central limit
+  theorem you can watch happen.
 tags: [continuous, collections]
 extra:
   blurb: "The Irwin–Hall distribution by simulation."
@@ -12,12 +13,13 @@ extra:
 ---
 use rand;   # unif
 
-# Add three independent uniforms and ask how often the total clears 2.
-draws ~[3] unif(0, 1);
+# Slide n: one draw is flat, two make a triangle, a dozen round into a bell — the CLT in miniature.
+n     = input::int(min: 1, max: 12, step: 1, default: 3);
+
+draws ~[n] unif(0, 1);
 total = vec::sum(draws);
 ```latex
-P(\text{sum of three uniforms} > 2) = ${P(total > 2)}
+P(\text{sum of } ${n} \text{ uniforms} > 2) = ${P(total > 2) * 100}\%
 ```
 
-# The totals pile up in the middle and thin out at the edges — a little hill already forming.
 plot::histogram(total)

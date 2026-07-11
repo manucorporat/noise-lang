@@ -1,18 +1,25 @@
-# The Kelly criterion: you found a bet that wins 60% of the time — how much should you stake?
-# Each round you bet a fraction f of your money: win and the stake doubles (bankroll × (1+f)),
-# lose and it's gone (bankroll × (1-f)). Bet too little and you waste your edge; bet too much
-# and one bad streak wipes you out. Because bankrolls MULTIPLY round after round, the number to
-# maximize is the expected LOG of the growth factor, E[log(1 + f·R)] — and for this bet the
-# analytic peak is the Kelly fraction f* = 2p - 1 = 0.2: stake 20% of your bankroll.
+---
+title: "The Kelly criterion"
+abstract: >
+  You found a biased bet that wins 60% of the time — how much of your money should you
+  put on each round? Stake too little and you barely grow; stake too much and one bad
+  streak wipes you out. There is a single magic fraction in between that grows your money
+  fastest over the long run, and it is smaller than most people guess.
+tags: [betting, optimization]
+extra:
+  blurb: "How much of your bankroll to stake on a winning bet."
+  category: "Games & risk"
+  analytic: "f* = 0.2 → 0.0201/round"
+---
 
-# Expected log-growth of one round at stake fraction f (p = 0.6 win chance, double-or-nothing).
+# Why maximize the LOG of growth, not the growth itself? Bankrolls MULTIPLY round to round,
+# so what actually compounds is the average log-return — and that peaks at f* = 2p - 1 = 0.2.
 log_growth(f) = {
-  win ~ rand::bernoulli(0.6);            # one random round of the game
-  g = if win { 1 + f } else { 1 - f };   # this round's bankroll multiplier
-  E(math::log(g))                        # long-run compounding rate (per round)
+  win ~ rand::bernoulli(0.6);
+  g = if win { 1 + f } else { 1 - f };   # win: your stake f doubles; lose: it is gone
+  E(math::log(g))
 };
 
-# Sweep stake fractions 0, 0.05, ..., 0.5 and tabulate the growth rate at each.
 fractions = [for k in 0..11 { k / 20 }];
 growth    = [for f in fractions { log_growth(f) }];
 
@@ -23,8 +30,16 @@ for k in 0..11 {
   Print(`  f = ${fractions[k]} -> ${growth[k]}`)
 };
 
+# Your turn: drag your stake and watch the growth rate climb to the peak at 0.2, then go negative.
+my_stake = input::real(min: 0, max: 0.5, step: 0.05, default: 0.2);
+
+Print(`your stake f = ${my_stake} -> growth ${log_growth(my_stake)}`);
+
 ```md
 The curve peaks at f* = 2p - 1 = 0.2 — the Kelly fraction — and goes NEGATIVE past ~0.4:
 overbetting a winning game loses money in the long run.
 (Analytic: E[log g] = p*log(1+f) + (1-p)*log(1-f); at f = 0.2 that's ~0.0201 per round.)
 ```
+
+# The Kelly curve made visible: log-growth against stake, cresting at 0.2 then plunging below zero.
+plot::line(growth)

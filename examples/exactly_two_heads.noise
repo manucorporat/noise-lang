@@ -1,9 +1,10 @@
 ---
 title: "Exactly two heads"
 abstract: >
-  Flip three coins and count the heads with count([...]). Asking P(count == 2)
-  gives the Binomial(3, ½) probability of exactly two heads — built from
-  primitives, not a formula.
+  Flip three coins — how likely is exactly two heads? Not one-half, as a quick
+  guess suggests, but three in eight, because there are three different ways to
+  place two heads among three coins. Counting the arrangements is what separates
+  the gut feeling from the real odds.
 tags: [modeling, collections]
 extra:
   blurb: "A tiny Binomial built from boolean events."
@@ -14,7 +15,8 @@ coin  = rand::bernoulli(0.5);
 flips ~[3] coin;
 heads = vec::count(flips);
 ```md
-P(exactly two heads of three) = **${P(heads == 2)}**
+P(exactly two heads of three) = **${P(heads == 2) * 100}%**
 ```
-# See the whole shape: 0, 1, 2, or 3 heads — the bar at 2 is the 3/8 we asked about.
+
+# The whole shape at a glance — the bar at two heads is the 3/8 we asked for.
 plot::histogram(heads)

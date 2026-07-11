@@ -1,9 +1,10 @@
 ---
 title: "Redundancy"
 abstract: >
-  Three independent components are each up with probability 0.9; the system is up
-  if any of them is. any([...]) over the three Bernoulli draws gives P(system up)
-  ≈ 0.999 — redundancy turning 90% into three nines.
+  A single part works only 90% of the time — not good enough. So wire several in parallel:
+  the system keeps running as long as any one of them survives. Stack up three and the
+  failure rate collapses from 1-in-10 to 1-in-1000 — a flaky 90% part becomes three nines.
+  How many spares does it take to buy each extra nine of reliability?
 tags: [engineering, collections]
 extra:
   blurb: "Three parallel components, each 90% reliable."
@@ -11,10 +12,18 @@ extra:
   analytic: "0.999"
 ---
 part   = rand::bernoulli(0.9);
-parts  ~[3] part;
+
+# Each parallel spare multiplies the odds of a TOTAL failure by another 0.1, so reliability
+# marches 0.9 → 0.99 → 0.999: one extra nine bought per part.
+n      = input::int(min: 1, max: 6, step: 1, default: 3);
+
+parts  ~[n] part;
 up     = vec::any(parts);
 ```latex
-P(\text{system up}) = ${P(up)} \qquad (\text{3-way parallel})
+P(\text{system up}) = ${P(up) * 100}\% \qquad (\text{${n}-way parallel})
 ```
-# Two bars: the system is up almost always, down only the tiny 0.001 of the time.
-plot::histogram(up)
+
+# The nines pile up geometrically — reliability rockets toward certainty, then flattens
+# as each additional spare buys a smaller and smaller slice.
+reliab_by_count = [for k in 1..7 { 1 - 0.1 ^ k }];
+plot::line(reliab_by_count)

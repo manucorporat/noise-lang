@@ -1,24 +1,26 @@
 ---
 title: "Birthday paradox"
 abstract: >
-  Draw a birthday for each person with ~[n] unif_int(1,365), then
-  has_duplicates(...) checks whether any two match. Even small groups collide more
-  often than intuition suggests — and the whole experiment is one expression that
-  scales to any group size.
+  How many people do you need in a room before two of them probably share a
+  birthday? The surprising answer is just 23 — far fewer than the 365 days in a
+  year would suggest. Coincidences are much more likely than they feel.
 tags: [collections, classic]
 extra:
   blurb: "How often does a group share a birthday?"
   category: "Probability"
+  analytic: "23 people → 50.7%"
 ---
-use rand;   # unif_int
+use rand;
 
-# Give each of the n people a random day of the year, then ask whether any two collide.
-n     = 23;
-bday  = unif_int(1, 365);
-days  ~[n] bday;
-match = vec::has_duplicates(days);
+n = input::int(min: 2, max: 100, step: 1, default: 23);
+
+share ~[n] unif_int(1, 365);
+matched = vec::has_duplicates(share);
 ```md
-P(shared birthday among ${n}) = **${P(match)}**
+With ${n} people, the chance that two share a birthday is **${P(matched) * 100}%**.
 ```
-# The answer as a dot with error bars — with 23 people it lands just past a coin flip.
-plot::value(P(match))
+
+# The exact odds against group size: a steep climb that clears 50% at just 23 people.
+chance(k) = { miss = 1.0; for i in 1..k { miss = miss * (365 - i) / 365 }; 1 - miss };
+odds_by_size = [for g in 1..61 { chance(g) }];
+plot::line(odds_by_size)

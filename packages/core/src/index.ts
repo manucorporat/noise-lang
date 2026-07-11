@@ -45,9 +45,9 @@ const ZERO_STATS: NoiseStats = { forcings: 0, samples: 0, ops: 0, rng_draws: 0 }
 
 // --- the Document contract (PLAN-LITERATE §D5) -----------------------------------------------
 //
-// A run returns exactly one `Document`: meta (frontmatter/knobs) + a flat, ordered array of typed
-// blocks (code, notes, plots) + the comment layer + the result. Every view (Preview, plots-only,
-// output-only) is a pure filter over `blocks`.
+// A run returns exactly one `Document`: meta (frontmatter) + a flat, ordered array of typed
+// blocks (code, notes, plots, inputs) + the comment layer + the result (which also carries the
+// input manifest). Every view (Preview, plots-only, output-only) is a pure filter over `blocks`.
 
 /** A half-open byte range `[start, end)` into the source. */
 export interface Span {
@@ -55,9 +55,9 @@ export interface Span {
   end: number;
 }
 
-/** One block in the flat array. `code` is verbatim source; `note`/`plot` are emissions carrying the
- * `stmt_span` of the statement that produced them. */
-export type Block = CodeBlock | NoteBlock | PlotBlock;
+/** One block in the flat array. `code` is verbatim source; `note`/`plot`/`input` are emissions
+ * carrying the `stmt_span` of the statement that produced them. */
+export type Block = CodeBlock | NoteBlock | PlotBlock | InputBlock;
 
 /** A verbatim source segment — one statement group. */
 export interface CodeBlock {
@@ -81,6 +81,12 @@ export interface PlotBlock {
   text: string;
   charts: ChartSpec[];
   stmt_span: Span;
+}
+
+/** An inline **input control** (`input::…`, PLAN-INPUTS): a host-tunable parameter, rendered as a
+ *  slider/checkbox right after the code group that declares it. Carries its resolved current `value`. */
+export interface InputBlock extends InputSpec {
+  kind: 'input';
 }
 
 /** One comment in the annotation layer. `code_span` is the code it annotates (null = detached prose). */
@@ -113,16 +119,19 @@ export interface DocResult {
   error: DocError | null;
   stats: NoiseStats;
   truncated: Truncated | null;
+  /** The run's **input manifest** (PLAN-INPUTS §3): every `input::` declared, resolved, in
+   *  declaration order. A host reads this to render controls and prune stale overrides. */
+  inputs: InputSpec[];
 }
 
-/** Frontmatter meta carried by a document (same shape as `meta()` minus `ok`). */
+/** Frontmatter meta carried by a document (same shape as `meta()` minus `ok`). Purely descriptive —
+ *  tunable parameters are inline `input::…` calls, discovered from the run (`result.inputs`). */
 export interface DocMeta {
   title?: string;
   /** A paper-style abstract — prose a literate host renders under the title. */
   abstract?: string;
   /** Free-form keyword tags (a paper's "Keywords:" line). */
   tags: string[];
-  knobs: Knob[];
   extra: Record<string, unknown>;
 }
 
@@ -180,25 +189,46 @@ function enrich(doc: NoiseDocument, elapsedMs: number): NoiseResult {
   };
 }
 
-/** A concrete knob value a host passes as an override — a number (int/float) or a bool. */
-export type KnobValue = number | boolean;
+/** A concrete input value a host passes as an override — a number (real/int) or a bool. */
+export type InputValue = number | boolean;
 
-/** Knob overrides keyed by knob name. Values are clamped/snapped by the engine. */
-export type KnobOverrides = Record<string, KnobValue>;
+/** An input's declared type. `real` is the continuous slider; `int` snaps to whole numbers. */
+export type InputKind = 'real' | 'int' | 'bool';
 
-/** Run options: knob overrides for now, sample budget/seed later. */
+/** A resolved input (PLAN-INPUTS): the spec declared by an `input::…` call plus its current `value`
+ *  and the `stmt_span` of the declaring statement. This is both an `input` block and a
+ *  `result.inputs[]` manifest entry. */
+export interface InputSpec {
+  name: string;
+  type: InputKind;
+  min?: number;
+  max?: number;
+  step?: number;
+  default: InputValue;
+  /** The resolved current value (host override, else default — clamped/snapped). */
+  value: InputValue;
+  /** Optional human label for the UI (falls back to `name`). */
+  label?: string;
+  stmt_span: Span;
+}
+
+/** Input overrides keyed by input name. Values are clamped/snapped by the engine. */
+export type InputOverrides = Record<string, InputValue>;
+
+/** Run options: input overrides for now, sample budget/seed later. */
 export interface RunOpts {
-  knobs?: KnobOverrides;
+  /** Override inline `input::…` parameters by name. */
+  inputs?: InputOverrides;
 }
 
 /** Serialize `RunOpts` to the JSON the WASM boundary expects (or `undefined` when empty). */
 function optsToJson(opts?: RunOpts): string | undefined {
-  if (!opts?.knobs || Object.keys(opts.knobs).length === 0) return undefined;
-  return JSON.stringify({ knobs: opts.knobs });
+  if (!opts?.inputs || Object.keys(opts.inputs).length === 0) return undefined;
+  return JSON.stringify({ inputs: opts.inputs });
 }
 
-/** Parse + evaluate a Noise program. `opts.knobs` tunes frontmatter knobs. Never throws — failures
- * come back in `error`. */
+/** Parse + evaluate a Noise program. `opts.inputs` tunes inline `input::…` parameters. Never throws
+ * — failures come back in `error`. */
 export async function run(src: string, opts?: RunOpts): Promise<NoiseResult> {
   await load();
   // Time only the engine call (module load is excluded — it's a one-off, not per-run cost).
@@ -209,24 +239,10 @@ export async function run(src: string, opts?: RunOpts): Promise<NoiseResult> {
   return enrich(doc, elapsedMs);
 }
 
-// --- frontmatter + knobs (the "read metadata without running" path) --------------------------
+// --- frontmatter (the "read metadata without running" path) ----------------------------------
 
-/** A knob's declared type. `choice` is reserved for a later phase. */
-export type KnobKind = 'int' | 'float' | 'bool' | 'choice';
-
-/** A typed, host-tunable global declared in a file's frontmatter (PLAN-LITERATE §D2). */
-export interface Knob {
-  name: string;
-  type: KnobKind;
-  min?: number;
-  max?: number;
-  step?: number;
-  default: KnobValue;
-  /** Optional human label for the UI (falls back to `name`). */
-  label?: string;
-}
-
-/** A file's parsed frontmatter — what `meta` returns. */
+/** A file's parsed frontmatter — what `meta` returns. Purely descriptive; tunable parameters are
+ *  inline `input::…` calls, discovered from a run (`result.inputs`), not from here. */
 export interface NoiseMeta {
   ok: boolean;
   /** The document title, if declared. */
@@ -235,8 +251,6 @@ export interface NoiseMeta {
   abstract?: string;
   /** Free-form keyword tags (a paper's "Keywords:" line). */
   tags: string[];
-  /** Declared knobs, in source order (render sliders top-to-bottom). */
-  knobs: Knob[];
   /** Unknown frontmatter keys, preserved verbatim (blurb, category, …). */
   extra: Record<string, unknown>;
   /** Set when the fence is malformed. */
@@ -244,9 +258,9 @@ export interface NoiseMeta {
 }
 
 /**
- * Read a file's frontmatter **without running it** — the pure call a host uses to build a knob UI.
- * A file with no frontmatter returns `{ ok: true, knobs: [], extra: {} }`; a malformed fence returns
- * `{ ok: false, error }`.
+ * Read a file's frontmatter **without running it** — the pure call a host uses for the pre-run paper
+ * header. A file with no frontmatter returns `{ ok: true, tags: [], extra: {} }`; a malformed fence
+ * returns `{ ok: false, error }`.
  */
 export async function meta(src: string): Promise<NoiseMeta> {
   await load();
@@ -256,7 +270,6 @@ export async function meta(src: string): Promise<NoiseMeta> {
     title: parsed.title,
     abstract: parsed.abstract,
     tags: parsed.tags ?? [],
-    knobs: parsed.knobs ?? [],
     extra: parsed.extra ?? {},
     error: parsed.error,
   };

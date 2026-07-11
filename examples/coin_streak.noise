@@ -1,21 +1,24 @@
 ---
 title: "Heads in a row"
 abstract: >
-  Instead of computing (1/2)³ yourself, you model three independent coin flips and
-  ask whether all three came up heads. The language does the probability —
-  P(all heads) ≈ 0.125 — by simulating the actual event.
+  Flip a coin several times in a row — what are the odds it lands heads every
+  single time? Each extra flip cuts the chances in half, so a run of just three is
+  already down to one in eight. Long streaks of luck are far rarer than they feel.
 tags: [independence, modeling]
-knobs:
-  flip_count: { type: int, min: 1, max: 20, step: 1, default: 3 }
 extra:
   blurb: "Model the event, don’t multiply probabilities by hand."
   category: "Probability"
   analytic: "1/8 = 0.125"
 ---
+# How many coins we flip in a row — tune it and watch the all-heads chance halve each time.
+flip_count = input::int(min: 1, max: 20, step: 1, default: 3);
+
 flips  ~[flip_count] rand::bernoulli(0.5);
 streak = vec::all(flips);
 ```md
-P(all heads in a row) = **${P(streak)}**
+P(all heads in a row) = **${P(streak) * 100}%**
 ```
-# Two bars: how often you DON'T get the streak vs. the rare all-heads win.
-plot::histogram(streak)
+
+# The odds halve with every extra flip — the curve dives toward zero almost at once.
+odds_by_length = [for k in 1..11 { 0.5 ^ k }];
+plot::line(odds_by_length)

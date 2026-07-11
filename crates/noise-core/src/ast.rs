@@ -83,8 +83,9 @@ pub enum Expr {
         params: Vec<String>,
         body: Box<Spanned>,
     },
-    /// `f(args...)` — call. Resolves to a user function first, then a builtin.
-    Call(String, Vec<Spanned>),
+    /// `f(args...)` — call. Resolves to a user function first, then a builtin. Arguments are
+    /// **either all positional or all named, never mixed** (see [`CallArgs`]).
+    Call(String, CallArgs),
     /// `{ stmts... }` — a block; evaluates to its last statement's value.
     Block(Vec<Spanned>),
     /// `if cond { .. } else { .. }` — else is optional.
@@ -144,6 +145,33 @@ pub enum Expr {
     /// that iteration's side effects, and a comprehension *omits* that element. This is how a
     /// comprehension expresses a filter (`if bad(x) { continue }; f(x)`) without special syntax.
     Continue,
+}
+
+/// A call's argument list. A call is **either all positional or all named — never mixed**
+/// (`f(x, y)` or `f(a: x, b: y)`, but not `f(x, b: y)`). The two forms are disjoint at the AST
+/// level so positional calls — the overwhelming majority — stay a plain `Vec<Spanned>` on the hot
+/// path, exactly as before named arguments existed. Named args bind to parameters *by name* at
+/// eval time (a thin name→slot reorder layered before argument evaluation). See PLAN-INPUTS §2.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallArgs {
+    /// `f(a, b)` — arguments in parameter order.
+    Positional(Vec<Spanned>),
+    /// `f(x: a, y: b)` — `(name, value)` pairs in any order; each parameter named at most once.
+    Named(Vec<(String, Spanned)>),
+}
+
+impl CallArgs {
+    /// The number of arguments, regardless of form.
+    pub fn len(&self) -> usize {
+        match self {
+            CallArgs::Positional(a) => a.len(),
+            CallArgs::Named(a) => a.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// One segment of a [`Template`](Expr::Template): literal text, or an interpolation hole. Holes are

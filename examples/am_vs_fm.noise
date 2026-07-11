@@ -1,11 +1,10 @@
 ---
 title: "AM vs FM"
 abstract: >
-  A full modulate → add static → demodulate pipeline for both AM (message in the
-  carrier's length) and FM (message in its angle, via e^{iθ}). One ~-drawn complex
-  static hits both carriers — the same storm by construction — and FM comes back
-  several times cleaner. The whole chain is written on waveforms; the resolution is
-  one knob at the top.
+  Turn up the static and an AM station dissolves into hiss while the FM one holds on —
+  why? Both carry the same message through the same noise, yet FM comes back several
+  times cleaner. The difference is where each hides the message: AM in the wave's height,
+  which noise hits head-on, and FM in its angle, which a wider swing can defend.
 tags: [signals, dsp, complex]
 extra:
   blurb: "Why FM survives noise better than AM."
@@ -17,14 +16,16 @@ use vec;
 engine::set_max_samples(40000);   # how many noise realizations to average over
 engine::set_resolution(64);       # how many points per waveform
 
-# Modulators: message -> complex carrier.  Demodulators: (noisy) carrier -> message.
 am_modulate(msg)              = 1 + msg;               # message in the LENGTH (the angle stays 0)
 fm_modulate(msg, swing)       = exp(i * swing * msg);  # message in the ANGLE
 am_demodulate(carrier)        = abs(carrier) - 1;      # read the arrow's LENGTH, drop the carrier
 fm_demodulate(carrier, swing) = arg(carrier) / swing;  # read the arrow's ANGLE, undo the swing
 
-fm_swing       = 3;     # how far FM swings the angle: bigger = wider band = more noise-immune
-noise_strength = 0.4;
+# Drag: a wider swing spreads FM across more band, so it shrugs off static better. Kept <= 5 so the
+# angle never wraps past +/- 90 degrees (msg peaks at 0.3, and 5 * 0.3 < pi/2).
+fm_swing       = input::real(min: 1, max: 5, step: 0.5, default: 3);
+# Drag: crank the static up and watch AM fall apart faster than FM for the exact same storm.
+noise_strength = input::real(min: 0, max: 1, step: 0.05, default: 0.4);
 
 # A gentle 3-cycle tone, kept small so the FM angle never wraps past +/- 90 degrees.
 msg = 0.3 * signal::sine(3);

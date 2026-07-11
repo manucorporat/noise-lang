@@ -1,11 +1,10 @@
 ---
 title: "TurboQuant"
 abstract: >
-  The capstone. A fresh random rotation per sample, matrix–vector products, and
-  reductions show that a naive MSE 1-bit quantizer is inner-product biased by 2/π
-  and carries several times the squared error — while a 1-bit QJL sketch of the
-  residual is unbiased. Empirical validation of a research result in a page of
-  readable code.
+  To save memory you compress each vector down to a single bit per coordinate — but do
+  the dot products between them survive? The obvious scheme, rounding every coordinate
+  to its nearest level, quietly shrinks every inner product by a factor of 2/π. This
+  reproduces that hidden bias from a recent paper, and the one-bit sketch that fixes it.
 tags: [research, capstone]
 extra:
   blurb: "Reproducing a quantization bias (and its fix) from an arXiv paper."
@@ -53,9 +52,6 @@ D_{\text{mse}},\ b = 4 = ${E(normsq(x - mse4))} \qquad(\text{paper } 0.009)
 \text{MSE } b = 1: \quad \frac{E[\text{est}]}{\text{true}} = ${E(y @ mse1) / true_ip} \qquad(\text{biased: } \tfrac{2}{\pi} = ${2 / pi})
 ```
 
-# Picture the bias: the MSE estimate lands at ~2/pi of the truth, not 1.
-plot::value(E(y @ mse1) / true_ip);
-
 # === Algorithm 2: TurboQuant_prod. The MSE reconstruction `m` (at b-1 bits) plus a 1-bit QJL sketch
 #     of its residual r = x - m, using an independent Gaussian projection S, rescaled by ||r||.
 #     `tq_ip` returns the resulting estimate of <y, x>; it is provably unbiased (Theorem 2).
@@ -79,10 +75,7 @@ prod2 = tq_ip(x, y, m2, S2, d);
 prod3 = tq_ip(x, y, m3, S3, d);
 prod4 = tq_ip(x, y, m4, S4, d);
 
-# The fix lands on the truth (unbiased), and its inner-product error shrinks with bits, matching the
-# paper's D_prod table (scaled by 1/d) — error a fraction of the biased MSE quantizer's.
-# ...and the fix lands on 1 — the unbiased estimate with its confidence interval.
-plot::value(E(prod2) / true_ip);
+# The fix lands on 1 — unbiased — and its squared error shrinks like 1/d as bits are added, a fraction of the biased quantizer's.
 ```latex
 \text{prod } b = 2: \quad \frac{E[\text{est}]}{\text{true}} = ${E(prod2) / true_ip} \qquad(\text{unbiased} \approx 1)
 D_{\text{prod}},\ b = 1 = ${E((prod1 - true_ip) ^ 2)} \qquad(\text{plain QJL};\ \le \text{ bound } \tfrac{\pi}{2d} = ${pi / 2 / d})

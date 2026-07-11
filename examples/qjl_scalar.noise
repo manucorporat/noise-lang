@@ -1,9 +1,10 @@
 ---
 title: "QJL in 1-D"
 abstract: >
-  A scalar warm-up for the TurboQuant capstone: a sign-based 1-bit sketch, rescaled
-  by √(π/2), recovers an inner product without bias. Uses normal, E/Var, sqrt and
-  pi — the primitives the d-dimensional version scales up.
+  How much of a number can you throw away and still recover it on average? Keep just
+  one bit — its sign — and you seem to have lost the magnitude entirely. Yet rescaling
+  by √(π/2) makes the average land exactly on the true size, with no bias. This one-bit
+  trick is the seed of the TurboQuant sketch.
 tags: [research, continuous]
 extra:
   blurb: "An unbiased 1-bit quantizer (TurboQuant building block)."
@@ -20,5 +21,5 @@ E[\text{QJL 1-D estimate}] = ${E(estimate)} \qquad (\text{unbiased target} = 1.0
 \mathrm{Var}[\text{estimate}] = ${Var(estimate)}
 ```
 
-# The 1-bit estimate should sit on 1.0 — show it with its confidence interval.
-plot::value(E(estimate))
+# A folded normal — skewed and spread — yet its average is pinned to 1. One bit throws away a lot, but not the mean.
+plot::histogram(estimate)

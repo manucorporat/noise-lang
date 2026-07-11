@@ -1,8 +1,11 @@
 # PLAN-INPUTS — inputs as a language construct, declared inline (replacing frontmatter knobs)
 
-**Date:** 2026-07-11 · **Status:** Not started. Supersedes the **knobs** half of PLAN-LITERATE (LT1
-§D2). Frontmatter stays for pure metadata (`title`/`abstract`/`tags`/`extra`); the tunable-parameter
-job moves out of the frontmatter and into the program body.
+**Date:** 2026-07-11 · **Status:** ✅ Implemented (all phases IN1–IN4). Supersedes the **knobs** half
+of PLAN-LITERATE (LT1 §D2). Frontmatter stays for pure metadata (`title`/`abstract`/`tags`/`extra`);
+the tunable-parameter job moved out of the frontmatter and into the program body. Knobs are fully
+removed (no legacy aliases) per the resolved open questions: `name: value` delimiter, LHS-name
+inference shipped, `input::real`, control rendered as its own block after the code group, non-taken
+branches accepted + documented.
 
 ## The decision
 
@@ -25,17 +28,18 @@ description), it forces every input to the *top* of the file regardless of where
 means each new input *type* is an out-of-band extension of a YAML schema rather than of the language.
 
 **Replace it with a first-class expression.** An input is a value the host may tune, declared where
-it is used:
+it is used — passed with **named arguments** (a general call feature, §2), the input's `name`
+inferred from the binding on the left:
 
 ```
-dice_sides    = input::real({ name: "dice_sides",    min: 1, max: 100, step: 1, default: 6 });
-target_number = input::real({ name: "target_number", min: 1, max: 100, step: 1, default: 4 });
+dice_sides    = input::real(min: 1, max: 100, step: 1, default: 6);
+target_number = input::real(min: 1, max: 100, step: 1, default: 4);
 
 Dice ~ rand::unif_int(1, dice_sides);
 p = P(Dice == target_number);
 ```
 
-`input::real(spec)` evaluates to the input's **current value** — a deterministic point mass, exactly
+`input::real(...)` evaluates to the input's **current value** — a deterministic point mass, exactly
 what a knob binds today — so downstream code reads it like any number. The host renders a control
 **inline in the document, at the point of declaration** (a slider that appears after the code block
 where the input lives), not a bar of every input stacked at the top. `input::real` is the first of a
@@ -110,38 +114,49 @@ Types for the first cut, mirroring today's `KnobKind`:
 Headless (CLI, tests, landing-page demos): with no override, `input::real` returns `snap(default)`
 deterministically — programs run unchanged with no host UI.
 
-### 2. The spec argument — the one real grammar question
+### 2. Named arguments — a general call feature
 
-`input::real({...})` needs a **record/object literal**, which the language does **not** have today:
-`crates/noise-core/src/parser.rs` parses `{ … }` as a statement `Block` (used for `if`/`for` bodies).
-This is the crux decision. Options:
+Rather than a record type, add **named arguments** to the call grammar. This is not `input::`-specific
+— it works for **every** function (user functions and builtins alike), and `input::real(...)` is then
+just an ordinary call.
 
-- **(A) Record literals** `{ key: value, ... }` added to expression grammar. Disambiguate from a
-  block by lookahead: in expression position, `{` followed by `IDENT :` (or `STRING :`) is a record;
-  otherwise it's a block. New `Expr::Record(Vec<(String, Spanned)>)`; evaluates to a `Value::Record`
-  (a new value kind) or — narrower — is accepted *only* as an `input::`/builtin argument and never
-  escapes into a general value. **Recommended.** It's the most reusable (future `input::choice({
-  options: [...] })`, config args) and matches exactly what the user wrote. Cost: a value kind + a
-  parser lookahead + printing/typing rules.
-- **(B) Keyword arguments** in calls generally: `input::real(name: "dice_sides", min: 1, max: 100,
-  step: 1, default: 6)`. No new value kind; `Expr::Call` gains optional named args. Slightly less
-  "record-y" but avoids a `Value::Record`. Reusable for any builtin.
-- **(C) `input::`-only special form.** The parser special-cases `input::*(…)` to accept `key: value`
-  pairs. Cheapest, but a one-off wart.
-- **(D) Positional** `input::real("dice_sides", 1, 100, 1, 6)`. No grammar change; worst ergonomics
-  and unreadable at call sites. Rejected.
+**The rule:** a call's arguments are **either all positional or all named — never mixed.**
 
-**Recommendation:** **(A) record literals, scoped narrowly at first** — parse `{ k: v }` as
-`Expr::Record`, evaluate it only inside `input::`/builtin argument handling (a record that reaches a
-normal context is a type error for now). This gives the user's exact syntax and a clean growth path
-without committing to records as a general first-class value on day one. If that scoping proves
-awkward, fall back to **(B)**.
+```
+f(x, y)                       # positional, in parameter order
+f(a: x, b: y)                 # named, any order
+f(x, b: y)                    # ERROR: mixed positional + named
+input::real(min: 1, max: 100, step: 1, default: 6)
+```
 
-**Ergonomic enhancement (recommended):** make `name` optional when `input::…` is the *direct RHS of a
-bind* — infer it from the LHS identifier. `dice_sides = input::real({ min: 1, max: 100, default: 6 })`
-names the input `"dice_sides"`. Removes the most repetitive part of the user's example. Requires the
-binder to pass the target name into evaluation of its RHS (a small, contained change). A standalone
-`input::real({...})` with no `name` and no binding LHS is an error.
+- **Grammar.** Keep the hot path unchanged by making the two forms disjoint at the AST level:
+  `Expr::Call(name, CallArgs)` with `CallArgs = Positional(Vec<Spanned>) | Named(Vec<(String,
+  Spanned)>)`. Existing positional calls stay `Positional` verbatim — zero churn for the many call
+  sites. Named uses `name: expr` pairs (a `Colon` token; `crates/noise-core/src/lexer.rs` already has
+  `::` for paths — confirm a lone `:` lexes, add the token if not; `:` is otherwise unused in
+  expression position — ranges are `..`).
+- **Parse.** After `(`, look ahead: if the first argument is `IDENT :`, the whole list is **named**
+  (every entry must be `ident: expr`; a bare positional entry among them is a spanned "can't mix
+  positional and named arguments" error). Otherwise it's **positional** as today. A duplicate name is
+  a spanned error.
+- **Resolution (eval).** Named args bind to parameters **by name**:
+  - *User functions* — `f(a, b) = …` knows its parameter names; a named call maps `a:`/`b:` onto them,
+    fills every parameter exactly once, errors on an unknown name or a missing parameter.
+  - *Builtins* (`input::real`, and any builtin that opts in) — each declares its accepted parameter
+    names + which are required; resolution is the same. Builtins that don't opt in accept positional
+    only (unchanged).
+  This keeps positional calls on the exact current code path; named calls are a thin
+  name→slot mapping layered before argument evaluation.
+
+Why this over a record literal: it's one feature that pays off everywhere (readable calls to any
+multi-arg function), needs no new *value* kind, and avoids the `{…}` block-vs-record ambiguity
+entirely. `input::` gains nothing special — it's a builtin with named parameters like any other.
+
+**Ergonomic enhancement (recommended):** make an input's `name` **optional** when `input::…` is the
+*direct RHS of a bind* — infer it from the LHS identifier, so `dice_sides = input::real(min: 1, max:
+100, default: 6)` names the input `"dice_sides"`. Removes the most repetitive part of the example.
+Requires the binder to pass the target name into evaluation of its RHS (small, contained). A
+standalone `input::real(...)` with no `name:` and no binding LHS is a spanned error.
 
 ### 3. Discovery: the input manifest comes from the run, not from `meta()`
 
@@ -197,23 +212,26 @@ The override shape is unchanged (name → value); only names change:
 
 - Remove `Knob`, `KnobKind`, `KnobValue`, `knobs` from `Frontmatter`. A `knobs:` key becomes an
   **unknown top-level key** (already an error per the strict schema) — the error message gains a hint:
-  "`knobs:` is no longer frontmatter; declare inputs with `input::real({...})` in the body."
+  "`knobs:` is no longer frontmatter; declare inputs with `input::real(...)` in the body."
 - Keep the shared clamp/snap resolver (moved out of `Knob`) as `input`'s validator.
 
 ---
 
 ## Phases
 
-**IN1 — spec syntax.** Implement the chosen argument form (recommended: record literals, §2), with
-the block-vs-record lookahead, `Expr::Record`, evaluation confined to builtin arguments, and printing
-/type-error rules. Parser + eval tests: `{a: 1, b: 2}` parses as a record in call position and as a
-block in body position; a record in a normal value slot is a type error. *No `input::` yet.*
+**IN1 — named arguments (general call feature).** `CallArgs = Positional | Named` in the AST; lexer
+`Colon` token if missing; parser lookahead (`IDENT :` ⇒ named) with the "no mixing" + "no duplicate
+name" errors; eval name→slot resolution for **user functions** (unknown-name / missing-param errors).
+Positional calls unchanged. Tests: `f(a,b)=…; f(b: 2, a: 1)` binds correctly; `f(1, b: 2)` errors;
+`f(z: 1)` (unknown param) errors; duplicate name errors. *No `input::` yet.*
 
-**IN2 — the `input::` primitive (engine).** Add `input::{real,int,bool}` intercepts in `Expr::Call`;
-lift clamp/snap out of `Knob` into `resolve_input`; build the run **input manifest** with name dedup +
-redeclaration error; `run_with_inputs(overrides)` plumbing + post-run "unknown input override" error;
-optional LHS-name inference (§2). Tests: default resolution, override clamp/snap, bool, dedup,
-redeclare-conflict, headless determinism.
+**IN2 — the `input::` primitive (engine).** Extend named-arg resolution (IN1) to **builtins** —
+`input::{real,int,bool}` each declare their accepted named params (`name?`, `min?`, `max?`, `step?`,
+`default`, `label?`); intercept them in `Expr::Call` like `plot::`/`stats::`; lift clamp/snap out of
+`Knob` into `resolve_input`; build the run **input manifest** with name dedup + redeclaration error;
+`run_with_inputs(overrides)` plumbing + post-run "unknown input override" error; LHS-name inference
+(§2). Tests: default resolution, override clamp/snap, bool, dedup, redeclare-conflict, name
+inference, headless determinism.
 
 **IN3 — Document + inline rendering.** `Output::Input` + `Block::Input` + `assemble` interleaving +
 wire JSON; `Document.result.inputs`. Playground: drop `#pg-knobs`/`refreshKnobs` knob half, render
@@ -231,9 +249,9 @@ build`, browser pass on the three migrated demos.
 
 ## Open questions
 
-1. **Record scope (§2):** narrow (builtin-arg only) vs a general `Value::Record`? Start narrow;
-   revisit if records prove broadly useful.
-2. **`name` inference (§2):** ship LHS-name inference in IN2, or require explicit `name` first and add
+1. **Named-arg delimiter (§2):** `name: value` (recommended — reads like the frontmatter/spec it
+   replaces) vs `name = value` (but `=` is already bind, so `:` is cleaner and unambiguous).
+2. **`name` inference (§2):** ship LHS-name inference in IN2, or require explicit `name:` first and add
    inference later? Recommend shipping it — it's the biggest ergonomic win over knobs.
 3. **`real` vs `float`:** name the numeric input `input::real` (recommended) or keep `float` for
    parity with the old `KnobKind`?

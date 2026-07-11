@@ -1,13 +1,15 @@
-# The "colors" of noise: same `~` draw, same length — only the SPECTRUM differs.
-#
-# White noise is jagged: each sample is independent of the last (a flat spectrum). "Redder" noise
-# is smoother, because nearby samples are correlated. We measure that with the lag-1
-# autocorrelation — how alike are consecutive samples, on average:
-#   ~0   = white (no memory)        a hiss
-#   ~1   = brown (a slow random walk)  a wander
-# Pink (1/f) sits in between, and is the spectrum seen all over nature: electronics, neurons,
-# music, climate. Ornstein-Uhlenbeck (OU) is the tunable one — its correlation is exactly
-# exp(-1/tau), so a bigger correlation time `tau` means a redder, smoother signal.
+---
+title: "Colors of noise"
+abstract: >
+  Noise has color. White noise is a flat hiss where each instant is independent of the last;
+  "redder" noise sounds smoother because nearby samples remember each other. How do you put a
+  number on that memory — the thing that makes pink noise turn up everywhere from electronics to
+  neurons to music? Count how alike neighboring samples are, and the colors sort themselves out.
+tags: [signals, dsp]
+extra:
+  blurb: "White, pink, brown — sorted by how much each sample remembers the last."
+  category: "Signals & DSP"
+---
 use math;     # round
 
 n = 256;   # every color drawn at the same resolution
@@ -19,7 +21,6 @@ pair_sum(x) = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i+1] }; acc
 sq_sum(x)   = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i]   }; acc };
 neighbor_corr(x) = E(pair_sum(x)) / E(sq_sum(x));
 
-# The headline trio: n samples of each color.
 white ~[n] signal::noise_white(1);
 pink  ~[n] signal::noise_pink(1);
 brown ~[n] signal::noise_brown(1);
@@ -31,7 +32,7 @@ pink (~1/f): **${round(neighbor_corr(pink),  3)}**
 brown (1/f^2): **${round(neighbor_corr(brown), 3)}** smooth wander
 ```
 
-# OU is the knob: correlation = exp(-1/tau), checkable in closed form.
+# OU is the tunable one: correlation = exp(-1/tau), checkable in closed form.
 ou_short ~[n] signal::noise_ou(1, 4);
 ou_long  ~[n] signal::noise_ou(1, 32);
 ```md

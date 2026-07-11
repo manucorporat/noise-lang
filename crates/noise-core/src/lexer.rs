@@ -51,6 +51,7 @@ pub enum TokKind {
     LBracket,   // [
     RBracket,   // ]
     ColonColon, // ::
+    Colon,      // : — named-argument separator (`f(a: x)`)
     DotDot,     // ..
     Comma,
     Semi,
@@ -270,6 +271,7 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
             ('|', Some('|')) => (TokKind::PipePipe, 2),
             ('|', _) => (TokKind::Pipe, 1),
             (':', Some(':')) => (TokKind::ColonColon, 2),
+            (':', _) => (TokKind::Colon, 1),
             ('.', Some('.')) => (TokKind::DotDot, 2),
             ('+', _) => (TokKind::Plus, 1),
             ('-', _) => (TokKind::Minus, 1),
@@ -318,9 +320,9 @@ mod tests {
     fn operators_are_matched_greedily() {
         use TokKind::*;
         assert_eq!(
-            kinds("^ == != <= >= && || :: .. = ~ @ < > ! + - * / % ( ) { } [ ] , ;"),
+            kinds("^ == != <= >= && || :: : .. = ~ @ < > ! + - * / % ( ) { } [ ] , ;"),
             vec![
-                Caret, EqEq, BangEq, Le, Ge, AmpAmp, PipePipe, ColonColon, DotDot, Eq, Tilde,
+                Caret, EqEq, BangEq, Le, Ge, AmpAmp, PipePipe, ColonColon, Colon, DotDot, Eq, Tilde,
                 At, Lt, Gt, Bang, Plus, Minus, Star, Slash, Percent, LParen, RParen, LBrace, RBrace,
                 LBracket, RBracket, Comma, Semi, Eof,
             ]

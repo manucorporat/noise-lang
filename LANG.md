@@ -155,15 +155,16 @@ if else for in use        keywords
 true false                boolean literals
 ```
 
-## Frontmatter and knobs (literate files)
+## Frontmatter (literate files)
 
 A `.noise` file may open with a `---`-fenced **frontmatter** block that turns it into a
-self-describing document: a `title`, a paper-style `abstract`, keyword `tags`, a set of typed,
-tunable **knobs**, and an `extra:` map for host-specific metadata. The fence is recognized
-**only at byte 0** — line 1 must be exactly `---`, and the block runs to the next line that is
-exactly `---`. Anywhere else in a file, `---` keeps meaning three unary minuses, so no ordinary
-program is affected. The engine treats the whole block as trivia (it never becomes a token), so
-error spans still point at the original source.
+self-describing document: a `title`, a paper-style `abstract`, keyword `tags`, and an `extra:` map
+for host-specific metadata. Frontmatter is **purely descriptive** — tunable parameters are not
+declared here; they are inline `input::…` calls in the program body (see **Inputs** below). The
+fence is recognized **only at byte 0** — line 1 must be exactly `---`, and the block runs to the next
+line that is exactly `---`. Anywhere else in a file, `---` keeps meaning three unary minuses, so no
+ordinary program is affected. The engine treats the whole block as trivia (it never becomes a
+token), so error spans still point at the original source.
 
 ```
 ---
@@ -171,32 +172,71 @@ title: "Roll a die"
 abstract: >
   A die is discrete, so it uses unif_int — integers 1..6.
 tags: [basics, discrete]
-knobs:
-  dice_sides:    { type: int, min: 1, max: 100, step: 1, default: 6 }
-  target_number: { type: int, min: 1, max: 100, step: 1, default: 4 }
 extra:
   category: "Basics"          # host-specific metadata, engine passes it through
 ---
+dice_sides = input::int(min: 1, max: 100, step: 1, default: 6);
 Dice ~ rand::unif_int(1, dice_sides);
-p = P(Dice == target_number);
-Print("P(rolling a", target_number, ") =", p)
+Print("P(rolling a 4) =", P(Dice == 4))
 ```
 
 - **Syntax**: the block is **YAML** (a `{ … }` JSON block also works, since JSON is valid YAML).
-- **Recognized keys**: only `title`, `abstract`, `tags`, `knobs`, and `extra` are accepted at the
-  top level — any other key is a validation error. Host-specific metadata (a `blurb`, a `category`,
-  a `seed`, …) goes under `extra:`, a free-form map the engine passes through untouched.
-- **Knobs** are `name: { type, … }` maps. `type` is `int`, `float`, or `bool`. Numeric knobs take
-  optional `min`, `max`, and `step`; every knob needs a `default`. An optional `label` names it in a
-  UI. Each knob binds as a plain **deterministic global** (a point mass) *before the first
-  statement* — exactly like writing `dice_sides = 6` — so the program reads it like any variable and
-  may shadow it with a normal rebind.
-- **Overrides**: a host may retune a knob (the CLI's `noise file.noise --knob dice_sides=20`, the
-  playground's sliders). The engine type-checks the override, clamps it to `[min, max]`, and snaps
-  it to `step` — one implementation, so every host behaves identically. An override naming a knob the
-  file doesn't declare is an error.
-- **Validation**: `default` must sit within `[min, max]`, `min <= max`, and types must be coherent.
-  `noise validate file.noise` reports frontmatter errors alongside the usual checks.
+- **Recognized keys**: only `title`, `abstract`, `tags`, and `extra` are accepted at the top level —
+  any other key is a validation error. Host-specific metadata (a `blurb`, a `category`, a `seed`, …)
+  goes under `extra:`, a free-form map the engine passes through untouched.
+- **Validation**: `noise validate file.noise` reports frontmatter errors alongside the usual checks.
+  A retired `knobs:` block is a clear error pointing at `input::` (see below).
+
+## Inputs
+
+An **input** is a host-tunable parameter declared **inline in the program body**, where it is used,
+with an `input::<type>(…)` call. It replaces the old frontmatter `knobs:` map: instead of an
+out-of-band YAML schema, a tunable value is an ordinary namespaced call, and a literate host renders
+a control (a slider, a checkbox) at the point of declaration rather than a bar of every input at the
+top of the page.
+
+```
+dice_sides    = input::int(min: 1, max: 100, step: 1, default: 6);
+target_number = input::int(min: 1, max: 100, step: 1, default: 4);
+
+Dice ~ rand::unif_int(1, dice_sides);
+p = P(Dice == target_number);
+```
+
+- **Value**: `input::…(…)` evaluates to the input's **current value** — a deterministic point mass
+  (its default, or a host override) — so downstream code reads it like any number. A program may
+  shadow the name with a normal rebind.
+- **Types**: `input::real` (a continuous slider), `input::int` (snaps to whole numbers), and
+  `input::bool` (a checkbox). Numeric inputs take optional `min`, `max`, and `step`; every input
+  needs a `default`. An optional `label` names it in a UI.
+- **Named arguments**: an input's spec is passed with **named arguments** (`min: 1, max: 10`) — a
+  general call feature (see below), not `input::`-specific.
+- **Name**: an input needs a name. When `input::…` is the **direct right-hand side of a bind**
+  (`dice_sides = input::int(…)`), the name is inferred from the left-hand identifier; otherwise pass
+  it explicitly with `name: "dice_sides"`.
+- **Overrides**: a host may retune an input (the CLI's `noise file.noise --input dice_sides=20`, the
+  playground's inline sliders). The engine type-checks the override, clamps it to `[min, max]`, and
+  snaps it to `step` — one implementation, so every host behaves identically. An override naming an
+  input the program never declares is an error. Headless (no override), an input resolves to its
+  default, so programs run unchanged with no UI.
+- **Discovery**: inputs are found **by running the program** — the engine returns a manifest of every
+  input it evaluated. (An input inside a branch that didn't run won't appear until that branch runs,
+  the same as a `plot::` inside a branch.)
+
+## Named arguments
+
+A call's arguments are **either all positional or all named — never mixed**: `f(x, y)` or
+`f(a: x, b: y)`, but not `f(x, b: y)`. Named arguments (`name: value` pairs) bind to parameters by
+name, in any order, and work for **any** user-defined function as well as `input::`:
+
+```
+sub(a, b) = a - b;
+sub(b: 2, a: 10)          # 8 — named, any order
+sub(10, 2)                # 8 — positional, in parameter order
+```
+
+Every parameter must be filled exactly once; an unknown name, a missing parameter, or a duplicate
+name is an error.
 
 ## Templates
 
@@ -892,11 +932,12 @@ against a persistent environment.
 A run produces exactly one **`Document`** (PLAN-LITERATE §D5) — a self-describing structure every
 host (CLI, playground, `@noiselang/core`) renders:
 
-- `meta` — the frontmatter (title, knobs, extra).
+- `meta` — the frontmatter (title, abstract, tags, extra).
 - `blocks` — one flat, ordered array in emission order, each tagged `code` (a verbatim source
-  group), `note` (emitted text — a template or a `Print`, with an optional `syntax` tag), or `plot`
-  (a `plot::*`/`describe` chart). A note/plot carries the `stmt_span` of the statement that produced
-  it, so a host can group outputs under their code or highlight the producing line.
+  group), `note` (emitted text — a template or a `Print`, with an optional `syntax` tag), `plot`
+  (a `plot::*`/`describe` chart), or `input` (an inline `input::…` control). A note/plot/input
+  carries the `stmt_span` of the statement that produced it, so a host can group outputs under their
+  code or highlight the producing line. `result.inputs` additionally lists every input as a manifest.
 - `comments` — the annotation *layer*: each comment a `(self_span, code_span?)` pair. An attached
   comment names the code it annotates (one line or a whole group); a detached run (blank line
   between it and the code) has no `code_span` and reads as free-standing prose.

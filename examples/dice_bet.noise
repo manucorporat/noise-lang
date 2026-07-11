@@ -1,9 +1,9 @@
 ---
 title: "A dice bet"
 abstract: >
-  A wager turns a die roll into a payoff random variable with if (win/lose
-  amounts), and P(profit > 0) reports how often you come out ahead. The same
-  lifted-if machinery models real decisions.
+  Here's a wager: roll a die, win 10 if it comes up 6, otherwise lose 2. How often
+  do you actually walk away ahead? Only 1 roll in 6 — winning is rare even when the
+  prize looks tempting.
 tags: [lifted if, risk]
 extra:
   blurb: "Build a payoff distribution, then ask about profit."
@@ -15,7 +15,7 @@ D ~ unif_int(1, 6);
 payoff = if D == 6 { 10 } else { 0 - 2 };
 p = P(payoff > 0);
 ```md
-The chance you come out ahead is **${p}**.
+The chance you come out ahead is **${p * 100}%**.
 ```
 
 # Two outcomes only: a tall -2 bar (you usually lose a bit) and a short +10 bar.

@@ -1,10 +1,10 @@
 ---
 title: "Two dice"
 abstract: >
-  The one rule that surprises everyone: a name bound with ~ is one fixed draw, so
-  Dice + Dice would be 2·Dice (one die doubled), not two dice. Real independence
-  comes from separate draws — here ~[2] unif_int(1,6) makes two independent dice,
-  and sum(...) adds them. P(sum == 7) ≈ 1/6.
+  Roll two dice and add them — what are the odds of a 7? Seven is the single most
+  likely total, at one in six, because more pairs of faces add up to it than to any
+  other number. Keep adding dice and that lopsided triangle of totals rounds itself
+  into a bell.
 tags: [independence, collections]
 extra:
   blurb: "Independence is a separate ~ draw, not a repeated name."
@@ -13,13 +13,16 @@ extra:
 ---
 use rand;   # unif_int
 
-# Roll one fair die twice independently and add the rolls; ask how often the total is 7.
+# Slide the number of dice: two make a lopsided triangle, but pile on more and the total rounds into a bell.
+num_dice = input::int(min: 1, max: 20, step: 1, default: 2);
+
 die   = unif_int(1, 6);
-dice  ~[2] die;
+
+# Each ~ draw is a fresh, independent roll — die + die would be one roll doubled, not two dice.
+dice  ~[num_dice] die;
 total = vec::sum(dice);
 ```latex
-P(\text{two dice sum to } 7) = ${P(total == 7)}
+P(\text{${num_dice} dice sum to } 7) = ${P(total == 7) * 100}\%
 ```
 
-# The total piles up in a triangle: 7 is the tallest bar, 2 and 12 the shortest.
 plot::histogram(total)
