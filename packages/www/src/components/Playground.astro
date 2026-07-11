@@ -353,9 +353,17 @@
     max-width: 660px; margin: 0 auto;
     font-family: var(--serif); font-size: 1.04rem; line-height: 1.62; color: var(--ink);
   }
-  /* On a wide panel, reserve a right gutter for the margin notes (text left, notes right). */
+  /* On a wide panel, reserve a right gutter for the margin notes (text left, notes right). The gutter
+     is a right padding so the text column (600) + gutter (250) form one 850-wide block that stays
+     centred — otherwise a full-width Render pane would strand the text against the right edge. */
   @container (min-width: 781px) {
-    #pg-output .pg-paper { max-width: 600px; margin-left: auto; margin-right: 250px; }
+    #pg-output .pg-paper {
+      box-sizing: border-box;
+      max-width: 850px;
+      margin-left: auto;
+      margin-right: auto;
+      padding-right: 250px;
+    }
   }
 
   /* Paper header: the frontmatter title + abstract + keywords, typeset like a journal article.
