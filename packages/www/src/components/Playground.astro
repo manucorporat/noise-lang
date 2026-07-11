@@ -8,7 +8,30 @@
 ---
 
 <section id="playground" class="playground">
-  <div class="pg-split" id="pg-split">
+  <div class="pg-viewbar">
+    <div class="pg-viewtabs" id="pg-viewtabs" role="group" aria-label="Choose editor and render layout">
+      <button class="pg-viewtab" data-view="code" type="button" aria-pressed="false" title="Editor only">
+        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+          <path d="M9 8l-4 4 4 4"></path><path d="M15 8l4 4-4 4"></path>
+        </svg>
+        <span>Code</span>
+      </button>
+      <button class="pg-viewtab pg-viewtab-split" data-view="split" type="button" aria-pressed="false" title="Editor and render side by side">
+        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+          <rect x="4" y="5" width="7" height="14" rx="1"></rect><rect x="13" y="5" width="7" height="14" rx="1"></rect>
+        </svg>
+        <span>Split</span>
+      </button>
+      <button class="pg-viewtab" data-view="render" type="button" aria-pressed="false" title="Render only">
+        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+          <rect x="4" y="5" width="16" height="14" rx="1"></rect><path d="M4 9h16"></path>
+        </svg>
+        <span>Render</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="pg-split" id="pg-split" data-view="split">
     <div class="pg-editor-wrap glass">
       <div class="pg-toolbar">
         <label class="pg-select-wrap">
@@ -79,6 +102,30 @@
 <style>
   .playground { max-width: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1rem; }
 
+  /* Segmented control to switch the layout between Code-only, Split, and Render-only. Persisted so a
+     reader keeps whichever focus they picked; the Split segment is hidden on narrow screens where a
+     two-pane split can't breathe (there the view falls back to a single pane). */
+  .pg-viewbar { display: flex; justify-content: center; }
+  .pg-viewtabs {
+    display: inline-flex; align-items: stretch; gap: 2px;
+    padding: 2px; border: 1px solid var(--rule); border-radius: 9px; background: var(--paper-2);
+  }
+  .pg-viewtab {
+    font: inherit; font-size: 0.74rem; font-variant: small-caps; letter-spacing: 0.05em;
+    color: var(--ink-dim); background: transparent;
+    border: 1px solid transparent; border-radius: 7px;
+    padding: 0.28rem 0.85rem; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 0.42rem;
+    transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  }
+  .pg-viewtab svg { stroke: currentColor; stroke-width: 1.9; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .pg-viewtab:hover { color: var(--ink); }
+  .pg-viewtab[aria-pressed='true'] {
+    color: var(--ink); background: var(--paper); border-color: var(--rule);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  }
+  .pg-viewtab:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+
   /* A resizable two-pane split. `--pg-left` is the editor's width fraction, dragged by the handle. */
   .pg-split {
     display: grid;
@@ -86,9 +133,18 @@
     align-items: stretch;
     min-height: clamp(460px, calc(100vh - 13rem), 940px);
   }
+  /* Single-pane views: collapse to one column and hide the resizer + the pane being focused away. */
+  .pg-split[data-view='code'],
+  .pg-split[data-view='render'] { grid-template-columns: 1fr; }
+  .pg-split[data-view='code'] .pg-resizer,
+  .pg-split[data-view='code'] .pg-output-wrap,
+  .pg-split[data-view='render'] .pg-resizer,
+  .pg-split[data-view='render'] .pg-editor-wrap { display: none; }
+
   @media (max-width: 880px) {
     .pg-split { grid-template-columns: 1fr; min-height: 0; gap: 1rem; }
     .pg-resizer { display: none; }
+    .pg-viewtab-split { display: none; }
   }
 
   .pg-resizer {
@@ -1157,6 +1213,53 @@
     if (e.key === 'ArrowLeft') setLeft(cur - 3);
     else if (e.key === 'ArrowRight') setLeft(cur + 3);
   });
+
+  // --- layout view switcher (Code / Split / Render) ---
+  // The reader's choice is persisted so they keep the same focus next visit and on shared links.
+  // On narrow screens a side-by-side split doesn't fit, so the Split option falls back to a single
+  // pane there while the stored preference is left intact for when they're back on a wide screen.
+  const VIEW_KEY = 'noise-pg-view';
+  type ViewMode = 'code' | 'split' | 'render';
+  const isViewMode = (v: unknown): v is ViewMode => v === 'code' || v === 'split' || v === 'render';
+  const narrow = window.matchMedia('(max-width: 880px)');
+  const viewTabs = Array.from(document.querySelectorAll<HTMLButtonElement>('#pg-viewtabs .pg-viewtab'));
+
+  const readView = (): ViewMode => {
+    try {
+      const v = localStorage.getItem(VIEW_KEY);
+      if (isViewMode(v)) return v;
+    } catch {}
+    return 'split';
+  };
+  let viewPref: ViewMode = readView();
+
+  // What actually renders: `split` isn't offered on narrow screens, so it resolves to `code` there.
+  const effectiveView = (): ViewMode => (narrow.matches && viewPref === 'split' ? 'code' : viewPref);
+
+  function applyView() {
+    const eff = effectiveView();
+    split.dataset.view = eff;
+    for (const btn of viewTabs) btn.setAttribute('aria-pressed', String(btn.dataset.view === eff));
+    // Re-fit the editor and any charts now that a pane may have just (dis)appeared.
+    editor.layout();
+    for (const card of liveCards) drawCard(card.mount, card.charts);
+  }
+
+  function setView(v: ViewMode) {
+    viewPref = v;
+    try { localStorage.setItem(VIEW_KEY, v); } catch {}
+    applyView();
+  }
+
+  for (const btn of viewTabs) {
+    btn.addEventListener('click', () => {
+      const v = btn.dataset.view;
+      if (isViewMode(v)) setView(v);
+    });
+  }
+  // Re-resolve when crossing the narrow/wide boundary (e.g. a phone rotates or a window is resized).
+  narrow.addEventListener('change', applyView);
+  applyView();
 
   // --- wiring ---
   $('pg-run').addEventListener('click', execute);
