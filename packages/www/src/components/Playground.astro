@@ -116,7 +116,7 @@
      The Split segment is hidden on narrow screens where a two-pane split can't breathe. */
   .pg-viewtabs {
     display: inline-flex; align-items: stretch; gap: 2px;
-    padding: 2px; border: 1px solid var(--rule); border-radius: 9px; background: var(--paper-2);
+    padding: 1px; border: 1px solid var(--rule); border-radius: 8px; background: var(--paper-2);
   }
   /* The editor-toolbar copy leads the left (editor) panel and carries the toggle whenever the editor
      is shown — Code and Split. Only in Render-only, where the editor panel is gone, does the
@@ -135,9 +135,9 @@
   .pg-head-left { display: inline-flex; align-items: center; gap: 0.6rem; min-width: 0; }
   .pg-viewtab {
     font: inherit; font-size: 0.72rem; font-variant: small-caps; letter-spacing: 0.05em;
-    color: var(--ink-dim); background: transparent;
-    border: 1px solid transparent; border-radius: 7px;
-    padding: 0.2rem 0.62rem; cursor: pointer;
+    line-height: 1; color: var(--ink-dim); background: transparent;
+    border: 1px solid transparent; border-radius: 6px;
+    padding: 0.12rem 0.6rem; cursor: pointer;
     display: inline-flex; align-items: center; gap: 0.36rem;
     transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
   }
@@ -194,7 +194,9 @@
     gap: 0.5rem;
     min-height: var(--pg-head, 2.3rem);
     box-sizing: border-box;
-    padding: 0.3rem 0.7rem;
+    /* Same horizontal padding as the Render header (.pg-output-head) so the view toggle sits at the
+       exact same x in both — it must not shift when the visible copy swaps between the two. */
+    padding: 0.3rem 0.85rem;
     border-bottom: 1px solid var(--rule);
     background: var(--paper);
     flex-wrap: nowrap;
@@ -211,7 +213,8 @@
     background: var(--paper-2);
     border: 1px solid var(--rule);
     border-radius: 4px;
-    padding: 0.25rem 1.7rem 0.25rem 0.6rem;
+    /* Compact vertical padding so the toolbar keeps to --pg-head and lines up with the Render header. */
+    padding: 0.12rem 1.7rem 0.12rem 0.6rem;
     cursor: pointer;
     max-width: 230px;
   }
@@ -227,7 +230,7 @@
     font: inherit;
     font-size: 0.82rem;
     border-radius: 4px;
-    padding: 0.25rem 0.65rem;
+    padding: 0.12rem 0.65rem;
     cursor: pointer;
     border: 1px solid var(--rule);
     display: inline-flex;
