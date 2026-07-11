@@ -58,7 +58,8 @@ pub fn sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
 /// identically to [`sample_n`] (which stays a single ordered stream); both are deterministic in
 /// `seed` and converge to the same values within Monte-Carlo error.
 pub fn moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Moments {
-    crate::reduce::run_reduction(graph, root, n, seed, &crate::reduce::MomentsReducer).into_moments()
+    crate::reduce::run_reduction(graph, root, n, seed, &crate::reduce::MomentsReducer)
+        .into_moments()
 }
 
 /// Conditional moments — the forcing path behind `P(· | C)` / `E(· | C)` / `Var(· | C)`. `root`
@@ -67,7 +68,8 @@ pub fn moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Moments {
 /// alongside the in-condition count `m` (≈ `n·P(C)`), which the caller uses for the standard error.
 /// `m == 0` means the condition never occurred in `n` draws (the conditional is undefined upstream).
 pub fn cond_moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> (Moments, u64) {
-    let acc = crate::reduce::run_reduction(graph, root, n, seed, &crate::reduce::CondMomentsReducer);
+    let acc =
+        crate::reduce::run_reduction(graph, root, n, seed, &crate::reduce::CondMomentsReducer);
     (acc.into_moments(), acc.count())
 }
 
@@ -108,8 +110,9 @@ pub fn sample_pairs(
     let (prog, regs) = compile_roots(graph, &roots);
     let (ra, rb) = (regs[0] as usize, regs[1] as usize);
     let rc = cond.map(|_| regs[2] as usize);
-    let mut buf: Vec<Box<[f64]>> =
-        (0..prog.n_regs).map(|_| vec![0.0f64; BATCH].into_boxed_slice()).collect();
+    let mut buf: Vec<Box<[f64]>> = (0..prog.n_regs)
+        .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+        .collect();
     let mut rng = Rng::seed_from_u64(seed);
     let mut out = Vec::with_capacity(n);
     let mut remaining = n;
@@ -117,7 +120,7 @@ pub fn sample_pairs(
         run_batch(&prog, &mut buf, &mut rng);
         let take = remaining.min(BATCH);
         for k in 0..take {
-            if rc.map_or(true, |c| buf[c][k] != 0.0) {
+            if rc.is_none_or(|c| buf[c][k] != 0.0) {
                 out.push((buf[ra][k], buf[rb][k]));
             }
         }
@@ -134,13 +137,20 @@ pub fn sample_pairs(
 pub fn grid_moments(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<Moments> {
     let k = roots.len();
     if k == 0 || n == 0 {
-        return vec![Moments { mean: 0.0, variance: 0.0 }; k];
+        return vec![
+            Moments {
+                mean: 0.0,
+                variance: 0.0
+            };
+            k
+        ];
     }
     let (prog, regs) = compile_roots(graph, roots);
     let idx: Vec<usize> = regs.iter().map(|&r| r as usize).collect();
     let (mut sum, mut sum_sq) = (vec![0.0f64; k], vec![0.0f64; k]);
-    let mut buf: Vec<Box<[f64]>> =
-        (0..prog.n_regs).map(|_| vec![0.0f64; BATCH].into_boxed_slice()).collect();
+    let mut buf: Vec<Box<[f64]>> = (0..prog.n_regs)
+        .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+        .collect();
     let mut rng = Rng::seed_from_u64(seed);
     let mut count = 0u64;
     let mut remaining = n;
@@ -164,7 +174,10 @@ pub fn grid_moments(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec
     (0..k)
         .map(|j| {
             let mean = sum[j] / nf;
-            Moments { mean, variance: (sum_sq[j] / nf - mean * mean).max(0.0) }
+            Moments {
+                mean,
+                variance: (sum_sq[j] / nf - mean * mean).max(0.0),
+            }
         })
         .collect()
 }
@@ -182,8 +195,9 @@ pub fn grid_draws(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<V
     let (prog, regs) = compile_roots(graph, roots);
     let idx: Vec<usize> = regs.iter().map(|&r| r as usize).collect();
     let mut cols: Vec<Vec<f64>> = (0..k).map(|_| Vec::with_capacity(n)).collect();
-    let mut buf: Vec<Box<[f64]>> =
-        (0..prog.n_regs).map(|_| vec![0.0f64; BATCH].into_boxed_slice()).collect();
+    let mut buf: Vec<Box<[f64]>> = (0..prog.n_regs)
+        .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+        .collect();
     let mut rng = Rng::seed_from_u64(seed);
     let mut remaining = n;
     while remaining > 0 {
@@ -210,8 +224,9 @@ pub fn corr_matrix(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<
     let idx: Vec<usize> = regs.iter().map(|&r| r as usize).collect();
     let mut sum = vec![0.0f64; k];
     let mut cross = vec![0.0f64; k * k]; // upper triangle filled; symmetrized at the end
-    let mut buf: Vec<Box<[f64]>> =
-        (0..prog.n_regs).map(|_| vec![0.0f64; BATCH].into_boxed_slice()).collect();
+    let mut buf: Vec<Box<[f64]>> = (0..prog.n_regs)
+        .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+        .collect();
     let mut rng = Rng::seed_from_u64(seed);
     let mut vals = vec![0.0f64; k];
     let mut count = 0u64;
@@ -236,13 +251,19 @@ pub fn corr_matrix(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<
     }
     let nf = count as f64;
     let mean: Vec<f64> = sum.iter().map(|s| s / nf).collect();
-    let var: Vec<f64> = (0..k).map(|i| (cross[i * k + i] / nf - mean[i] * mean[i]).max(0.0)).collect();
+    let var: Vec<f64> = (0..k)
+        .map(|i| (cross[i * k + i] / nf - mean[i] * mean[i]).max(0.0))
+        .collect();
     let mut corr = vec![0.0f64; k * k];
     for i in 0..k {
         for j in i..k {
             let cov = cross[i * k + j] / nf - mean[i] * mean[j];
             let denom = (var[i] * var[j]).sqrt();
-            let c = if denom > 0.0 { (cov / denom).clamp(-1.0, 1.0) } else { f64::from(i == j) };
+            let c = if denom > 0.0 {
+                (cov / denom).clamp(-1.0, 1.0)
+            } else {
+                f64::from(i == j)
+            };
             corr[i * k + j] = c;
             corr[j * k + i] = c; // symmetric
         }
@@ -266,7 +287,13 @@ mod tests {
         let (g, id) = const_graph(1.0);
         assert!(sample_n(&g, id, 0, 0).is_empty());
         // moments over zero draws is well-defined (no NaN), not a panic.
-        assert_eq!(moments(&g, id, 0, 0), Moments { mean: 0.0, variance: 0.0 });
+        assert_eq!(
+            moments(&g, id, 0, 0),
+            Moments {
+                mean: 0.0,
+                variance: 0.0
+            }
+        );
     }
 
     #[test]
@@ -275,7 +302,10 @@ mod tests {
         // 1500 is not a multiple of BATCH (1024) — exercises the sliced final batch.
         let draws = sample_n(&g, id, 1500, 0);
         assert_eq!(draws.len(), 1500);
-        assert!(draws.iter().all(|&x| x == 7.0), "constant column must stay constant");
+        assert!(
+            draws.iter().all(|&x| x == 7.0),
+            "constant column must stay constant"
+        );
     }
 
     #[test]
@@ -290,8 +320,14 @@ mod tests {
     fn unif_int_degenerate_range_is_a_point_mass() {
         // unif_int(5,5): n = max(5-5+1, 1) = 1, so every draw is exactly 5 (under the hood).
         let mut g = RvGraph::default();
-        let id = g.push(RvNode::Src(Source::UniformInt { lo: 5.0, hi: 5.0 }), RvKind::Num);
+        let id = g.push(
+            RvNode::Src(Source::UniformInt { lo: 5.0, hi: 5.0 }),
+            RvKind::Num,
+        );
         let draws = sample_n(&g, id, 4096, 123);
-        assert!(draws.iter().all(|&x| x == 5.0), "unif_int(5,5) must be exactly 5");
+        assert!(
+            draws.iter().all(|&x| x == 5.0),
+            "unif_int(5,5) must be exactly 5"
+        );
     }
 }

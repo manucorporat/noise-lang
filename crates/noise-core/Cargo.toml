@@ -10,6 +10,9 @@ description = "Core of the Noise probabilistic language: lexer, parser, evaluato
 keywords = ["probabilistic", "monte-carlo", "language", "interpreter", "sampling"]
 categories = ["science", "mathematics", "compilers"]
 
+[lints]
+workspace = true
+
 [dependencies]
 cranelift = { version = "0.127.4", optional = true }
 cranelift-jit = { version = "0.127.4", optional = true }
@@ -20,14 +23,14 @@ wasm-encoder = "0.252"
 # The plot payload is a Flint `ChartAssemblyInput` — JSON by definition (see `flint.rs`). Building
 # it as a `serde_json::Value` is what lets every host (CLI, wasm, a future HTML writer) hand the
 # same bytes to the same stock chart compiler.
-serde_json = { version = "1", features = ["preserve_order"] }
-serde_yaml = "0.9.34"
+serde_json = { workspace = true, features = ["preserve_order"] }
+serde_norway = "0.9.42"
 
 # Browser-only: the WASM-emitter's host seam (`wasm_host`) calls into JS (`WebAssembly.instantiate`
 # the emitted kernel + run it) via wasm-bindgen. Native builds never compile that module, so this
 # dependency is wasm32-gated and keeps the native crate wasm-bindgen-free.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2"
+wasm-bindgen.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

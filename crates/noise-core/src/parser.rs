@@ -17,7 +17,11 @@ use crate::lexer::{tokenize, TokKind, Token};
 pub fn parse(src: &str) -> Result<Program> {
     let tokens = tokenize(src)?;
     let newlines = newline_flags(src, &tokens);
-    let mut p = Parser { tokens, newlines, pos: 0 };
+    let mut p = Parser {
+        tokens,
+        newlines,
+        pos: 0,
+    };
     let stmts = p.parse_stmts(&[TokKind::Eof])?;
     p.expect(TokKind::Eof)?;
     Ok(Program { stmts })
@@ -112,7 +116,10 @@ impl Parser {
                 }
             } else if !terminators.contains(self.peek()) && !self.newline_before() {
                 return Err(NoiseError::parse(
-                    format!("expected `;`, a line break, or end of block, found {:?}", self.peek()),
+                    format!(
+                        "expected `;`, a line break, or end of block, found {:?}",
+                        self.peek()
+                    ),
                     self.span(),
                 ));
             }
@@ -143,7 +150,10 @@ impl Parser {
                 self.bump(); // =
                 let rhs = self.parse_expr()?;
                 let span = Span::new(start, rhs.span.end);
-                return Ok(Spanned::new(Expr::Bind(BindKind::Assign, name, Box::new(rhs)), span));
+                return Ok(Spanned::new(
+                    Expr::Bind(BindKind::Assign, name, Box::new(rhs)),
+                    span,
+                ));
             }
             // `Ident ~[shape]? rhs` → a sample binding. This is sugar for `Ident = ~[shape]? rhs`:
             // we leave the `~` in place so the prefix parser builds the draw, then bind the result
@@ -153,7 +163,10 @@ impl Parser {
                 self.bump(); // ident — cursor now sits on `~`
                 let rhs = self.parse_bp(0)?;
                 let span = Span::new(start, rhs.span.end);
-                return Ok(Spanned::new(Expr::Bind(BindKind::Assign, name, Box::new(rhs)), span));
+                return Ok(Spanned::new(
+                    Expr::Bind(BindKind::Assign, name, Box::new(rhs)),
+                    span,
+                ));
             }
         }
         self.parse_bp(0)
@@ -213,13 +226,24 @@ impl Parser {
             BindKind::Sample
         } else {
             return Err(NoiseError::parse(
-                format!("expected `=` or `~` in function definition, found {:?}", self.peek()),
+                format!(
+                    "expected `=` or `~` in function definition, found {:?}",
+                    self.peek()
+                ),
                 self.span(),
             ));
         };
         let body = self.parse_expr()?;
         let span = Span::new(start, body.span.end);
-        Ok(Spanned::new(Expr::FnDef { kind, name, params, body: Box::new(body) }, span))
+        Ok(Spanned::new(
+            Expr::FnDef {
+                kind,
+                name,
+                params,
+                body: Box::new(body),
+            },
+            span,
+        ))
     }
 
     /// Precedence-climbing core for infix operators.
@@ -251,7 +275,10 @@ impl Parser {
                 let rhs = self.parse_bp(COND_RBP)?;
                 let span = Span::new(lhs.span.start, rhs.span.end);
                 lhs = Spanned::new(
-                    Expr::Cond { event: Box::new(lhs), given: Box::new(rhs) },
+                    Expr::Cond {
+                        event: Box::new(lhs),
+                        given: Box::new(rhs),
+                    },
                     span,
                 );
                 continue;
@@ -308,7 +335,13 @@ impl Parser {
                 };
                 let body = self.parse_bp(PREFIX_BP)?;
                 let span = Span::new(start, body.span.end);
-                Ok(Spanned::new(Expr::Sample { shape, body: Box::new(body) }, span))
+                Ok(Spanned::new(
+                    Expr::Sample {
+                        shape,
+                        body: Box::new(body),
+                    },
+                    span,
+                ))
             }
             _ => self.parse_postfix(),
         }
@@ -340,7 +373,11 @@ impl Parser {
                 self.bump();
                 Ok(Spanned::new(Expr::Str(s), tok.span))
             }
-            TokKind::Template { body, syntax, body_offset } => {
+            TokKind::Template {
+                body,
+                syntax,
+                body_offset,
+            } => {
                 self.bump();
                 let parts = parse_template_parts(&body, body_offset)?;
                 Ok(Spanned::new(Expr::Template { parts, syntax }, tok.span))
@@ -380,7 +417,10 @@ impl Parser {
                     let span = Span::new(tok.span.start, call_end);
                     Ok(Spanned::new(Expr::Call(name, args), span))
                 } else {
-                    Ok(Spanned::new(Expr::Ident(name), Span::new(tok.span.start, end)))
+                    Ok(Spanned::new(
+                        Expr::Ident(name),
+                        Span::new(tok.span.start, end),
+                    ))
                 }
             }
             TokKind::Use => {
@@ -515,7 +555,10 @@ impl Parser {
         let open = self.expect(TokKind::LBracket)?;
         if *self.peek() == TokKind::RBracket {
             let close = self.expect(TokKind::RBracket)?;
-            return Ok(Spanned::new(Expr::Array(Vec::new()), Span::new(open.span.start, close.span.end)));
+            return Ok(Spanned::new(
+                Expr::Array(Vec::new()),
+                Span::new(open.span.start, close.span.end),
+            ));
         }
         // `[for x in iter (if cond) { body }]` — a comprehension, detected by a leading `for`. It
         // mirrors the `for x in xs { body }` loop statement exactly, just wrapped in `[ ]` so the
@@ -553,7 +596,11 @@ impl Parser {
         let close = self.expect(TokKind::RBracket)?;
         let span = Span::new(start, close.span.end);
         Ok(Spanned::new(
-            Expr::Comprehension { body: Box::new(body), var, iter: Box::new(iter) },
+            Expr::Comprehension {
+                body: Box::new(body),
+                var,
+                iter: Box::new(iter),
+            },
             span,
         ))
     }
@@ -576,7 +623,11 @@ impl Parser {
         let body = self.parse_block()?;
         let span = Span::new(kw.span.start, body.span.end);
         Ok(Spanned::new(
-            Expr::For { var, iter: Box::new(iter), body: Box::new(body) },
+            Expr::For {
+                var,
+                iter: Box::new(iter),
+                body: Box::new(body),
+            },
             span,
         ))
     }
@@ -837,7 +888,11 @@ fn parse_expr_str(src: &str, base_offset: usize) -> Result<Spanned> {
     for t in &mut tokens {
         t.span = Span::new(t.span.start + base_offset, t.span.end + base_offset);
     }
-    let mut p = Parser { tokens, newlines, pos: 0 };
+    let mut p = Parser {
+        tokens,
+        newlines,
+        pos: 0,
+    };
     let e = p.parse_expr()?;
     p.expect(TokKind::Eof)?;
     Ok(e)
@@ -850,7 +905,11 @@ mod tests {
 
     fn parse_one(src: &str) -> Expr {
         let mut prog = parse(src).unwrap();
-        assert_eq!(prog.stmts.len(), 1, "expected exactly one statement in {src:?}");
+        assert_eq!(
+            prog.stmts.len(),
+            1,
+            "expected exactly one statement in {src:?}"
+        );
         prog.stmts.pop().unwrap().expr
     }
 
@@ -928,8 +987,20 @@ mod tests {
 
     #[test]
     fn function_definition_is_distinguished_from_a_call() {
-        assert!(matches!(parse_one("f(x) = x"), Expr::FnDef { kind: BindKind::Assign, .. }));
-        assert!(matches!(parse_one("g() ~ unif(0,1)"), Expr::FnDef { kind: BindKind::Sample, .. }));
+        assert!(matches!(
+            parse_one("f(x) = x"),
+            Expr::FnDef {
+                kind: BindKind::Assign,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_one("g() ~ unif(0,1)"),
+            Expr::FnDef {
+                kind: BindKind::Sample,
+                ..
+            }
+        ));
         // a bare `f(x)` (no following `=`/`~`) is a call expression, not a definition
         assert!(matches!(parse_one("f(x)"), Expr::Call(_, _)));
     }
@@ -946,29 +1017,56 @@ mod tests {
         // all-named → Named, keeps source order and names
         match parse_one("f(b: 2, a: 1)") {
             Expr::Call(_, CallArgs::Named(a)) => {
-                assert_eq!(a.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+                assert_eq!(
+                    a.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+                    ["b", "a"]
+                );
             }
             other => panic!("got {other:?}"),
         }
         // a `::` path in argument position is NOT mistaken for a named entry
-        assert!(matches!(parse_one("f(rand::pi)"), Expr::Call(_, CallArgs::Positional(_))));
+        assert!(matches!(
+            parse_one("f(rand::pi)"),
+            Expr::Call(_, CallArgs::Positional(_))
+        ));
     }
 
     #[test]
     fn mixed_and_duplicate_named_args_are_errors() {
         // positional then named
-        assert!(matches!(parse("f(1, b: 2)").unwrap_err().kind, ErrorKind::Parse(_)));
+        assert!(matches!(
+            parse("f(1, b: 2)").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
         // named then positional
-        assert!(matches!(parse("f(a: 1, 2)").unwrap_err().kind, ErrorKind::Parse(_)));
+        assert!(matches!(
+            parse("f(a: 1, 2)").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
         // duplicate name
-        assert!(matches!(parse("f(a: 1, a: 2)").unwrap_err().kind, ErrorKind::Parse(_)));
+        assert!(matches!(
+            parse("f(a: 1, a: 2)").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
     }
 
     #[test]
     fn parse_errors_are_typed_and_dont_panic() {
-        for src in ["3 +", "(1 + 2", "f(x = 3", "1 2", "f(1,) = 1", "[1, 2", "for in xs {}"] {
+        for src in [
+            "3 +",
+            "(1 + 2",
+            "f(x = 3",
+            "1 2",
+            "f(1,) = 1",
+            "[1, 2",
+            "for in xs {}",
+        ] {
             let err = parse(src).unwrap_err();
-            assert!(matches!(err.kind, ErrorKind::Parse(_)), "{src:?} -> {:?}", err.kind);
+            assert!(
+                matches!(err.kind, ErrorKind::Parse(_)),
+                "{src:?} -> {:?}",
+                err.kind
+            );
         }
     }
 
@@ -1017,7 +1115,10 @@ mod tests {
             other => panic!("got {other:?}"),
         }
         // `~[]` (empty shape) is a parse error
-        assert!(matches!(parse("xs ~[] unif(0, 1)").unwrap_err().kind, ErrorKind::Parse(_)));
+        assert!(matches!(
+            parse("xs ~[] unif(0, 1)").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
     }
 
     #[test]
@@ -1146,7 +1247,10 @@ mod tests {
     #[test]
     fn two_values_on_one_line_without_a_separator_is_still_an_error() {
         // `1 2` (same line, no `;`) must stay an error — the newline rule shouldn't mask it.
-        assert!(matches!(parse("1 2").unwrap_err().kind, ErrorKind::Parse(_)));
+        assert!(matches!(
+            parse("1 2").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
     }
 
     #[test]
@@ -1158,9 +1262,18 @@ mod tests {
         // `use module;`
         assert!(matches!(parse_one("use rand"), Expr::Use(m) if m == "rand"));
         // a path can be indexed/called like any primary: `vec::range(0, 3)[1]`
-        assert!(matches!(parse_one("rand::normal(0, 1)[0]"), Expr::Index(_, _)));
+        assert!(matches!(
+            parse_one("rand::normal(0, 1)[0]"),
+            Expr::Index(_, _)
+        ));
         // errors: dangling `::`, bad `use`
-        assert!(matches!(parse("rand::").unwrap_err().kind, ErrorKind::Parse(_)));
-        assert!(matches!(parse("use ;").unwrap_err().kind, ErrorKind::Parse(_)));
+        assert!(matches!(
+            parse("rand::").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
+        assert!(matches!(
+            parse("use ;").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
     }
 }

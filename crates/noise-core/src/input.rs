@@ -87,7 +87,10 @@ impl InputSpec {
         match (self.kind, self.default) {
             (InputKind::Bool, InputValue::Num(_)) => {
                 return Err(NoiseError::runtime(
-                    format!("input `{}` is a bool but its default is a number", self.name),
+                    format!(
+                        "input `{}` is a bool but its default is a number",
+                        self.name
+                    ),
                     span,
                 ))
             }

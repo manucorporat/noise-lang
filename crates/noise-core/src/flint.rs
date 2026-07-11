@@ -25,7 +25,9 @@
 
 use serde_json::{json, Value as J};
 
-use crate::introspect::{CorrMatrix, Dist1, Dist2, DistGrid, Explain, FanChart, Payload, Summary, ValueCard, View};
+use crate::introspect::{
+    CorrMatrix, Dist1, Dist2, DistGrid, Explain, FanChart, Payload, Summary, ValueCard, View,
+};
 
 /// The width, in px, every spec is authored against. A host that knows its real pixel width
 /// rescales `canvasSize` and keeps the aspect ratio — so this constant fixes *shape*, not size.
@@ -50,7 +52,11 @@ pub struct Plot {
 /// Translate a computed summary into its renderable form. Total: every payload maps to some title
 /// and text, and to zero or more charts.
 pub fn to_flint(s: &Summary) -> Plot {
-    Plot { title: title(s), text: text_card(s), charts: charts(s) }
+    Plot {
+        title: title(s),
+        text: text_card(s),
+        charts: charts(s),
+    }
 }
 
 // --- titles ------------------------------------------------------------------------------------
@@ -84,7 +90,12 @@ pub fn text_card(s: &Summary) -> String {
     let head = title(s);
     match (&s.payload, s.view) {
         (Payload::One(d), View::Samples) => {
-            let body = d.head.iter().map(|x| fmt_n(*x)).collect::<Vec<_>>().join(", ");
+            let body = d
+                .head
+                .iter()
+                .map(|x| fmt_n(*x))
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("{head}: [{body}]")
         }
         (Payload::One(d), _) if d.boolean => {
@@ -104,7 +115,12 @@ pub fn text_card(s: &Summary) -> String {
             fmt_n(d.q95),
         ),
         (Payload::Two(d), _) => {
-            format!("{head}: n={} corr={} cov={}", d.n, fmt_n(d.corr), fmt_n(d.cov))
+            format!(
+                "{head}: n={} corr={} cov={}",
+                d.n,
+                fmt_n(d.corr),
+                fmt_n(d.cov)
+            )
         }
         (Payload::Explain(e), _) => {
             if e.drivers.is_empty() {
@@ -138,7 +154,13 @@ pub fn text_card(s: &Summary) -> String {
             }
             let (lo, hi) = min_max(&g.mean);
             let kind = if g.is_series() { "vector" } else { "matrix" };
-            format!("{head}: {kind} {}×{} mean {} … {}", g.rows, g.cols, fmt_n(lo), fmt_n(hi))
+            format!(
+                "{head}: {kind} {}×{} mean {} … {}",
+                g.rows,
+                g.cols,
+                fmt_n(lo),
+                fmt_n(hi)
+            )
         }
         (Payload::CorrMatrix(c), _) => {
             // The diagonal is 1 by construction, so the informative number is the strongest
@@ -148,7 +170,11 @@ pub fn text_card(s: &Summary) -> String {
                 .filter(|(i, j)| i != j)
                 .map(|(i, j)| c.corr[i * c.n + j].abs())
                 .fold(0.0f64, f64::max);
-            format!("{head}: {n}×{n} max |corr| off-diagonal = {}", fmt_n(peak), n = c.n)
+            format!(
+                "{head}: {n}×{n} max |corr| off-diagonal = {}",
+                fmt_n(peak),
+                n = c.n
+            )
         }
         (Payload::Fan(c), _) => {
             if c.q50.is_empty() {
@@ -177,7 +203,11 @@ fn fmt_n(x: f64) -> String {
     }
     let s = format!("{x:.4}");
     let t = s.trim_end_matches('0').trim_end_matches('.');
-    if t.is_empty() || t == "-0" { "0".to_string() } else { t.to_string() }
+    if t.is_empty() || t == "-0" {
+        "0".to_string()
+    } else {
+        t.to_string()
+    }
 }
 
 fn min_max(xs: &[f64]) -> (f64, f64) {
@@ -190,7 +220,15 @@ fn min_max(xs: &[f64]) -> (f64, f64) {
 
 /// Assemble one `ChartAssemblyInput`. `semantic_types` is what makes Flint's design decisions for
 /// us: a `Count` axis gets integer ticks, a `Correlation` gets a diverging ramp pinned to ±1.
-fn chart(rows: Vec<J>, semantic: J, chart_type: &str, encodings: J, properties: J, w: f64, h: f64) -> J {
+fn chart(
+    rows: Vec<J>,
+    semantic: J,
+    chart_type: &str,
+    encodings: J,
+    properties: J,
+    w: f64,
+    h: f64,
+) -> J {
     let mut spec = json!({
         "chartType": chart_type,
         "encodings": encodings,
@@ -206,7 +244,11 @@ fn chart(rows: Vec<J>, semantic: J, chart_type: &str, encodings: J, properties: 
 /// (`hist(count)` would otherwise collide its value column with its `count` column.) Flint escapes
 /// and titles the raw name for us, so `path[51]` is a legal field, not a Vega-Lite nested lookup.
 fn field(label: &str, reserved: &[&str]) -> String {
-    let mut name = if label.is_empty() { "value".to_string() } else { label.to_string() };
+    let mut name = if label.is_empty() {
+        "value".to_string()
+    } else {
+        label.to_string()
+    };
     while reserved.contains(&name.as_str()) {
         name.push('_');
     }
@@ -230,7 +272,9 @@ fn no_zero_baseline() -> J {
 fn charts(s: &Summary) -> Vec<J> {
     match &s.payload {
         Payload::One(d) => dist1_chart(&s.label, d).into_iter().collect(),
-        Payload::Two(d) => dist2_chart(&s.label, s.label_b.as_deref().unwrap_or("y"), d).into_iter().collect(),
+        Payload::Two(d) => dist2_chart(&s.label, s.label_b.as_deref().unwrap_or("y"), d)
+            .into_iter()
+            .collect(),
         Payload::Explain(e) => explain_chart(e).into_iter().collect(),
         Payload::Value(v) => value_chart(&s.label, v).into_iter().collect(),
         Payload::Grid(g) => grid_charts(&s.label, g),
@@ -245,7 +289,10 @@ fn charts(s: &Summary) -> Vec<J> {
 fn dist1_chart(label: &str, d: &Dist1) -> Option<J> {
     if d.boolean {
         let p = d.mean;
-        let rows = vec![json!({ "outcome": "false", "share": 1.0 - p }), json!({ "outcome": "true", "share": p })];
+        let rows = vec![
+            json!({ "outcome": "false", "share": 1.0 - p }),
+            json!({ "outcome": "true", "share": p }),
+        ];
         return Some(chart(
             rows,
             json!({ "outcome": "Category", "share": percentage() }),
@@ -288,7 +335,11 @@ fn dist2_chart(label_a: &str, label_b: &str, d: &Dist2) -> Option<J> {
     }
     let a = field(label_a, &[]);
     let b = field(label_b, &[&a]);
-    let rows = d.points.iter().map(|&(x, y)| json!({ &a: x, &b: y })).collect();
+    let rows = d
+        .points
+        .iter()
+        .map(|&(x, y)| json!({ &a: x, &b: y }))
+        .collect();
     Some(chart(
         rows,
         json!({ &a: "Number", &b: "Number" }),
@@ -306,7 +357,11 @@ fn explain_chart(e: &Explain) -> Option<J> {
     if e.drivers.is_empty() {
         return None;
     }
-    let rows = e.drivers.iter().map(|d| json!({ "driver": d.name, "share": d.share })).collect();
+    let rows = e
+        .drivers
+        .iter()
+        .map(|d| json!({ "driver": d.name, "share": d.share }))
+        .collect();
     let height = (90.0 + 30.0 * e.drivers.len() as f64).clamp(140.0, 480.0);
     Some(chart(
         rows,
@@ -347,7 +402,9 @@ fn grid_charts(label: &str, g: &DistGrid) -> Vec<J> {
     let mean = field(label, &["index", "lo", "hi"]);
     let banded = g.sd.iter().any(|&s| s > 0.0);
     let line = chart(
-        (0..g.mean.len()).map(|i| json!({ "index": i, &mean: g.mean[i] })).collect(),
+        (0..g.mean.len())
+            .map(|i| json!({ "index": i, &mean: g.mean[i] }))
+            .collect(),
         json!({ "index": "Number", &mean: "Number" }),
         "Line Chart",
         json!({ "x": "index", "y": &mean }),
@@ -433,7 +490,9 @@ fn fan_charts(label: &str, c: &FanChart) -> Vec<J> {
     let median = field(label, &["index", "q05", "q25", "q75", "q95"]);
     let band = |lo_name: &str, hi_name: &str, lo: &[f64], hi: &[f64]| {
         chart(
-            (0..c.cols).map(|t| json!({ "index": t, lo_name: lo[t], hi_name: hi[t] })).collect(),
+            (0..c.cols)
+                .map(|t| json!({ "index": t, lo_name: lo[t], hi_name: hi[t] }))
+                .collect(),
             json!({ "index": "Number", lo_name: "Number", hi_name: "Number" }),
             "Range Area Chart",
             json!({ "x": "index", "y": lo_name, "y2": hi_name }),
@@ -446,7 +505,9 @@ fn fan_charts(label: &str, c: &FanChart) -> Vec<J> {
         band("q05", "q95", &c.q05, &c.q95),
         band("q25", "q75", &c.q25, &c.q75),
         chart(
-            (0..c.cols).map(|t| json!({ "index": t, &median: c.q50[t] })).collect(),
+            (0..c.cols)
+                .map(|t| json!({ "index": t, &median: c.q50[t] }))
+                .collect(),
             json!({ "index": "Number", &median: "Number" }),
             "Line Chart",
             json!({ "x": "index", "y": &median }),
@@ -463,27 +524,55 @@ mod tests {
     use crate::introspect::{Driver, Histogram, ValueCard};
 
     fn summary(view: View, label: &str, payload: Payload) -> Summary {
-        Summary { view, label: label.into(), label_b: None, payload }
+        Summary {
+            view,
+            label: label.into(),
+            label_b: None,
+            payload,
+        }
     }
 
     /// Every emitted spec must be a well-formed `ChartAssemblyInput`: inline data, a semantic type
     /// per encoded field, and a `chartType` Flint actually registers.
     fn assert_well_formed(spec: &J) {
-        let rows = spec["data"]["values"].as_array().expect("data.values must be an array");
+        let rows = spec["data"]["values"]
+            .as_array()
+            .expect("data.values must be an array");
         assert!(!rows.is_empty(), "a spec must carry its data inline");
-        let types = spec["semantic_types"].as_object().expect("semantic_types must be an object");
-        let encodings = spec["chart_spec"]["encodings"].as_object().expect("encodings");
+        let types = spec["semantic_types"]
+            .as_object()
+            .expect("semantic_types must be an object");
+        let encodings = spec["chart_spec"]["encodings"]
+            .as_object()
+            .expect("encodings");
         for (channel, f) in encodings {
-            let f = f.as_str().unwrap_or_else(|| panic!("encoding {channel} must name a field"));
-            assert!(types.contains_key(f), "field {f:?} is encoded but has no semantic type");
-            assert!(rows[0].get(f).is_some(), "field {f:?} is encoded but absent from the rows");
+            let f = f
+                .as_str()
+                .unwrap_or_else(|| panic!("encoding {channel} must name a field"));
+            assert!(
+                types.contains_key(f),
+                "field {f:?} is encoded but has no semantic type"
+            );
+            assert!(
+                rows[0].get(f).is_some(),
+                "field {f:?} is encoded but absent from the rows"
+            );
         }
         // Exactly the chart types this repo's renderer contract promises Flint knows.
         let ct = spec["chart_spec"]["chartType"].as_str().unwrap();
-        const REGISTERED: [&str; 6] =
-            ["Bar Chart", "Scatter Plot", "Line Chart", "Range Area Chart", "Heatmap", "Ranged Dot Plot"];
+        const REGISTERED: [&str; 6] = [
+            "Bar Chart",
+            "Scatter Plot",
+            "Line Chart",
+            "Range Area Chart",
+            "Heatmap",
+            "Ranged Dot Plot",
+        ];
         assert!(REGISTERED.contains(&ct), "unregistered chartType {ct:?}");
-        assert!(spec["chart_spec"]["canvasSize"]["width"].is_number(), "canvasSize");
+        assert!(
+            spec["chart_spec"]["canvasSize"]["width"].is_number(),
+            "canvasSize"
+        );
     }
 
     fn dist1(boolean: bool) -> Dist1 {
@@ -499,9 +588,17 @@ mod tests {
             q75: 3.0,
             q95: 3.5,
             hist: if boolean {
-                Histogram { lo: 0.0, hi: 1.0, bins: vec![580, 420] }
+                Histogram {
+                    lo: 0.0,
+                    hi: 1.0,
+                    bins: vec![580, 420],
+                }
             } else {
-                Histogram { lo: 0.0, hi: 4.0, bins: vec![100, 400, 400, 100] }
+                Histogram {
+                    lo: 0.0,
+                    hi: 4.0,
+                    bins: vec![100, 400, 400, 100],
+                }
             },
             head: vec![1.0, 2.0, 3.0],
             boolean,
@@ -524,7 +621,11 @@ mod tests {
         assert_eq!(rows[3]["st"], 3.5);
         assert_eq!(rows[0]["count"], 100);
         // The text card carries every number the bars encode.
-        assert!(p.text.contains("n=1000") && p.text.contains("mean=2") && p.text.contains("q95=3.5"), "{}", p.text);
+        assert!(
+            p.text.contains("n=1000") && p.text.contains("mean=2") && p.text.contains("q95=3.5"),
+            "{}",
+            p.text
+        );
     }
 
     /// An event's chart is two `Percentage` bars, not a 30-bin histogram of 0s and 1s.
@@ -560,23 +661,48 @@ mod tests {
         assert_eq!(p.charts.len(), 3);
         for c in &p.charts {
             assert_well_formed(c);
-            assert_eq!(c["chart_spec"]["encodings"]["x"], "index", "layers must share an x field");
+            assert_eq!(
+                c["chart_spec"]["encodings"]["x"], "index",
+                "layers must share an x field"
+            );
         }
         assert_eq!(p.charts[0]["chart_spec"]["chartType"], "Range Area Chart");
-        assert_eq!(p.charts[0]["chart_spec"]["encodings"]["y2"], "q95", "outer band first");
-        assert_eq!(p.charts[1]["chart_spec"]["encodings"]["y2"], "q75", "inner band second");
+        assert_eq!(
+            p.charts[0]["chart_spec"]["encodings"]["y2"], "q95",
+            "outer band first"
+        );
+        assert_eq!(
+            p.charts[1]["chart_spec"]["encodings"]["y2"], "q75",
+            "inner band second"
+        );
         assert_eq!(p.charts[2]["chart_spec"]["chartType"], "Line Chart");
         // The median's field is the variable's own name, so the merged y axis is titled `path`.
         assert_eq!(p.charts[2]["chart_spec"]["encodings"]["y"], "path");
         // A layered line must not anchor y at zero, or it fights the band's scale on merge.
-        assert_eq!(p.charts[2]["chart_spec"]["chartProperties"]["includeZero_y"], false);
-        assert!(p.text.contains("final q05=-2") && p.text.contains("q95=2"), "{}", p.text);
+        assert_eq!(
+            p.charts[2]["chart_spec"]["chartProperties"]["includeZero_y"],
+            false
+        );
+        assert!(
+            p.text.contains("final q05=-2") && p.text.contains("q95=2"),
+            "{}",
+            p.text
+        );
     }
 
     /// A check-mode fan carries no draws. It must degrade to a text card, not panic on `q50[0]`.
     #[test]
     fn an_empty_fan_emits_no_charts() {
-        let c = FanChart { cols: 3, n: 0, q05: vec![], q25: vec![], q50: vec![], q75: vec![], q95: vec![], mean: vec![] };
+        let c = FanChart {
+            cols: 3,
+            n: 0,
+            q05: vec![],
+            q25: vec![],
+            q50: vec![],
+            q75: vec![],
+            q95: vec![],
+            mean: vec![],
+        };
         let p = to_flint(&summary(View::Fan, "path", Payload::Fan(c)));
         assert!(p.charts.is_empty());
         assert_eq!(p.text, "fan(path): (empty)");
@@ -584,7 +710,10 @@ mod tests {
 
     #[test]
     fn a_correlation_matrix_is_a_heatmap_with_the_correlation_semantic_type() {
-        let c = CorrMatrix { n: 2, corr: vec![1.0, -0.6, -0.6, 1.0] };
+        let c = CorrMatrix {
+            n: 2,
+            corr: vec![1.0, -0.6, -0.6, 1.0],
+        };
         let p = to_flint(&summary(View::CorrMatrix, "v", Payload::CorrMatrix(c)));
         assert_eq!(p.title, "corr(v)");
         assert_well_formed(&p.charts[0]);
@@ -594,22 +723,39 @@ mod tests {
         // Indices are `Rank`, not `Category`: element 10 must sort after element 9, not after 1.
         assert_eq!(p.charts[0]["semantic_types"]["row"], "Rank");
         assert_eq!(p.charts[0]["data"]["values"].as_array().unwrap().len(), 4);
-        assert!(p.text.contains("2×2 max |corr| off-diagonal = 0.6"), "{}", p.text);
+        assert!(
+            p.text.contains("2×2 max |corr| off-diagonal = 0.6"),
+            "{}",
+            p.text
+        );
     }
 
     /// A vector with spread layers a ±sd band under its mean line; a deterministic one is just the
     /// line (there is no band to draw, and an invisible zero-width area would only add ink).
     #[test]
     fn a_series_bands_its_mean_only_when_it_has_spread() {
-        let spread = DistGrid { rows: 1, cols: 3, mean: vec![1.0, 2.0, 3.0], sd: vec![0.1, 0.2, 0.3] };
+        let spread = DistGrid {
+            rows: 1,
+            cols: 3,
+            mean: vec![1.0, 2.0, 3.0],
+            sd: vec![0.1, 0.2, 0.3],
+        };
         let p = to_flint(&summary(View::Grid, "path", Payload::Grid(spread)));
         assert_eq!(p.charts.len(), 2);
         assert_eq!(p.charts[0]["chart_spec"]["chartType"], "Range Area Chart");
         assert_eq!(p.charts[1]["chart_spec"]["chartType"], "Line Chart");
         assert_eq!(p.charts[0]["data"]["values"][0]["lo"], 0.9);
-        assert_eq!(p.charts[1]["chart_spec"]["chartProperties"]["includeZero_y"], false);
+        assert_eq!(
+            p.charts[1]["chart_spec"]["chartProperties"]["includeZero_y"],
+            false
+        );
 
-        let flat = DistGrid { rows: 1, cols: 3, mean: vec![1.0, 2.0, 3.0], sd: vec![0.0, 0.0, 0.0] };
+        let flat = DistGrid {
+            rows: 1,
+            cols: 3,
+            mean: vec![1.0, 2.0, 3.0],
+            sd: vec![0.0, 0.0, 0.0],
+        };
         let p = to_flint(&summary(View::Grid, "xs", Payload::Grid(flat)));
         assert_eq!(p.charts.len(), 1);
         assert_eq!(p.charts[0]["chart_spec"]["chartType"], "Line Chart");
@@ -619,7 +765,12 @@ mod tests {
 
     #[test]
     fn a_matrix_is_a_heatmap_of_cell_means() {
-        let g = DistGrid { rows: 2, cols: 3, mean: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], sd: vec![0.0; 6] };
+        let g = DistGrid {
+            rows: 2,
+            cols: 3,
+            mean: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            sd: vec![0.0; 6],
+        };
         let p = to_flint(&summary(View::Grid, "M", Payload::Grid(g)));
         assert_eq!(p.charts.len(), 1);
         assert_well_formed(&p.charts[0]);
@@ -633,20 +784,37 @@ mod tests {
     /// An estimate draws its 95% interval; an exact number has none, so it is text only.
     #[test]
     fn a_value_card_draws_an_interval_only_when_it_is_uncertain() {
-        let p = to_flint(&summary(View::Value, "pi", Payload::Value(ValueCard { val: 3.14, se: 0.01 })));
+        let p = to_flint(&summary(
+            View::Value,
+            "mu",
+            Payload::Value(ValueCard { val: 2.5, se: 0.01 }),
+        ));
         assert_eq!(p.charts.len(), 1);
         assert_well_formed(&p.charts[0]);
         assert_eq!(p.charts[0]["chart_spec"]["chartType"], "Ranged Dot Plot");
         // The value axis is the variable; the row axis is blank (no title, no tick, no legend).
-        assert_eq!(p.charts[0]["chart_spec"]["encodings"], json!({ "x": "pi", "y": " " }));
+        assert_eq!(
+            p.charts[0]["chart_spec"]["encodings"],
+            json!({ "x": "mu", "y": " " })
+        );
         let rows = p.charts[0]["data"]["values"].as_array().unwrap();
         assert_eq!(rows.len(), 3, "low · estimate · high");
-        assert_eq!(rows[0]["pi"], 3.14 - 1.96 * 0.01);
-        assert_eq!(rows[1]["pi"], 3.14);
-        assert_eq!(p.text, "pi: 3.14 ± 0.01 (95% CI 3.1204 … 3.1596)");
+        assert_eq!(rows[0]["mu"], 2.5 - 1.96 * 0.01);
+        assert_eq!(rows[1]["mu"], 2.5);
+        assert_eq!(p.text, "mu: 2.5 ± 0.01 (95% CI 2.4804 … 2.5196)");
 
-        let exact = to_flint(&summary(View::Value, "k", Payload::Value(ValueCard { val: 100.0, se: 0.0 })));
-        assert!(exact.charts.is_empty(), "an exact scalar has no interval to draw");
+        let exact = to_flint(&summary(
+            View::Value,
+            "k",
+            Payload::Value(ValueCard {
+                val: 100.0,
+                se: 0.0,
+            }),
+        ));
+        assert!(
+            exact.charts.is_empty(),
+            "an exact scalar has no interval to draw"
+        );
         assert_eq!(exact.text, "k: 100 (exact)");
     }
 
@@ -671,8 +839,14 @@ mod tests {
         let p = to_flint(&s);
         assert_eq!(p.title, "scatter(st, payoff)");
         assert_well_formed(&p.charts[0]);
-        assert_eq!(p.charts[0]["chart_spec"]["encodings"], json!({ "x": "st", "y": "payoff" }));
-        assert_eq!(p.charts[0]["data"]["values"][0], json!({ "st": 1.0, "payoff": 2.0 }));
+        assert_eq!(
+            p.charts[0]["chart_spec"]["encodings"],
+            json!({ "x": "st", "y": "payoff" })
+        );
+        assert_eq!(
+            p.charts[0]["data"]["values"][0],
+            json!({ "st": 1.0, "payoff": 2.0 })
+        );
     }
 
     /// `scatter(x, x)` must not collapse both axes onto one column and silently drop a series.
@@ -688,13 +862,24 @@ mod tests {
             sd_b: 1.0,
             points: vec![(1.0, 1.0)],
         };
-        let s = Summary { view: View::Scatter, label: "x".into(), label_b: Some("x".into()), payload: Payload::Two(d) };
+        let s = Summary {
+            view: View::Scatter,
+            label: "x".into(),
+            label_b: Some("x".into()),
+            payload: Payload::Two(d),
+        };
         let p = to_flint(&s);
-        assert_eq!(p.charts[0]["chart_spec"]["encodings"], json!({ "x": "x", "y": "x_" }));
+        assert_eq!(
+            p.charts[0]["chart_spec"]["encodings"],
+            json!({ "x": "x", "y": "x_" })
+        );
 
         // A variable literally named `count` must not overwrite the histogram's count column.
         let p = to_flint(&summary(View::Hist, "count", Payload::One(dist1(false))));
-        assert_eq!(p.charts[0]["chart_spec"]["encodings"], json!({ "x": "count_", "y": "count" }));
+        assert_eq!(
+            p.charts[0]["chart_spec"]["encodings"],
+            json!({ "x": "count_", "y": "count" })
+        );
         assert_well_formed(&p.charts[0]);
     }
 
@@ -703,19 +888,37 @@ mod tests {
         let e = Explain {
             sd: 2.0,
             drivers: vec![
-                Driver { name: "vol".into(), corr: -0.9, share: 0.7 },
-                Driver { name: "drift".into(), corr: 0.4, share: 0.3 },
+                Driver {
+                    name: "vol".into(),
+                    corr: -0.9,
+                    share: 0.7,
+                },
+                Driver {
+                    name: "drift".into(),
+                    corr: 0.4,
+                    share: 0.3,
+                },
             ],
         };
         let p = to_flint(&summary(View::Explain, "payoff", Payload::Explain(e)));
         assert_eq!(p.title, "explain(payoff)");
         assert_well_formed(&p.charts[0]);
         // x is the share, y the name ⇒ horizontal bars, strongest driver first (data order).
-        assert_eq!(p.charts[0]["chart_spec"]["encodings"], json!({ "x": "share", "y": "driver" }));
+        assert_eq!(
+            p.charts[0]["chart_spec"]["encodings"],
+            json!({ "x": "share", "y": "driver" })
+        );
         assert_eq!(p.charts[0]["data"]["values"][0]["driver"], "vol");
         assert!(p.text.contains("drivers: vol 70%, drift 30%"), "{}", p.text);
 
-        let none = to_flint(&summary(View::Explain, "y", Payload::Explain(Explain { sd: 1.0, drivers: vec![] })));
+        let none = to_flint(&summary(
+            View::Explain,
+            "y",
+            Payload::Explain(Explain {
+                sd: 1.0,
+                drivers: vec![],
+            }),
+        ));
         assert!(none.charts.is_empty());
         assert!(none.text.contains("no named upstream variables"));
     }

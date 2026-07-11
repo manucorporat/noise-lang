@@ -28,10 +28,10 @@ pub mod sampler;
 pub mod signal;
 pub mod simplify;
 pub mod stats;
+pub mod value;
 pub mod wasm_emit;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_host;
-pub mod value;
 
 pub use dist::RvId;
 pub use doc::Document;
@@ -162,7 +162,10 @@ mod tests {
         let v = eng.run(&with_prelude("unif(0, 1)")).unwrap();
         assert!(matches!(v, Value::Recipe(_)), "got {v:?}");
         assert_eq!(v.to_string(), "unif(0, 1)");
-        assert!(eng.graph().is_empty(), "a recipe must not touch the sample-DAG");
+        assert!(
+            eng.graph().is_empty(),
+            "a recipe must not touch the sample-DAG"
+        );
     }
 
     #[test]
@@ -174,7 +177,10 @@ mod tests {
         assert!(run("if unif(0,1) { 1 } else { 0 }").is_err());
         // and the message points the user at `~`
         let err = run("unif(0,1) + 3").unwrap_err();
-        assert!(err.to_string().contains('~'), "message should mention `~`: {err}");
+        assert!(
+            err.to_string().contains('~'),
+            "message should mention `~`: {err}"
+        );
     }
 
     #[test]
@@ -182,7 +188,10 @@ mod tests {
         // `Die = unif_int(1,6)` binds the recipe; each `~ Die` draws an INDEPENDENT die, so
         // P(a == b) = 1/6 (not 1 — they are not the same node).
         let p = run_num("Die = unif_int(1,6); a ~ Die; b ~ Die; P(a == b)");
-        assert!((p - 1.0 / 6.0).abs() < 5e-3, "P(a==b) over two draws of one recipe = {p}");
+        assert!(
+            (p - 1.0 / 6.0).abs() < 5e-3,
+            "P(a==b) over two draws of one recipe = {p}"
+        );
     }
 
     #[test]
@@ -243,7 +252,11 @@ mod tests {
         // X ~ unif(-1,1): mean 0, variance (2^2)/12 = 1/3.
         let m = moments_of("X ~ unif(-1,1); X", 1_000_000, 42);
         assert!((m.mean - 0.0).abs() < 3e-3, "mean = {}", m.mean);
-        assert!((m.variance - 1.0 / 3.0).abs() < 3e-3, "var = {}", m.variance);
+        assert!(
+            (m.variance - 1.0 / 3.0).abs() < 3e-3,
+            "var = {}",
+            m.variance
+        );
     }
 
     #[test]
@@ -251,7 +264,11 @@ mod tests {
         // D ~ unif(1,6): mean 3.5, variance 25/12 ≈ 2.08333.
         let m = moments_of("D ~ unif(1,6); D", 1_000_000, 7);
         assert!((m.mean - 3.5).abs() < 3e-3, "mean = {}", m.mean);
-        assert!((m.variance - 25.0 / 12.0).abs() < 5e-3, "var = {}", m.variance);
+        assert!(
+            (m.variance - 25.0 / 12.0).abs() < 5e-3,
+            "var = {}",
+            m.variance
+        );
     }
 
     #[test]
@@ -259,7 +276,11 @@ mod tests {
         // X ~ unif(-1,1); X^2: E=1/3, Var = 1/5 - 1/9 = 4/45 ≈ 0.08889.
         let m = moments_of("X ~ unif(-1,1); X ^ 2", 1_000_000, 42);
         assert!((m.mean - 1.0 / 3.0).abs() < 3e-3, "mean = {}", m.mean);
-        assert!((m.variance - 4.0 / 45.0).abs() < 3e-3, "var = {}", m.variance);
+        assert!(
+            (m.variance - 4.0 / 45.0).abs() < 3e-3,
+            "var = {}",
+            m.variance
+        );
     }
 
     #[test]
@@ -267,7 +288,11 @@ mod tests {
         // Y = 2*X + 3 for X~unif(0,1): mean 4, variance (2^2)/12 = 1/3.
         let m = moments_of("X ~ unif(0,1); 2*X + 3", 1_000_000, 1);
         assert!((m.mean - 4.0).abs() < 3e-3, "mean = {}", m.mean);
-        assert!((m.variance - 1.0 / 3.0).abs() < 3e-3, "var = {}", m.variance);
+        assert!(
+            (m.variance - 1.0 / 3.0).abs() < 3e-3,
+            "var = {}",
+            m.variance
+        );
     }
 
     #[test]
@@ -276,7 +301,11 @@ mod tests {
         // (Independent draws would give variance 1/6 — this proves CSE.)
         let m = moments_of("X ~ unif(0,1); X + X", 1_000_000, 99);
         assert!((m.mean - 1.0).abs() < 3e-3, "mean = {}", m.mean);
-        assert!((m.variance - 1.0 / 3.0).abs() < 3e-3, "var = {}", m.variance);
+        assert!(
+            (m.variance - 1.0 / 3.0).abs() < 3e-3,
+            "var = {}",
+            m.variance
+        );
 
         // X - X is exactly 0 everywhere.
         let m = moments_of("X ~ unif(0,1); X - X", 100_000, 99);
@@ -361,7 +390,11 @@ mod tests {
                 "{src:?} should be a Runtime error, got {:?}",
                 err.kind
             );
-            assert_ne!(err.span, crate::error::Span::default(), "{src:?} needs a real span");
+            assert_ne!(
+                err.span,
+                crate::error::Span::default(),
+                "{src:?} needs a real span"
+            );
         }
     }
 
@@ -396,10 +429,12 @@ mod tests {
         // p ~ unif(0,1); a,b ~ bernoulli(p): a and b share p but use fresh draws, so they are
         // correlated (independent only GIVEN p). For 0/1 indicators, E[a·b] = P(a && b) = E[p^2] =
         // 1/3, while P(a)·P(b) = 1/4, so the covariance is 1/3 − 1/4 = 1/12 > 0.
-        let cov = run_num(
-            "p ~ unif(0,1); a ~ bernoulli(p); b ~ bernoulli(p); P(a && b) - P(a)*P(b)",
+        let cov =
+            run_num("p ~ unif(0,1); a ~ bernoulli(p); b ~ bernoulli(p); P(a && b) - P(a)*P(b)");
+        assert!(
+            (cov - 1.0 / 12.0).abs() < 5e-3,
+            "cov = {cov} (expected 1/12)"
         );
-        assert!((cov - 1.0 / 12.0).abs() < 5e-3, "cov = {cov} (expected 1/12)");
     }
 
     #[test]
@@ -408,9 +443,7 @@ mod tests {
         let post = run_num("p ~ unif(0,1); k ~ bernoulli(p); E(p | k)");
         assert!((post - 2.0 / 3.0).abs() < 5e-3, "E(p | k) = {post}");
         // Observe 7 heads in 10 flips -> posterior mean of the bias = (7+1)/(10+2) = 8/12.
-        let post10 = run_num(
-            "q ~ unif(0,1); flips ~[10] bernoulli(q); E(q | count(flips) == 7)",
-        );
+        let post10 = run_num("q ~ unif(0,1); flips ~[10] bernoulli(q); E(q | count(flips) == 7)");
         assert!((post10 - 8.0 / 12.0).abs() < 1e-2, "E(q | 7/10) = {post10}");
     }
 
@@ -430,7 +463,11 @@ mod tests {
                 "{src:?} should be a Runtime error, got {:?}",
                 err.kind
             );
-            assert_ne!(err.span, crate::error::Span::default(), "{src:?} needs a real span");
+            assert_ne!(
+                err.span,
+                crate::error::Span::default(),
+                "{src:?} needs a real span"
+            );
         }
     }
 
@@ -473,7 +510,10 @@ mod tests {
         let mut eng = Engine::new();
         let v = eng.run("2*3+1").unwrap();
         assert_eq!(v, Value::Num(7.0));
-        assert!(eng.graph().is_empty(), "graph must stay empty for deterministic programs");
+        assert!(
+            eng.graph().is_empty(),
+            "graph must stay empty for deterministic programs"
+        );
     }
 
     // --- Phase 3: probability queries, discrete distributions, boolean ops ---
@@ -498,7 +538,10 @@ mod tests {
     fn pi_via_monte_carlo() {
         // The corrected example: π = 4·P(point in unit circle).
         let pi = run_num("X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1)");
-        assert!((pi - std::f64::consts::PI).abs() < 0.02, "pi estimate = {pi}");
+        assert!(
+            (pi - std::f64::consts::PI).abs() < 0.02,
+            "pi estimate = {pi}"
+        );
     }
 
     #[test]
@@ -535,7 +578,9 @@ mod tests {
         let rv = eng.run_rv(&with_prelude("D ~ unif_int(1,6); D")).unwrap();
         let draws = eng.sample(&rv, 50_000, 11).unwrap();
         assert!(
-            draws.iter().all(|&x| (1.0..=6.0).contains(&x) && x.fract() == 0.0),
+            draws
+                .iter()
+                .all(|&x| (1.0..=6.0).contains(&x) && x.fract() == 0.0),
             "unif_int(1,6) must yield integers in 1..=6"
         );
     }
@@ -580,11 +625,18 @@ mod tests {
         // (e.g. "3.141"/"3.142"), not a spurious "3.1416".
         let pi = display_of("X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1, 100000000)");
         assert_eq!(decimals(&pi), 3, "should propagate to 3 decimals, got {pi}");
-        assert!((pi.parse::<f64>().unwrap() - std::f64::consts::PI).abs() < 0.01, "pi = {pi}");
+        assert!(
+            (pi.parse::<f64>().unwrap() - std::f64::consts::PI).abs() < 0.01,
+            "pi = {pi}"
+        );
 
         // Default budget → larger error → coarser: 2 decimals ("3.14").
         let pi_coarse = display_of("X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1)");
-        assert_eq!(decimals(&pi_coarse), 2, "default budget should show 2 decimals, got {pi_coarse}");
+        assert_eq!(
+            decimals(&pi_coarse),
+            2,
+            "default budget should show 2 decimals, got {pi_coarse}"
+        );
         assert!(
             (pi_coarse.parse::<f64>().unwrap() - std::f64::consts::PI).abs() < 0.02,
             "pi_coarse = {pi_coarse}"
@@ -597,15 +649,24 @@ mod tests {
         // as the explicit count, but once, up front. At a small budget the standard error is wide,
         // so the estimate displays to few digits; bumping the budget reveals more.
         let coarse = display_of("engine::set_max_samples(1000); D ~ unif_int(1,6); P(D == 4)");
-        assert_eq!(coarse, "0.2", "1000 draws justifies one decimal, got {coarse}");
+        assert_eq!(
+            coarse, "0.2",
+            "1000 draws justifies one decimal, got {coarse}"
+        );
         let fine = display_of("engine::set_max_samples(100000000); D ~ unif_int(1,6); P(D == 4)");
-        assert!(fine.len() > 5, "1e8 draws should reveal ~4 digits, got {fine}");
+        assert!(
+            fine.len() > 5,
+            "1e8 draws should reveal ~4 digits, got {fine}"
+        );
 
         // An explicit per-call count still overrides the engine default (here: tighten back up
         // despite the coarse global setting).
         let overridden =
             display_of("engine::set_max_samples(1000); D ~ unif_int(1,6); P(D == 4, 100000000)");
-        assert!(overridden.len() > 5, "explicit count should override, got {overridden}");
+        assert!(
+            overridden.len() > 5,
+            "explicit count should override, got {overridden}"
+        );
     }
 
     #[test]
@@ -632,17 +693,28 @@ mod tests {
     #[test]
     fn engine_module_scoping_and_validation() {
         // Reachable both as a `mod::name` path and (with `use`) unqualified, like any module.
-        assert!(run_raw("engine::set_max_samples(50); use rand; X ~ unif(0,1); P(X < 0.5)").is_ok());
+        assert!(
+            run_raw("engine::set_max_samples(50); use rand; X ~ unif(0,1); P(X < 0.5)").is_ok()
+        );
         assert!(run_raw("use engine; set_max_samples(50); 1").is_ok());
         assert!(run_raw("use engine; set_max_opts(50); 1").is_ok());
         // Out of scope without a `use`/path, with a fix-it message naming the module.
         let err = run_raw("set_max_samples(50)").unwrap_err().to_string();
         assert!(err.contains("engine") && err.contains("use"), "{err}");
         let err_opts = run_raw("set_max_opts(50)").unwrap_err().to_string();
-        assert!(err_opts.contains("engine") && err_opts.contains("use"), "{err_opts}");
+        assert!(
+            err_opts.contains("engine") && err_opts.contains("use"),
+            "{err_opts}"
+        );
         // Both budgets must be at least 1.
-        assert!(run_raw("engine::set_max_samples(0)").unwrap_err().to_string().contains(">= 1"));
-        assert!(run_raw("engine::set_max_opts(0)").unwrap_err().to_string().contains(">= 1"));
+        assert!(run_raw("engine::set_max_samples(0)")
+            .unwrap_err()
+            .to_string()
+            .contains(">= 1"));
+        assert!(run_raw("engine::set_max_opts(0)")
+            .unwrap_err()
+            .to_string()
+            .contains(">= 1"));
     }
 
     #[test]
@@ -657,11 +729,15 @@ mod tests {
         // The placeholder probability stays in range, so it's safe flowing into a range-checked
         // constructor (this would error if `P` returned NaN or an out-of-[0,1] value).
         assert!(Engine::new()
-            .check(&format!("{prelude}X ~ normal(0,1); B ~ bernoulli(P(X < 0))"))
+            .check(&format!(
+                "{prelude}X ~ normal(0,1); B ~ bernoulli(P(X < 0))"
+            ))
             .is_ok());
 
         // `check` still surfaces parse, scope, and type errors the way `run` does.
-        assert!(Engine::new().check(&format!("{prelude}Y ~ normal(mu, 1)")).is_err());
+        assert!(Engine::new()
+            .check(&format!("{prelude}Y ~ normal(mu, 1)"))
+            .is_err());
         assert!(Engine::new().check("X ~ unif(0, 1").is_err());
         assert!(Engine::new()
             .check(&format!("{prelude}X ~ normal(0,1); P(X)"))
@@ -673,7 +749,11 @@ mod tests {
     #[test]
     fn if_over_rv_selects_per_lane() {
         // payoff = +10 with prob 1/6, -2 with prob 5/6 -> mean 0 exactly, variance 20.
-        let m = moments_of("D ~ unif_int(1,6); if D == 6 { 10 } else { 0 - 2 }", 1_000_000, 3);
+        let m = moments_of(
+            "D ~ unif_int(1,6); if D == 6 { 10 } else { 0 - 2 }",
+            1_000_000,
+            3,
+        );
         assert!(m.mean.abs() < 0.02, "mean = {}", m.mean);
         assert!((m.variance - 20.0).abs() < 0.2, "var = {}", m.variance);
     }
@@ -682,14 +762,19 @@ mod tests {
     fn if_branches_read_consistent_draws() {
         // if D == 6 { D } else { 0 } : the branch reuses the SAME per-lane draw of D,
         // so the result is 6 w.p. 1/6 and 0 otherwise -> mean 1.
-        let m = moments_of("D ~ unif_int(1,6); if D == 6 { D } else { 0 }", 1_000_000, 4);
+        let m = moments_of(
+            "D ~ unif_int(1,6); if D == 6 { D } else { 0 }",
+            1_000_000,
+            4,
+        );
         assert!((m.mean - 1.0).abs() < 0.02, "mean = {}", m.mean);
     }
 
     #[test]
     fn max_via_if() {
         // M = max(A, B) for two d6; P(M == 6) = 1 - (5/6)^2 = 11/36.
-        let p = run_num("A ~ unif_int(1,6); B ~ unif_int(1,6); P((if A > B { A } else { B }) == 6)");
+        let p =
+            run_num("A ~ unif_int(1,6); B ~ unif_int(1,6); P((if A > B { A } else { B }) == 6)");
         assert!((p - 11.0 / 36.0).abs() < 5e-3, "P(max==6) = {p}");
     }
 
@@ -714,8 +799,14 @@ mod tests {
     fn if_else_branches_on_a_probability() {
         // `P(...) > c` is a deterministic bool, so a normal if/else picks one branch — handy
         // for printing a verdict instead of a hardcoded message.
-        assert_eq!(num("D ~ unif_int(1,6); if P(D < 4) > 0.4 { 1 } else { 0 }"), 1.0);
-        assert_eq!(num("D ~ unif_int(1,6); if P(D == 6) > 0.5 { 1 } else { 0 }"), 0.0);
+        assert_eq!(
+            num("D ~ unif_int(1,6); if P(D < 4) > 0.4 { 1 } else { 0 }"),
+            1.0
+        );
+        assert_eq!(
+            num("D ~ unif_int(1,6); if P(D == 6) > 0.5 { 1 } else { 0 }"),
+            0.0
+        );
         // a print in a branch yields unit
         assert_eq!(
             run("if 1 < 2 { Print(\"yes\") } else { Print(\"no\") }").unwrap(),
@@ -781,7 +872,10 @@ mod tests {
         // zero-arg function (a thunk)
         assert_eq!(num("answer() = 42; answer() + 1"), 43.0);
         // functions may call other functions
-        assert_eq!(num("inc(x) = x + 1; twice(x) = inc(inc(x)); twice(10)"), 12.0);
+        assert_eq!(
+            num("inc(x) = x + 1; twice(x) = inc(inc(x)); twice(10)"),
+            12.0
+        );
     }
 
     #[test]
@@ -805,7 +899,9 @@ mod tests {
     #[test]
     fn named_argument_errors() {
         // unknown parameter name
-        let e = run("f(a, b) = a + b; f(a: 1, z: 2)").unwrap_err().to_string();
+        let e = run("f(a, b) = a + b; f(a: 1, z: 2)")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("no parameter named `z`"), "{e}");
         // a parameter left unbound
         let e = run("f(a, b) = a + b; f(a: 1)").unwrap_err().to_string();
@@ -820,10 +916,16 @@ mod tests {
         // With no host override, an input evaluates to its (clamped/snapped) default — the program
         // runs deterministically, no UI needed (PLAN-INPUTS §1).
         assert_eq!(num("n = input::real(min: 1, max: 100, default: 6); n"), 6.0);
-        assert_eq!(num("k = input::int(min: 0, max: 10, step: 2, default: 5); k"), 6.0); // snap 5→6
+        assert_eq!(
+            num("k = input::int(min: 0, max: 10, step: 2, default: 5); k"),
+            6.0
+        ); // snap 5→6
         assert!(boolean("b = input::bool(default: true); b"));
         // name inference: the LHS names the input, no explicit `name:` needed.
-        assert_eq!(num("sides = input::real(min: 2, max: 20, default: 6); sides * 2"), 12.0);
+        assert_eq!(
+            num("sides = input::real(min: 2, max: 20, default: 6); sides * 2"),
+            12.0
+        );
     }
 
     #[test]
@@ -831,20 +933,30 @@ mod tests {
         let mut e = Engine::new();
         e.set_input_overrides(vec![("n".into(), crate::input::InputValue::Num(250.0))]);
         // 250 clamps to max 100.
-        let v = e.run(&with_prelude("n = input::real(min: 1, max: 100, default: 6); n")).unwrap();
+        let v = e
+            .run(&with_prelude(
+                "n = input::real(min: 1, max: 100, default: 6); n",
+            ))
+            .unwrap();
         assert!(matches!(v, Value::Num(x) if x == 100.0), "got {v:?}");
     }
 
     #[test]
     fn input_errors() {
         // a standalone input with no name and no binding LHS
-        let e = run("input::real(min: 1, max: 10, default: 5)").unwrap_err().to_string();
+        let e = run("input::real(min: 1, max: 10, default: 5)")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("needs a name"), "{e}");
         // missing default
-        let e = run("n = input::real(min: 1, max: 10)").unwrap_err().to_string();
+        let e = run("n = input::real(min: 1, max: 10)")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("needs a `default`"), "{e}");
         // unknown field
-        let e = run("n = input::real(minn: 1, default: 5)").unwrap_err().to_string();
+        let e = run("n = input::real(minn: 1, default: 5)")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("no field `minn`"), "{e}");
         // unknown input type
         let e = run("n = input::color(default: 5)").unwrap_err().to_string();
@@ -900,7 +1012,11 @@ mod tests {
         // = 2*Var(d6) = 2*35/12 ≈ 5.833 (shared would be 4*35/12 ≈ 11.667).
         let m = moments_of("roll() ~ unif_int(1,6); roll() + roll()", 1_000_000, 12);
         assert!((m.mean - 7.0).abs() < 0.02, "mean = {}", m.mean);
-        assert!((m.variance - 2.0 * 35.0 / 12.0).abs() < 0.1, "var = {}", m.variance);
+        assert!(
+            (m.variance - 2.0 * 35.0 / 12.0).abs() < 0.1,
+            "var = {}",
+            m.variance
+        );
     }
 
     #[test]
@@ -908,7 +1024,7 @@ mod tests {
         assert!(run("f(x) = x; f(1, 2)").is_err()); // too many args
         assert!(run("f(x, y) = x; f(1)").is_err()); // too few args
         assert!(run("nope(1)").is_err()); // unknown function
-        // a recursive function with no base case is caught, not a stack overflow
+                                          // a recursive function with no base case is caught, not a stack overflow
         assert!(run("loop(x) = loop(x); loop(1)").is_err());
     }
 
@@ -923,7 +1039,10 @@ mod tests {
         let mut eng = Engine::new();
         let v = eng.run("sq(x) = x * x").unwrap();
         assert_eq!(v, Value::Unit);
-        assert!(eng.graph().is_empty(), "defining a function must not sample");
+        assert!(
+            eng.graph().is_empty(),
+            "defining a function must not sample"
+        );
     }
 
     // --- degenerate distributions (point masses) and parameter-domain errors ---
@@ -939,13 +1058,17 @@ mod tests {
     fn unif_int_degenerate_range_is_a_constant() {
         // unif_int(5,5) is a point mass at 5: P(==5) = 1 and every draw is exactly 5.
         assert_eq!(run_num("D ~ unif_int(5,5); P(D == 5)"), 1.0);
-        assert!(draws_of("D ~ unif_int(5,5); D", 5000, 7).iter().all(|&x| x == 5.0));
+        assert!(draws_of("D ~ unif_int(5,5); D", 5000, 7)
+            .iter()
+            .all(|&x| x == 5.0));
     }
 
     #[test]
     fn unif_degenerate_range_is_a_constant() {
         // unif(2,2) has zero span, so every draw is exactly 2.
-        assert!(draws_of("X ~ unif(2,2); X", 4096, 9).iter().all(|&x| x == 2.0));
+        assert!(draws_of("X ~ unif(2,2); X", 4096, 9)
+            .iter()
+            .all(|&x| x == 2.0));
     }
 
     #[test]
@@ -1067,8 +1190,10 @@ mod tests {
     fn normal_parameter_domain_and_recipe_display() {
         assert!(run("normal(0, -1)").is_err()); // sigma must be >= 0
         assert_eq!(display_of("normal(0, 1)"), "normal(0, 1)"); // undrawn recipe prints itself
-        // sigma = 0 is a degenerate point mass at mu.
-        assert!(draws_of("Z ~ normal(5, 0); Z", 2000, 4).iter().all(|&x| x == 5.0));
+                                                                // sigma = 0 is a degenerate point mass at mu.
+        assert!(draws_of("Z ~ normal(5, 0); Z", 2000, 4)
+            .iter()
+            .all(|&x| x == 5.0));
     }
 
     // --- more `rand` distributions: exp, poisson, geometric, and the `_int` family ---
@@ -1112,7 +1237,9 @@ mod tests {
         let p = run_num("G ~ geometric(0.25); P(G == 0)");
         assert!((p - 0.25).abs() < 3e-3, "P(G==0) = {p}");
         // p = 1 is a point mass at 0.
-        assert!(draws_of("G ~ geometric(1); G", 2000, 7).iter().all(|&x| x == 0.0));
+        assert!(draws_of("G ~ geometric(1); G", 2000, 7)
+            .iter()
+            .all(|&x| x == 0.0));
     }
 
     #[test]
@@ -1136,7 +1263,7 @@ mod tests {
         assert!(run("poisson(0)").is_err()); // lambda must be > 0
         assert!(run("geometric(0)").is_err()); // p must be > 0
         assert!(run("geometric(1.5)").is_err()); // p must be <= 1
-        // undrawn recipes print themselves
+                                                 // undrawn recipes print themselves
         assert_eq!(display_of("exponential(2)"), "exponential(2)");
         assert_eq!(display_of("poisson(3)"), "poisson(3)");
         assert_eq!(display_of("geometric(0.5)"), "geometric(0.5)");
@@ -1144,7 +1271,10 @@ mod tests {
         assert_eq!(display_of("exponential_int(2)"), "exponential_int(2)");
         // recipes bound with `=` stay undrawn; `~` draws independent copies
         let p = run_num("D = poisson(3); a ~ D; b ~ D; P(a == b && a == 0)");
-        assert!((p - (-3.0f64).exp().powi(2)).abs() < 3e-3, "P(a==b==0) = {p}");
+        assert!(
+            (p - (-3.0f64).exp().powi(2)).abs() < 3e-3,
+            "P(a==b==0) = {p}"
+        );
     }
 
     // --- Q(): distribution quantiles (companion to E/Var/P) ---
@@ -1209,7 +1339,9 @@ mod tests {
         assert!(!boolean("false || (1 > 2)"));
         assert!(boolean("!false"));
         // they are point masses: a `for`-accumulator over events works (the `any`/`all` shape).
-        assert!(boolean("acc = false; for x in [1 < 2, 3 < 4] { acc = acc || x }; acc"));
+        assert!(boolean(
+            "acc = false; for x in [1 < 2, 3 < 4] { acc = acc || x }; acc"
+        ));
         // `true`/`false` are reserved keywords, not identifiers.
         assert!(run("true = 5").is_err());
     }
@@ -1224,10 +1356,13 @@ mod tests {
         assert_eq!(run_num("E(true)"), 1.0); // E of a Bernoulli(1) point mass
         assert_eq!(run_num("E(false)"), 0.0);
         assert_eq!(run_num("Var(true)"), 0.0); // a point mass has zero variance
-        // E of an event equals its probability, whether it's a comparison, `&&`/`||`, or drawn.
+                                               // E of an event equals its probability, whether it's a comparison, `&&`/`||`, or drawn.
         let p = run_num("D ~ unif_int(1, 6); P(D > 3)");
         let e = run_num("D ~ unif_int(1, 6); E(D > 3)");
-        assert!((p - e).abs() < 1e-9 && (p - 0.5).abs() < 5e-3, "P={p} E={e}");
+        assert!(
+            (p - e).abs() < 1e-9 && (p - 0.5).abs() < 5e-3,
+            "P={p} E={e}"
+        );
         let pe = run_num("C ~ bernoulli(0.3); E(C)");
         assert!((pe - 0.3).abs() < 3e-3, "E(bernoulli 0.3) = {pe}");
     }
@@ -1252,8 +1387,8 @@ mod tests {
         assert!(run("[1, 2, 3][1.5]").is_err()); // non-integer index
         assert!(run("[1, 2, 3][0 - 1]").is_err()); // negative index
         assert!(run("5[0]").is_err()); // indexing a non-array
-        // A random-variable index is no longer an error — it's a per-lane gather (see
-        // `random_index_is_a_gather`). Gathering a matrix row into one lane is still rejected.
+                                       // A random-variable index is no longer an error — it's a per-lane gather (see
+                                       // `random_index_is_a_gather`). Gathering a matrix row into one lane is still rejected.
         assert!(run("X ~ unif_int(0, 1); [[1, 2], [3, 4]][X]").is_err());
     }
 
@@ -1294,7 +1429,9 @@ mod tests {
     #[test]
     fn empirical_draws_are_iid() {
         // two `~` draws resample independently: P(a == b) = Σ pᵢ² (0.5 for two equal atoms), not 1.
-        assert!((num("d = [0, 1]; a ~ empirical(d); b ~ empirical(d); P(a == b)") - 0.5).abs() < 0.01);
+        assert!(
+            (num("d = [0, 1]; a ~ empirical(d); b ~ empirical(d); P(a == b)") - 0.5).abs() < 0.01
+        );
         // a shaped draw is iid at every leaf — NOT one shared draw repeated (two iid coin values
         // sum to 1 half the time; a shared pair never would).
         assert!((num("xs ~[2] empirical([0, 1]); P(sum(xs) == 1)") - 0.5).abs() < 0.01);
@@ -1311,8 +1448,14 @@ mod tests {
         // data 0..19 in blocks of 5: the drawn series has the data's length, and inside a block
         // consecutive elements are consecutive data points (difference exactly 1, every lane).
         assert_eq!(num("s ~ block_bootstrap(0..20, 5); Len(s)"), 20.0);
-        assert_eq!(num("s ~ block_bootstrap(0..20, 5); P(s[1] - s[0] == 1)"), 1.0);
-        assert_eq!(num("s ~ block_bootstrap(0..20, 5); P(s[4] - s[3] == 1)"), 1.0);
+        assert_eq!(
+            num("s ~ block_bootstrap(0..20, 5); P(s[1] - s[0] == 1)"),
+            1.0
+        );
+        assert_eq!(
+            num("s ~ block_bootstrap(0..20, 5); P(s[4] - s[3] == 1)"),
+            1.0
+        );
         // across a block boundary the blocks are independent, so a +1 step is rare but possible:
         // start₁ == start₀ + 5, i.e. 11 of the 16² equally-likely start pairs ≈ 0.043.
         let p = num("s ~ block_bootstrap(0..20, 5); P(s[5] - s[4] == 1)");
@@ -1345,9 +1488,8 @@ mod tests {
     fn block_bootstrap_draws_are_independent() {
         // two `~` draws pick independent block starts: the first elements agree only when the
         // two starts collide (1/16 for data 0..19, b = 5).
-        let p = num(
-            "a ~ block_bootstrap(0..20, 5); b ~ block_bootstrap(0..20, 5); P(a[0] == b[0])",
-        );
+        let p =
+            num("a ~ block_bootstrap(0..20, 5); b ~ block_bootstrap(0..20, 5); P(a[0] == b[0])");
         assert!((p - 1.0 / 16.0).abs() < 0.01, "got {p}");
     }
 
@@ -1356,9 +1498,13 @@ mod tests {
         let e = run("X ~ empirical([])").unwrap_err().to_string();
         assert!(e.contains("non-empty"), "{e}");
         // elements must be constant numbers (flat): an RV or a nested array is rejected.
-        let e = run("Z ~ normal(0, 1); X ~ empirical([Z, 1])").unwrap_err().to_string();
+        let e = run("Z ~ normal(0, 1); X ~ empirical([Z, 1])")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("constant numbers"), "{e}");
-        let e = run("X ~ empirical([[1, 2], [3, 4]])").unwrap_err().to_string();
+        let e = run("X ~ empirical([[1, 2], [3, 4]])")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("constant numbers"), "{e}");
         // block_len must be an integer in 1..=Len(xs).
         for bad in ["0", "4", "1.5"] {
@@ -1378,13 +1524,25 @@ mod tests {
         let rets = "[0.004, -0.006, 0.012, 0.003, -0.002, 0.007, 0.001, -0.005, 0.008, 0.002, \
                      -0.012, -0.04, -0.018, -0.009, 0.011, 0.006, -0.003, 0.009, -0.001, 0.013, \
                      -0.007, 0.002, 0.01, -0.004]";
-        let diff = num(&format!("rets = {rets}; r ~ empirical(rets); E(r) - mean(rets)"));
-        assert!(diff.abs() < 0.001, "bootstrap mean off the sample mean by {diff}");
-        let p_crash = num(&format!("rets = {rets}; r ~ empirical(rets); P(r <= -0.04)"));
+        let diff = num(&format!(
+            "rets = {rets}; r ~ empirical(rets); E(r) - mean(rets)"
+        ));
+        assert!(
+            diff.abs() < 0.001,
+            "bootstrap mean off the sample mean by {diff}"
+        );
+        let p_crash = num(&format!(
+            "rets = {rets}; r ~ empirical(rets); P(r <= -0.04)"
+        ));
         assert!((p_crash - 1.0 / 24.0).abs() < 0.005, "got {p_crash}");
         // the first 5 elements of a block-5 series form one contiguous historical run, so
         // consecutive differences match some window of the data every lane (spot-check length).
-        assert_eq!(num(&format!("rets = {rets}; w ~ block_bootstrap(rets, 5); Len(w)")), 24.0);
+        assert_eq!(
+            num(&format!(
+                "rets = {rets}; w ~ block_bootstrap(rets, 5); Len(w)"
+            )),
+            24.0
+        );
     }
 
     #[test]
@@ -1409,7 +1567,7 @@ mod tests {
         assert_eq!(display_of("2..2"), "[]"); // empty
         assert_eq!(display_of("3..1"), "[]"); // a >= b
         assert!(run("0..2.5").is_err()); // non-integer bound
-        // bounds are full expressions: `1+1 .. 2*3` is `2..6`
+                                         // bounds are full expressions: `1+1 .. 2*3` is `2..6`
         assert_eq!(display_of("1 + 1 .. 2 * 3"), "[2, 3, 4, 5]");
         // a range over an undrawn distribution / non-number is an error
         assert!(run("0..unif(0, 1)").is_err());
@@ -1435,7 +1593,7 @@ mod tests {
         assert_eq!(num("dot([1, 2, 3], [4, 5, 6])"), 32.0);
         assert_eq!(num("normsq([3, 4])"), 25.0);
         assert_eq!(num("norm([3, 4])"), 5.0); // 3-4-5 triangle
-        // scaling a vector is just broadcast multiplication (no `scale` builtin needed)
+                                              // scaling a vector is just broadcast multiplication (no `scale` builtin needed)
         assert_eq!(display_of("[1, 2, 3] * 2"), "[2, 4, 6]");
         // vector add/sub are the elementwise `+`/`-` operators
         assert_eq!(display_of("[1, 2] + [3, 4]"), "[4, 6]");
@@ -1454,8 +1612,11 @@ mod tests {
         assert_eq!(display_of("zeros(2)"), "[0, 0]");
         assert_eq!(display_of("iota(4)"), "[0, 1, 2, 3]");
         assert_eq!(display_of("iota(4)"), display_of("0..4")); // iota == 0..n
-        // transpose swaps rows and columns
-        assert_eq!(display_of("transpose([[1, 2, 3], [4, 5, 6]])"), "[[1, 4], [2, 5], [3, 6]]");
+                                                               // transpose swaps rows and columns
+        assert_eq!(
+            display_of("transpose([[1, 2, 3], [4, 5, 6]])"),
+            "[[1, 4], [2, 5], [3, 6]]"
+        );
         assert_eq!(display_of("transpose([])"), "[]");
         // transpose is an involution on a square matrix
         assert_eq!(
@@ -1476,7 +1637,7 @@ mod tests {
             display_of("[[1, 2], [3, 4]] @ [[5, 6], [7, 8]]"),
             "[[19, 22], [43, 50]]"
         ); // mat·mat
-        // `@` binds like `*`, so `1 + M @ v` is `1 + (M @ v)`.
+           // `@` binds like `*`, so `1 + M @ v` is `1 + (M @ v)`.
         assert_eq!(display_of("1 + [[1, 2], [3, 4]] @ [1, 1]"), "[4, 8]");
         // It is NOT elementwise `*`, which broadcasts the row by the scalar lane.
         assert_eq!(display_of("[[1, 2], [3, 4]] * [1, 1]"), "[[1, 2], [3, 4]]");
@@ -1500,11 +1661,12 @@ mod tests {
         assert!((num("mse([1, 2, 3], [1, 2, 5])") - 4.0 / 3.0).abs() < 1e-12);
         assert_eq!(num("mse([5, 5], [5, 5])"), 0.0); // identical signals
         assert!(run("mse([1, 2], [1, 2, 3])").is_err()); // length mismatch
-        // mse equals the noise power of an additive channel: received = signal + noise.
-        let p = run_num(
-            "sig = ones(8); noise ~[8] normal(0, 2); E(mse(sig + noise, sig))",
+                                                         // mse equals the noise power of an additive channel: received = signal + noise.
+        let p = run_num("sig = ones(8); noise ~[8] normal(0, 2); E(mse(sig + noise, sig))");
+        assert!(
+            (p - 4.0).abs() < 0.1,
+            "additive-noise MSE = {p} (want sigma^2 = 4)"
         );
-        assert!((p - 4.0).abs() < 0.1, "additive-noise MSE = {p} (want sigma^2 = 4)");
     }
 
     #[test]
@@ -1539,11 +1701,17 @@ mod tests {
             display_of("a = sample(sine(3), 16); b = sample(sine(7), 16); a + b")
         );
         // math::exp defers into a signal (the deterministic FM building block).
-        assert_eq!(run("use math; exp(0.5 * sine(3))").unwrap().type_name(), "signal");
+        assert_eq!(
+            run("use math; exp(0.5 * sine(3))").unwrap().type_name(),
+            "signal"
+        );
         let e0 = run_num("use math; sample(exp(0.5 * sine(3)), 4)[0]");
         assert!((e0 - 1.0).abs() < 1e-12, "exp(0.5·sin(0)) = {e0} (want 1)");
         // prefix negation defers as well.
-        assert_eq!(display_of("sample(-sine(4), 4)"), display_of("0 - sine(4, 4)"));
+        assert_eq!(
+            display_of("sample(-sine(4), 4)"),
+            display_of("0 - sine(4, 4)")
+        );
         assert!(run("sample(5, 8)").is_err()); // sample needs a signal
     }
 
@@ -1567,13 +1735,25 @@ mod tests {
         let white = run_num(&format!("{corr} w ~[200] noise_white(1); c(w)"));
         let ou = run_num(&format!("{corr} w ~[200] noise_ou(1, 8); c(w)"));
         let brown = run_num(&format!("{corr} w ~[200] noise_brown(1); c(w)"));
-        assert!(white.abs() < 0.05, "white neighbor corr = {white} (want ~0)");
-        assert!((ou - (-1.0f64 / 8.0).exp()).abs() < 0.05, "OU corr = {ou} (want exp(-1/8))");
+        assert!(
+            white.abs() < 0.05,
+            "white neighbor corr = {white} (want ~0)"
+        );
+        assert!(
+            (ou - (-1.0f64 / 8.0).exp()).abs() < 0.05,
+            "OU corr = {ou} (want exp(-1/8))"
+        );
         assert!(brown > 0.9, "brown neighbor corr = {brown} (want ~1)");
-        assert!(white < ou && ou < brown, "color should redden: {white} < {ou} < {brown}");
+        assert!(
+            white < ou && ou < brown,
+            "color should redden: {white} < {ou} < {brown}"
+        );
         // an UNDRAWN generator in arithmetic or `sample` is the recipe error, pointing at `~`.
         let e = run("noise_pink(0.5) * 2").unwrap_err().to_string();
-        assert!(e.contains("undrawn distribution") && e.contains('~'), "got: {e}");
+        assert!(
+            e.contains("undrawn distribution") && e.contains('~'),
+            "got: {e}"
+        );
         let e = run("sample(noise_white(1), 8)").unwrap_err().to_string();
         assert!(e.contains("undrawn distribution"), "got: {e}");
         // bad params are still errors.
@@ -1590,7 +1770,10 @@ mod tests {
             "static ~ noise_white(1); a = sample(static, 4); b = sample(static, 4); \
              Var(a[0] - b[0], 20000)",
         );
-        assert!(v.abs() < 1e-9, "same realization must cancel exactly, got Var = {v}");
+        assert!(
+            v.abs() < 1e-9,
+            "same realization must cancel exactly, got Var = {v}"
+        );
         // …and `static - static` is a zero signal, not "two samples".
         let z = run_num("static ~ noise_white(1); Var(sample(static - static, 8)[0], 20000)");
         assert!(z.abs() < 1e-12, "static - static = {z} (want exactly 0)");
@@ -1599,19 +1782,26 @@ mod tests {
         let e = run("static ~ noise_white(1); a = sample(static, 8); sample(static, 16)")
             .unwrap_err()
             .to_string();
-        assert!(e.contains("realized at length 8") && e.contains("16"), "got: {e}");
+        assert!(
+            e.contains("realized at length 8") && e.contains("16"),
+            "got: {e}"
+        );
         // A drawn realization composes lazily: signal arithmetic over it defers, and reducers
         // see the same noise both times.
         let v = run_num(
             "static ~ noise_white(1); rx = 2 * static; \
              a = sample(rx, 4); b = sample(rx, 4); Var(a[2] - b[2], 20000)",
         );
-        assert!(v.abs() < 1e-9, "derived signals share the realization, got Var = {v}");
-        // An `=`-bound generator stays a recipe: each `~` draw of it is independent.
-        let v = run_num(
-            "G = noise_white(1); x ~[4] G; y ~[4] G; Var(x[0] - y[0], 60000)",
+        assert!(
+            v.abs() < 1e-9,
+            "derived signals share the realization, got Var = {v}"
         );
-        assert!((v - 2.0).abs() < 0.15, "independent draws should give Var 2, got {v}");
+        // An `=`-bound generator stays a recipe: each `~` draw of it is independent.
+        let v = run_num("G = noise_white(1); x ~[4] G; y ~[4] G; Var(x[0] - y[0], 60000)");
+        assert!(
+            (v - 2.0).abs() < 0.15,
+            "independent draws should give Var 2, got {v}"
+        );
     }
 
     #[test]
@@ -1630,15 +1820,11 @@ mod tests {
         );
         // …and `engine::set_resolution(N)` changes what reducers use (the realization pins at 8,
         // so re-rendering at 256 is now the length clash).
-        let ok = run(
-            "engine::set_resolution(8); static ~ noise_white(1); \
-             x = E(mean(static), 100); Len(sample(static, 8))",
-        );
+        let ok = run("engine::set_resolution(8); static ~ noise_white(1); \
+             x = E(mean(static), 100); Len(sample(static, 8))");
         assert_eq!(ok.unwrap(), Value::Num(8.0));
-        let e = run(
-            "engine::set_resolution(8); static ~ noise_white(1); \
-             x = E(mean(static), 100); sample(static, 256)",
-        )
+        let e = run("engine::set_resolution(8); static ~ noise_white(1); \
+             x = E(mean(static), 100); sample(static, 256)")
         .unwrap_err()
         .to_string();
         assert!(e.contains("realized at length 8"), "got: {e}");
@@ -1655,16 +1841,24 @@ mod tests {
         // sample of a complex signal → an array of complex, channels rendered consistently.
         assert_eq!(num("Len(sample(sine(3) + math::i * sine(7), 8))"), 8.0);
         let im1 = run_num("im(sample(sine(2) + math::i, 4)[1])");
-        assert!((im1 - 1.0).abs() < 1e-12, "constant im channel = {im1} (want 1)");
+        assert!(
+            (im1 - 1.0).abs() < 1e-12,
+            "constant im channel = {im1} (want 1)"
+        );
         // abs/arg of a complex signal stay lazy and demodulate correctly:
         // |e^{i·θ(t)}| = 1 and arg(e^{i·θ(t)}) = θ(t) for a small angle.
-        assert_eq!(run("abs(exp(i * 0.3 * sine(3)))").unwrap().type_name(), "signal");
+        assert_eq!(
+            run("abs(exp(i * 0.3 * sine(3)))").unwrap().type_name(),
+            "signal"
+        );
         let m = run_num("mse(arg(exp(i * 0.3 * sine(3))), 0.3 * sine(3))");
         assert!(m < 1e-18, "lossless FM round-trip, got mse = {m}");
         let a = run_num("mean(abs(exp(i * 0.3 * sine(3))))");
         assert!((a - 1.0).abs() < 1e-12, "unit carrier magnitude, got {a}");
         // plotting a complex signal is a teaching error (no single trace).
-        let e = run("plot::line(sine(3) + math::i * sine(7))").unwrap_err().to_string();
+        let e = run("plot::line(sine(3) + math::i * sine(7))")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("no single trace"), "got: {e}");
     }
 
@@ -1673,19 +1867,28 @@ mod tests {
         // noise_white_complex(σ) is undrawn like the rest; `~` draws a lazy complex realization.
         assert_eq!(run("noise_white_complex(1)").unwrap().type_name(), "noise");
         assert!(run("noise_white_complex(1) + math::i").is_err());
-        assert_eq!(run("z ~ noise_white_complex(1); z").unwrap().type_name(), "complex");
+        assert_eq!(
+            run("z ~ noise_white_complex(1); z").unwrap().type_name(),
+            "complex"
+        );
         // Total-power convention matches rand::normal_complex: E|z|² = σ² (σ = 2 ⇒ 4),
         // split evenly across the quadratures.
         let p = run_num("z ~[64] noise_white_complex(2); E(normsq(z) / 64, 20000)");
         assert!((p - 4.0).abs() < 0.2, "E|z|² = {p} (want σ² = 4)");
         let re_var = run_num("z ~[8] noise_white_complex(2); Var(re(z[0]), 40000)");
-        assert!((re_var - 2.0).abs() < 0.15, "per-quadrature var = {re_var} (want σ²/2 = 2)");
+        assert!(
+            (re_var - 2.0).abs() < 0.15,
+            "per-quadrature var = {re_var} (want σ²/2 = 2)"
+        );
         // ONE realization: both channels re-render consistently across two samples.
         let v = run_num(
             "z ~ noise_white_complex(1); a = sample(z, 4); b = sample(z, 4); \
              Var(re(a[0]) - re(b[0]) + im(a[1]) - im(b[1]), 20000)",
         );
-        assert!(v.abs() < 1e-9, "complex realization must be shared, got Var = {v}");
+        assert!(
+            v.abs() < 1e-9,
+            "complex realization must be shared, got Var = {v}"
+        );
     }
 
     #[test]
@@ -1733,9 +1936,15 @@ mod tests {
         // Nyquist-Shannon: a freq-7 wave needs > 2*7 = 14 samples. Undersampled at 10 it aliases to
         // the freq-3 wave (7 folds to 10-7 = 3) — identical samples, mse 0. Oversampled, they differ.
         let aliased = num("mse(sample(cosine(7), 10), sample(cosine(3), 10))");
-        assert!(aliased < 1e-12, "undersampled should alias (mse 0), got {aliased}");
+        assert!(
+            aliased < 1e-12,
+            "undersampled should alias (mse 0), got {aliased}"
+        );
         let resolved = num("mse(sample(cosine(7), 64), sample(cosine(3), 64))");
-        assert!(resolved > 0.5, "oversampled should distinguish them, got {resolved}");
+        assert!(
+            resolved > 0.5,
+            "oversampled should distinguish them, got {resolved}"
+        );
     }
 
     #[test]
@@ -1745,9 +1954,12 @@ mod tests {
         assert!((num("sin(pi / 2)") - 1.0).abs() < 1e-12);
         assert!((num("atan(1) * 4") - std::f64::consts::PI).abs() < 1e-12);
         assert_eq!(display_of("cos([0, 0])"), "[1, 1]"); // maps over an array
-        // E[cos(X)] for X ~ N(0,1) is exp(-1/2) — proves cos lifts over a random variable.
+                                                         // E[cos(X)] for X ~ N(0,1) is exp(-1/2) — proves cos lifts over a random variable.
         let m = run_num("X ~ normal(0, 1); E(cos(X))");
-        assert!((m - (-0.5f64).exp()).abs() < 3e-3, "E[cos(X)] = {m} (want e^-0.5)");
+        assert!(
+            (m - (-0.5f64).exp()).abs() < 3e-3,
+            "E[cos(X)] = {m} (want e^-0.5)"
+        );
         // `sign` is a ufunc too: scalar -1/0/+1, maps over arrays, and lifts over RVs.
         assert_eq!(num("sign(3.2)"), 1.0);
         assert_eq!(num("sign(0 - 7)"), -1.0);
@@ -1780,7 +1992,10 @@ mod tests {
         // Lognormal mean: X ~ N(0,1) → E[e^X] = e^{1/2} (the PLAN-FINANCE F1 unlock).
         let m = run_num("X ~ normal(0, 1); E(exp(X))");
         let want = (0.5f64).exp();
-        assert!((m - want).abs() < 3e-2 * want, "E[e^X] = {m} (want e^0.5 = {want})");
+        assert!(
+            (m - want).abs() < 3e-2 * want,
+            "E[e^X] = {m} (want e^0.5 = {want})"
+        );
         // E[ln U] over U(0,1) = -1.
         let l = run_num("U ~ unif(0, 1); E(log(U))");
         assert!((l + 1.0).abs() < 1e-2, "E[ln U] = {l} (want -1)");
@@ -1798,13 +2013,22 @@ mod tests {
         assert!((p - 0.5).abs() < 3e-3, "P(log X == log X) = {p} (want 0.5)");
         // E[ln|X|] for X ~ N(0,1) = -(γ + ln 2)/2 ≈ -0.6352 — finite despite the |X| → 0 lanes.
         let la = run_num("X ~ normal(0, 1); E(log(abs(X)))");
-        assert!((la + 0.6352).abs() < 2e-2, "E[ln|X|] = {la} (want ≈ -0.6352)");
+        assert!(
+            (la + 0.6352).abs() < 2e-2,
+            "E[ln|X|] = {la} (want ≈ -0.6352)"
+        );
         // exp/log map elementwise over an *array of RVs*: E[Σₖ e^{Xₖ}] = 3·e^{1/2}.
         let a = run_num("xs ~[3] normal(0, 1); E(sum(exp(xs)))");
-        assert!((a - 3.0 * (0.5f64).exp()).abs() < 0.15, "E[Σ e^X] = {a} (want 3·e^0.5)");
+        assert!(
+            (a - 3.0 * (0.5f64).exp()).abs() < 0.15,
+            "E[Σ e^X] = {a} (want 3·e^0.5)"
+        );
         // A *noisy lazy signal* defers exp into its tree and lifts per lane at materialization.
         let sg = run_num("static ~ noise_white(1); E(mean(sample(exp(static), 16)))");
-        assert!((sg - (0.5f64).exp()).abs() < 0.05, "E[mean e^noise] = {sg} (want e^0.5)");
+        assert!(
+            (sg - (0.5f64).exp()).abs() < 0.05,
+            "E[mean e^noise] = {sg} (want e^0.5)"
+        );
     }
 
     #[test]
@@ -1820,7 +2044,10 @@ mod tests {
         let analytic = |f: f64| 0.6 * (1.0 + f).ln() + 0.4 * (1.0 - f).ln();
         for f in [0.1, 0.2, 0.3] {
             let (got, want) = (growth(f), analytic(f));
-            assert!((got - want).abs() < 2e-3, "E[log g] at f={f}: {got} (want {want})");
+            assert!(
+                (got - want).abs() < 2e-3,
+                "E[log g] at f={f}: {got} (want {want})"
+            );
         }
         // The Kelly point beats both neighbours (analytic gaps ≈ 5e-3 >> MC noise).
         assert!(growth(0.2) > growth(0.1) && growth(0.2) > growth(0.3));
@@ -1833,7 +2060,10 @@ mod tests {
         assert_eq!(display_of("[2, 4, 6] / 2"), "[1, 2, 3]");
         assert_eq!(display_of("[1, 2, 3] ^ 2"), "[1, 4, 9]");
         // nested: an array of arrays broadcasts recursively ([I,Q] + [nI,nQ]).
-        assert_eq!(display_of("[[1, 2], [3, 4]] + [[10, 20], [30, 40]]"), "[[11, 22], [33, 44]]");
+        assert_eq!(
+            display_of("[[1, 2], [3, 4]] + [[10, 20], [30, 40]]"),
+            "[[11, 22], [33, 44]]"
+        );
         assert!(run("[1, 2] + [1, 2, 3]").is_err()); // length mismatch
     }
 
@@ -1856,7 +2086,10 @@ mod tests {
         let fm = run_num(&format!(
             "{lib} E(mse(fm_demod(fm_mod(msg, dev) + static, dev), msg), 30000)"
         ));
-        assert!((am - 0.09).abs() < 0.02, "AM error = {am} (want ~ sigma^2 = 0.09)");
+        assert!(
+            (am - 0.09).abs() < 0.02,
+            "AM error = {am} (want ~ sigma^2 = 0.09)"
+        );
         // FM should be several times cleaner for the same static (advantage grows with deviation).
         assert!(fm < am * 0.5, "FM error {fm} should be << AM error {am}");
     }
@@ -1867,7 +2100,10 @@ mod tests {
         // ||Pi x|| = ||x|| = 1 (the mean is exactly 1, hence a tight tolerance at tiny N).
         let nrm =
             run_num("d = 8; x = normalize(ones(d)); Pi ~ rotation(d); E(normsq(Pi @ x), 100)");
-        assert!((nrm - 1.0).abs() < 1e-9, "||Pi x||^2 = {nrm}, want exactly 1");
+        assert!(
+            (nrm - 1.0).abs() < 1e-9,
+            "||Pi x||^2 = {nrm}, want exactly 1"
+        );
         // And it round-trips: Pi^T Pi x = x (same Pi reused, so transpose is the inverse).
         let rt = run_num(
             "d = 8; Pi ~ rotation(d); x = normalize(iota(d)); \
@@ -1887,13 +2123,19 @@ mod tests {
             "d = 6; x = normalize(ones(d)); Rs ~[2] rotation(d); \
              E(normsq(Rs[0] @ x - Rs[1] @ x), 2000)",
         );
-        assert!(spread > 0.1, "two independent rotations should differ, got spread {spread}");
+        assert!(
+            spread > 0.1,
+            "two independent rotations should differ, got spread {spread}"
+        );
     }
 
     #[test]
     fn quantize_snaps_to_nearest_centroid() {
         // Each coordinate snaps to its nearest codebook entry; cell boundaries are the midpoints.
-        assert_eq!(display_of("quantize([-2, -0.1, 0.1, 2], [-1, 1])"), "[-1, -1, 1, 1]");
+        assert_eq!(
+            display_of("quantize([-2, -0.1, 0.1, 2], [-1, 1])"),
+            "[-1, -1, 1, 1]"
+        );
         assert_eq!(display_of("quantize([0.4, 0.6], [0, 1])"), "[0, 1]"); // midpoint at 0.5
         assert_eq!(display_of("quantize([5, -5], [0])"), "[0, 0]"); // single-level codebook
         assert!(run("quantize([1], [])").is_err()); // empty codebook
@@ -1915,17 +2157,26 @@ mod tests {
                              * dot(y, transpose(S) @ sign(S @ r)); ";
         // Algorithm 1's distortion table, b=1 entry: D_mse ~ 0.36.
         let dmse = run_num(&format!("{common} E(normsq(x - mse), 12000)"));
-        assert!((dmse - 0.36).abs() < 0.05, "D_mse(b=1) = {dmse}, want ~0.36");
+        assert!(
+            (dmse - 0.36).abs() < 0.05,
+            "D_mse(b=1) = {dmse}, want ~0.36"
+        );
         // The MSE quantizer is biased by 2/pi; the two-stage prod estimate is unbiased.
         let mse_ratio = run_num(&format!("{common} E(dot(y, mse) / t, 12000)"));
         let prod_ratio = run_num(&format!("{common} E(prod / t, 12000)"));
-        assert!((mse_ratio - 2.0 / std::f64::consts::PI).abs() < 0.05, "MSE ratio = {mse_ratio}");
+        assert!(
+            (mse_ratio - 2.0 / std::f64::consts::PI).abs() < 0.05,
+            "MSE ratio = {mse_ratio}"
+        );
         assert!((prod_ratio - 1.0).abs() < 0.05, "prod ratio = {prod_ratio}");
         // The payoff: the unbiased two-stage estimate has far lower mean-squared inner-product error
         // than the biased MSE quantizer, whose error is dominated by its 2/pi bias floor.
         let mse_err = run_num(&format!("{common} E((dot(y, mse) - t) ^ 2, 12000)"));
         let prod_err = run_num(&format!("{common} E((prod - t) ^ 2, 12000)"));
-        assert!(prod_err < mse_err * 0.6, "prod err {prod_err} should be << MSE err {mse_err}");
+        assert!(
+            prod_err < mse_err * 0.6,
+            "prod err {prod_err} should be << MSE err {mse_err}"
+        );
     }
 
     #[test]
@@ -2016,7 +2267,10 @@ mod tests {
         assert!((v99 - 1.0).abs() < 0.05, "Var(path[99]) = {v99}");
         // path[9] is ONE random variable reused (the scan shares structure), not a fresh draw:
         // subtracting it from itself is exactly 0 in every lane.
-        assert_eq!(run_num(&format!("{common} P(path[9] - path[9] == 0, 10000)")), 1.0);
+        assert_eq!(
+            run_num(&format!("{common} P(path[9] - path[9] == 0, 10000)")),
+            1.0
+        );
     }
 
     #[test]
@@ -2061,7 +2315,10 @@ mod tests {
             "rets ~[52] normal(0.001, 0.02); path = 100 * cumprod(1 + rets); \
              dd = min(path / cummax(path)) - 1; E(dd, 50000)",
         );
-        assert!(dd > -1.0 && dd < 0.0, "E(max drawdown) = {dd}, want in (-1, 0)");
+        assert!(
+            dd > -1.0 && dd < 0.0,
+            "E(max drawdown) = {dd}, want in (-1, 0)"
+        );
     }
 
     #[test]
@@ -2078,7 +2335,10 @@ mod tests {
              payoff = if s_final > k { s_final - k } else { 0 }; \
              E(exp(0 - r * t) * payoff, 400000)",
         );
-        assert!((price - 10.4506).abs() < 0.2, "vanilla call = {price}, BS wants 10.4506");
+        assert!(
+            (price - 10.4506).abs() < 0.2,
+            "vanilla call = {price}, BS wants 10.4506"
+        );
     }
 
     #[test]
@@ -2102,21 +2362,27 @@ mod tests {
         assert!((run_num("x ~ unif(0, 1); E(x)") - 0.5).abs() < 0.05);
         assert!((run_num("xs ~[1] unif(0, 1); E(xs[0])") - 0.5).abs() < 0.05); // indexable
         assert!(run("x ~ unif(0, 1); x[0]").is_err()); // a scalar can't be indexed
-        // `~[]` (empty shape) is rejected at parse time.
+                                                       // `~[]` (empty shape) is rejected at parse time.
         assert!(run("xs ~[] unif(0, 1)").is_err());
     }
 
     #[test]
     fn for_loop_accumulates_via_leaking_scope() {
         // The body's binding leaks into the current frame, so `acc` persists across iterations.
-        assert_eq!(num("acc = 0; for x in [1, 2, 3, 4] { acc = acc + x }; acc"), 10.0);
+        assert_eq!(
+            num("acc = 0; for x in [1, 2, 3, 4] { acc = acc + x }; acc"),
+            10.0
+        );
         // nested loops
         assert_eq!(
             num("acc = 0; for i in 0..3 { for j in 0..3 { acc = acc + 1 } }; acc"),
             9.0
         );
         // a zero-iteration loop runs the body zero times and yields unit (graph untouched).
-        assert_eq!(run("for i in 0..0 { x ~ unif(0, 1) }").unwrap(), Value::Unit);
+        assert_eq!(
+            run("for i in 0..0 { x ~ unif(0, 1) }").unwrap(),
+            Value::Unit
+        );
         assert_eq!(graph_len("for i in 0..0 { x ~ unif(0, 1) }"), 0);
     }
 
@@ -2127,8 +2393,16 @@ mod tests {
         let one = graph_len("x ~ unif(0, 1)");
         assert_eq!(graph_len("for i in 0..5 { x ~ unif(0, 1) }"), 5 * one);
         // `~` inside the loop gives independence: sum of n iid uniforms has variance n/12.
-        let m = moments_of("acc = 0; for i in 0..12 { u ~ unif(0, 1); acc = acc + u }; acc", 1_000_000, 7);
-        assert!((m.variance - 12.0 / 12.0).abs() < 0.02, "var = {}", m.variance);
+        let m = moments_of(
+            "acc = 0; for i in 0..12 { u ~ unif(0, 1); acc = acc + u }; acc",
+            1_000_000,
+            7,
+        );
+        assert!(
+            (m.variance - 12.0 / 12.0).abs() < 0.02,
+            "var = {}",
+            m.variance
+        );
     }
 
     #[test]
@@ -2142,7 +2416,10 @@ mod tests {
         // The §0 property: each library function IS expressible in Noise. A Noise-written `sum`,
         // `dot`, and `has_duplicates` must match the builtin on the same inputs.
         let noise_sum = "mysum(xs) = { acc = 0; for x in xs { acc = acc + x }; acc };";
-        assert_eq!(num(&format!("{noise_sum} mysum([1, 2, 3, 4])")), num("sum([1, 2, 3, 4])"));
+        assert_eq!(
+            num(&format!("{noise_sum} mysum([1, 2, 3, 4])")),
+            num("sum([1, 2, 3, 4])")
+        );
 
         let noise_dot =
             "mydot(a, b) = { acc = 0; for i in 0..Len(a) { acc = acc + a[i] * b[i] }; acc };";
@@ -2172,7 +2449,10 @@ mod tests {
     fn birthday_problem_for_23() {
         // The headline win: 23 people, one line. Analytic ≈ 0.5073.
         let p = run_num("days ~[23] unif_int(1, 365); P(has_duplicates(days))");
-        assert!((p - 0.5073).abs() < 5e-3, "P(shared birthday among 23) = {p}");
+        assert!(
+            (p - 0.5073).abs() < 5e-3,
+            "P(shared birthday among 23) = {p}"
+        );
     }
 
     #[test]
@@ -2188,15 +2468,18 @@ mod tests {
     fn migrated_one_liners_hit_their_analytic_values() {
         // The §5c table — each was a hand-unrolled example, now one line.
         let cases = [
-            ("P(sum(~[2] unif_int(1, 6)) == 7)", 1.0 / 6.0),       // dice_sum
-            ("P(all(~[3] bernoulli(0.5)))", 0.125),                // coin_streak
-            ("P(count(~[3] bernoulli(0.5)) == 2)", 0.375),         // exactly_two_heads
-            ("P(sum(~[3] unif(0, 1)) > 2)", 1.0 / 6.0),            // irwin_hall
-            ("P(any(~[3] bernoulli(0.9)))", 0.999),                // reliability
+            ("P(sum(~[2] unif_int(1, 6)) == 7)", 1.0 / 6.0), // dice_sum
+            ("P(all(~[3] bernoulli(0.5)))", 0.125),          // coin_streak
+            ("P(count(~[3] bernoulli(0.5)) == 2)", 0.375),   // exactly_two_heads
+            ("P(sum(~[3] unif(0, 1)) > 2)", 1.0 / 6.0),      // irwin_hall
+            ("P(any(~[3] bernoulli(0.9)))", 0.999),          // reliability
         ];
         for (src, expected) in cases {
             let p = run_num(src);
-            assert!((p - expected).abs() < 5e-3, "{src} = {p}, expected {expected}");
+            assert!(
+                (p - expected).abs() < 5e-3,
+                "{src} = {p}, expected {expected}"
+            );
         }
     }
 
@@ -2208,7 +2491,10 @@ mod tests {
         assert_eq!(run_raw("math::sqrt(16)").unwrap(), Value::Num(4.0));
         assert!((as_num(run_raw("math::pi").unwrap()) - std::f64::consts::PI).abs() < 1e-12);
         assert_eq!(run_raw("vec::sum([1, 2, 3])").unwrap(), Value::Num(6.0));
-        assert_eq!(run_raw("vec::dot([1, 2], [3, 4])").unwrap(), Value::Num(11.0));
+        assert_eq!(
+            run_raw("vec::dot([1, 2], [3, 4])").unwrap(),
+            Value::Num(11.0)
+        );
         // a random constructor path draws fine (the qualified `rand::unif` needs no `use`)
         assert!(run_raw("X ~ rand::unif(0, 1); P(X < 0.5, 1000)").is_ok());
     }
@@ -2221,7 +2507,10 @@ mod tests {
         let p = run_raw("use rand; use vec; P(has_duplicates(~[2] unif_int(1, 6)))").unwrap();
         assert!((as_num(p) - 1.0 / 6.0).abs() < 5e-3);
         // `use builtin;` is a harmless no-op (always active anyway).
-        assert_eq!(run_raw("use builtin; Len([1, 2])").unwrap().to_string(), "2");
+        assert_eq!(
+            run_raw("use builtin; Len([1, 2])").unwrap().to_string(),
+            "2"
+        );
     }
 
     #[test]
@@ -2248,14 +2537,20 @@ mod tests {
         ] {
             let err = run_raw(src).unwrap_err();
             let msg = err.to_string();
-            assert!(msg.contains(module) && msg.contains("use"), "{src} -> {msg}");
+            assert!(
+                msg.contains(module) && msg.contains("use"),
+                "{src} -> {msg}"
+            );
         }
     }
 
     #[test]
     fn module_path_errors_are_specific() {
         // wrong module for a real function
-        assert!(run_raw("math::unif(0, 1)").unwrap_err().to_string().contains("rand"));
+        assert!(run_raw("math::unif(0, 1)")
+            .unwrap_err()
+            .to_string()
+            .contains("rand"));
         // unknown module, in a path and in a `use`
         assert!(run_raw("foo::bar()").is_err());
         assert!(run_raw("use foo; 1").is_err());
@@ -2314,9 +2609,10 @@ mod tests {
         );
 
         let n = 1_000_000usize;
-        for (label, src, target) in
-            [("D_mse  b=4", d_mse.as_str(), 0.009), ("D_prod b=4", d_prod.as_str(), 0.047 / 20.0)]
-        {
+        for (label, src, target) in [
+            ("D_mse  b=4", d_mse.as_str(), 0.009),
+            ("D_prod b=4", d_prod.as_str(), 0.047 / 20.0),
+        ] {
             let mut eng = Engine::new();
             let id = match eng.run_rv(src).unwrap() {
                 Value::Dist(id) => id,
@@ -2368,7 +2664,7 @@ mod tests {
         assert_eq!(display_of("3*math::i"), "3i");
         assert_eq!(display_of("-1*math::i"), "-1i");
         assert_eq!(display_of("0*math::i"), "0"); // 0 + 0i collapses to 0
-        // `j` is an alias for `i` (electrical-engineering convention).
+                                                  // `j` is an alias for `i` (electrical-engineering convention).
         assert_eq!(complex_of("math::j"), (0.0, 1.0));
         // a user variable `i` still shadows the constant (vars win over the math fallback).
         assert_eq!(num("i = 5; i"), 5.0);
@@ -2411,7 +2707,10 @@ mod tests {
         // principal square root: sqrt(-1 + 0i) = i, sqrt(2i) = 1 + i
         assert_eq!(complex_of("math::sqrt(-1 + 0*math::i)"), (0.0, 1.0));
         let (sr, si) = complex_of("math::sqrt(2*math::i)");
-        assert!((sr - 1.0).abs() < 1e-12 && (si - 1.0).abs() < 1e-12, "sqrt(2i) = {sr}+{si}i");
+        assert!(
+            (sr - 1.0).abs() < 1e-12 && (si - 1.0).abs() < 1e-12,
+            "sqrt(2i) = {sr}+{si}i"
+        );
         // real sqrt stays IEEE: sqrt(-1.0) is NaN (no auto-promotion to complex)
         assert!(num("math::sqrt(-1)").is_nan());
     }
@@ -2444,8 +2743,11 @@ mod tests {
         assert_eq!(num("vec::normsq([3 + 4*math::i])"), 25.0);
         assert_eq!(num("vec::norm([3 + 4*math::i])"), 5.0);
         assert_eq!(num("vec::mse([1 + 1*math::i], [1 + 0*math::i])"), 1.0); // |i|² = 1
-        // sum/mean lift component-wise (stay complex)
-        assert_eq!(complex_of("vec::sum([1 + 1*math::i, 2 + 3*math::i])"), (3.0, 4.0));
+                                                                            // sum/mean lift component-wise (stay complex)
+        assert_eq!(
+            complex_of("vec::sum([1 + 1*math::i, 2 + 3*math::i])"),
+            (3.0, 4.0)
+        );
         // dot stays bilinear (no conjugation): [i]·[i] = i·i = -1
         assert_eq!(complex_of("vec::dot([math::i], [math::i])"), (-1.0, 0.0));
         // vdot is Hermitian (conjugates the first arg): conj(i)·i = (-i)(i) = 1
@@ -2515,13 +2817,19 @@ mod tests {
     fn comprehensions_map_and_close_over_outer() {
         assert_eq!(display_of("[for x in 0..5 { x*x }]"), "[0, 1, 4, 9, 16]");
         // body closes over an outer variable (no closures needed)
-        assert_eq!(display_of("a = 10; [for x in 0..3 { a + x }]"), "[10, 11, 12]");
+        assert_eq!(
+            display_of("a = 10; [for x in 0..3 { a + x }]"),
+            "[10, 11, 12]"
+        );
         // a pure 1-to-1 map: result length always equals the iterable's
         assert_eq!(num("Len([for x in 0..7 { x }])"), 7.0);
         // empty array literal still parses (not a comprehension)
         assert_eq!(display_of("[]"), "[]");
         // a multi-statement body block works (and leaks, like every Noise block)
-        assert_eq!(display_of("[for x in 0..3 { y = x + 1; y * y }]"), "[1, 4, 9]");
+        assert_eq!(
+            display_of("[for x in 0..3 { y = x + 1; y * y }]"),
+            "[1, 4, 9]"
+        );
     }
 
     // ===================== vec::outer / vec::categorical (PLAN-COMPLEX §8-9) =====================
@@ -2529,7 +2837,10 @@ mod tests {
     #[test]
     fn outer_product_and_categorical() {
         // outer(a, b)[i][j] = a_i * b_j
-        assert_eq!(display_of("vec::outer([1, 2], [10, 20, 30])"), "[[10, 20, 30], [20, 40, 60]]");
+        assert_eq!(
+            display_of("vec::outer([1, 2], [10, 20, 30])"),
+            "[[10, 20, 30], [20, 40, 60]]"
+        );
         // categorical samples an index proportional to the weights
         let p = run_num("y ~ rand::categorical([0, 0, 1, 0]); E(y)"); // all mass on index 2
         assert!((p - 2.0).abs() < 1e-9, "E(categorical) = {p}");
@@ -2544,13 +2855,13 @@ mod tests {
         assert_eq!(num("math::gcd(0, 0)"), 0.0);
         assert_eq!(num("math::gcd(-12, 8)"), 4.0);
         assert_eq!(num("math::gcd(17, 5)"), 1.0); // coprime
-        // modpow: exact even when base^exp would overflow 2^53.
+                                                  // modpow: exact even when base^exp would overflow 2^53.
         assert_eq!(num("math::modpow(7, 4, 15)"), 1.0); // 7^4 = 2401 ≡ 1
         assert_eq!(num("math::modpow(2, 10, 1000)"), 24.0); // 1024 mod 1000
         assert_eq!(num("math::modpow(7, 100, 13)"), 9.0); // 7^100 is astronomically large
         assert_eq!(num("math::modpow(2, 0, 15)"), 1.0); // base^0 = 1
         assert_eq!(num("math::modpow(2, 5, 1)"), 0.0); // anything mod 1 = 0
-        // exactness: `2^64 % 13` would lose precision via float `^`; modpow is exact (= 3).
+                                                       // exactness: `2^64 % 13` would lose precision via float `^`; modpow is exact (= 3).
         assert_eq!(num("math::modpow(2, 64, 13)"), 3.0);
         // domain errors: non-integer, negative exponent, non-positive modulus, RV argument
         assert!(run("math::gcd(1.5, 2)").is_err());
@@ -2591,7 +2902,7 @@ mod tests {
         // the quantum subroutine reads period(7^x mod 15) = 4 off a clean 4-spike comb (4 | Q = 16)
         assert_eq!(run_num(&format!("{lib} period(7, 15, 16)")), 4.0);
         assert_eq!(run_num(&format!("{lib} period(4, 15, 16)")), 2.0); // base 4 -> period 2
-        // shor(15) genuinely factors via the quantum period (a = 2 is coprime, period 4 | 16) -> [3, 5]
+                                                                       // shor(15) genuinely factors via the quantum period (a = 2 is coprime, period 4 | 16) -> [3, 5]
         assert_eq!(run_num(&format!("{lib} shor(15)[0]")), 3.0);
         assert_eq!(run_num(&format!("{lib} shor(15)[1]")), 5.0);
         // a few more composites factor correctly (product check)
@@ -2621,7 +2932,7 @@ mod tests {
         assert_eq!(complex_of("(2 + 3*math::i) ^ 0"), (1.0, 0.0)); // z^0 = 1
         assert_eq!(complex_of("(2 + 3*math::i) ^ 1"), (2.0, 3.0)); // z^1 = z
         assert_eq!(complex_of("(1 + math::i) ^ -1"), (0.5, -0.5)); // reciprocal
-        // a general complex power is rejected (needs a constant integer exponent)
+                                                                   // a general complex power is rejected (needs a constant integer exponent)
         assert!(run("(1 + math::i) ^ 1.5").is_err());
         assert!(run("(1 + math::i) ^ (1 + math::i)").is_err());
         assert!(run("2 ^ math::i").is_err());
@@ -2654,11 +2965,23 @@ mod tests {
     #[test]
     fn complex_ufuncs_map_over_arrays() {
         // exp / conj / re map elementwise over a complex array
-        assert_eq!(display_of("math::re([1 + 2*math::i, 3 + 4*math::i])"), "[1, 3]");
-        assert_eq!(display_of("math::im([1 + 2*math::i, 3 + 4*math::i])"), "[2, 4]");
-        assert_eq!(complex_of("math::conj([1 + 2*math::i, 3 + 4*math::i])[1]"), (3.0, -4.0));
+        assert_eq!(
+            display_of("math::re([1 + 2*math::i, 3 + 4*math::i])"),
+            "[1, 3]"
+        );
+        assert_eq!(
+            display_of("math::im([1 + 2*math::i, 3 + 4*math::i])"),
+            "[2, 4]"
+        );
+        assert_eq!(
+            complex_of("math::conj([1 + 2*math::i, 3 + 4*math::i])[1]"),
+            (3.0, -4.0)
+        );
         // abs over a complex array → real array
-        assert_eq!(display_of("math::abs([3 + 4*math::i, 0 + 1*math::i])"), "[5, 1]");
+        assert_eq!(
+            display_of("math::abs([3 + 4*math::i, 0 + 1*math::i])"),
+            "[5, 1]"
+        );
     }
 
     #[test]
@@ -2677,13 +3000,19 @@ mod tests {
         assert!((m - 1.0).abs() < 1e-9, "E|e^iX| = {m}");
         // exp of a *random real part* lifts too (PLAN-FINANCE F1): E[e^U] over U(0,1) = e - 1.
         let x = run_num("X ~ rand::unif(0,1); E(math::exp(X))");
-        assert!((x - (std::f64::consts::E - 1.0)).abs() < 0.02, "E e^U = {x}");
+        assert!(
+            (x - (std::f64::consts::E - 1.0)).abs() < 0.02,
+            "E e^U = {x}"
+        );
         // sqrt over a real RV is IEEE `^ 0.5`: E[sqrt(U(0,4))] = (1/4)∫₀⁴ √x dx = 4/3
         let s = run_num("X ~ rand::unif(0, 4); E(math::sqrt(X))");
         assert!((s - 4.0 / 3.0).abs() < 0.02, "E sqrt = {s}");
         // arg over an RV phasor near -1 sits at ±π (left half-plane quadrant fix)
         let a = run_num("z ~ rand::normal_complex(0.02); E(math::abs(math::arg((0 - 1) + z)))");
-        assert!((a - std::f64::consts::PI).abs() < 0.05, "E|arg| near -1 = {a}");
+        assert!(
+            (a - std::f64::consts::PI).abs() < 0.05,
+            "E|arg| near -1 = {a}"
+        );
     }
 
     #[test]
@@ -2703,19 +3032,40 @@ mod tests {
     #[test]
     fn vec_lifts_and_magnitudes_over_complex() {
         // linear ops lift component-wise (stay complex)
-        assert_eq!(complex_of("vec::mean([2 + 2*math::i, 4 + 4*math::i])"), (3.0, 3.0));
-        assert_eq!(num("vec::transpose([[1 + 1*math::i, 2], [3, 4*math::i]])[0][1]"), 3.0);
+        assert_eq!(
+            complex_of("vec::mean([2 + 2*math::i, 4 + 4*math::i])"),
+            (3.0, 3.0)
+        );
+        assert_eq!(
+            num("vec::transpose([[1 + 1*math::i, 2], [3, 4*math::i]])[0][1]"),
+            3.0
+        );
         // normalize a complex vector → unit magnitude
         assert!((num("vec::norm(vec::normalize([3 + 4*math::i]))") - 1.0).abs() < 1e-12);
         // dot is bilinear, vdot is Hermitian: dot([i,i],[i,i]) = -2, vdot = +2 (= normsq)
-        assert_eq!(complex_of("vec::dot([math::i, math::i], [math::i, math::i])"), (-2.0, 0.0));
-        assert_eq!(complex_of("vec::vdot([math::i, math::i], [math::i, math::i])"), (2.0, 0.0));
+        assert_eq!(
+            complex_of("vec::dot([math::i, math::i], [math::i, math::i])"),
+            (-2.0, 0.0)
+        );
+        assert_eq!(
+            complex_of("vec::vdot([math::i, math::i], [math::i, math::i])"),
+            (2.0, 0.0)
+        );
         // vdot(z, z) == normsq(z) (a real)
-        assert_eq!(complex_of("vec::vdot([3 + 4*math::i], [3 + 4*math::i])"), (25.0, 0.0));
+        assert_eq!(
+            complex_of("vec::vdot([3 + 4*math::i], [3 + 4*math::i])"),
+            (25.0, 0.0)
+        );
         // on REAL vectors vdot coincides with dot
-        assert_eq!(num("vec::vdot([1, 2, 3], [4, 5, 6])"), num("vec::dot([1, 2, 3], [4, 5, 6])"));
+        assert_eq!(
+            num("vec::vdot([1, 2, 3], [4, 5, 6])"),
+            num("vec::dot([1, 2, 3], [4, 5, 6])")
+        );
         // adjoint = conjugate transpose (rectangular)
-        assert_eq!(complex_of("vec::adjoint([[1 + 1*math::i, 2 + 1*math::i, 3]])[1][0]"), (2.0, -1.0));
+        assert_eq!(
+            complex_of("vec::adjoint([[1 + 1*math::i, 2 + 1*math::i, 3]])[1][0]"),
+            (2.0, -1.0)
+        );
     }
 
     #[test]
@@ -2740,7 +3090,7 @@ mod tests {
         assert_eq!(num("10.5 % 3"), 1.5);
         // chains left-to-right with `*` and `/`
         assert_eq!(num("13 % 12 * 2"), 2.0); // (13 % 12) * 2
-        // propagates an estimate's error (E carries one)
+                                             // propagates an estimate's error (E carries one)
         let m = run_num("X ~ rand::unif_int(0, 9); E(X) % 100");
         assert!((m - 4.5).abs() < 0.1, "E(X) % 100 = {m}");
     }
@@ -2761,9 +3111,15 @@ mod tests {
     #[test]
     fn comprehensions_nest_and_over_arrays() {
         // nested comprehension builds a matrix
-        assert_eq!(display_of("[for i in 0..2 { [for j in 0..3 { i*j }] }]"), "[[0, 0, 0], [0, 1, 2]]");
+        assert_eq!(
+            display_of("[for i in 0..2 { [for j in 0..3 { i*j }] }]"),
+            "[[0, 0, 0], [0, 1, 2]]"
+        );
         // iterate a literal array (not just a range)
-        assert_eq!(display_of("[for x in [10, 20, 30] { x + 1 }]"), "[11, 21, 31]");
+        assert_eq!(
+            display_of("[for x in [10, 20, 30] { x + 1 }]"),
+            "[11, 21, 31]"
+        );
         // a body that maps each element through several ops
         assert_eq!(display_of("[for x in 0..4 { (2*x) % 3 }]"), "[0, 2, 1, 0]");
         // the loop variable leaks (Noise blocks don't scope) — last value survives
@@ -2788,15 +3144,27 @@ mod tests {
     #[test]
     fn continue_filters_in_comprehensions_and_loops() {
         // filter form: `if bad { continue }; keep` — the imperative idiom
-        assert_eq!(display_of("[for x in 0..10 { if x % 2 != 0 { continue }; x }]"), "[0, 2, 4, 6, 8]");
+        assert_eq!(
+            display_of("[for x in 0..10 { if x % 2 != 0 { continue }; x }]"),
+            "[0, 2, 4, 6, 8]"
+        );
         // else-continue form
-        assert_eq!(display_of("[for x in 0..10 { if x % 3 == 0 { x } else { continue } }]"), "[0, 3, 6, 9]");
+        assert_eq!(
+            display_of("[for x in 0..10 { if x % 3 == 0 { x } else { continue } }]"),
+            "[0, 3, 6, 9]"
+        );
         // all elements skipped → empty array
         assert_eq!(display_of("[for x in 0..5 { continue }]"), "[]");
         // continue in a plain `for` skips that iteration's side effects (here, accumulation)
-        assert_eq!(num("acc = 0; for x in 0..10 { if x % 2 != 0 { continue }; acc = acc + x }; acc"), 20.0);
+        assert_eq!(
+            num("acc = 0; for x in 0..10 { if x % 2 != 0 { continue }; acc = acc + x }; acc"),
+            20.0
+        );
         // it propagates up through a nested block
-        assert_eq!(display_of("[for x in 0..6 { { if x % 2 == 1 { continue } }; x*10 }]"), "[0, 20, 40]");
+        assert_eq!(
+            display_of("[for x in 0..6 { { if x % 2 == 1 { continue } }; x*10 }]"),
+            "[0, 20, 40]"
+        );
         // a RANDOM continue is rejected (the array length is fixed at build time) — clean error
         assert!(run("B ~ rand::bernoulli(0.5); [for x in 0..3 { if B { continue }; x }]").is_err());
         // misused as a data value → a plain type error (not a panic)
@@ -2831,7 +3199,7 @@ mod tests {
         // `exp` is the function (e^2), NOT a distribution; the old name is gone.
         assert!((num("math::exp(2)") - (2.0f64).exp()).abs() < 1e-12);
         assert!(run("X ~ exp_int(2); X").is_err()); // old `exp_int` name removed
-        // the distribution lives on as `rand::exponential` with the same tail.
+                                                    // the distribution lives on as `rand::exponential` with the same tail.
         let p = run_num("X ~ rand::exponential(2); P(X > 1)");
         assert!((p - (-2.0f64).exp()).abs() < 3e-3, "P(X>1) = {p}");
     }
@@ -2841,15 +3209,27 @@ mod tests {
     #[test]
     fn complex_broadcasts_with_arrays() {
         // complex scalar ⊕ real array (both orders), real array ⊕ complex array
-        assert_eq!(display_of("(2 + 3*math::i) + [1, 2, 3]"), "[3 + 3i, 4 + 3i, 5 + 3i]");
-        assert_eq!(display_of("[1, 2] + [math::i, 2*math::i]"), "[1 + 1i, 2 + 2i]");
+        assert_eq!(
+            display_of("(2 + 3*math::i) + [1, 2, 3]"),
+            "[3 + 3i, 4 + 3i, 5 + 3i]"
+        );
+        assert_eq!(
+            display_of("[1, 2] + [math::i, 2*math::i]"),
+            "[1 + 1i, 2 + 2i]"
+        );
         // complex array scaled by a real scalar (result may mix complex & real elements)
         assert_eq!(display_of("[1 + 1*math::i, 2] * 2"), "[2 + 2i, 4]");
         // length mismatch is a clean error
         assert!(run("[math::i] + [1, 2]").is_err());
         // real matrix @ complex vector: [[1,2],[3,4]] @ [i,i] = [3i, 7i]
-        assert_eq!(complex_of("([[1, 2], [3, 4]] @ [math::i, math::i])[0]"), (0.0, 3.0));
-        assert_eq!(complex_of("([[1, 2], [3, 4]] @ [math::i, math::i])[1]"), (0.0, 7.0));
+        assert_eq!(
+            complex_of("([[1, 2], [3, 4]] @ [math::i, math::i])[0]"),
+            (0.0, 3.0)
+        );
+        assert_eq!(
+            complex_of("([[1, 2], [3, 4]] @ [math::i, math::i])[1]"),
+            (0.0, 7.0)
+        );
     }
 
     #[test]
@@ -2867,7 +3247,9 @@ mod tests {
         let z = run("signal::sine(3) + math::i").unwrap();
         assert_eq!(z.type_name(), "complex");
         // an UNDRAWN noise generator is still rejected (the message now points at `~`)
-        let e = run("signal::noise_white(1) + math::i").unwrap_err().to_string();
+        let e = run("signal::noise_white(1) + math::i")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("undrawn distribution"), "got: {e}");
         assert!(run("math::i + true").is_err());
         assert!(run("math::i + rand::unif(0, 1)").is_err());
@@ -2900,12 +3282,24 @@ mod tests {
     fn estimates_flow_through_complex() {
         // a `P`/`E` estimate (carries a standard error) promotes into a complex value and through
         // the magnitude ufuncs, floor, and exp — none of which should choke on the `Est` channel.
-        assert!((run_num("D ~ rand::unif_int(1,6); math::abs(P(D > 3) + 0*math::i)") - 0.5).abs() < 0.01);
+        assert!(
+            (run_num("D ~ rand::unif_int(1,6); math::abs(P(D > 3) + 0*math::i)") - 0.5).abs()
+                < 0.01
+        );
         // 6.5·P(D>3) ≈ 3.25 (off the integer boundary, so floor is a stable 3 despite MC noise)
-        assert_eq!(run_num("D ~ rand::unif_int(1,6); math::floor(6.5 * P(D > 3))"), 3.0);
-        assert_eq!(run_num("D ~ rand::unif_int(1,6); math::exp(0 * P(D > 3))"), 1.0);
+        assert_eq!(
+            run_num("D ~ rand::unif_int(1,6); math::floor(6.5 * P(D > 3))"),
+            3.0
+        );
+        assert_eq!(
+            run_num("D ~ rand::unif_int(1,6); math::exp(0 * P(D > 3))"),
+            1.0
+        );
         // sum over a mix of real and complex elements stays complex
-        assert_eq!(complex_of("vec::sum([1, math::i, 2 + 2*math::i])"), (3.0, 3.0));
+        assert_eq!(
+            complex_of("vec::sum([1, math::i, 2 + 2*math::i])"),
+            (3.0, 3.0)
+        );
     }
 
     // ===================== identity fold: correctness guards =====================
@@ -2960,11 +3354,9 @@ mod tests {
     /// summary, no separate machinery.
     #[test]
     fn describe_of_a_conditioned_value_is_the_posterior() {
-        let d = one(
-            "use rand; use vec;
+        let d = one("use rand; use vec;
              bias ~ unif(0,1); flips ~[10] bernoulli(bias); heads = count(flips);
-             describe(bias | heads == 7)",
-        );
+             describe(bias | heads == 7)");
         assert!((d.mean - 0.6667).abs() < 0.02, "posterior mean {}", d.mean);
         // the posterior is tighter than the flat prior (sd 1/√12 ≈ 0.289).
         assert!(d.sd < 0.2, "posterior sd should be tight, got {}", d.sd);
@@ -2975,17 +3367,22 @@ mod tests {
     /// and break this — the same joint-sampling requirement as conditioning.)
     #[test]
     fn corr_is_a_correct_joint_statistic() {
-        let indep = match &summary_of("A ~ rand::unif(0,1); B ~ rand::unif(0,1); corr(A, B)").payload {
-            Payload::Two(d) => d.corr,
-            _ => panic!("expected a two-variable summary"),
-        };
+        let indep =
+            match &summary_of("A ~ rand::unif(0,1); B ~ rand::unif(0,1); corr(A, B)").payload {
+                Payload::Two(d) => d.corr,
+                _ => panic!("expected a two-variable summary"),
+            };
         assert!(indep.abs() < 0.02, "independent corr ~0, got {indep}");
-        let shared = match &summary_of("A ~ rand::unif(0,1); B ~ rand::unif(0,1); corr(A, A + B)").payload {
-            Payload::Two(d) => d.corr,
-            _ => panic!("expected a two-variable summary"),
-        };
+        let shared =
+            match &summary_of("A ~ rand::unif(0,1); B ~ rand::unif(0,1); corr(A, A + B)").payload {
+                Payload::Two(d) => d.corr,
+                _ => panic!("expected a two-variable summary"),
+            };
         // corr(A, A+B) = sd_A / sd_{A+B} = 1/√2 ≈ 0.707 for two iid uniforms.
-        assert!((shared - 0.707).abs() < 0.03, "corr(A, A+B) ≈ 0.707, got {shared}");
+        assert!(
+            (shared - 0.707).abs() < 0.03,
+            "corr(A, A+B) ≈ 0.707, got {shared}"
+        );
     }
 
     /// `explain(Y)` ranks the named upstream variables that drive `Y`. For the posterior predictive
@@ -3002,7 +3399,11 @@ mod tests {
         match &s.payload {
             Payload::Explain(e) => {
                 assert_eq!(e.drivers.first().map(|d| d.name.as_str()), Some("bias"));
-                assert!(e.drivers[0].corr > 0.1, "bias should positively drive next: {}", e.drivers[0].corr);
+                assert!(
+                    e.drivers[0].corr > 0.1,
+                    "bias should positively drive next: {}",
+                    e.drivers[0].corr
+                );
             }
             other => panic!("expected an explain summary, got {other:?}"),
         }
@@ -3018,7 +3419,9 @@ mod tests {
             .unwrap();
         // bindings() surfaces the live variables (name + kind) for the picker.
         let binds = eng.bindings();
-        assert!(binds.iter().any(|(n, k)| n == "bias" && *k == "dist<number>"));
+        assert!(binds
+            .iter()
+            .any(|(n, k)| n == "bias" && *k == "dist<number>"));
         assert!(binds.iter().any(|(n, _)| n == "heads"));
         // a follow-up run sees `bias`/`heads` — no re-declaration — and yields the posterior.
         match eng.run("describe(bias | heads == 7)").unwrap() {
@@ -3042,7 +3445,11 @@ mod tests {
     #[test]
     fn describe_is_polymorphic_over_value_kinds() {
         // a scalar estimate → value card carrying its standard error
-        match &summary_of("X ~ rand::unif(-1,1); Y ~ rand::unif(-1,1); pi = 4*P(X^2+Y^2<1); describe(pi)").payload {
+        match &summary_of(
+            "X ~ rand::unif(-1,1); Y ~ rand::unif(-1,1); pi = 4*P(X^2+Y^2<1); describe(pi)",
+        )
+        .payload
+        {
             Payload::Value(v) => {
                 assert!((v.val - std::f64::consts::PI).abs() < 0.02, "pi {}", v.val);
                 assert!(v.se > 0.0, "an estimate should carry uncertainty");
@@ -3053,7 +3460,11 @@ mod tests {
         match &summary_of("xs ~[6] rand::bernoulli(0.7); describe(xs)").payload {
             Payload::Grid(g) => {
                 assert_eq!((g.rows, g.cols), (1, 6));
-                assert!(g.mean.iter().all(|&m| (m - 0.7).abs() < 0.02), "per-element P(true)≈0.7: {:?}", g.mean);
+                assert!(
+                    g.mean.iter().all(|&m| (m - 0.7).abs() < 0.02),
+                    "per-element P(true)≈0.7: {:?}",
+                    g.mean
+                );
             }
             other => panic!("expected a grid, got {other:?}"),
         }
@@ -3070,7 +3481,11 @@ mod tests {
                     assert!((c.corr[i * 4 + i] - 1.0).abs() < 1e-6, "diagonal must be 1");
                     for j in 0..4 {
                         if i != j {
-                            assert!(c.corr[i * 4 + j].abs() < 0.02, "iid off-diagonal ~0: {}", c.corr[i * 4 + j]);
+                            assert!(
+                                c.corr[i * 4 + j].abs() < 0.02,
+                                "iid off-diagonal ~0: {}",
+                                c.corr[i * 4 + j]
+                            );
                         }
                     }
                 }
@@ -3087,18 +3502,29 @@ mod tests {
         let last = eng
             .run("use rand; X ~ normal(0,1); Y ~ normal(0,1); plot::histogram(X); plot::scatter(X, Y)")
             .unwrap();
-        assert!(matches!(last, Value::Unit), "a plot is a statement, not a value");
+        assert!(
+            matches!(last, Value::Unit),
+            "a plot is a statement, not a value"
+        );
         let items = eng.take_output();
         let plots: Vec<_> = items
             .iter()
             .filter_map(|o| match &o.output {
                 crate::Output::Plot(s) => Some(s),
-                crate::Output::Text(_) | crate::Output::Note { .. } | crate::Output::Input { .. } => None,
+                crate::Output::Text(_)
+                | crate::Output::Note { .. }
+                | crate::Output::Input { .. } => None,
             })
             .collect();
         assert_eq!(plots.len(), 2);
-        assert!(matches!(plots[0].payload, Payload::One(_)), "histogram → Dist1");
-        assert!(matches!(plots[1].payload, Payload::Two(_)), "scatter → Dist2");
+        assert!(
+            matches!(plots[0].payload, Payload::One(_)),
+            "histogram → Dist1"
+        );
+        assert!(
+            matches!(plots[1].payload, Payload::Two(_)),
+            "scatter → Dist2"
+        );
         // drained: a second take is empty
         assert!(eng.take_output().is_empty());
     }
@@ -3145,13 +3571,23 @@ mod tests {
         assert_eq!(c.cols, 16);
         for t in 0..c.cols {
             assert!(
-                c.q05[t] < c.q25[t] && c.q25[t] < c.q50[t] && c.q50[t] < c.q75[t] && c.q75[t] < c.q95[t],
+                c.q05[t] < c.q25[t]
+                    && c.q25[t] < c.q50[t]
+                    && c.q50[t] < c.q75[t]
+                    && c.q75[t] < c.q95[t],
                 "bands must be strictly ordered at index {t}"
             );
         }
-        assert!(c.q50[15].abs() < 0.1, "driftless median ≈ 0, got {}", c.q50[15]);
+        assert!(
+            c.q50[15].abs() < 0.1,
+            "driftless median ≈ 0, got {}",
+            c.q50[15]
+        );
         let (w0, w1) = (c.q95[0] - c.q05[0], c.q95[15] - c.q05[15]);
-        assert!(w1 > 2.0 * w0, "the cone must widen with t: width {w0} → {w1}");
+        assert!(
+            w1 > 2.0 * w0,
+            "the cone must widen with t: width {w0} → {w1}"
+        );
     }
 
     /// A plain numeric array is the degenerate fan: every band (and the mean) equals the values —
@@ -3171,15 +3607,22 @@ mod tests {
         }
         let shown = s.to_string();
         // An array literal has no source name, so the card falls back to the generic `value`.
-        assert_eq!(shown, "fan(value): 3 steps n=200000 final q05=3 med=3 q95=3");
+        assert_eq!(
+            shown,
+            "fan(value): 3 steps n=200000 final q05=3 med=3 q95=3"
+        );
     }
 
     /// A scalar or a matrix has no single index to fan over → a friendly spanned error.
     #[test]
     fn fan_rejects_scalars_and_matrices() {
-        let scalar = run("X ~ rand::normal(0,1); plot::fan(X)").unwrap_err().to_string();
+        let scalar = run("X ~ rand::normal(0,1); plot::fan(X)")
+            .unwrap_err()
+            .to_string();
         assert!(scalar.contains("plot::fan wants a vector"), "got: {scalar}");
-        let matrix = run("M ~[2, 2] rand::normal(0,1); plot::fan(M)").unwrap_err().to_string();
+        let matrix = run("M ~[2, 2] rand::normal(0,1); plot::fan(M)")
+            .unwrap_err()
+            .to_string();
         assert!(matrix.contains("plot::fan wants a vector"), "got: {matrix}");
         let num = run("plot::fan(3)").unwrap_err().to_string();
         assert!(num.contains("plot::fan wants a vector"), "got: {num}");
@@ -3198,7 +3641,11 @@ mod tests {
         let plot = crate::flint::to_flint(&s);
         assert_eq!(plot.title, "fan(path)");
         assert_eq!(plot.charts.len(), 3, "two bands + a median line");
-        assert!(plot.text.starts_with("fan(path): 8 steps"), "text fallback: {}", plot.text);
+        assert!(
+            plot.text.starts_with("fan(path): 8 steps"),
+            "text fallback: {}",
+            plot.text
+        );
         // The median line's y is the source variable, so the merged chart's y axis is titled `path`.
         assert_eq!(plot.charts[2]["chart_spec"]["encodings"]["y"], "path");
     }
@@ -3259,7 +3706,10 @@ mod tests {
         };
         let got = rows(&eng.run("stats::histogram(X)").unwrap());
         assert_eq!(got.len(), 2, "[midpoints, counts]");
-        assert_eq!(got[1], d.hist.bins.iter().map(|&c| c as f64).collect::<Vec<_>>());
+        assert_eq!(
+            got[1],
+            d.hist.bins.iter().map(|&c| c as f64).collect::<Vec<_>>()
+        );
         assert_eq!(got[0], d.hist.midpoints(false));
         assert_eq!(got[0].len(), 30, "the default bin count is the chart's");
         // The counts are a partition of the sample: nothing binned twice, nothing dropped.
@@ -3271,12 +3721,23 @@ mod tests {
     #[test]
     fn stats_histogram_takes_a_bin_count_and_an_event_takes_two() {
         let mut eng = engine_after("X ~ normal(0, 1); hit = X > 0");
-        assert_eq!(rows(&eng.run("stats::histogram(X, 8)").unwrap())[0].len(), 8);
+        assert_eq!(
+            rows(&eng.run("stats::histogram(X, 8)").unwrap())[0].len(),
+            8
+        );
 
         let h = rows(&eng.run("stats::histogram(hit, 8)").unwrap());
-        assert_eq!(h[0], vec![0.0, 1.0], "an event bins into false/true, whatever `bins` says");
+        assert_eq!(
+            h[0],
+            vec![0.0, 1.0],
+            "an event bins into false/true, whatever `bins` says"
+        );
         let (f, t) = (h[1][0], h[1][1]);
-        assert!((t / (f + t) - 0.5).abs() < 0.01, "P(X > 0) ≈ 0.5, got {}", t / (f + t));
+        assert!(
+            (t / (f + t) - 0.5).abs() < 0.01,
+            "P(X > 0) ≈ 0.5, got {}",
+            t / (f + t)
+        );
     }
 
     /// `stats::quantiles` reads the same sample `describe` ranks, at the same levels.
@@ -3290,7 +3751,10 @@ mod tests {
             },
             other => panic!("{other:?}"),
         };
-        let got = nums(&eng.run("stats::quantiles(X, [0.05, 0.25, 0.5, 0.75, 0.95])").unwrap());
+        let got = nums(
+            &eng.run("stats::quantiles(X, [0.05, 0.25, 0.5, 0.75, 0.95])")
+                .unwrap(),
+        );
         assert_eq!(got, vec![d.q05, d.q25, d.q50, d.q75, d.q95]);
         // …and they are the quantiles of a standard normal, in the order asked.
         assert!((got[2]).abs() < 0.02, "median ≈ 0, got {}", got[2]);
@@ -3314,8 +3778,17 @@ mod tests {
 
         // `X | X > 0` keeps ~half the lanes, and its mean is the half-normal's E[X | X>0] = √(2/π).
         let c = nums(&eng.run("stats::moments(X | X > 0)").unwrap());
-        assert!((c[0] / m[0] - 0.5).abs() < 0.01, "about half the lanes survive: {} of {}", c[0], m[0]);
-        assert!((c[1] - (2.0 / std::f64::consts::PI).sqrt()).abs() < 0.01, "E[X|X>0] = √(2/π), got {}", c[1]);
+        assert!(
+            (c[0] / m[0] - 0.5).abs() < 0.01,
+            "about half the lanes survive: {} of {}",
+            c[0],
+            m[0]
+        );
+        assert!(
+            (c[1] - (2.0 / std::f64::consts::PI).sqrt()).abs() < 0.01,
+            "E[X|X>0] = √(2/π), got {}",
+            c[1]
+        );
         assert!(c[3] >= 0.0, "no draw below the condition, got min {}", c[3]);
     }
 
@@ -3334,7 +3807,12 @@ mod tests {
         assert!(got.iter().all(|r| r.len() == 8), "one column per index");
         // The bands are ordered at every index, because they came from one joint pass.
         for t in 0..8 {
-            assert!(got[0][t] < got[1][t] && got[1][t] < got[2][t] && got[2][t] < got[3][t] && got[3][t] < got[4][t]);
+            assert!(
+                got[0][t] < got[1][t]
+                    && got[1][t] < got[2][t]
+                    && got[2][t] < got[3][t]
+                    && got[3][t] < got[4][t]
+            );
         }
     }
 
@@ -3355,7 +3833,10 @@ mod tests {
             other => panic!("expected a number, got {other:?}"),
         };
         assert_eq!(got, expected);
-        assert!((got - 0.5f64.sqrt()).abs() < 0.01, "corr(X, X+N) = 1/√2, got {got}");
+        assert!(
+            (got - 0.5f64.sqrt()).abs() < 0.01,
+            "corr(X, X+N) = 1/√2, got {got}"
+        );
 
         // A vector: the element×element matrix. iid ⇒ identity, up to Monte-Carlo noise.
         let mut eng = engine_after("v ~[4] normal(0, 1)");
@@ -3366,7 +3847,10 @@ mod tests {
             assert!((row[i] - 1.0).abs() < 1e-9, "the diagonal is 1");
             for (j, &c) in row.iter().enumerate() {
                 if i != j {
-                    assert!(c.abs() < 0.02, "iid elements are uncorrelated: corr[{i}][{j}] = {c}");
+                    assert!(
+                        c.abs() < 0.02,
+                        "iid elements are uncorrelated: corr[{i}][{j}] = {c}"
+                    );
                 }
                 assert_eq!(c, m[j][i], "the matrix is symmetric");
             }
@@ -3376,12 +3860,19 @@ mod tests {
     /// The results are ordinary arrays: index them, reduce them, feed them back into a plot.
     #[test]
     fn a_stats_result_is_an_ordinary_array() {
-        assert_eq!(num("b ~ bernoulli(0.25); h = stats::histogram(b, 2); h[0][1]"), 1.0);
+        assert_eq!(
+            num("b ~ bernoulli(0.25); h = stats::histogram(b, 2); h[0][1]"),
+            1.0
+        );
         // The counts sum to the sample size, so a share is one division away.
         let p = num("b ~ bernoulli(0.25); h = stats::histogram(b, 2); h[1][1] / sum(h[1])");
-        assert!((p - 0.25).abs() < 0.01, "P(true) recovered from the counts: {p}");
+        assert!(
+            (p - 0.25).abs() < 0.01,
+            "P(true) recovered from the counts: {p}"
+        );
         // A fan's median row is a path a program can measure.
-        let drift = num("zs ~[16] rand::normal(0, 1); f = stats::fan(cumsum(zs)); max(f[2]) - min(f[2])");
+        let drift =
+            num("zs ~[16] rand::normal(0, 1); f = stats::fan(cumsum(zs)); max(f[2]) - min(f[2])");
         assert!(drift > 0.0, "the median band moves");
     }
 
@@ -3389,30 +3880,55 @@ mod tests {
     #[test]
     fn stats_functions_are_always_qualified() {
         let e = run("xs ~[4] normal(0,1); fan(xs)").unwrap_err().to_string();
-        assert!(e.contains("is in module 'stats'") && e.contains("stats::fan"), "{e}");
+        assert!(
+            e.contains("is in module 'stats'") && e.contains("stats::fan"),
+            "{e}"
+        );
         // `use stats;` parses (every module does) but grants nothing unqualified.
-        let e = super::run("use stats; xs ~[4] rand::normal(0,1); fan(xs)").unwrap_err().to_string();
+        let e = super::run("use stats; xs ~[4] rand::normal(0,1); fan(xs)")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("stats::fan"), "{e}");
         // A bare `corr(a, b)` is still the introspection summary, not `stats::corr`'s number.
-        assert!(matches!(run("X ~ normal(0,1); corr(X, X)").unwrap(), Value::Summary(_)));
+        assert!(matches!(
+            run("X ~ normal(0,1); corr(X, X)").unwrap(),
+            Value::Summary(_)
+        ));
     }
 
     #[test]
     fn stats_errors_are_specific() {
-        let e = run("X ~ normal(0,1); stats::bogus(X)").unwrap_err().to_string();
+        let e = run("X ~ normal(0,1); stats::bogus(X)")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("unknown 'stats::bogus'"), "{e}");
-        let e = run("X ~ normal(0,1); stats::quantiles(X, 0.5)").unwrap_err().to_string();
-        assert!(e.contains("wants an array") && e.contains("Q(x, 0.5)"), "{e}");
-        let e = run("X ~ normal(0,1); stats::quantiles(X, [1.5])").unwrap_err().to_string();
+        let e = run("X ~ normal(0,1); stats::quantiles(X, 0.5)")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("wants an array") && e.contains("Q(x, 0.5)"),
+            "{e}"
+        );
+        let e = run("X ~ normal(0,1); stats::quantiles(X, [1.5])")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("must lie in [0, 1]"), "{e}");
-        let e = run("X ~ normal(0,1); stats::histogram(X, 0)").unwrap_err().to_string();
+        let e = run("X ~ normal(0,1); stats::histogram(X, 0)")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("at least 1 bin"), "{e}");
-        let e = run("X ~ normal(0,1); stats::fan(X)").unwrap_err().to_string();
+        let e = run("X ~ normal(0,1); stats::fan(X)")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("stats::fan wants a vector"), "{e}");
-        let e = run("X ~ normal(0,1); stats::corr(X)").unwrap_err().to_string();
+        let e = run("X ~ normal(0,1); stats::corr(X)")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("two variables, or one vector"), "{e}");
         // A condition that never holds has nothing to summarize — the same error `describe` gives.
-        let e = run("X ~ normal(0,1); stats::moments(X | X > 100)").unwrap_err().to_string();
+        let e = run("X ~ normal(0,1); stats::moments(X | X > 100)")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("never occurred"), "{e}");
     }
 
@@ -3438,7 +3954,10 @@ mod tests {
     /// An input binds its (clamped/snapped) default and the program reads it like any variable.
     #[test]
     fn input_default_binds_as_value() {
-        assert_eq!(super::run("sides = input::int(min: 1, max: 100, default: 6); sides + 1").unwrap(), Value::Num(7.0));
+        assert_eq!(
+            super::run("sides = input::int(min: 1, max: 100, default: 6); sides + 1").unwrap(),
+            Value::Num(7.0)
+        );
     }
 
     /// A host override wins over the default and is clamped/snapped by the engine.
@@ -3448,7 +3967,9 @@ mod tests {
         let mut eng = Engine::new();
         eng.set_input_overrides(vec![("sides".into(), InputValue::Num(999.0))]);
         // 999 clamps to the max (20).
-        let v = eng.run("sides = input::int(min: 1, max: 20, default: 6); sides").unwrap();
+        let v = eng
+            .run("sides = input::int(min: 1, max: 20, default: 6); sides")
+            .unwrap();
         assert_eq!(v, Value::Num(20.0));
     }
 
@@ -3458,7 +3979,9 @@ mod tests {
         use crate::input::InputValue;
         let mut eng = Engine::new();
         eng.set_input_overrides(vec![("nope".into(), InputValue::Num(1.0))]);
-        let err = eng.run("sides = input::int(default: 6); sides").unwrap_err();
+        let err = eng
+            .run("sides = input::int(default: 6); sides")
+            .unwrap_err();
         assert!(format!("{err}").contains("unknown input"), "{err}");
     }
 
@@ -3500,7 +4023,10 @@ mod tests {
     /// Nested (non-root) a template is just a string value — usable with `+`, as a `Print` arg, etc.
     #[test]
     fn template_as_value_is_a_string() {
-        assert_eq!(super::run("x = 5\n`v=${x}` + \"!\"").unwrap(), Value::Str("v=5!".into()));
+        assert_eq!(
+            super::run("x = 5\n`v=${x}` + \"!\"").unwrap(),
+            Value::Str("v=5!".into())
+        );
     }
 
     /// An error inside a `${…}` hole points at the *original* byte offset, not a re-based one.

@@ -77,7 +77,9 @@ pub struct InterpBackend;
 
 impl Backend for InterpBackend {
     fn compile(&self, graph: &RvGraph, root: RvId) -> Box<dyn Program> {
-        Box::new(InterpProgram { inner: Arc::new(compile(graph, root)) })
+        Box::new(InterpProgram {
+            inner: Arc::new(compile(graph, root)),
+        })
     }
 }
 
@@ -93,7 +95,11 @@ impl Program for InterpProgram {
             .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
             .collect();
         // Placeholder RNG; the driver calls `reseed` before the first batch.
-        Box::new(InterpRunner { prog: self.inner.clone(), regs, rng: Rng::seed_from_u64(0) })
+        Box::new(InterpRunner {
+            prog: self.inner.clone(),
+            regs,
+            rng: Rng::seed_from_u64(0),
+        })
     }
 }
 

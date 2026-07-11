@@ -108,7 +108,9 @@ impl Backend for WasmHostBackend {
         if handle < 0 {
             return InterpBackend.compile(graph, root); // instantiation failed; stay correct
         }
-        Box::new(WasmProgram { inner: Arc::new(KernelHandle { handle, streams }) })
+        Box::new(WasmProgram {
+            inner: Arc::new(KernelHandle { handle, streams }),
+        })
     }
 }
 
@@ -126,7 +128,10 @@ struct WasmProgram {
 
 impl Program for WasmProgram {
     fn runner(&self) -> Box<dyn Runner> {
-        Box::new(WasmRunner { inner: self.inner.clone(), buf: vec![0.0; BATCH] })
+        Box::new(WasmRunner {
+            inner: self.inner.clone(),
+            buf: vec![0.0; BATCH],
+        })
     }
 }
 

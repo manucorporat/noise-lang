@@ -80,7 +80,13 @@ impl Builder {
             RvNode::Gather { elems, index } => {
                 let elems: Vec<RvId> = elems.iter().map(|&e| self.rewrite(g, e)).collect();
                 let index = self.rewrite(g, *index);
-                self.out.push(RvNode::Gather { elems: elems.into_boxed_slice(), index }, kind)
+                self.out.push(
+                    RvNode::Gather {
+                        elems: elems.into_boxed_slice(),
+                        index,
+                    },
+                    kind,
+                )
             }
         };
         self.done.insert(id, new);
@@ -141,7 +147,8 @@ impl Builder {
         }
         // Involutions: -(-x) and !(!x) collapse to x.
         if let RvNode::Unary(inner_op, inner) = *self.out.node(a) {
-            if (op == UnOp::Neg && inner_op == UnOp::Neg) || (op == UnOp::Not && inner_op == UnOp::Not)
+            if (op == UnOp::Neg && inner_op == UnOp::Neg)
+                || (op == UnOp::Not && inner_op == UnOp::Not)
             {
                 return inner;
             }
@@ -229,14 +236,19 @@ mod tests {
     use crate::dist::Source;
 
     fn src(g: &mut RvGraph) -> RvId {
-        g.push(RvNode::Src(Source::Uniform(crate::dist::Uniform { lo: 0.0, hi: 1.0 })), RvKind::Num)
+        g.push(
+            RvNode::Src(Source::Uniform(crate::dist::Uniform { lo: 0.0, hi: 1.0 })),
+            RvKind::Num,
+        )
     }
     fn num(g: &mut RvGraph, x: f64) -> RvId {
         g.push(RvNode::ConstNum(x), RvKind::Num)
     }
     fn bin(g: &mut RvGraph, op: BinOp, a: RvId, b: RvId) -> RvId {
-        let k = if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne)
-        {
+        let k = if matches!(
+            op,
+            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne
+        ) {
             RvKind::Bool
         } else {
             RvKind::Num
@@ -291,13 +303,22 @@ mod tests {
     #[test]
     fn applies_identities() {
         // X + 0, X * 1, X ^ 1 all collapse to X (the same source node).
-        for (op, c) in [(BinOp::Add, 0.0), (BinOp::Mul, 1.0), (BinOp::Pow, 1.0), (BinOp::Div, 1.0)] {
+        for (op, c) in [
+            (BinOp::Add, 0.0),
+            (BinOp::Mul, 1.0),
+            (BinOp::Pow, 1.0),
+            (BinOp::Div, 1.0),
+        ] {
             let mut g = RvGraph::default();
             let x = src(&mut g);
             let c = num(&mut g, c);
             let root = bin(&mut g, op, x, c);
             let (out, r) = simplify(&g, root);
-            assert_eq!(out.node(r), &RvNode::Src(Source::Uniform(crate::dist::Uniform { lo: 0.0, hi: 1.0 })), "{op:?} identity should collapse to X");
+            assert_eq!(
+                out.node(r),
+                &RvNode::Src(Source::Uniform(crate::dist::Uniform { lo: 0.0, hi: 1.0 })),
+                "{op:?} identity should collapse to X"
+            );
         }
     }
 
@@ -326,7 +347,9 @@ mod tests {
         let root = bin(&mut g, BinOp::Eq, s1, s2);
         let (out, r) = simplify(&g, root);
         match out.node(r) {
-            RvNode::Binary(BinOp::Eq, a, b) => assert_eq!(a, b, "identical X+Y must CSE to one node"),
+            RvNode::Binary(BinOp::Eq, a, b) => {
+                assert_eq!(a, b, "identical X+Y must CSE to one node")
+            }
             other => panic!("expected Eq(s, s), got {other:?}"),
         }
         // ...but the two independent sources X and Y must NOT be merged.
@@ -366,13 +389,28 @@ mod tests {
         }
 
         let cases = [
-            ("dice_sum", "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B"),
-            ("pi", "use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1"),
-            ("poly_deep", "use rand; X ~ unif(0,1); ((X*X+X)*X - X)*X + X*X - X + 1"),
+            (
+                "dice_sum",
+                "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B",
+            ),
+            (
+                "pi",
+                "use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1",
+            ),
+            (
+                "poly_deep",
+                "use rand; X ~ unif(0,1); ((X*X+X)*X - X)*X + X*X - X + 1",
+            ),
             // CSE: a subexpression reused several times.
-            ("cse_reuse", "use rand; X ~ unif(0,1); Y ~ unif(0,1); (X+Y)*(X+Y) + (X+Y)*3 - (X+Y)"),
+            (
+                "cse_reuse",
+                "use rand; X ~ unif(0,1); Y ~ unif(0,1); (X+Y)*(X+Y) + (X+Y)*3 - (X+Y)",
+            ),
             // Identity-bearing: `* 1`, `+ 0`, `^ 1` that survive to graph nodes.
-            ("identities", "use rand; X ~ unif(0,1); (X * 1 + 0) ^ 1 + X*X"),
+            (
+                "identities",
+                "use rand; X ~ unif(0,1); (X * 1 + 0) ^ 1 + X*X",
+            ),
         ];
         println!("\n  cone size (nodes the backend lowers): before → after simplify");
         for (name, src) in cases {
@@ -384,7 +422,10 @@ mod tests {
             let before = cone(eng.graph(), id);
             let (out, r) = simplify(eng.graph(), id);
             let after = cone(&out, r);
-            println!("    {name:12} {before:3} → {after:3}  (-{})", before - after);
+            println!(
+                "    {name:12} {before:3} → {after:3}  (-{})",
+                before - after
+            );
         }
     }
 

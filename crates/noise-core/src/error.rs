@@ -36,10 +36,16 @@ pub struct NoiseError {
 
 impl NoiseError {
     pub fn parse(msg: impl Into<String>, span: Span) -> Self {
-        NoiseError { kind: ErrorKind::Parse(msg.into()), span }
+        NoiseError {
+            kind: ErrorKind::Parse(msg.into()),
+            span,
+        }
     }
     pub fn runtime(msg: impl Into<String>, span: Span) -> Self {
-        NoiseError { kind: ErrorKind::Runtime(msg.into()), span }
+        NoiseError {
+            kind: ErrorKind::Runtime(msg.into()),
+            span,
+        }
     }
 }
 

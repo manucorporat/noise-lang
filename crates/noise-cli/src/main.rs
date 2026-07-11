@@ -11,10 +11,8 @@ use noise_core::{Engine, InputValue};
 /// `editors/vscode-noise/` kept in sync by `build.rs` — vendored (rather than reached
 /// via `../../../editors`) so the files survive the `cargo publish` tarball.
 const EXT_PKG_JSON: &str = include_str!("../vendor/vscode-noise/package.json");
-const EXT_LANG_CONFIG: &str =
-    include_str!("../vendor/vscode-noise/language-configuration.json");
-const EXT_TMLANGUAGE: &str =
-    include_str!("../vendor/vscode-noise/syntaxes/noise.tmLanguage.json");
+const EXT_LANG_CONFIG: &str = include_str!("../vendor/vscode-noise/language-configuration.json");
+const EXT_TMLANGUAGE: &str = include_str!("../vendor/vscode-noise/syntaxes/noise.tmLanguage.json");
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -144,7 +142,10 @@ fn install_ide_integration() {
         // points at a source tree — leave it be rather than writing through it.
         if let Ok(meta) = std::fs::symlink_metadata(&dest) {
             if meta.file_type().is_symlink() {
-                println!("• {name}: already linked (dev install) → {}", dest.display());
+                println!(
+                    "• {name}: already linked (dev install) → {}",
+                    dest.display()
+                );
                 installed += 1;
                 continue;
             }
@@ -159,7 +160,9 @@ fn install_ide_integration() {
     }
 
     if installed == 0 {
-        eprintln!("no supported editor found (looked for ~/.cursor, ~/.vscode, ~/.vscode-insiders).");
+        eprintln!(
+            "no supported editor found (looked for ~/.cursor, ~/.vscode, ~/.vscode-insiders)."
+        );
         std::process::exit(1);
     }
     println!("\nReload the editor window to activate: Cmd/Ctrl+Shift+P → \"Reload Window\".");
@@ -170,7 +173,10 @@ fn write_extension(dest: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dest.join("syntaxes"))?;
     std::fs::write(dest.join("package.json"), EXT_PKG_JSON)?;
     std::fs::write(dest.join("language-configuration.json"), EXT_LANG_CONFIG)?;
-    std::fs::write(dest.join("syntaxes").join("noise.tmLanguage.json"), EXT_TMLANGUAGE)?;
+    std::fs::write(
+        dest.join("syntaxes").join("noise.tmLanguage.json"),
+        EXT_TMLANGUAGE,
+    )?;
     Ok(())
 }
 
@@ -287,4 +293,3 @@ fn repl() {
         render_document(&doc);
     }
 }
-

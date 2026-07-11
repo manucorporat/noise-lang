@@ -142,7 +142,8 @@ cargo run -p noise-cli -- f.noise  # run a file (prints last statement's value)
 ```
 
 Modern toolchain; no future-incompat warnings (unlike `legacy/`). `Cargo.lock` is
-git-ignored.
+committed (reproducible CI and `cargo install`); CI is `.github/workflows/ci.yml`
+(tests native + `--features jit`, clippy `-D warnings`, rustfmt, wasm32 build, `cargo audit`).
 
 ## What works today (tested)
 

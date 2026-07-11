@@ -1,6 +1,5 @@
 /target/
 **/*.rs.bk
-Cargo.lock
 # wasm-pack output (legacy path; the wasm now builds into packages/core/wasm/)
 /crates/noise-wasm/pkg/
 # JS workspace deps (pnpm)

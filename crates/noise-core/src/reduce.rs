@@ -13,7 +13,10 @@
 //! the same chunks sequentially (browser parallelism is web-workers, handled above this layer).
 //! The [`Reducer`] monoid is executor-agnostic, so a rayon backend could drop in unchanged.
 
-use crate::backend::{compile_root, Program, Runner};
+use crate::backend::{compile_root, Runner};
+// `Program` (the `&dyn` seam threads hand around) only exists on the threaded native executor.
+#[cfg(not(target_arch = "wasm32"))]
+use crate::backend::Program;
 use crate::dist::{RvGraph, RvId};
 use crate::sampler::Moments;
 
@@ -125,7 +128,9 @@ fn chosen_threads(n: usize, n_chunks: usize) -> usize {
     if n < PAR_MIN_SAMPLES || n_chunks < 2 {
         return 1;
     }
-    let cores = std::thread::available_parallelism().map(|c| c.get()).unwrap_or(1);
+    let cores = std::thread::available_parallelism()
+        .map(|c| c.get())
+        .unwrap_or(1);
     cores.min(n_chunks)
 }
 
@@ -161,7 +166,10 @@ fn run_parallel<R: Reducer>(
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().expect("reduction worker panicked")).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("reduction worker panicked"))
+            .collect()
     });
     combine_in_order(r, per_thread.into_iter().flatten().collect())
 }
@@ -195,7 +203,10 @@ impl MomentAcc {
 
     pub fn into_moments(self) -> Moments {
         if self.count == 0 {
-            return Moments { mean: 0.0, variance: 0.0 };
+            return Moments {
+                mean: 0.0,
+                variance: 0.0,
+            };
         }
         let n = self.count as f64;
         let mean = self.sum / n;
@@ -220,7 +231,11 @@ impl Reducer for MomentsReducer {
     type Acc = MomentAcc;
 
     fn identity(&self) -> MomentAcc {
-        MomentAcc { count: 0, sum: 0.0, sum_sq: 0.0 }
+        MomentAcc {
+            count: 0,
+            sum: 0.0,
+            sum_sq: 0.0,
+        }
     }
 
     fn absorb(&self, acc: &mut MomentAcc, col: &[f64]) {
@@ -253,7 +268,11 @@ impl Reducer for MomentsReducer {
     }
 
     fn merge(&self, a: MomentAcc, b: MomentAcc) -> MomentAcc {
-        MomentAcc { count: a.count + b.count, sum: a.sum + b.sum, sum_sq: a.sum_sq + b.sum_sq }
+        MomentAcc {
+            count: a.count + b.count,
+            sum: a.sum + b.sum,
+            sum_sq: a.sum_sq + b.sum_sq,
+        }
     }
 }
 
@@ -270,7 +289,11 @@ impl Reducer for CondMomentsReducer {
     type Acc = MomentAcc;
 
     fn identity(&self) -> MomentAcc {
-        MomentAcc { count: 0, sum: 0.0, sum_sq: 0.0 }
+        MomentAcc {
+            count: 0,
+            sum: 0.0,
+            sum_sq: 0.0,
+        }
     }
 
     fn absorb(&self, acc: &mut MomentAcc, col: &[f64]) {
@@ -284,7 +307,11 @@ impl Reducer for CondMomentsReducer {
     }
 
     fn merge(&self, a: MomentAcc, b: MomentAcc) -> MomentAcc {
-        MomentAcc { count: a.count + b.count, sum: a.sum + b.sum, sum_sq: a.sum_sq + b.sum_sq }
+        MomentAcc {
+            count: a.count + b.count,
+            sum: a.sum + b.sum,
+            sum_sq: a.sum_sq + b.sum_sq,
+        }
     }
 }
 
@@ -321,7 +348,11 @@ mod tests {
         let base = run_parallel(&*program, n, seed, &r, n_chunks, 1).into_moments();
         for t in [2usize, 3, 5, 8] {
             let m = run_parallel(&*program, n, seed, &r, n_chunks, t).into_moments();
-            assert_eq!(m.mean.to_bits(), base.mean.to_bits(), "mean differs at {t} threads");
+            assert_eq!(
+                m.mean.to_bits(),
+                base.mean.to_bits(),
+                "mean differs at {t} threads"
+            );
             assert_eq!(
                 m.variance.to_bits(),
                 base.variance.to_bits(),
@@ -329,7 +360,11 @@ mod tests {
             );
         }
         // ...and it actually estimates π/4 ≈ 0.785.
-        assert!((base.mean - std::f64::consts::FRAC_PI_4).abs() < 2e-3, "mean = {}", base.mean);
+        assert!(
+            (base.mean - std::f64::consts::FRAC_PI_4).abs() < 2e-3,
+            "mean = {}",
+            base.mean
+        );
     }
 
     /// Same-process A/B of the new Σx/Σx² absorb vs the old streaming-Welford absorb over an
@@ -370,10 +405,21 @@ mod tests {
         let old_mps = n as f64 / t.elapsed().as_secs_f64() / 1e6;
 
         println!("\n  reduce absorb (single thread, M elem/s):");
-        println!("    welford(old) {old_mps:7.0}   sum/sumsq(new) {new_mps:7.0}   speedup {:.2}x", new_mps / old_mps);
+        println!(
+            "    welford(old) {old_mps:7.0}   sum/sumsq(new) {new_mps:7.0}   speedup {:.2}x",
+            new_mps / old_mps
+        );
         // Sanity: both estimate the same moments.
-        assert!((new_m.mean - mean).abs() < 1e-6, "mean mismatch {} vs {}", new_m.mean, mean);
-        assert!((new_m.variance - m2 / count as f64).abs() < 1e-6, "var mismatch");
+        assert!(
+            (new_m.mean - mean).abs() < 1e-6,
+            "mean mismatch {} vs {}",
+            new_m.mean,
+            mean
+        );
+        assert!(
+            (new_m.variance - m2 / count as f64).abs() < 1e-6,
+            "var mismatch"
+        );
     }
 
     /// Repeated `moments` calls are bit-identical despite work-stealing (index-ordered merge).
@@ -411,10 +457,15 @@ mod tests {
             n as f64 / t.elapsed().as_secs_f64() / 1e6
         };
 
-        let cores = std::thread::available_parallelism().map(|c| c.get()).unwrap_or(1);
+        let cores = std::thread::available_parallelism()
+            .map(|c| c.get())
+            .unwrap_or(1);
         let one = drive(1);
         let all = drive(cores);
         println!("\n  moments(pi) end-to-end (generate + reduce), M samples/s:");
-        println!("    1 thread {one:8.0}   {cores} threads {all:8.0}   scaling {:.1}x", all / one);
+        println!(
+            "    1 thread {one:8.0}   {cores} threads {all:8.0}   scaling {:.1}x",
+            all / one
+        );
     }
 }

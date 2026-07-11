@@ -9,7 +9,8 @@
 //! the original source. This module is the separate entry a host calls to read the metadata without
 //! running the program (`meta(src)` in wasm, `validate` in the CLI).
 //!
-//! Content is parsed by `serde_yaml` (wasm-clean, pure-Rust `unsafe-libyaml`). YAML is a superset of
+//! Content is parsed by `serde_norway` (the maintained `serde_yaml` fork; wasm-clean, pure-Rust
+//! `unsafe-libyaml-norway`). YAML is a superset of
 //! JSON, so the same pass handles both the YAML `key: value` form and the `{ … }` JSON escape hatch;
 //! it lowers to a `serde_json::Value`, and one `Value -> Frontmatter` path ([`from_value`]) validates
 //! it (§D2).
@@ -46,7 +47,10 @@ impl Frontmatter {
             "tags".into(),
             serde_json::Value::Array(self.tags.iter().map(|t| serde_json::json!(t)).collect()),
         );
-        m.insert("extra".into(), serde_json::Value::Object(self.extra.clone()));
+        m.insert(
+            "extra".into(),
+            serde_json::Value::Object(self.extra.clone()),
+        );
         serde_json::Value::Object(m)
     }
 }
@@ -95,9 +99,17 @@ fn fence_content(src: &str) -> Result<Option<(&str, Span, usize)>> {
         let line = src[line_start..line_end].trim_end_matches('\r');
         if line == "---" {
             let content_end = line_start; // content is everything before this closing line
-            let block_end = if line_end < bytes.len() { line_end + 1 } else { line_end };
+            let block_end = if line_end < bytes.len() {
+                line_end + 1
+            } else {
+                line_end
+            };
             let content = &src[content_start..content_end];
-            return Ok(Some((content, Span::new(content_start, content_end), block_end)));
+            return Ok(Some((
+                content,
+                Span::new(content_start, content_end),
+                block_end,
+            )));
         }
         if line_end >= bytes.len() {
             break;
@@ -136,13 +148,13 @@ pub fn parse(src: &str) -> Result<Option<(Frontmatter, Span)>> {
 }
 
 /// Parse the fenced content into a `serde_json::Value`. YAML is a superset of JSON, so one
-/// `serde_yaml` pass handles both the YAML `key: value` form and the `{ … }` JSON escape hatch
+/// `serde_norway` pass handles both the YAML `key: value` form and the `{ … }` JSON escape hatch
 /// (§D1). The result is lowered to a validated [`Frontmatter`] by [`from_value`].
 fn parse_content(content: &str, span: Span) -> Result<serde_json::Value> {
     if content.trim().is_empty() {
         return Ok(serde_json::Value::Object(serde_json::Map::new()));
     }
-    serde_yaml::from_str::<serde_json::Value>(content)
+    serde_norway::from_str::<serde_json::Value>(content)
         .map_err(|e| NoiseError::parse(format!("invalid frontmatter: {e}"), span))
 }
 
@@ -153,24 +165,29 @@ fn parse_content(content: &str, span: Span) -> Result<serde_json::Value> {
 fn from_value(value: serde_json::Value, span: Span) -> Result<Frontmatter> {
     let mut obj = match value {
         serde_json::Value::Object(m) => m,
-        _ => {
-            return Err(NoiseError::parse(
-                "frontmatter must be a map of keys",
-                span,
-            ))
-        }
+        _ => return Err(NoiseError::parse("frontmatter must be a map of keys", span)),
     };
 
     let title = match obj.remove("title") {
         None => None,
         Some(serde_json::Value::String(s)) => Some(s),
-        Some(_) => return Err(NoiseError::parse("frontmatter `title` must be a string", span)),
+        Some(_) => {
+            return Err(NoiseError::parse(
+                "frontmatter `title` must be a string",
+                span,
+            ))
+        }
     };
 
     let abstract_ = match obj.remove("abstract") {
         None => None,
         Some(serde_json::Value::String(s)) => Some(s),
-        Some(_) => return Err(NoiseError::parse("frontmatter `abstract` must be a string", span)),
+        Some(_) => {
+            return Err(NoiseError::parse(
+                "frontmatter `abstract` must be a string",
+                span,
+            ))
+        }
     };
 
     let tags = match obj.remove("tags") {
@@ -179,10 +196,18 @@ fn from_value(value: serde_json::Value, span: Span) -> Result<Frontmatter> {
             .into_iter()
             .map(|v| match v {
                 serde_json::Value::String(s) => Ok(s),
-                _ => Err(NoiseError::parse("frontmatter `tags` must be a list of strings", span)),
+                _ => Err(NoiseError::parse(
+                    "frontmatter `tags` must be a list of strings",
+                    span,
+                )),
             })
             .collect::<Result<Vec<_>>>()?,
-        Some(_) => return Err(NoiseError::parse("frontmatter `tags` must be a list of strings", span)),
+        Some(_) => {
+            return Err(NoiseError::parse(
+                "frontmatter `tags` must be a list of strings",
+                span,
+            ))
+        }
     };
 
     // `knobs:` is retired (PLAN-INPUTS): tunable parameters are now inline `input::…` calls in the
@@ -214,7 +239,12 @@ fn from_value(value: serde_json::Value, span: Span) -> Result<Frontmatter> {
         ));
     }
 
-    Ok(Frontmatter { title, abstract_, tags, extra })
+    Ok(Frontmatter {
+        title,
+        abstract_,
+        tags,
+        extra,
+    })
 }
 
 #[cfg(test)]
@@ -264,7 +294,10 @@ mod tests {
         let err = parse("---\nknobs:\n  n: { type: int, default: 6 }\n---\n").unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("no longer supported"), "got: {msg}");
-        assert!(msg.contains("input::real"), "should point at input::; got: {msg}");
+        assert!(
+            msg.contains("input::real"),
+            "should point at input::; got: {msg}"
+        );
     }
 
     #[test]
@@ -281,7 +314,10 @@ mod tests {
         let err = parse("---\ntitle: t\nblurb: hi\n---\n").unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("unknown key `blurb`"), "got: {msg}");
-        assert!(msg.contains("extra"), "should point the user at `extra:`; got: {msg}");
+        assert!(
+            msg.contains("extra"),
+            "should point the user at `extra:`; got: {msg}"
+        );
     }
 
     #[test]
@@ -294,14 +330,23 @@ mod tests {
     fn abstract_and_tags_are_native() {
         let src = "---\ntitle: T\nabstract: >\n  A short paper-style summary\n  spanning two lines.\ntags: [monte carlo, basics]\n---\nx = 1\n";
         let (fm, _) = parse(src).unwrap().unwrap();
-        assert_eq!(fm.abstract_.as_deref(), Some("A short paper-style summary spanning two lines.\n"));
-        assert_eq!(fm.tags, vec!["monte carlo".to_string(), "basics".to_string()]);
+        assert_eq!(
+            fm.abstract_.as_deref(),
+            Some("A short paper-style summary spanning two lines.\n")
+        );
+        assert_eq!(
+            fm.tags,
+            vec!["monte carlo".to_string(), "basics".to_string()]
+        );
         // Native fields don't leak into `extra`.
         assert!(!fm.extra.contains_key("abstract"));
         assert!(!fm.extra.contains_key("tags"));
         let j = fm.to_json();
         assert_eq!(j["tags"], serde_json::json!(["monte carlo", "basics"]));
-        assert_eq!(j["abstract"], serde_json::json!("A short paper-style summary spanning two lines.\n"));
+        assert_eq!(
+            j["abstract"],
+            serde_json::json!("A short paper-style summary spanning two lines.\n")
+        );
     }
 
     #[test]

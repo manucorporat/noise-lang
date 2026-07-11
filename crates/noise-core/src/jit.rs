@@ -182,12 +182,17 @@ fn build(graph: &RvGraph, root: RvId) -> Result<JitProgram, String> {
 /// skeleton is: load each stream's state → counted loop emitting `streams` samples per iteration →
 /// store state back → return.
 fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram, String> {
-    assert!(streams >= 1 && BATCH.is_multiple_of(streams), "streams must divide BATCH");
+    assert!(
+        streams >= 1 && BATCH.is_multiple_of(streams),
+        "streams must divide BATCH"
+    );
 
     // --- ISA + module setup ---
     let mut flags = settings::builder();
     flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
-    flags.set("use_colocated_libcalls", "false").map_err(|e| e.to_string())?;
+    flags
+        .set("use_colocated_libcalls", "false")
+        .map_err(|e| e.to_string())?;
     flags.set("is_pic", "false").map_err(|e| e.to_string())?;
     let isa = cranelift_native::builder()
         .map_err(|e| e.to_string())?
@@ -209,8 +214,9 @@ fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram,
     sig.params.push(AbiParam::new(ptr)); // out
     sig.params.push(AbiParam::new(types::I64)); // n
     sig.params.push(AbiParam::new(ptr)); // state
-    let func_id =
-        module.declare_function("kernel", Linkage::Export, &sig).map_err(|e| e.to_string())?;
+    let func_id = module
+        .declare_function("kernel", Linkage::Export, &sig)
+        .map_err(|e| e.to_string())?;
 
     let mut ctx = module.make_context();
     ctx.func.signature = sig;
@@ -259,7 +265,9 @@ fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram,
         for (j, st) in states.iter().enumerate() {
             for (k, v) in st.iter().enumerate() {
                 let off = ((k * streams + j) * 8) as i32;
-                let w = fb.ins().load(types::I64, MemFlags::trusted(), state_ptr, off);
+                let w = fb
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), state_ptr, off);
                 fb.def_var(*v, w);
             }
         }
@@ -303,7 +311,9 @@ fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram,
         fb.finalize();
     }
 
-    module.define_function(func_id, &mut ctx).map_err(|e| e.to_string())?;
+    module
+        .define_function(func_id, &mut ctx)
+        .map_err(|e| e.to_string())?;
     module.clear_context(&mut ctx);
     module.finalize_definitions().map_err(|e| e.to_string())?;
     let code = module.get_finalized_function(func_id);
@@ -311,7 +321,13 @@ fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram,
     // module is moved into the program so the code stays mapped for the pointer's lifetime.
     let func: KernelFn = unsafe { std::mem::transmute::<*const u8, KernelFn>(code) };
 
-    Ok(JitProgram { inner: Arc::new(JitProgramInner { _module: module, func, streams }) })
+    Ok(JitProgram {
+        inner: Arc::new(JitProgramInner {
+            _module: module,
+            func,
+            streams,
+        }),
+    })
 }
 
 /// Declare the six math shims as module imports and return their `FuncId`s. (Errors are
@@ -331,7 +347,9 @@ fn declare_math(module: &mut JITModule) -> Result<MathIds, String> {
         s
     };
     let decl = |module: &mut JITModule, name: &str, sig: &cranelift::codegen::ir::Signature| {
-        module.declare_function(name, Linkage::Import, sig).map_err(|e| e.to_string())
+        module
+            .declare_function(name, Linkage::Import, sig)
+            .map_err(|e| e.to_string())
     };
     Ok(MathIds {
         atan: decl(module, "nz_atan", &sig1)?,
@@ -347,7 +365,12 @@ fn call1(fb: &mut FunctionBuilder, f: cranelift::codegen::ir::FuncRef, x: Value)
 }
 
 /// `f(x, y)` for a two-arg shim `FuncRef`.
-fn call2(fb: &mut FunctionBuilder, f: cranelift::codegen::ir::FuncRef, x: Value, y: Value) -> Value {
+fn call2(
+    fb: &mut FunctionBuilder,
+    f: cranelift::codegen::ir::FuncRef,
+    x: Value,
+    y: Value,
+) -> Value {
     let c = fb.ins().call(f, &[x, y]);
     fb.inst_results(c)[0]
 }
@@ -494,7 +517,7 @@ fn emit_ln(fb: &mut FunctionBuilder, x: Value) -> Value {
     let mant = fb.ins().band_imm(bits, 0x000f_ffff_ffff_ffff);
     let mbits = fb.ins().bor_imm(mant, 0x3ff0_0000_0000_0000u64 as i64);
     let m0 = fb.ins().bitcast(types::F64, MemFlags::new(), mbits); // [1, 2)
-    // Recenter when m0 > √2 (branchless): m = m0/2, e = e0 + 1, so |f| ≤ 0.172.
+                                                                   // Recenter when m0 > √2 (branchless): m = m0/2, e = e0 + 1, so |f| ≤ 0.172.
     let sqrt2 = fb.ins().f64const(SQRT_2);
     let big = fb.ins().fcmp(FloatCC::GreaterThan, m0, sqrt2);
     let half = fb.ins().f64const(0.5);
@@ -718,7 +741,11 @@ fn logic_to_f64(fb: &mut FunctionBuilder, a: Value, b: Value, and: bool) -> Valu
     let zero = fb.ins().f64const(0.0);
     let an = fb.ins().fcmp(FloatCC::NotEqual, a, zero);
     let bn = fb.ins().fcmp(FloatCC::NotEqual, b, zero);
-    let r = if and { fb.ins().band(an, bn) } else { fb.ins().bor(an, bn) };
+    let r = if and {
+        fb.ins().band(an, bn)
+    } else {
+        fb.ins().bor(an, bn)
+    };
     bool_to_f64(fb, r)
 }
 
@@ -732,9 +759,9 @@ fn bool_to_f64(fb: &mut FunctionBuilder, cond: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sampler::moments;
     use crate::kernel::supported;
     use crate::kernel::STREAMS;
+    use crate::sampler::moments;
 
     /// JIT and interpreter must agree *in distribution* on a graph the JIT supports. We compare
     /// moments (not draw-for-draw — the RNG consumption order differs by design).
@@ -829,7 +856,10 @@ mod tests {
         assert_jit_matches_interp("use rand; use math; X ~ unif(-2, 3); log(X) == log(X)", 21);
         // Domain guard, zero lanes: log(0) = -inf < -100, P = 1/5 over unif_int(0,4) (an
         // indicator, so the mean stays finite and comparable).
-        assert_jit_matches_interp("use rand; use math; X ~ unif_int(0, 4); log(X) < 0 - 100", 22);
+        assert_jit_matches_interp(
+            "use rand; use math; X ~ unif_int(0, 4); log(X) < 0 - 100",
+            22,
+        );
         // Domain guard, +inf: X/0 = +inf per lane; log(+inf) = +inf > 100 surely.
         assert_jit_matches_interp("use rand; use math; X ~ unif(1, 2); log(X / 0) > 100", 23);
     }
@@ -856,7 +886,10 @@ mod tests {
     fn stream_count_preserves_distribution() {
         let cases = [
             ("use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B", 7.0),
-            ("use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1", std::f64::consts::FRAC_PI_4),
+            (
+                "use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1",
+                std::f64::consts::FRAC_PI_4,
+            ),
         ];
         for (src, expected) in cases {
             let mut eng = crate::Engine::new();
@@ -912,14 +945,32 @@ mod tests {
         }
 
         let cases = [
-            ("pi_indicator", "use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1"),
-            ("dice_sum", "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B"),
-            ("poly_deep", "use rand; X ~ unif(0,1); ((X*X+X)*X - X)*X + X*X - X + 1"),
-            ("normal_poly", "use rand; Z ~ normal(0,1); ((Z*Z+Z)*Z - Z)*Z + Z*Z"),
+            (
+                "pi_indicator",
+                "use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1",
+            ),
+            (
+                "dice_sum",
+                "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B",
+            ),
+            (
+                "poly_deep",
+                "use rand; X ~ unif(0,1); ((X*X+X)*X - X)*X + X*X - X + 1",
+            ),
+            (
+                "normal_poly",
+                "use rand; Z ~ normal(0,1); ((Z*Z+Z)*Z - Z)*Z + Z*Z",
+            ),
             // Transcendental-bound now that ln/cos are inlined: the multi-stream win should appear.
-            ("normal_sum", "use rand; X ~ normal(0,1); Y ~ normal(0,1); X + Y"),
+            (
+                "normal_sum",
+                "use rand; X ~ normal(0,1); Y ~ normal(0,1); X + Y",
+            ),
             ("exp_tail", "use rand; X ~ exponential(2); X > 1"),
-            ("sin_wave", "use rand; use math; X ~ unif(0,1); sin(6.283*X) + cos(6.283*X)"),
+            (
+                "sin_wave",
+                "use rand; use math; X ~ unif(0,1); sin(6.283*X) + cos(6.283*X)",
+            ),
         ];
         let batches = 4000;
         println!("\n  kernel throughput by stream count (single thread, M elem/s):");

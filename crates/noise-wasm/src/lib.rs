@@ -33,9 +33,10 @@ fn parse_opts(opts_json: Option<String>) -> Result<Vec<(String, InputValue)>, St
     for (name, v) in opts.inputs {
         let iv = match v {
             serde_json::Value::Bool(b) => InputValue::Bool(b),
-            serde_json::Value::Number(n) => {
-                InputValue::Num(n.as_f64().ok_or_else(|| format!("input `{name}` is not a number"))?)
-            }
+            serde_json::Value::Number(n) => InputValue::Num(
+                n.as_f64()
+                    .ok_or_else(|| format!("input `{name}` is not a number"))?,
+            ),
             _ => return Err(format!("input `{name}` override must be a number or bool")),
         };
         out.push((name, iv));
@@ -171,13 +172,23 @@ struct PlotOut {
 impl From<&Summary> for PlotOut {
     fn from(s: &Summary) -> PlotOut {
         let p = to_flint(s);
-        PlotOut { title: p.title, text: p.text, charts: p.charts, error: None }
+        PlotOut {
+            title: p.title,
+            text: p.text,
+            charts: p.charts,
+            error: None,
+        }
     }
 }
 
 impl PlotOut {
     fn failed(error: String) -> PlotOut {
-        PlotOut { title: "—".into(), text: error.clone(), charts: vec![], error: Some(error) }
+        PlotOut {
+            title: "—".into(),
+            text: error.clone(),
+            charts: vec![],
+            error: Some(error),
+        }
     }
 }
 
@@ -191,8 +202,7 @@ pub fn run_with_introspection(src: &str, requests_json: &str, opts_json: Option<
     let overrides = match parse_opts(opts_json) {
         Ok(o) => o,
         Err(e) => {
-            let payload =
-                serde_json::json!({ "document": doc_error(e), "bindings": [], "introspections": [] });
+            let payload = serde_json::json!({ "document": doc_error(e), "bindings": [], "introspections": [] });
             return to_json_string(&payload);
         }
     };
@@ -204,7 +214,10 @@ pub fn run_with_introspection(src: &str, requests_json: &str, opts_json: Option<
     let bindings: Vec<Binding> = engine
         .bindings()
         .into_iter()
-        .map(|(name, kind)| Binding { name, kind: kind.to_string() })
+        .map(|(name, kind)| Binding {
+            name,
+            kind: kind.to_string(),
+        })
         .collect();
 
     let requests: Vec<Request> = serde_json::from_str(requests_json).unwrap_or_default();

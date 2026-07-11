@@ -28,7 +28,10 @@ use crate::dist::{RvGraph, RvId, RvNode, Source};
 /// pressure modest; past four the gain flattens (see `jit::bench_streams`). Must divide [`BATCH`].
 pub const STREAMS: usize = 4;
 
-const _: () = assert!(BATCH.is_multiple_of(STREAMS), "BATCH must be a multiple of STREAMS");
+const _: () = assert!(
+    BATCH.is_multiple_of(STREAMS),
+    "BATCH must be a multiple of STREAMS"
+);
 
 /// Expand `seed` into `streams` independent xoshiro states. Each stream gets four consecutive
 /// SplitMix64 outputs (mirroring `Rng::seed_from_u64`, so `streams == 1` seeds bit-identically to
@@ -74,7 +77,14 @@ pub fn const_int_exponent(graph: &RvGraph, id: RvId) -> Option<u32> {
 pub fn profitable(graph: &RvGraph, root: RvId, inline_trans: bool) -> bool {
     let mut seen = HashSet::new();
     let (mut fusible, mut libcalls) = (0u32, 0u32);
-    if walk_cost(graph, root, &mut seen, &mut fusible, &mut libcalls, inline_trans) {
+    if walk_cost(
+        graph,
+        root,
+        &mut seen,
+        &mut fusible,
+        &mut libcalls,
+        inline_trans,
+    ) {
         fusible > libcalls
     } else {
         false // unsupported (Poisson) → interpreter
@@ -185,8 +195,10 @@ fn latency_bound(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>) -> bool {
         RvNode::Gather { .. } => false, // interpreter-only (gated out before this is consulted)
         RvNode::ConstNum(_) | RvNode::ConstBool(_) => true,
         RvNode::Unary(op, a) => {
-            !matches!(op, UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Round | UnOp::Exp | UnOp::Ln)
-                && latency_bound(graph, *a, seen)
+            !matches!(
+                op,
+                UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Round | UnOp::Exp | UnOp::Ln
+            ) && latency_bound(graph, *a, seen)
         }
         RvNode::Binary(crate::ast::BinOp::Pow, a, b) => {
             const_int_exponent(graph, *b).is_some()

@@ -204,8 +204,14 @@ impl std::fmt::Display for SigExpr {
 
 fn fmt_expr(e: &SigExpr, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match e {
-        SigExpr::Wave { wave: Wave::Sine, freq } => write!(f, "sine({})", crate::value::format_num(*freq)),
-        SigExpr::Wave { wave: Wave::Cosine, freq } => {
+        SigExpr::Wave {
+            wave: Wave::Sine,
+            freq,
+        } => write!(f, "sine({})", crate::value::format_num(*freq)),
+        SigExpr::Wave {
+            wave: Wave::Cosine,
+            freq,
+        } => {
             write!(f, "cosine({})", crate::value::format_num(*freq))
         }
         SigExpr::Konst(c) => write!(f, "{}", crate::value::format_num(*c)),

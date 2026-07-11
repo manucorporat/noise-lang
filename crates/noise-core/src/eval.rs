@@ -109,7 +109,10 @@ pub enum Output {
     /// An emitted **template** (PLAN-LITERATE §D3): a root-position template statement renders to
     /// this rather than becoming the program value. `syntax` is the triple-fence info tag (`md`, …)
     /// so a host renders markdown vs preformatted text; the CLI prints the raw text either way.
-    Note { text: String, syntax: Option<String> },
+    Note {
+        text: String,
+        syntax: Option<String>,
+    },
     /// A `plot::*` chart — the same summary the introspection core produces.
     Plot(Rc<crate::introspect::Summary>),
     /// An `input::*` control (PLAN-INPUTS §4): a host-tunable parameter declared inline. Carries the
@@ -213,7 +216,10 @@ impl Engine {
             }
             return;
         }
-        self.outputs.push(Emission { stmt_span: self.current_stmt_span, output });
+        self.outputs.push(Emission {
+            stmt_span: self.current_stmt_span,
+            output,
+        });
     }
 
     /// Read-only access to the sample-DAG (tests assert it stays empty for deterministic
@@ -286,7 +292,9 @@ impl Engine {
         for (name, _) in &self.input_overrides {
             if !self.input_manifest.iter().any(|r| &r.spec.name == name) {
                 return Err(NoiseError::runtime(
-                    format!("override for unknown input `{name}` (the program declares no such input)"),
+                    format!(
+                        "override for unknown input `{name}` (the program declares no such input)"
+                    ),
                     Span::new(0, 0),
                 ));
             }
@@ -301,7 +309,10 @@ impl Engine {
         self.current_stmt_span = stmt.span;
         if let Expr::Template { parts, syntax } = &stmt.expr {
             let text = self.render_template(parts)?;
-            self.emit(Output::Note { text, syntax: syntax.clone() });
+            self.emit(Output::Note {
+                text,
+                syntax: syntax.clone(),
+            });
             Ok(Value::Unit)
         } else {
             self.eval(stmt)
@@ -363,7 +374,16 @@ impl Engine {
         let inputs = std::mem::take(&mut self.input_manifest);
         let truncated = self.first_dropped_span.map(|span| (self.dropped, span));
         crate::doc::assemble(
-            src, fm, segs, comments, emissions, inputs, last, error, self.stats(), truncated,
+            src,
+            fm,
+            segs,
+            comments,
+            emissions,
+            inputs,
+            last,
+            error,
+            self.stats(),
+            truncated,
         )
     }
 
@@ -406,7 +426,12 @@ impl Engine {
             Expr::Bind(kind, name, rhs) => self.eval_bind(*kind, name, rhs),
             Expr::Sample { shape, body } => self.eval_sample(shape, body),
             Expr::MatMul(l, r) => self.eval_matmul(l, r, node.span),
-            Expr::FnDef { kind, name, params, body } => {
+            Expr::FnDef {
+                kind,
+                name,
+                params,
+                body,
+            } => {
                 // Defining a function registers it (cloning the body out of the AST so it
                 // outlives this `run`) and evaluates to unit.
                 let f = Rc::new(UserFn {
@@ -466,7 +491,10 @@ impl Engine {
             Expr::Use(module) => {
                 if !is_module(module) {
                     return Err(NoiseError::runtime(
-                        format!("unknown module '{module}' (known modules: {})", MODULES.join(", ")),
+                        format!(
+                            "unknown module '{module}' (known modules: {})",
+                            MODULES.join(", ")
+                        ),
                         node.span,
                     ));
                 }
@@ -571,7 +599,10 @@ impl Engine {
                         span,
                     ));
                 }
-                Err(NoiseError::runtime(format!("undefined variable '{name}'"), span))
+                Err(NoiseError::runtime(
+                    format!("undefined variable '{name}'"),
+                    span,
+                ))
             }
         }
     }
@@ -662,7 +693,10 @@ impl Engine {
         match v {
             Value::Num(n) | Value::Est { val: n, .. } if n.is_finite() => Ok(n),
             other => Err(NoiseError::runtime(
-                format!("range bound must be a finite number, got {}", other.type_name()),
+                format!(
+                    "range bound must be a finite number, got {}",
+                    other.type_name()
+                ),
                 e.span,
             )),
         }
@@ -699,7 +733,13 @@ impl Engine {
     /// scalars of one kind — gathering a matrix row into a single lane is out of scope. At sample
     /// time each lane rounds its `index` to the nearest integer and **clamps** it into range (a
     /// permutation index is always valid, so the clamp only guards malformed inputs).
-    fn gather(&mut self, xs: &[Value], index: Value, arr_span: Span, idx_span: Span) -> Result<Value> {
+    fn gather(
+        &mut self,
+        xs: &[Value],
+        index: Value,
+        arr_span: Span,
+        idx_span: Span,
+    ) -> Result<Value> {
         if xs.is_empty() {
             return Err(NoiseError::runtime(
                 "cannot gather from an empty array".to_string(),
@@ -709,7 +749,10 @@ impl Engine {
         let (index_id, index_kind) = self.operand_to_rv(index, idx_span)?;
         if index_kind != RvKind::Num {
             return Err(NoiseError::runtime(
-                format!("array index must be a number, got {}", index_kind.type_name()),
+                format!(
+                    "array index must be a number, got {}",
+                    index_kind.type_name()
+                ),
                 idx_span,
             ));
         }
@@ -730,9 +773,13 @@ impl Engine {
             elems.push(id);
         }
         let kind = elem_kind.expect("non-empty array has a kind");
-        let id = self
-            .graph
-            .push(RvNode::Gather { elems: elems.into_boxed_slice(), index: index_id }, kind);
+        let id = self.graph.push(
+            RvNode::Gather {
+                elems: elems.into_boxed_slice(),
+                index: index_id,
+            },
+            kind,
+        );
         Ok(Value::Dist(id))
     }
 
@@ -742,7 +789,10 @@ impl Engine {
             Value::Array(xs) => xs,
             other => {
                 return Err(NoiseError::runtime(
-                    format!("`for` expects an array to iterate, got {}", other.type_name()),
+                    format!(
+                        "`for` expects an array to iterate, got {}",
+                        other.type_name()
+                    ),
                     iter.span,
                 ))
             }
@@ -768,7 +818,10 @@ impl Engine {
             Value::Array(xs) => xs,
             other => {
                 return Err(NoiseError::runtime(
-                    format!("a comprehension needs an array to iterate, got {}", other.type_name()),
+                    format!(
+                        "a comprehension needs an array to iterate, got {}",
+                        other.type_name()
+                    ),
                     iter.span,
                 ))
             }
@@ -889,7 +942,15 @@ impl Engine {
             self.emit(Output::Text(line));
             Ok(Value::Unit)
         } else {
-            builtins::call(base, &arg_vals, &self.graph, self.max_samples, self.max_opts, span, self.check_mode)
+            builtins::call(
+                base,
+                &arg_vals,
+                &self.graph,
+                self.max_samples,
+                self.max_opts,
+                span,
+                self.check_mode,
+            )
         }
     }
 
@@ -1047,7 +1108,15 @@ impl Engine {
             NoiseError::runtime(format!("input `{name}` needs a `default`"), span)
         })?;
 
-        let spec = InputSpec { name: name.clone(), kind, min, max, step, default, label };
+        let spec = InputSpec {
+            name: name.clone(),
+            kind,
+            min,
+            max,
+            step,
+            default,
+            label,
+        };
         spec.validate(span)?;
 
         // Dedup by name. A repeat with the same spec reuses the resolved value; a repeat with a
@@ -1068,8 +1137,15 @@ impl Engine {
             .find(|(n, _)| *n == name)
             .map(|(_, v)| *v);
         let value = spec.resolve(over)?;
-        self.emit(Output::Input { spec: spec.clone(), value });
-        self.input_manifest.push(ResolvedInput { spec, value, stmt_span: self.current_stmt_span });
+        self.emit(Output::Input {
+            spec: spec.clone(),
+            value,
+        });
+        self.input_manifest.push(ResolvedInput {
+            spec,
+            value,
+            stmt_span: self.current_stmt_span,
+        });
         Ok(input_value_to_value(value))
     }
 
@@ -1078,7 +1154,10 @@ impl Engine {
         match self.eval(e)? {
             Value::Num(n) => Ok(n),
             other => Err(NoiseError::runtime(
-                format!("input::{base} field `{field}` must be a number, got {}", other.type_name()),
+                format!(
+                    "input::{base} field `{field}` must be a number, got {}",
+                    other.type_name()
+                ),
                 e.span,
             )),
         }
@@ -1089,7 +1168,10 @@ impl Engine {
         match self.eval(e)? {
             Value::Str(s) => Ok(s),
             other => Err(NoiseError::runtime(
-                format!("input::{base} field `{field}` must be a string, got {}", other.type_name()),
+                format!(
+                    "input::{base} field `{field}` must be a string, got {}",
+                    other.type_name()
+                ),
                 e.span,
             )),
         }
@@ -1101,7 +1183,10 @@ impl Engine {
             Value::Num(n) => Ok(InputValue::Num(n)),
             Value::Bool(b) => Ok(InputValue::Bool(b)),
             other => Err(NoiseError::runtime(
-                format!("input::{base} `default` must be a number or bool, got {}", other.type_name()),
+                format!(
+                    "input::{base} `default` must be a number or bool, got {}",
+                    other.type_name()
+                ),
                 e.span,
             )),
         }
@@ -1116,7 +1201,11 @@ impl Engine {
     ) -> Result<Value> {
         if args.len() != f.params.len() {
             return Err(NoiseError::runtime(
-                format!("{name} expects {} argument(s), got {}", f.params.len(), args.len()),
+                format!(
+                    "{name} expects {} argument(s), got {}",
+                    f.params.len(),
+                    args.len()
+                ),
                 span,
             ));
         }
@@ -1167,7 +1256,10 @@ impl Engine {
     /// `E|z|² = sigma²` like `rand::normal_complex`).
     fn draw_noise(&mut self, spec: NoiseSpec) -> Value {
         if let NoiseKind::WhiteComplex = spec.kind {
-            let lane = NoiseSpec { sigma: spec.sigma / std::f64::consts::SQRT_2, kind: NoiseKind::White };
+            let lane = NoiseSpec {
+                sigma: spec.sigma / std::f64::consts::SQRT_2,
+                kind: NoiseKind::White,
+            };
             let re = self.draw_noise(lane);
             let im = self.draw_noise(lane);
             return Value::complex(re, im);
@@ -1185,18 +1277,25 @@ impl Engine {
         if let [n] = dims {
             let vals = match spec.kind {
                 NoiseKind::WhiteComplex => {
-                    let lane =
-                        NoiseSpec { sigma: spec.sigma / std::f64::consts::SQRT_2, kind: NoiseKind::White };
+                    let lane = NoiseSpec {
+                        sigma: spec.sigma / std::f64::consts::SQRT_2,
+                        kind: NoiseKind::White,
+                    };
                     let re = self.materialize_noise(lane, *n);
                     let im = self.materialize_noise(lane, *n);
-                    re.into_iter().zip(im).map(|(a, b)| Value::complex(a, b)).collect()
+                    re.into_iter()
+                        .zip(im)
+                        .map(|(a, b)| Value::complex(a, b))
+                        .collect()
                 }
                 _ => self.materialize_noise(spec, *n),
             };
             return Value::Array(Rc::new(vals));
         }
         let (m, rest) = (dims[0], &dims[1..]);
-        Value::Array(Rc::new((0..m).map(|_| self.draw_noise_shaped(rest, spec)).collect()))
+        Value::Array(Rc::new(
+            (0..m).map(|_| self.draw_noise_shaped(rest, spec)).collect(),
+        ))
     }
 
     /// The prefix draw operator `~[shape]? body` (LANG.md §2). Evaluate the operand once to a
@@ -1258,45 +1357,58 @@ impl Engine {
         // A complex draw yields a `Value::Complex` (two independent real channels), not a scalar id.
         if let Recipe::NormalComplex { sigma } = r {
             let s = sigma / std::f64::consts::SQRT_2;
-            let re = self.graph.push(RvNode::Src(Source::Normal { mu: 0.0, sigma: s }), RvKind::Num);
-            let im = self.graph.push(RvNode::Src(Source::Normal { mu: 0.0, sigma: s }), RvKind::Num);
+            let re = self.graph.push(
+                RvNode::Src(Source::Normal { mu: 0.0, sigma: s }),
+                RvKind::Num,
+            );
+            let im = self.graph.push(
+                RvNode::Src(Source::Normal { mu: 0.0, sigma: s }),
+                RvKind::Num,
+            );
             return Ok(Value::complex(Value::Dist(re), Value::Dist(im)));
         }
         let id = match r {
-            Recipe::Uniform { lo, hi } => {
-                self.graph.push(RvNode::Src(Source::Uniform(Uniform { lo, hi })), RvKind::Num)
-            }
-            Recipe::UniformInt { lo, hi } => {
-                self.graph.push(RvNode::Src(Source::UniformInt { lo, hi }), RvKind::Num)
-            }
-            Recipe::Normal { mu, sigma } => {
-                self.graph.push(RvNode::Src(Source::Normal { mu, sigma }), RvKind::Num)
-            }
-            Recipe::Exp { rate } => {
-                self.graph.push(RvNode::Src(Source::Exp { rate }), RvKind::Num)
-            }
-            Recipe::Poisson { lambda } => {
-                self.graph.push(RvNode::Src(Source::Poisson { lambda }), RvKind::Num)
-            }
-            Recipe::Geometric { p } => {
-                self.graph.push(RvNode::Src(Source::Geometric { p }), RvKind::Num)
-            }
+            Recipe::Uniform { lo, hi } => self.graph.push(
+                RvNode::Src(Source::Uniform(Uniform { lo, hi })),
+                RvKind::Num,
+            ),
+            Recipe::UniformInt { lo, hi } => self
+                .graph
+                .push(RvNode::Src(Source::UniformInt { lo, hi }), RvKind::Num),
+            Recipe::Normal { mu, sigma } => self
+                .graph
+                .push(RvNode::Src(Source::Normal { mu, sigma }), RvKind::Num),
+            Recipe::Exp { rate } => self
+                .graph
+                .push(RvNode::Src(Source::Exp { rate }), RvKind::Num),
+            Recipe::Poisson { lambda } => self
+                .graph
+                .push(RvNode::Src(Source::Poisson { lambda }), RvKind::Num),
+            Recipe::Geometric { p } => self
+                .graph
+                .push(RvNode::Src(Source::Geometric { p }), RvKind::Num),
             // The `_int` family draws a continuous source then rounds each lane to an integer.
             Recipe::NormalInt { mu, sigma } => {
-                let z = self.graph.push(RvNode::Src(Source::Normal { mu, sigma }), RvKind::Num);
+                let z = self
+                    .graph
+                    .push(RvNode::Src(Source::Normal { mu, sigma }), RvKind::Num);
                 self.graph.push(RvNode::Unary(UnOp::Round, z), RvKind::Num)
             }
             Recipe::ExpInt { rate } => {
-                let z = self.graph.push(RvNode::Src(Source::Exp { rate }), RvKind::Num);
+                let z = self
+                    .graph
+                    .push(RvNode::Src(Source::Exp { rate }), RvKind::Num);
                 self.graph.push(RvNode::Unary(UnOp::Round, z), RvKind::Num)
             }
             Recipe::Bernoulli { p } => {
                 // bernoulli(p) ≡ (unif(0,1) < p): a bool-RV that is 1 with probability p.
-                let u = self
-                    .graph
-                    .push(RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })), RvKind::Num);
+                let u = self.graph.push(
+                    RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
+                    RvKind::Num,
+                );
                 let c = self.graph.push(RvNode::ConstNum(p), RvKind::Num);
-                self.graph.push(RvNode::Binary(BinOp::Lt, u, c), RvKind::Bool)
+                self.graph
+                    .push(RvNode::Binary(BinOp::Lt, u, c), RvKind::Bool)
             }
             // --- distributions with a (possibly) random parameter: lower to a standard base draw +
             //     a deterministic transform, so the VM/RNG never change (LANG.md "Hierarchical
@@ -1305,43 +1417,91 @@ impl Engine {
             //     are independent given `p`). The transform nodes simplify/CSE/lower like any other.
             Recipe::UniformDyn { lo, hi } => {
                 // lo + (hi − lo)·U,  U ~ unif(0,1).
-                let u = self.graph.push(RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })), RvKind::Num);
+                let u = self.graph.push(
+                    RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
+                    RvKind::Num,
+                );
                 let (lo, hi) = (self.arg_id(lo), self.arg_id(hi));
-                let width = self.graph.push(RvNode::Binary(BinOp::Sub, hi, lo), RvKind::Num);
-                let scaled = self.graph.push(RvNode::Binary(BinOp::Mul, width, u), RvKind::Num);
-                self.graph.push(RvNode::Binary(BinOp::Add, lo, scaled), RvKind::Num)
+                let width = self
+                    .graph
+                    .push(RvNode::Binary(BinOp::Sub, hi, lo), RvKind::Num);
+                let scaled = self
+                    .graph
+                    .push(RvNode::Binary(BinOp::Mul, width, u), RvKind::Num);
+                self.graph
+                    .push(RvNode::Binary(BinOp::Add, lo, scaled), RvKind::Num)
             }
             Recipe::UniformIntDyn { lo, hi } => {
                 // lo + floor((hi − lo + 1)·U),  U ~ unif(0,1) → inclusive integers lo..=hi.
-                let u = self.graph.push(RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })), RvKind::Num);
+                let u = self.graph.push(
+                    RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
+                    RvKind::Num,
+                );
                 let (lo, hi) = (self.arg_id(lo), self.arg_id(hi));
-                let diff = self.graph.push(RvNode::Binary(BinOp::Sub, hi, lo), RvKind::Num);
+                let diff = self
+                    .graph
+                    .push(RvNode::Binary(BinOp::Sub, hi, lo), RvKind::Num);
                 let one = self.graph.push(RvNode::ConstNum(1.0), RvKind::Num);
-                let width = self.graph.push(RvNode::Binary(BinOp::Add, diff, one), RvKind::Num);
-                let scaled = self.graph.push(RvNode::Binary(BinOp::Mul, u, width), RvKind::Num);
-                let floored = self.graph.push(RvNode::Unary(UnOp::Floor, scaled), RvKind::Num);
-                self.graph.push(RvNode::Binary(BinOp::Add, lo, floored), RvKind::Num)
+                let width = self
+                    .graph
+                    .push(RvNode::Binary(BinOp::Add, diff, one), RvKind::Num);
+                let scaled = self
+                    .graph
+                    .push(RvNode::Binary(BinOp::Mul, u, width), RvKind::Num);
+                let floored = self
+                    .graph
+                    .push(RvNode::Unary(UnOp::Floor, scaled), RvKind::Num);
+                self.graph
+                    .push(RvNode::Binary(BinOp::Add, lo, floored), RvKind::Num)
             }
             Recipe::NormalDyn { mu, sigma, int } => {
                 // mu + sigma·Z,  Z ~ N(0,1); `int` rounds each lane (normal_int).
-                let z = self.graph.push(RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }), RvKind::Num);
+                let z = self.graph.push(
+                    RvNode::Src(Source::Normal {
+                        mu: 0.0,
+                        sigma: 1.0,
+                    }),
+                    RvKind::Num,
+                );
                 let (mu, sigma) = (self.arg_id(mu), self.arg_id(sigma));
-                let scaled = self.graph.push(RvNode::Binary(BinOp::Mul, sigma, z), RvKind::Num);
-                let val = self.graph.push(RvNode::Binary(BinOp::Add, mu, scaled), RvKind::Num);
-                if int { self.graph.push(RvNode::Unary(UnOp::Round, val), RvKind::Num) } else { val }
+                let scaled = self
+                    .graph
+                    .push(RvNode::Binary(BinOp::Mul, sigma, z), RvKind::Num);
+                let val = self
+                    .graph
+                    .push(RvNode::Binary(BinOp::Add, mu, scaled), RvKind::Num);
+                if int {
+                    self.graph
+                        .push(RvNode::Unary(UnOp::Round, val), RvKind::Num)
+                } else {
+                    val
+                }
             }
             Recipe::ExpDyn { rate, int } => {
                 // E / rate,  E ~ Exp(1) → Exp(rate); `int` rounds each lane (exponential_int).
-                let e = self.graph.push(RvNode::Src(Source::Exp { rate: 1.0 }), RvKind::Num);
+                let e = self
+                    .graph
+                    .push(RvNode::Src(Source::Exp { rate: 1.0 }), RvKind::Num);
                 let rate = self.arg_id(rate);
-                let val = self.graph.push(RvNode::Binary(BinOp::Div, e, rate), RvKind::Num);
-                if int { self.graph.push(RvNode::Unary(UnOp::Round, val), RvKind::Num) } else { val }
+                let val = self
+                    .graph
+                    .push(RvNode::Binary(BinOp::Div, e, rate), RvKind::Num);
+                if int {
+                    self.graph
+                        .push(RvNode::Unary(UnOp::Round, val), RvKind::Num)
+                } else {
+                    val
+                }
             }
             Recipe::BernoulliDyn { p } => {
                 // (U < p),  U ~ unif(0,1): a bool-RV true with the lane's probability p.
-                let u = self.graph.push(RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })), RvKind::Num);
+                let u = self.graph.push(
+                    RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
+                    RvKind::Num,
+                );
                 let p = self.arg_id(p);
-                self.graph.push(RvNode::Binary(BinOp::Lt, u, p), RvKind::Bool)
+                self.graph
+                    .push(RvNode::Binary(BinOp::Lt, u, p), RvKind::Bool)
             }
             // Handled above with an early return (they yield arrays/complex, not a scalar `id`).
             Recipe::Rotation { .. } => unreachable!("rotation drawn via draw_rotation"),
@@ -1350,7 +1510,9 @@ impl Engine {
             Recipe::BlockBootstrap { .. } => {
                 unreachable!("block_bootstrap drawn via draw_block_bootstrap")
             }
-            Recipe::NormalComplex { .. } => unreachable!("normal_complex drawn via the complex path"),
+            Recipe::NormalComplex { .. } => {
+                unreachable!("normal_complex drawn via the complex path")
+            }
         };
         Ok(Value::Dist(id))
     }
@@ -1394,8 +1556,15 @@ impl Engine {
                 RvKind::Bool
             }
             // Math ufuncs need a numeric RV and yield a numeric RV.
-            UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Sign | UnOp::Round | UnOp::Floor
-            | UnOp::Ceil | UnOp::Exp | UnOp::Ln => {
+            UnOp::Sin
+            | UnOp::Cos
+            | UnOp::Atan
+            | UnOp::Sign
+            | UnOp::Round
+            | UnOp::Floor
+            | UnOp::Ceil
+            | UnOp::Exp
+            | UnOp::Ln => {
                 if kind != RvKind::Num {
                     return Err(NoiseError::runtime(
                         format!("cannot apply {} to {}", unop_name(op), kind.type_name()),
@@ -1405,7 +1574,9 @@ impl Engine {
                 RvKind::Num
             }
         };
-        Ok(Value::Dist(self.graph.push(RvNode::Unary(op, id), result_kind)))
+        Ok(Value::Dist(
+            self.graph.push(RvNode::Unary(op, id), result_kind),
+        ))
     }
 
     /// Lift a binary op over random variables. At least one operand is a `Value::Dist`;
@@ -1457,7 +1628,9 @@ impl Engine {
                 RvKind::Bool
             }
         };
-        Ok(Value::Dist(self.graph.push(RvNode::Binary(op, lid, rid), result_kind)))
+        Ok(Value::Dist(
+            self.graph.push(RvNode::Binary(op, lid, rid), result_kind),
+        ))
     }
 
     /// Lift `if cond { then } else { else }` where `cond` is a bool random variable. Builds a
@@ -1492,7 +1665,9 @@ impl Engine {
                 span,
             ));
         }
-        Ok(Value::Dist(self.graph.push(RvNode::Select { cond, a, b }, ak)))
+        Ok(Value::Dist(
+            self.graph.push(RvNode::Select { cond, a, b }, ak),
+        ))
     }
 
     /// Coerce an operand to an `(RvId, RvKind)`. `Dist` reuses its id (structural sharing);
@@ -1501,16 +1676,24 @@ impl Engine {
     fn operand_to_rv(&mut self, v: Value, span: Span) -> Result<(RvId, RvKind)> {
         match v {
             Value::Dist(id) => Ok((id, self.graph.kind(id))),
-            Value::Num(n) => Ok((self.graph.push(RvNode::ConstNum(n), RvKind::Num), RvKind::Num)),
+            Value::Num(n) => Ok((
+                self.graph.push(RvNode::ConstNum(n), RvKind::Num),
+                RvKind::Num,
+            )),
             // An estimate folds in as its central value (its error is dropped inside the RV).
-            Value::Est { val, .. } => {
-                Ok((self.graph.push(RvNode::ConstNum(val), RvKind::Num), RvKind::Num))
-            }
-            Value::Bool(b) => {
-                Ok((self.graph.push(RvNode::ConstBool(b), RvKind::Bool), RvKind::Bool))
-            }
+            Value::Est { val, .. } => Ok((
+                self.graph.push(RvNode::ConstNum(val), RvKind::Num),
+                RvKind::Num,
+            )),
+            Value::Bool(b) => Ok((
+                self.graph.push(RvNode::ConstBool(b), RvKind::Bool),
+                RvKind::Bool,
+            )),
             other => Err(NoiseError::runtime(
-                format!("cannot use {} in a random-variable expression", other.type_name()),
+                format!(
+                    "cannot use {} in a random-variable expression",
+                    other.type_name()
+                ),
                 span,
             )),
         }
@@ -1540,7 +1723,11 @@ impl Engine {
         let quantity_v = self.eval(event)?;
         forbid_undrawn(&quantity_v, event.span)?;
         let (quantity, q_kind) = self.operand_to_rv(quantity_v, event.span)?;
-        Ok(Value::Cond { quantity, q_kind, condition })
+        Ok(Value::Cond {
+            quantity,
+            q_kind,
+            condition,
+        })
     }
 
     /// Query a conditioned value — `P(a)`, `E(a)`, `Var(a)`, `Q(a, q)` where `a = X | C`. Fuse the
@@ -1552,7 +1739,11 @@ impl Engine {
     /// the ordinary trailing arguments (an optional sample count, plus `q` for `Q`).
     fn query_cond(&mut self, qname: &str, arg_vals: &[Value], span: Span) -> Result<Value> {
         let (quantity, q_kind, condition) = match arg_vals[0] {
-            Value::Cond { quantity, q_kind, condition } => (quantity, q_kind, condition),
+            Value::Cond {
+                quantity,
+                q_kind,
+                condition,
+            } => (quantity, q_kind, condition),
             _ => unreachable!("query_cond called without a conditioned first argument"),
         };
         if qname == "P" && q_kind != RvKind::Bool {
@@ -1563,15 +1754,31 @@ impl Engine {
             ));
         }
         let nan = self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num);
-        let root = self.graph.push(RvNode::Select { cond: condition, a: quantity, b: nan }, RvKind::Num);
+        let root = self.graph.push(
+            RvNode::Select {
+                cond: condition,
+                a: quantity,
+                b: nan,
+            },
+            RvKind::Num,
+        );
         let tail = &arg_vals[1..];
         let (default_n, max_opts, check) = (self.max_samples, self.max_opts, self.check_mode);
         match qname {
             "P" => builtins::prob_cond(&self.graph, root, tail, default_n, max_opts, span, check),
-            "E" | "Var" => {
-                builtins::moment_cond(qname, &self.graph, root, tail, default_n, max_opts, span, check)
+            "E" | "Var" => builtins::moment_cond(
+                qname,
+                &self.graph,
+                root,
+                tail,
+                default_n,
+                max_opts,
+                span,
+                check,
+            ),
+            "Q" => {
+                builtins::quantile_cond(&self.graph, root, tail, default_n, max_opts, span, check)
             }
-            "Q" => builtins::quantile_cond(&self.graph, root, tail, default_n, max_opts, span, check),
             _ => unreachable!("query_cond dispatched with an unknown name"),
         }
     }
@@ -1597,20 +1804,40 @@ impl Engine {
         let n = self.max_samples.min(INTROSPECT_N);
         let seed = INTROSPECT_SEED;
         let summary = |view, label, label_b, payload| {
-            Ok(Value::Summary(Rc::new(Summary { view, label, label_b, payload })))
+            Ok(Value::Summary(Rc::new(Summary {
+                view,
+                label,
+                label_b,
+                payload,
+            })))
         };
         match name {
             "describe" | "hist" | "samples" => {
-                if arg_vals.is_empty() || arg_vals.len() > 2 || (name != "samples" && arg_vals.len() != 1)
+                if arg_vals.is_empty()
+                    || arg_vals.len() > 2
+                    || (name != "samples" && arg_vals.len() != 1)
                 {
                     return Err(NoiseError::runtime(
-                        format!("{name} expects 1 argument (a variable to inspect){}", if name == "samples" { " and an optional count" } else { "" }),
+                        format!(
+                            "{name} expects 1 argument (a variable to inspect){}",
+                            if name == "samples" {
+                                " and an optional count"
+                            } else {
+                                ""
+                            }
+                        ),
                         span,
                     ));
                 }
                 let head_k = match arg_vals.get(1) {
                     Some(v) => introspect_count(v, span)?,
-                    None => if name == "samples" { 10 } else { 8 },
+                    None => {
+                        if name == "samples" {
+                            10
+                        } else {
+                            8
+                        }
+                    }
                 };
                 let label = label_of(&args[0]);
                 // `describe` is polymorphic: a scalar number/estimate → a value+CI card, an array →
@@ -1644,7 +1871,12 @@ impl Engine {
                 };
                 let (root, conditional, boolean) = self.introspect_root(&arg_vals[0], span)?;
                 if self.check_mode {
-                    return summary(view, label, None, Payload::One(Dist1::from_draws(&[0.0], boolean, 0)));
+                    return summary(
+                        view,
+                        label,
+                        None,
+                        Payload::One(Dist1::from_draws(&[0.0], boolean, 0)),
+                    );
                 }
                 match dist1(&self.graph, root, boolean, conditional, n, seed, head_k) {
                     Some(d) => summary(view, label, None, Payload::One(d)),
@@ -1668,16 +1900,28 @@ impl Engine {
                 }
                 if arg_vals.len() != 2 {
                     return Err(NoiseError::runtime(
-                        format!("{name} expects 2 variables to compare, got {}", arg_vals.len()),
+                        format!(
+                            "{name} expects 2 variables to compare, got {}",
+                            arg_vals.len()
+                        ),
                         span,
                     ));
                 }
                 let (la, lb) = (label_of(&args[0]), label_of(&args[1]));
                 let a = self.introspect_plain_root(&arg_vals[0], name, span)?;
                 let b = self.introspect_plain_root(&arg_vals[1], name, span)?;
-                let view = if name == "scatter" { View::Scatter } else { View::Corr };
+                let view = if name == "scatter" {
+                    View::Scatter
+                } else {
+                    View::Corr
+                };
                 if self.check_mode {
-                    return summary(view, la, Some(lb), Payload::Two(Dist2::from_pairs(&[(0.0, 0.0)], 1)));
+                    return summary(
+                        view,
+                        la,
+                        Some(lb),
+                        Payload::Two(Dist2::from_pairs(&[(0.0, 0.0)], 1)),
+                    );
                 }
                 match dist2(&self.graph, a, b, None, n, seed) {
                     Some(d) => summary(view, la, Some(lb), Payload::Two(d)),
@@ -1687,18 +1931,30 @@ impl Engine {
             "explain" => {
                 if arg_vals.len() != 1 {
                     return Err(NoiseError::runtime(
-                        format!("explain expects 1 variable to explain, got {}", arg_vals.len()),
+                        format!(
+                            "explain expects 1 variable to explain, got {}",
+                            arg_vals.len()
+                        ),
                         span,
                     ));
                 }
                 let label = label_of(&args[0]);
                 // Target quantity (+ optional condition for `explain(Y | C)`).
                 let (target, cond) = match &arg_vals[0] {
-                    Value::Cond { quantity, condition, .. } => (*quantity, Some(*condition)),
+                    Value::Cond {
+                        quantity,
+                        condition,
+                        ..
+                    } => (*quantity, Some(*condition)),
                     other => (self.operand_to_rv(other.clone(), span)?.0, None),
                 };
                 if self.check_mode {
-                    return summary(View::Explain, label, None, Payload::Explain(Explain::from_candidates(0.0, vec![])));
+                    return summary(
+                        View::Explain,
+                        label,
+                        None,
+                        Payload::Explain(Explain::from_candidates(0.0, vec![])),
+                    );
                 }
                 // Candidate drivers: named random variables that are upstream of the target (and not
                 // the target itself). Collected (owned) before any `&mut self` so the scope borrow ends.
@@ -1707,16 +1963,25 @@ impl Engine {
                     .vars
                     .iter()
                     .filter_map(|(k, v)| match v {
-                        Value::Dist(id) if *id != target && anc.contains(id) => Some((k.clone(), *id)),
+                        Value::Dist(id) if *id != target && anc.contains(id) => {
+                            Some((k.clone(), *id))
+                        }
                         _ => None,
                     })
                     .collect();
                 cands.sort_by(|a, b| a.0.cmp(&b.0)); // deterministic ranking on ties
-                // Total spread of the target (conditional sd if `explain(Y | C)`).
+                                                     // Total spread of the target (conditional sd if `explain(Y | C)`).
                 let target_root = match cond {
                     Some(c) => {
                         let nan = self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num);
-                        self.graph.push(RvNode::Select { cond: c, a: target, b: nan }, RvKind::Num)
+                        self.graph.push(
+                            RvNode::Select {
+                                cond: c,
+                                a: target,
+                                b: nan,
+                            },
+                            RvKind::Num,
+                        )
                     }
                     None => target,
                 };
@@ -1728,7 +1993,12 @@ impl Engine {
                         corrs.push((cname.clone(), d.corr));
                     }
                 }
-                summary(View::Explain, label, None, Payload::Explain(Explain::from_candidates(sd, corrs)))
+                summary(
+                    View::Explain,
+                    label,
+                    None,
+                    Payload::Explain(Explain::from_candidates(sd, corrs)),
+                )
             }
             _ => unreachable!("introspect_call dispatched with an unknown name"),
         }
@@ -1740,10 +2010,20 @@ impl Engine {
     /// boolean)` where `boolean` flags an event quantity (draws are 0/1).
     fn introspect_root(&mut self, v: &Value, span: Span) -> Result<(RvId, bool, bool)> {
         match v {
-            Value::Cond { quantity, q_kind, condition } => {
+            Value::Cond {
+                quantity,
+                q_kind,
+                condition,
+            } => {
                 let nan = self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num);
-                let root =
-                    self.graph.push(RvNode::Select { cond: *condition, a: *quantity, b: nan }, RvKind::Num);
+                let root = self.graph.push(
+                    RvNode::Select {
+                        cond: *condition,
+                        a: *quantity,
+                        b: nan,
+                    },
+                    RvKind::Num,
+                );
                 Ok((root, true, *q_kind == RvKind::Bool))
             }
             other => {
@@ -1774,7 +2054,10 @@ impl Engine {
         let card = match v {
             Value::Num(x) => ValueCard { val: *x, se: 0.0 },
             Value::Est { val, se } => ValueCard { val: *val, se: *se },
-            Value::Bool(b) => ValueCard { val: f64::from(*b), se: 0.0 },
+            Value::Bool(b) => ValueCard {
+                val: f64::from(*b),
+                se: 0.0,
+            },
             _ => unreachable!("value_card only reached for a scalar"),
         };
         Ok(Value::Summary(Rc::new(Summary {
@@ -1788,16 +2071,35 @@ impl Engine {
     /// `describe` of an array → a per-cell grid summary (vector series / matrix heatmap), sampled in
     /// one joint pass.
     fn grid_summary(&mut self, xs: &[Value], label: String, span: Span) -> Result<Value> {
-        use crate::introspect::{grid, DistGrid, Payload, Summary, View, INTROSPECT_N, INTROSPECT_SEED};
+        use crate::introspect::{
+            grid, DistGrid, Payload, Summary, View, INTROSPECT_N, INTROSPECT_SEED,
+        };
         let wrap = |g| {
-            Value::Summary(Rc::new(Summary { view: View::Grid, label, label_b: None, payload: Payload::Grid(g) }))
+            Value::Summary(Rc::new(Summary {
+                view: View::Grid,
+                label,
+                label_b: None,
+                payload: Payload::Grid(g),
+            }))
         };
         let (roots, rows, cols) = self.array_roots(xs, span)?;
         if self.check_mode {
-            return Ok(wrap(DistGrid { rows, cols, mean: vec![], sd: vec![] }));
+            return Ok(wrap(DistGrid {
+                rows,
+                cols,
+                mean: vec![],
+                sd: vec![],
+            }));
         }
         let n = self.max_samples.min(INTROSPECT_N);
-        Ok(wrap(grid(&self.graph, &roots, rows, cols, n, INTROSPECT_SEED)))
+        Ok(wrap(grid(
+            &self.graph,
+            &roots,
+            rows,
+            cols,
+            n,
+            INTROSPECT_SEED,
+        )))
     }
 
     /// `corr(vec)` → the element×element correlation heatmap, sampled in one joint pass.
@@ -1816,17 +2118,27 @@ impl Engine {
     /// behind `corr(vec)` / `plot::corr(vec)` / `stats::corr(vec)`. Restricted to a vector (1-D) and
     /// capped in length, since the cost is O(n²) per lane. In check mode the matrix is empty (no
     /// sampling), and the callers fill the shape.
-    fn corr_matrix_of(&mut self, xs: &[Value], span: Span) -> Result<crate::introspect::CorrMatrix> {
+    fn corr_matrix_of(
+        &mut self,
+        xs: &[Value],
+        span: Span,
+    ) -> Result<crate::introspect::CorrMatrix> {
         use crate::introspect::{corr_grid, CorrMatrix, CORR_MAX, INTROSPECT_SEED};
         let roots = self.vector_roots(xs, span)?;
         if roots.len() > CORR_MAX {
             return Err(NoiseError::runtime(
-                format!("corr supports up to {CORR_MAX} elements, got {} — slice the vector first", roots.len()),
+                format!(
+                    "corr supports up to {CORR_MAX} elements, got {} — slice the vector first",
+                    roots.len()
+                ),
                 span,
             ));
         }
         if self.check_mode {
-            return Ok(CorrMatrix { n: roots.len(), corr: vec![] });
+            return Ok(CorrMatrix {
+                n: roots.len(),
+                corr: vec![],
+            });
         }
         // The pairwise matrix needs fewer draws than a single estimate; cap it to stay snappy.
         let n = self.max_samples.min(100_000);
@@ -1837,7 +2149,10 @@ impl Engine {
     /// spanned error here; `array_roots` handles the 2-D case).
     fn vector_roots(&mut self, xs: &[Value], span: Span) -> Result<Vec<RvId>> {
         if xs.is_empty() {
-            return Err(NoiseError::runtime("cannot inspect an empty array".to_string(), span));
+            return Err(NoiseError::runtime(
+                "cannot inspect an empty array".to_string(),
+                span,
+            ));
         }
         let mut roots = Vec::with_capacity(xs.len());
         for x in xs {
@@ -1860,7 +2175,10 @@ impl Engine {
     fn array_roots(&mut self, xs: &[Value], span: Span) -> Result<(Vec<RvId>, usize, usize)> {
         const GRID_MAX: usize = 1024;
         if xs.is_empty() {
-            return Err(NoiseError::runtime("cannot inspect an empty array".to_string(), span));
+            return Err(NoiseError::runtime(
+                "cannot inspect an empty array".to_string(),
+                span,
+            ));
         }
         if let Value::Array(first) = &xs[0] {
             let (rows, cols) = (xs.len(), first.len());
@@ -1870,27 +2188,37 @@ impl Engine {
                     Value::Array(r) => r,
                     _ => {
                         return Err(NoiseError::runtime(
-                            "a matrix needs array rows (this array mixes rows and scalars)".to_string(),
+                            "a matrix needs array rows (this array mixes rows and scalars)"
+                                .to_string(),
                             span,
                         ))
                     }
                 };
                 if r.len() != cols {
                     return Err(NoiseError::runtime(
-                        format!("a matrix must be rectangular; rows have lengths {cols} and {}", r.len()),
+                        format!(
+                            "a matrix must be rectangular; rows have lengths {cols} and {}",
+                            r.len()
+                        ),
                         span,
                     ));
                 }
                 for cell in r.iter() {
                     if matches!(cell, Value::Array(_)) {
-                        return Err(NoiseError::runtime("3-D arrays aren't supported".to_string(), span));
+                        return Err(NoiseError::runtime(
+                            "3-D arrays aren't supported".to_string(),
+                            span,
+                        ));
                     }
                     roots.push(self.operand_to_rv(cell.clone(), span)?.0);
                 }
             }
             if roots.len() > GRID_MAX {
                 return Err(NoiseError::runtime(
-                    format!("array too large to inspect ({} cells, max {GRID_MAX})", roots.len()),
+                    format!(
+                        "array too large to inspect ({} cells, max {GRID_MAX})",
+                        roots.len()
+                    ),
                     span,
                 ));
             }
@@ -1899,7 +2227,10 @@ impl Engine {
             let roots = self.vector_roots(xs, span)?;
             if roots.len() > GRID_MAX {
                 return Err(NoiseError::runtime(
-                    format!("array too large to inspect ({} elems, max {GRID_MAX})", roots.len()),
+                    format!(
+                        "array too large to inspect ({} elems, max {GRID_MAX})",
+                        roots.len()
+                    ),
                     span,
                 ));
             }
@@ -1914,7 +2245,13 @@ impl Engine {
     /// kind comes from the resulting payload, so the names are intent-revealing sugar:
     /// `histogram`/`hist` (a distribution), `line`/`heatmap`/`value`/`show` (polymorphic `describe`
     /// of a vector/matrix/scalar), `scatter`, `corr` (pair or element-matrix), `explain`, `samples`.
-    fn plot_call(&mut self, base: &str, args: &[Spanned], arg_vals: &[Value], span: Span) -> Result<Value> {
+    fn plot_call(
+        &mut self,
+        base: &str,
+        args: &[Spanned],
+        arg_vals: &[Value],
+        span: Span,
+    ) -> Result<Value> {
         // `fan` has no scalar-introspection counterpart (it's a whole-path quantile chart), so it
         // dispatches to its own summary builder rather than the `introspect_call` core.
         if base == "fan" {
@@ -1994,15 +2331,25 @@ impl Engine {
             None => NUM_BINS,
         };
         if nbins == 0 {
-            return Err(NoiseError::runtime("stats::histogram needs at least 1 bin".to_string(), span));
+            return Err(NoiseError::runtime(
+                "stats::histogram needs at least 1 bin".to_string(),
+                span,
+            ));
         }
         let (root, conditional, boolean) = self.introspect_root(&arg_vals[0], span)?;
         let nbins = if boolean { 2 } else { nbins };
         let h = match self.stats_draws(root, conditional, span)? {
-            None => Histogram { lo: 0.0, hi: 1.0, bins: vec![0; nbins] }, // check mode: shape only
+            None => Histogram {
+                lo: 0.0,
+                hi: 1.0,
+                bins: vec![0; nbins],
+            }, // check mode: shape only
             Some(draws) => histogram(&draws, boolean, nbins),
         };
-        Ok(matrix_of([h.midpoints(boolean), h.bins.iter().map(|&c| c as f64).collect()]))
+        Ok(matrix_of([
+            h.midpoints(boolean),
+            h.bins.iter().map(|&c| c as f64).collect(),
+        ]))
     }
 
     /// `stats::quantiles(x, [q…])` → one value per requested quantile, in the order asked. The same
@@ -2036,7 +2383,10 @@ impl Engine {
                 }
             };
             if !(0.0..=1.0).contains(&q) {
-                return Err(NoiseError::runtime(format!("a quantile must lie in [0, 1], got {q}"), span));
+                return Err(NoiseError::runtime(
+                    format!("a quantile must lie in [0, 1], got {q}"),
+                    span,
+                ));
             }
             levels.push(q);
         }
@@ -2045,7 +2395,12 @@ impl Engine {
             return Ok(row_of(vec![0.0; levels.len()])); // check mode: shape only
         };
         draws.sort_by(f64::total_cmp);
-        Ok(row_of(levels.into_iter().map(|q| quantile_sorted(&draws, q)).collect()))
+        Ok(row_of(
+            levels
+                .into_iter()
+                .map(|q| quantile_sorted(&draws, q))
+                .collect(),
+        ))
     }
 
     /// `stats::moments(x)` → `[n, mean, sd, min, max]` — the header line of `describe(x)`, as data.
@@ -2110,7 +2465,12 @@ impl Engine {
     /// the same draws `describe`/`hist` see. `None` means check mode (no sampling happened, and the
     /// caller returns a correctly-shaped placeholder); an empty in-condition sample is an error, as
     /// it is for `describe`.
-    fn stats_draws(&mut self, root: RvId, conditional: bool, span: Span) -> Result<Option<Vec<f64>>> {
+    fn stats_draws(
+        &mut self,
+        root: RvId,
+        conditional: bool,
+        span: Span,
+    ) -> Result<Option<Vec<f64>>> {
         use crate::introspect::{draws, INTROSPECT_N, INTROSPECT_SEED};
         if self.check_mode {
             return Ok(None);
@@ -2132,23 +2492,40 @@ impl Engine {
         use crate::introspect::{Payload, Summary, View};
         let label = label_of(&args[0]);
         let c = self.fan_chart("plot::fan", arg_vals, span)?;
-        Ok(Value::Summary(Rc::new(Summary { view: View::Fan, label, label_b: None, payload: Payload::Fan(c) })))
+        Ok(Value::Summary(Rc::new(Summary {
+            view: View::Fan,
+            label,
+            label_b: None,
+            payload: Payload::Fan(c),
+        })))
     }
 
     /// The per-index quantile bands of a path, in ONE joint pass — the computation behind
     /// `plot::fan(path)` and `stats::fan(path)`. `who` names the caller so the errors stay honest
     /// about which surface the program used. In check mode the bands are empty (no sampling); the
     /// callers fill the shape from `cols`.
-    fn fan_chart(&mut self, who: &str, arg_vals: &[Value], span: Span) -> Result<crate::introspect::FanChart> {
+    fn fan_chart(
+        &mut self,
+        who: &str,
+        arg_vals: &[Value],
+        span: Span,
+    ) -> Result<crate::introspect::FanChart> {
         use crate::introspect::{fan, FanChart, FAN_MAX, INTROSPECT_N, INTROSPECT_SEED};
         if arg_vals.len() != 1 {
             return Err(NoiseError::runtime(
-                format!("{who} expects 1 argument (a path — an array of random values), got {}", arg_vals.len()),
+                format!(
+                    "{who} expects 1 argument (a path — an array of random values), got {}",
+                    arg_vals.len()
+                ),
                 span,
             ));
         }
-        let not_a_path =
-            || NoiseError::runtime(format!("{who} wants a vector — a path of random values"), span);
+        let not_a_path = || {
+            NoiseError::runtime(
+                format!("{who} wants a vector — a path of random values"),
+                span,
+            )
+        };
         let xs = match &arg_vals[0] {
             Value::Array(xs) => xs.clone(),
             _ => return Err(not_a_path()),
@@ -2158,7 +2535,10 @@ impl Engine {
         }
         if xs.len() > FAN_MAX {
             return Err(NoiseError::runtime(
-                format!("{who} supports up to {FAN_MAX} elements, got {} — slice the path first", xs.len()),
+                format!(
+                    "{who} supports up to {FAN_MAX} elements, got {} — slice the path first",
+                    xs.len()
+                ),
                 span,
             ));
         }
@@ -2187,10 +2567,19 @@ impl Engine {
     fn eval_unary_expr(&mut self, op: UnOp, rhs: &Spanned, span: Span) -> Result<Value> {
         let v = self.eval(rhs)?;
         forbid_undrawn(&v, rhs.span)?;
-        if let Value::Cond { quantity, condition, .. } = v {
+        if let Value::Cond {
+            quantity,
+            condition,
+            ..
+        } = v
+        {
             let q = self.lift_unary(op, Value::Dist(quantity), span)?;
             let (quantity, q_kind) = self.operand_to_rv(q, span)?;
-            Ok(Value::Cond { quantity, q_kind, condition })
+            Ok(Value::Cond {
+                quantity,
+                q_kind,
+                condition,
+            })
         } else if matches!(v, Value::Complex { .. }) {
             self.unary_complex(op, v, span)
         } else if let Value::Signal(s) = v {
@@ -2211,8 +2600,16 @@ impl Engine {
     fn binop_cond(&mut self, op: BinOp, l: Value, r: Value, span: Span) -> Result<Value> {
         let (quantity, condition) = match (l, r) {
             (
-                Value::Cond { quantity: ql, condition: cl, .. },
-                Value::Cond { quantity: qr, condition: cr, .. },
+                Value::Cond {
+                    quantity: ql,
+                    condition: cl,
+                    ..
+                },
+                Value::Cond {
+                    quantity: qr,
+                    condition: cr,
+                    ..
+                },
             ) => {
                 if cl != cr {
                     return Err(NoiseError::runtime(
@@ -2224,18 +2621,38 @@ impl Engine {
                 }
                 (self.binop(op, Value::Dist(ql), Value::Dist(qr), span)?, cl)
             }
-            (Value::Cond { quantity, condition, .. }, other) => {
-                (self.binop(op, Value::Dist(quantity), other, span)?, condition)
-            }
-            (other, Value::Cond { quantity, condition, .. }) => {
-                (self.binop(op, other, Value::Dist(quantity), span)?, condition)
-            }
+            (
+                Value::Cond {
+                    quantity,
+                    condition,
+                    ..
+                },
+                other,
+            ) => (
+                self.binop(op, Value::Dist(quantity), other, span)?,
+                condition,
+            ),
+            (
+                other,
+                Value::Cond {
+                    quantity,
+                    condition,
+                    ..
+                },
+            ) => (
+                self.binop(op, other, Value::Dist(quantity), span)?,
+                condition,
+            ),
             _ => unreachable!("binop_cond called without a conditioned operand"),
         };
         // Re-wrap the transformed quantity, keeping the condition. The quantity is always an RV here
         // (it has a `Dist` operand), so `operand_to_rv` just reads its id/kind.
         let (quantity, q_kind) = self.operand_to_rv(quantity, span)?;
-        Ok(Value::Cond { quantity, q_kind, condition })
+        Ok(Value::Cond {
+            quantity,
+            q_kind,
+            condition,
+        })
     }
 
     /// Combine two element `Value`s with a binary op — the single fold primitive the library
@@ -2657,7 +3074,14 @@ impl Engine {
                         span,
                     ));
                 }
-                Ok(Value::Dist(self.graph.push(RvNode::Select { cond: c, a: aid, b: bid }, ak)))
+                Ok(Value::Dist(self.graph.push(
+                    RvNode::Select {
+                        cond: c,
+                        a: aid,
+                        b: bid,
+                    },
+                    ak,
+                )))
             }
             other => Err(NoiseError::runtime(
                 format!("expected a bool condition, got {}", other.type_name()),
@@ -2872,17 +3296,22 @@ impl Engine {
                 span,
             ));
         }
-        Ok(Value::Noise(NoiseSpec { sigma, kind: NoiseKind::Ou { tau } }))
+        Ok(Value::Noise(NoiseSpec {
+            sigma,
+            kind: NoiseKind::Ou { tau },
+        }))
     }
 
     /// Extract a finite `sigma >= 0` from a noise argument.
     fn noise_sigma(&self, v: &Value, span: Span) -> Result<f64> {
         let n = match v {
             Value::Num(n) | Value::Est { val: n, .. } => *n,
-            other => return Err(NoiseError::runtime(
-                format!("noise strength must be a number, got {}", other.type_name()),
-                span,
-            )),
+            other => {
+                return Err(NoiseError::runtime(
+                    format!("noise strength must be a number, got {}", other.type_name()),
+                    span,
+                ))
+            }
         };
         if n < 0.0 || !n.is_finite() {
             return Err(NoiseError::runtime(
@@ -2900,18 +3329,30 @@ impl Engine {
     fn lib_sample(&mut self, args: &[Value], span: Span) -> Result<Value> {
         if args.len() != 2 {
             return Err(NoiseError::runtime(
-                format!("sample expects 2 arguments (signal, samples), got {}", args.len()),
+                format!(
+                    "sample expects 2 arguments (signal, samples), got {}",
+                    args.len()
+                ),
                 span,
             ));
         }
         let n = self.count_arg("sample", &args[1], span)?;
         match &args[0] {
-            Value::Signal(s) => Ok(Value::Array(Rc::new(self.materialize_sig(&s.clone(), n, span)?))),
-            Value::Complex { re, im } if matches!(&**re, Value::Signal(_)) || matches!(&**im, Value::Signal(_)) => {
+            Value::Signal(s) => Ok(Value::Array(Rc::new(self.materialize_sig(
+                &s.clone(),
+                n,
+                span,
+            )?))),
+            Value::Complex { re, im }
+                if matches!(&**re, Value::Signal(_)) || matches!(&**im, Value::Signal(_)) =>
+            {
                 let res = self.sample_channel(re, n, span)?;
                 let ims = self.sample_channel(im, n, span)?;
                 Ok(Value::Array(Rc::new(
-                    res.into_iter().zip(ims).map(|(a, b)| Value::complex(a, b)).collect(),
+                    res.into_iter()
+                        .zip(ims)
+                        .map(|(a, b)| Value::complex(a, b))
+                        .collect(),
                 )))
             }
             noise @ Value::Noise(_) => {
@@ -2933,7 +3374,10 @@ impl Engine {
             Value::Signal(s) => self.materialize_sig(&s.clone(), n, span),
             Value::Num(_) | Value::Est { .. } | Value::Dist(_) => Ok(vec![v.clone(); n]),
             other => Err(NoiseError::runtime(
-                format!("cannot sample a complex signal with a {} channel", other.type_name()),
+                format!(
+                    "cannot sample a complex signal with a {} channel",
+                    other.type_name()
+                ),
                 span,
             )),
         }
@@ -2948,7 +3392,8 @@ impl Engine {
         let n = self.count_arg("set_resolution", n, span)?;
         if n < 1 {
             return Err(NoiseError::runtime(
-                "set_resolution(N) needs N >= 1 (a signal renders to at least one sample)".to_string(),
+                "set_resolution(N) needs N >= 1 (a signal renders to at least one sample)"
+                    .to_string(),
                 span,
             ));
         }
@@ -2968,14 +3413,17 @@ impl Engine {
             NoiseKind::Pink => self.pink_ids(spec.sigma, n),
             // The complex generator splits into two real White lanes at draw time
             // (`draw_noise`/`draw_noise_shaped`), so it never reaches a single-lane render.
-            NoiseKind::WhiteComplex => unreachable!("white_complex splits into two real lanes at draw"),
+            NoiseKind::WhiteComplex => {
+                unreachable!("white_complex splits into two real lanes at draw")
+            }
         };
         ids.into_iter().map(Value::Dist).collect()
     }
 
     /// A fresh `normal(0, sigma)` source node.
     fn normal_src(&mut self, sigma: f64) -> RvId {
-        self.graph.push(RvNode::Src(Source::Normal { mu: 0.0, sigma }), RvKind::Num)
+        self.graph
+            .push(RvNode::Src(Source::Normal { mu: 0.0, sigma }), RvKind::Num)
     }
 
     /// Brownian / red noise: `x_k = x_{k-1} + ε_k` with `ε ~ normal(0, sigma)` — a random walk
@@ -2988,7 +3436,9 @@ impl Engine {
         }
         for _ in 1..n {
             let step = self.normal_src(sigma);
-            prev = self.graph.push(RvNode::Binary(BinOp::Add, prev, step), RvKind::Num);
+            prev = self
+                .graph
+                .push(RvNode::Binary(BinOp::Add, prev, step), RvKind::Num);
             out.push(prev);
         }
         out
@@ -3008,8 +3458,12 @@ impl Engine {
         }
         for _ in 1..n {
             let eps = self.normal_src(innov);
-            let scaled = self.graph.push(RvNode::Binary(BinOp::Mul, phi_c, prev), RvKind::Num);
-            prev = self.graph.push(RvNode::Binary(BinOp::Add, scaled, eps), RvKind::Num);
+            let scaled = self
+                .graph
+                .push(RvNode::Binary(BinOp::Mul, phi_c, prev), RvKind::Num);
+            prev = self
+                .graph
+                .push(RvNode::Binary(BinOp::Add, scaled, eps), RvKind::Num);
             out.push(prev);
         }
         out
@@ -3031,7 +3485,9 @@ impl Engine {
             let tau = (1u64 << i) as f64;
             let oct = self.ou_ids(sigma_oct, tau, n);
             for k in 0..n {
-                acc[k] = self.graph.push(RvNode::Binary(BinOp::Add, acc[k], oct[k]), RvKind::Num);
+                acc[k] = self
+                    .graph
+                    .push(RvNode::Binary(BinOp::Add, acc[k], oct[k]), RvKind::Num);
             }
         }
         acc
@@ -3051,7 +3507,10 @@ impl Engine {
         for _ in 0..d {
             let mut row = Vec::with_capacity(d);
             for _ in 0..d {
-                row.push(self.draw(Recipe::Normal { mu: 0.0, sigma: 1.0 })?);
+                row.push(self.draw(Recipe::Normal {
+                    mu: 0.0,
+                    sigma: 1.0,
+                })?);
             }
             seed.push(Value::Array(Rc::new(row)));
         }
@@ -3110,10 +3569,14 @@ impl Engine {
     fn draw_empirical(&mut self, data: DataId) -> Value {
         let xs = self.datasets[data.0 as usize].clone();
         let hi = (xs.len() - 1) as f64; // non-empty by construction (`bootstrap_data`)
-        let index =
-            self.graph.push(RvNode::Src(Source::UniformInt { lo: 0.0, hi }), RvKind::Num);
+        let index = self
+            .graph
+            .push(RvNode::Src(Source::UniformInt { lo: 0.0, hi }), RvKind::Num);
         let elems = self.const_elems(&xs);
-        Value::Dist(self.graph.push(RvNode::Gather { elems, index }, RvKind::Num))
+        Value::Dist(
+            self.graph
+                .push(RvNode::Gather { elems, index }, RvKind::Num),
+        )
     }
 
     /// Draw a `block_bootstrap(xs, b)` recipe: a length-`n` series assembled from `⌈n/b⌉` random
@@ -3132,8 +3595,13 @@ impl Engine {
         let start_hi = (n - b) as f64; // 1 <= b <= n by construction (`lib_block_bootstrap`)
         let starts: Vec<RvId> = (0..n.div_ceil(b))
             .map(|_| {
-                self.graph
-                    .push(RvNode::Src(Source::UniformInt { lo: 0.0, hi: start_hi }), RvKind::Num)
+                self.graph.push(
+                    RvNode::Src(Source::UniformInt {
+                        lo: 0.0,
+                        hi: start_hi,
+                    }),
+                    RvKind::Num,
+                )
             })
             .collect();
         // Offset constants are shared across blocks; offset 0 reuses the start node directly.
@@ -3152,11 +3620,16 @@ impl Engine {
                         id
                     }
                 };
-                self.graph.push(RvNode::Binary(BinOp::Add, start, off_id), RvKind::Num)
+                self.graph
+                    .push(RvNode::Binary(BinOp::Add, start, off_id), RvKind::Num)
             };
-            out.push(Value::Dist(
-                self.graph.push(RvNode::Gather { elems: elems.clone(), index }, RvKind::Num),
-            ));
+            out.push(Value::Dist(self.graph.push(
+                RvNode::Gather {
+                    elems: elems.clone(),
+                    index,
+                },
+                RvKind::Num,
+            )));
         }
         Value::Array(Rc::new(out))
     }
@@ -3164,7 +3637,9 @@ impl Engine {
     /// Lift a constant dataset to `ConstNum` element nodes (the gather targets of the bootstrap
     /// draws).
     fn const_elems(&mut self, xs: &[f64]) -> Box<[RvId]> {
-        xs.iter().map(|&x| self.graph.push(RvNode::ConstNum(x), RvKind::Num)).collect()
+        xs.iter()
+            .map(|&x| self.graph.push(RvNode::ConstNum(x), RvKind::Num))
+            .collect()
     }
 
     /// `quantize(v, centroids)` — snap each coordinate of `v` to its **nearest** value in `centroids`
@@ -3177,7 +3652,10 @@ impl Engine {
         let xs = self.expect_array("quantize", v, span)?;
         let cs = self.expect_array("quantize", c, span)?;
         if cs.is_empty() {
-            return Err(NoiseError::runtime("quantize needs a non-empty codebook".to_string(), span));
+            return Err(NoiseError::runtime(
+                "quantize needs a non-empty codebook".to_string(),
+                span,
+            ));
         }
         let mut levels: Vec<f64> = Vec::with_capacity(cs.len());
         for e in cs.iter() {
@@ -3185,7 +3663,8 @@ impl Engine {
                 Some(n) => levels.push(n),
                 None => {
                     return Err(NoiseError::runtime(
-                        "quantize centroids must be constant numbers, not random variables".to_string(),
+                        "quantize centroids must be constant numbers, not random variables"
+                            .to_string(),
                         span,
                     ))
                 }
@@ -3249,7 +3728,11 @@ impl Engine {
     fn lib_cum_fold(&mut self, name: &str, args: &[Value], span: Span) -> Result<Value> {
         let [xs] = arity1(name, args, span)?;
         let xs = self.expect_array(name, xs, span)?;
-        let op = if name == "cumsum" { BinOp::Add } else { BinOp::Mul };
+        let op = if name == "cumsum" {
+            BinOp::Add
+        } else {
+            BinOp::Mul
+        };
         let mut out: Vec<Value> = Vec::with_capacity(xs.len());
         for x in xs.iter() {
             let acc = match out.last().cloned() {
@@ -3268,7 +3751,11 @@ impl Engine {
     fn lib_cum_extreme(&mut self, name: &str, args: &[Value], span: Span) -> Result<Value> {
         let [xs] = arity1(name, args, span)?;
         let xs = self.expect_array(name, xs, span)?;
-        let cmp = if name == "cummax" { BinOp::Gt } else { BinOp::Lt };
+        let cmp = if name == "cummax" {
+            BinOp::Gt
+        } else {
+            BinOp::Lt
+        };
         let mut out: Vec<Value> = Vec::with_capacity(xs.len());
         for x in xs.iter() {
             let m = match out.last().cloned() {
@@ -3322,7 +3809,10 @@ impl Engine {
         let [xs] = arity1(name, args, span)?;
         let xs = self.expect_array(name, xs, span)?;
         if xs.is_empty() {
-            return Err(NoiseError::runtime(format!("{name} of an empty array"), span));
+            return Err(NoiseError::runtime(
+                format!("{name} of an empty array"),
+                span,
+            ));
         }
         let cmp = if name == "max" { BinOp::Gt } else { BinOp::Lt };
         let mut m = xs[0].clone();
@@ -3338,7 +3828,10 @@ impl Engine {
         let [xs] = arity1("mean", args, span)?;
         let arr = self.expect_array("mean", xs, span)?;
         if arr.is_empty() {
-            return Err(NoiseError::runtime("mean of an empty array".to_string(), span));
+            return Err(NoiseError::runtime(
+                "mean of an empty array".to_string(),
+                span,
+            ));
         }
         let s = self.lib_sum(args, span)?;
         self.binop(BinOp::Div, s, Value::Num(arr.len() as f64), span)
@@ -3402,7 +3895,15 @@ impl Engine {
     /// quantum/linear-algebra "dagger". For a real matrix it is the plain transpose.
     fn lib_adjoint(&mut self, args: &[Value], span: Span) -> Result<Value> {
         let [m] = arity1("adjoint", args, span)?;
-        let t = builtins::call("transpose", std::slice::from_ref(m), &self.graph, self.max_samples, self.max_opts, span, self.check_mode)?;
+        let t = builtins::call(
+            "transpose",
+            std::slice::from_ref(m),
+            &self.graph,
+            self.max_samples,
+            self.max_opts,
+            span,
+            self.check_mode,
+        )?;
         self.math_ufunc("conj", &[t], span)
     }
 
@@ -3416,23 +3917,34 @@ impl Engine {
         let [w] = arity1("categorical", args, span)?;
         let xs = self.expect_array("categorical", w, span)?;
         if xs.is_empty() {
-            return Err(NoiseError::runtime("categorical needs a non-empty weight vector".to_string(), span));
+            return Err(NoiseError::runtime(
+                "categorical needs a non-empty weight vector".to_string(),
+                span,
+            ));
         }
         let mut weights = Vec::with_capacity(xs.len());
         for e in xs.iter() {
             match scalar_const(e) {
                 Some(v) if v >= 0.0 && v.is_finite() => weights.push(v),
-                _ => return Err(NoiseError::runtime(
-                    "categorical weights must be constant, non-negative numbers".to_string(),
-                    span,
-                )),
+                _ => {
+                    return Err(NoiseError::runtime(
+                        "categorical weights must be constant, non-negative numbers".to_string(),
+                        span,
+                    ))
+                }
             }
         }
         let total: f64 = weights.iter().sum();
         if total <= 0.0 {
-            return Err(NoiseError::runtime("categorical weights must sum to a positive value".to_string(), span));
+            return Err(NoiseError::runtime(
+                "categorical weights must sum to a positive value".to_string(),
+                span,
+            ));
         }
-        let u = self.graph.push(RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: total })), RvKind::Num);
+        let u = self.graph.push(
+            RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: total })),
+            RvKind::Num,
+        );
         let mut prefix = 0.0;
         let mut index = Value::Num(0.0);
         for &wk in &weights {
@@ -3487,7 +3999,10 @@ impl Engine {
                 span,
             ));
         }
-        Ok(Value::Recipe(Recipe::BlockBootstrap { data, block_len: bl as usize }))
+        Ok(Value::Recipe(Recipe::BlockBootstrap {
+            data,
+            block_len: bl as usize,
+        }))
     }
 
     /// Validate and intern a bootstrap data array (`empirical` / `block_bootstrap`): a
@@ -3578,6 +4093,7 @@ impl Engine {
     ///   - `mat @ vec` → matrix–vector product (`out[i] = dot(M[i], v)`)
     ///   - `vec @ mat` → row-vector × matrix (`out[j] = Σ_p v[p]·M[p][j]`)
     ///   - `mat @ mat` → matrix–matrix product (each result row is `A[i] @ B`)
+    ///
     /// A scalar operand is an error — `@` is for linear algebra; use `*` for scaling.
     fn matmul(&mut self, l: Value, r: Value, span: Span) -> Result<Value> {
         match (value_rank(&l), value_rank(&r)) {
@@ -3650,9 +4166,10 @@ impl Engine {
             Value::Est { val, .. } => Ok(Value::Num(apply_unop_f64(op, *val))),
             Value::Dist(_) => self.lift_unary(op, x.clone(), span),
             // A lazy signal defers the ufunc into its expression tree (stays a signal).
-            Value::Signal(s) => {
-                Ok(Value::Signal(Rc::new(SigExpr::Unary(SigUnOp::Un(op), s.clone()))))
-            }
+            Value::Signal(s) => Ok(Value::Signal(Rc::new(SigExpr::Unary(
+                SigUnOp::Un(op),
+                s.clone(),
+            )))),
             Value::Array(xs) => {
                 let mut out = Vec::with_capacity(xs.len());
                 for e in xs.iter() {
@@ -3661,7 +4178,11 @@ impl Engine {
                 Ok(Value::Array(Rc::new(out)))
             }
             other => Err(NoiseError::runtime(
-                format!("{} expects a number, array, or random variable, got {}", unop_name(op), other.type_name()),
+                format!(
+                    "{} expects a number, array, or random variable, got {}",
+                    unop_name(op),
+                    other.type_name()
+                ),
                 span,
             )),
         }
@@ -3680,7 +4201,10 @@ impl Engine {
             Value::Num(n) | Value::Est { val: n, .. } => {
                 let n = *n;
                 if n <= 0.0 {
-                    return Err(NoiseError::runtime(format!("{name} needs x > 0, got {n}"), span));
+                    return Err(NoiseError::runtime(
+                        format!("{name} needs x > 0, got {n}"),
+                        span,
+                    ));
                 }
                 Ok(Value::Num(if base10 { n.log10() } else { n.ln() }))
             }
@@ -3792,7 +4316,10 @@ impl Engine {
                 Ok(Value::complex(re_out, im_out))
             }
             other => Err(NoiseError::runtime(
-                format!("math::exp expects a number or complex value, got {}", other.type_name()),
+                format!(
+                    "math::exp expects a number or complex value, got {}",
+                    other.type_name()
+                ),
                 span,
             )),
         }
@@ -3826,7 +4353,10 @@ impl Engine {
                 )),
             },
             other => Err(NoiseError::runtime(
-                format!("math::sqrt expects a number or complex value, got {}", other.type_name()),
+                format!(
+                    "math::sqrt expects a number or complex value, got {}",
+                    other.type_name()
+                ),
                 span,
             )),
         }
@@ -3838,9 +4368,11 @@ impl Engine {
         match x {
             Value::Complex { re, im } => self.complex_atan2(*im, *re, span),
             Value::Num(n) => Ok(Value::Num(if n < 0.0 { std::f64::consts::PI } else { 0.0 })),
-            Value::Est { val, .. } => {
-                Ok(Value::Num(if val < 0.0 { std::f64::consts::PI } else { 0.0 }))
-            }
+            Value::Est { val, .. } => Ok(Value::Num(if val < 0.0 {
+                std::f64::consts::PI
+            } else {
+                0.0
+            })),
             Value::Dist(id) if self.graph.kind(id) == RvKind::Num => {
                 let neg = self.binop(BinOp::Lt, Value::Dist(id), Value::Num(0.0), span)?;
                 self.select(neg, Value::Num(std::f64::consts::PI), Value::Num(0.0), span)
@@ -3851,7 +4383,10 @@ impl Engine {
                 self.binop(BinOp::Mul, Value::Num(std::f64::consts::PI), neg, span)
             }
             other => Err(NoiseError::runtime(
-                format!("math::arg expects a number or complex value, got {}", other.type_name()),
+                format!(
+                    "math::arg expects a number or complex value, got {}",
+                    other.type_name()
+                ),
                 span,
             )),
         }
@@ -3894,11 +4429,18 @@ impl Engine {
             // A lazy signal defers the rounding into its tree.
             Value::Signal(s) => Ok(Value::Signal(Rc::new(SigExpr::Unary(SigUnOp::Un(op), s)))),
             Value::Complex { .. } => Err(NoiseError::runtime(
-                format!("{} is real-only — it has no meaning on a complex number", unop_name(op)),
+                format!(
+                    "{} is real-only — it has no meaning on a complex number",
+                    unop_name(op)
+                ),
                 span,
             )),
             other => Err(NoiseError::runtime(
-                format!("{} expects a number, got {}", unop_name(op), other.type_name()),
+                format!(
+                    "{} expects a number, got {}",
+                    unop_name(op),
+                    other.type_name()
+                ),
                 span,
             )),
         }
@@ -3913,7 +4455,10 @@ impl Engine {
         let diff = self.binop(BinOp::Sub, a.clone(), b.clone(), span)?;
         let n = self.expect_array("mse", &diff, span)?.len();
         if n == 0 {
-            return Err(NoiseError::runtime("mse of empty signals".to_string(), span));
+            return Err(NoiseError::runtime(
+                "mse of empty signals".to_string(),
+                span,
+            ));
         }
         let ss = self.lib_normsq(&[diff], span)?; // Σ (aᵢ-bᵢ)²
         self.binop(BinOp::Div, ss, Value::Num(n as f64), span)
@@ -3997,7 +4542,10 @@ fn input_value_to_value(v: InputValue) -> Value {
 /// resolution because they need `&mut` graph (sampling roots) and the variable scope (`explain`).
 #[inline]
 fn is_introspection(name: &str) -> bool {
-    matches!(name, "describe" | "hist" | "samples" | "corr" | "scatter" | "explain")
+    matches!(
+        name,
+        "describe" | "hist" | "samples" | "corr" | "scatter" | "explain"
+    )
 }
 
 /// A short label for an introspected operand, taken from its *source* expression (the evaluated
@@ -4123,7 +4671,9 @@ fn ancestors(graph: &RvGraph, root: RvId) -> HashSet<RvId> {
 /// `stats` (the same numbers, unrendered) are **always qualified** — they are reachable as
 /// `plot::hist(X)` / `stats::histogram(X)` without a `use`, and never unqualified, because their
 /// short verbs (`fan`, `corr`, `moments`) would otherwise shadow far too much.
-const MODULES: [&str; 8] = ["rand", "math", "vec", "signal", "engine", "builtin", "plot", "stats"];
+const MODULES: [&str; 8] = [
+    "rand", "math", "vec", "signal", "engine", "builtin", "plot", "stats",
+];
 
 /// The `stats::` functions — the raw-data twin of each `plot::` chart. Not in [`module_of`]: they
 /// resolve through the early `stats::` interception in `eval`, so this list exists only to point a
@@ -4162,13 +4712,19 @@ fn module_of(name: &str) -> Option<&'static str> {
         "exp" | "abs" | "arg" | "conj" | "re" | "im" | "floor" | "ceil" => "math",
         // collections / linear algebra (vector add/sub/matvec are the `+`/`-`/`@` operators)
         "sum" | "count" | "any" | "all" | "max" | "min" | "mean" | "dot" | "vdot" | "normsq"
-        | "norm" | "transpose" | "adjoint" | "normalize" | "has_duplicates" | "count_duplicates"
-        | "mse" | "ones" | "zeros" | "iota" | "outer" | "quantize" => "vec",
+        | "norm" | "transpose" | "adjoint" | "normalize" | "has_duplicates"
+        | "count_duplicates" | "mse" | "ones" | "zeros" | "iota" | "outer" | "quantize" => "vec",
         // prefix scans + the product reducer (PLAN-FINANCE F3): paths as fixed-horizon arrays.
         "prod" | "cumsum" | "cumprod" | "cummax" | "cummin" => "vec",
         // signal generation (DSP waveforms) + colored noise + materialization
-        "sine" | "cosine" | "sample" | "noise_white" | "noise_white_complex"
-        | "noise_brown" | "noise_pink" | "noise_ou" => "signal",
+        "sine"
+        | "cosine"
+        | "sample"
+        | "noise_white"
+        | "noise_white_complex"
+        | "noise_brown"
+        | "noise_pink"
+        | "noise_ou" => "signal",
         // run-time knobs: tune the evaluator itself (e.g. the Monte Carlo budget and the signal
         // resolution). Imperative settings, not value-producing builtins.
         "set_max_samples" | "set_max_opts" | "set_resolution" => "engine",
@@ -4266,7 +4822,10 @@ fn sig_operand(v: &Value, span: Span) -> Result<Rc<SigExpr>> {
         Value::Num(n) => Ok(Rc::new(SigExpr::Konst(*n))),
         Value::Est { val, .. } => Ok(Rc::new(SigExpr::Konst(*val))),
         other => Err(NoiseError::runtime(
-            format!("cannot combine a signal with {} — `signal::sample(sig, n)` it to an array first", other.type_name()),
+            format!(
+                "cannot combine a signal with {} — `signal::sample(sig, n)` it to an array first",
+                other.type_name()
+            ),
             span,
         )),
     }
@@ -4310,12 +4869,18 @@ fn apply_unop_f64(op: UnOp, x: f64) -> f64 {
 
 /// Spanned arity error shared by the library methods.
 fn arity_err(name: &str, want: usize, got: usize, span: Span) -> NoiseError {
-    NoiseError::runtime(format!("{name} expects {want} argument(s), got {got}"), span)
+    NoiseError::runtime(
+        format!("{name} expects {want} argument(s), got {got}"),
+        span,
+    )
 }
 
 /// Spanned vector-length mismatch shared by `dot` and elementwise broadcast.
 fn length_mismatch(name: &str, a: usize, b: usize, span: Span) -> NoiseError {
-    NoiseError::runtime(format!("{name} needs equal-length vectors, got {a} and {b}"), span)
+    NoiseError::runtime(
+        format!("{name} needs equal-length vectors, got {a} and {b}"),
+        span,
+    )
 }
 
 /// Borrow exactly one argument, or an arity error.

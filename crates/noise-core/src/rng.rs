@@ -159,13 +159,20 @@ mod tests {
         rng.fill_uniform_int(1.0, 6.0, &mut col);
         let mut counts = [0u64; 7]; // index 1..=6
         for &x in &col {
-            assert!((1.0..=6.0).contains(&x) && x.fract() == 0.0, "out-of-range face {x}");
+            assert!(
+                (1.0..=6.0).contains(&x) && x.fract() == 0.0,
+                "out-of-range face {x}"
+            );
             counts[x as usize] += 1;
         }
         let expected = col.len() as f64 / 6.0;
         for face in 1..=6 {
             let dev = (counts[face] as f64 - expected).abs() / expected;
-            assert!(dev < 0.01, "face {face}: count {} deviates {dev:.4} from uniform", counts[face]);
+            assert!(
+                dev < 0.01,
+                "face {face}: count {} deviates {dev:.4} from uniform",
+                counts[face]
+            );
         }
     }
 
@@ -212,7 +219,15 @@ mod tests {
         println!("\n  dice-sum throughput by independent RNG stream count (single thread):");
         run!(1, [Rng::seed_from_u64(1)]);
         run!(2, [Rng::seed_from_u64(1), Rng::seed_from_u64(2)]);
-        run!(4, [Rng::seed_from_u64(1), Rng::seed_from_u64(2), Rng::seed_from_u64(3), Rng::seed_from_u64(4)]);
+        run!(
+            4,
+            [
+                Rng::seed_from_u64(1),
+                Rng::seed_from_u64(2),
+                Rng::seed_from_u64(3),
+                Rng::seed_from_u64(4)
+            ]
+        );
         run!(
             8,
             [

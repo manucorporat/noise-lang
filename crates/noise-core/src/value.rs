@@ -31,7 +31,10 @@ pub enum Value {
     Dist(RvId),
     /// A Monte Carlo estimate: `val` with standard error `se` (`se == 0` ⇒ exact). Arithmetic
     /// propagates `se` (first order); `Display` rounds `val` to the digits `se` justifies.
-    Est { val: f64, se: f64 },
+    Est {
+        val: f64,
+        se: f64,
+    },
     /// A fixed-length array (PLAN-COLLECTIONS). Length is known at build time; elements are
     /// arbitrary `Value`s (`Num`, `Dist`, `Bool`, or nested `Array` for matrices). A vector of
     /// random variables is just an array of `Dist`. `Rc` keeps `push`/clone cheap.
@@ -58,7 +61,10 @@ pub enum Value {
     /// expressions stay `Num`. Invariant: `re`/`im` are always *real* values — scalars
     /// (`Num`/`Est`/`Dist`) or, for a **complex signal** (PLAN-SIGNALS §1.3), lazy `Signal`s
     /// (a complex signal is `Complex { re: Signal, im: Signal }` by composition, no new kind).
-    Complex { re: Box<Value>, im: Box<Value> },
+    Complex {
+        re: Box<Value>,
+        im: Box<Value>,
+    },
     /// A **conditioned value** — `event | given` (Bayes, scoped to a query). `quantity` is the RV
     /// being measured (an event for `P`, any number for `E`/`Var`/`Q`; its kind is `q_kind`),
     /// `condition` is the bool RV it is conditioned on. The two are kept *separate* (not yet fused)
@@ -67,7 +73,11 @@ pub enum Value {
     /// combined (the one rule that keeps conditioning consistent). Like a `Recipe`, a conditioned
     /// value is *consumed* by `P`/`E`/`Var`/`Q` (which fuse it into `select(condition, quantity, NaN)`
     /// and sample the subpopulation where the condition holds), never operated on past that.
-    Cond { quantity: RvId, q_kind: RvKind, condition: RvId },
+    Cond {
+        quantity: RvId,
+        q_kind: RvKind,
+        condition: RvId,
+    },
     /// An **introspection summary** — what `describe`/`hist`/`samples`/`corr`/`scatter`/`explain`
     /// evaluate to (see [`crate::introspect`]). It is a *value*: it binds, flows through, and
     /// `Display`s as its one-line text card (`crate::flint`, which also turns it into chart specs).
@@ -85,7 +95,10 @@ impl Value {
     /// Build a complex value from two real-scalar channels (the single constructor, so the
     /// `re`/`im`-are-real-scalars invariant lives in one place).
     pub fn complex(re: Value, im: Value) -> Value {
-        Value::Complex { re: Box::new(re), im: Box::new(im) }
+        Value::Complex {
+            re: Box::new(re),
+            im: Box::new(im),
+        }
     }
     /// A constant complex from two `f64`s — `re + im·i`.
     pub fn cnum(re: f64, im: f64) -> Value {
@@ -199,7 +212,11 @@ impl fmt::Display for Value {
                     _ => write!(f, "{re} + {im}i"),
                 }
             }
-            Value::Cond { quantity, condition, .. } => {
+            Value::Cond {
+                quantity,
+                condition,
+                ..
+            } => {
                 write!(f, "<conditioned #{} | #{}>", quantity.0, condition.0)
             }
             Value::Summary(s) => write!(f, "{s}"),

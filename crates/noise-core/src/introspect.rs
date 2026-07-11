@@ -159,10 +159,28 @@ impl Dist2 {
         let var_b = (sbb / nf - mean_b * mean_b).max(0.0);
         let cov = sab / nf - mean_a * mean_b;
         let (sd_a, sd_b) = (var_a.sqrt(), var_b.sqrt());
-        let corr = if sd_a > 0.0 && sd_b > 0.0 { (cov / (sd_a * sd_b)).clamp(-1.0, 1.0) } else { 0.0 };
+        let corr = if sd_a > 0.0 && sd_b > 0.0 {
+            (cov / (sd_a * sd_b)).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
         let stride = (pairs.len() / max_points.max(1)).max(1);
-        let points = pairs.iter().step_by(stride).take(max_points).copied().collect();
-        Dist2 { n, corr, cov, mean_a, mean_b, sd_a, sd_b, points }
+        let points = pairs
+            .iter()
+            .step_by(stride)
+            .take(max_points)
+            .copied()
+            .collect();
+        Dist2 {
+            n,
+            corr,
+            cov,
+            mean_a,
+            mean_b,
+            sd_a,
+            sd_b,
+            points,
+        }
     }
 }
 
@@ -248,7 +266,11 @@ impl Explain {
         let mut drivers: Vec<Driver> = candidates
             .into_iter()
             .map(|(name, corr)| {
-                let share = if total > 0.0 { corr * corr / total } else { 0.0 };
+                let share = if total > 0.0 {
+                    corr * corr / total
+                } else {
+                    0.0
+                };
                 Driver { name, corr, share }
             })
             .collect();
@@ -310,7 +332,14 @@ pub fn dist2(
 
 /// Per-cell moments of an array of `roots` (row-major, `rows×cols`) in one joint pass — the data
 /// behind a vector/matrix plot. A vector passes `rows = 1`.
-pub fn grid(graph: &RvGraph, roots: &[RvId], rows: usize, cols: usize, n: usize, seed: u64) -> DistGrid {
+pub fn grid(
+    graph: &RvGraph,
+    roots: &[RvId],
+    rows: usize,
+    cols: usize,
+    n: usize,
+    seed: u64,
+) -> DistGrid {
     let moments = sampler::grid_moments(graph, roots, n, seed);
     DistGrid {
         rows,
@@ -322,7 +351,10 @@ pub fn grid(graph: &RvGraph, roots: &[RvId], rows: usize, cols: usize, n: usize,
 
 /// The element×element correlation matrix of a vector of `roots` (one joint pass).
 pub fn corr_grid(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> CorrMatrix {
-    CorrMatrix { n: roots.len(), corr: sampler::corr_matrix(graph, roots, n, seed) }
+    CorrMatrix {
+        n: roots.len(),
+        corr: sampler::corr_matrix(graph, roots, n, seed),
+    }
 }
 
 /// Memory budget for a fan chart's joint draw matrix, in `f64` cells (`cols × n` ≈ 32 MB at the
@@ -351,7 +383,8 @@ pub fn fan(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> FanChart {
         mean: Vec::with_capacity(cols),
     };
     for mut col in draws {
-        fc.mean.push(col.iter().sum::<f64>() / col.len().max(1) as f64);
+        fc.mean
+            .push(col.iter().sum::<f64>() / col.len().max(1) as f64);
         col.sort_by(f64::total_cmp);
         fc.q05.push(quantile_sorted(&col, 0.05));
         fc.q25.push(quantile_sorted(&col, 0.25));
@@ -388,7 +421,11 @@ pub fn histogram(draws: &[f64], boolean: bool, nbins: usize) -> Histogram {
         for &x in draws {
             bins[(x != 0.0) as usize] += 1;
         }
-        return Histogram { lo: 0.0, hi: 1.0, bins };
+        return Histogram {
+            lo: 0.0,
+            hi: 1.0,
+            bins,
+        };
     }
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     for &x in draws {
@@ -401,7 +438,11 @@ pub fn histogram(draws: &[f64], boolean: bool, nbins: usize) -> Histogram {
     }
     let nbins = nbins.max(1);
     if !lo.is_finite() || !hi.is_finite() || lo == hi {
-        return Histogram { lo, hi, bins: vec![draws.len() as u64] };
+        return Histogram {
+            lo,
+            hi,
+            bins: vec![draws.len() as u64],
+        };
     }
     let span = hi - lo;
     let mut bins = vec![0u64; nbins];
@@ -424,7 +465,9 @@ impl Histogram {
             return vec![0.0, 1.0];
         }
         let width = (self.hi - self.lo) / self.bins.len() as f64;
-        (0..self.bins.len()).map(|i| self.lo + (i as f64 + 0.5) * width).collect()
+        (0..self.bins.len())
+            .map(|i| self.lo + (i as f64 + 0.5) * width)
+            .collect()
     }
 }
 
@@ -497,7 +540,11 @@ mod tests {
         // a roughly flat histogram: no bucket dominates
         let max = *d.hist.bins.iter().max().unwrap();
         let min = *d.hist.bins.iter().min().unwrap();
-        assert!(max - min <= 2, "flat sample should bin evenly: {:?}", d.hist.bins);
+        assert!(
+            max - min <= 2,
+            "flat sample should bin evenly: {:?}",
+            d.hist.bins
+        );
     }
 
     #[test]

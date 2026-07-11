@@ -22,22 +22,67 @@ pub type Reg = u32;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Inst {
-    Uniform { dst: Reg, lo: f64, hi: f64 },
-    UniformInt { dst: Reg, lo: f64, hi: f64 },
-    Normal { dst: Reg, mu: f64, sigma: f64 },
-    Exp { dst: Reg, rate: f64 },
-    Poisson { dst: Reg, lambda: f64 },
-    Geometric { dst: Reg, p: f64 },
-    ConstNum { dst: Reg, val: f64 },
-    ConstBool { dst: Reg, val: f64 }, // 0.0 / 1.0
-    Un { dst: Reg, op: UnOp, a: Reg },
-    Bin { dst: Reg, op: BinOp, a: Reg, b: Reg },
+    Uniform {
+        dst: Reg,
+        lo: f64,
+        hi: f64,
+    },
+    UniformInt {
+        dst: Reg,
+        lo: f64,
+        hi: f64,
+    },
+    Normal {
+        dst: Reg,
+        mu: f64,
+        sigma: f64,
+    },
+    Exp {
+        dst: Reg,
+        rate: f64,
+    },
+    Poisson {
+        dst: Reg,
+        lambda: f64,
+    },
+    Geometric {
+        dst: Reg,
+        p: f64,
+    },
+    ConstNum {
+        dst: Reg,
+        val: f64,
+    },
+    ConstBool {
+        dst: Reg,
+        val: f64,
+    }, // 0.0 / 1.0
+    Un {
+        dst: Reg,
+        op: UnOp,
+        a: Reg,
+    },
+    Bin {
+        dst: Reg,
+        op: BinOp,
+        a: Reg,
+        b: Reg,
+    },
     /// Per-lane select: `dst = cond ? a : b` (lifted `if`).
-    Select { dst: Reg, cond: Reg, a: Reg, b: Reg },
+    Select {
+        dst: Reg,
+        cond: Reg,
+        a: Reg,
+        b: Reg,
+    },
     /// Per-lane gather: `dst = table[round(clamp(index))]`. `table` indexes `Program::gathers`
     /// (the element registers); `index` is the register holding the per-lane index. Kept out of
     /// `Inst` itself so the enum stays `Copy`.
-    Gather { dst: Reg, table: u32, index: Reg },
+    Gather {
+        dst: Reg,
+        table: u32,
+        index: Reg,
+    },
 }
 
 pub struct Program {
@@ -79,10 +124,20 @@ pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
     let mut memo: HashMap<RvId, Reg> = HashMap::new();
     let mut insts: Vec<Inst> = Vec::new();
     let mut gathers: Vec<Box<[Reg]>> = Vec::new();
-    let regs: Vec<Reg> =
-        roots.iter().map(|&r| lower(graph, r, &mut memo, &mut insts, &mut gathers)).collect();
+    let regs: Vec<Reg> = roots
+        .iter()
+        .map(|&r| lower(graph, r, &mut memo, &mut insts, &mut gathers))
+        .collect();
     let root = regs.first().copied().unwrap_or(0);
-    (Program { n_regs: insts.len(), insts, root, gathers }, regs)
+    (
+        Program {
+            n_regs: insts.len(),
+            insts,
+            root,
+            gathers,
+        },
+        regs,
+    )
 }
 
 fn lower(
@@ -100,7 +155,11 @@ fn lower(
     let inst = match node {
         RvNode::Src(Source::Uniform(u)) => {
             let dst = insts.len() as Reg;
-            insts.push(Inst::Uniform { dst, lo: u.lo, hi: u.hi });
+            insts.push(Inst::Uniform {
+                dst,
+                lo: u.lo,
+                hi: u.hi,
+            });
             dst
         }
         RvNode::Src(Source::UniformInt { lo, hi }) => {
@@ -135,7 +194,10 @@ fn lower(
         }
         RvNode::ConstBool(b) => {
             let dst = insts.len() as Reg;
-            insts.push(Inst::ConstBool { dst, val: if b { 1.0 } else { 0.0 } });
+            insts.push(Inst::ConstBool {
+                dst,
+                val: if b { 1.0 } else { 0.0 },
+            });
             dst
         }
         RvNode::Unary(op, a) => {
@@ -148,7 +210,12 @@ fn lower(
             let ra = lower(graph, a, memo, insts, gathers);
             let rb = lower(graph, b, memo, insts, gathers);
             let dst = insts.len() as Reg;
-            insts.push(Inst::Bin { dst, op, a: ra, b: rb });
+            insts.push(Inst::Bin {
+                dst,
+                op,
+                a: ra,
+                b: rb,
+            });
             dst
         }
         RvNode::Select { cond, a, b } => {
@@ -156,18 +223,29 @@ fn lower(
             let ra = lower(graph, a, memo, insts, gathers);
             let rb = lower(graph, b, memo, insts, gathers);
             let dst = insts.len() as Reg;
-            insts.push(Inst::Select { dst, cond: rc, a: ra, b: rb });
+            insts.push(Inst::Select {
+                dst,
+                cond: rc,
+                a: ra,
+                b: rb,
+            });
             dst
         }
         RvNode::Gather { elems, index } => {
             // Lower every element register and the index, then record the table for the VM.
-            let table: Vec<Reg> =
-                elems.iter().map(|&e| lower(graph, e, memo, insts, gathers)).collect();
+            let table: Vec<Reg> = elems
+                .iter()
+                .map(|&e| lower(graph, e, memo, insts, gathers))
+                .collect();
             let ri = lower(graph, index, memo, insts, gathers);
             let tbl = gathers.len() as u32;
             gathers.push(table.into_boxed_slice());
             let dst = insts.len() as Reg;
-            insts.push(Inst::Gather { dst, table: tbl, index: ri });
+            insts.push(Inst::Gather {
+                dst,
+                table: tbl,
+                index: ri,
+            });
             dst
         }
     };
@@ -229,7 +307,11 @@ pub fn run_batch(program: &Program, regs: &mut [Box<[f64]>], rng: &mut crate::rn
             Inst::Select { dst, cond, a, b } => {
                 let (dst, cond, a, b) = (dst as usize, cond as usize, a as usize, b as usize);
                 for k in 0..BATCH {
-                    regs[dst][k] = if regs[cond][k] != 0.0 { regs[a][k] } else { regs[b][k] };
+                    regs[dst][k] = if regs[cond][k] != 0.0 {
+                        regs[a][k]
+                    } else {
+                        regs[b][k]
+                    };
                 }
             }
             Inst::Gather { dst, table, index } => {
@@ -316,7 +398,10 @@ mod tests {
     fn cse_shares_a_repeated_subexpression() {
         // X + X: the shared `X` must compile to ONE register, so total = 2 (X, the Add) not 3.
         let mut g = RvGraph::default();
-        let x = g.push(RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })), RvKind::Num);
+        let x = g.push(
+            RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
+            RvKind::Num,
+        );
         let sum = g.push(RvNode::Binary(BinOp::Add, x, x), RvKind::Num);
         let prog = compile(&g, sum);
         assert_eq!(prog.n_regs, 2, "X must be shared (CSE), not duplicated");
