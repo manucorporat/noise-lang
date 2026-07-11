@@ -154,6 +154,24 @@ pub fn round_to_se(val: f64, se: f64) -> f64 {
     (val * factor).round() / factor
 }
 
+/// Render an estimate `val ± se` the way its precision justifies (finding B3). For a sub-unit
+/// standard error this is [`round_to_se`] — the value rounded to its confident decimals (e.g.
+/// `3.141`). But when `se >= 1`, rounding to `0` decimals prints every integer digit of `val`
+/// (`241`) even though the error swamps them — false precision exactly when the uncertainty is
+/// largest. So a whole-unit-or-larger SE renders explicitly as `mean ± se`, both rounded to the
+/// SE's leading significant figure (`200 ± 500`), so the uncertainty is never hidden.
+pub fn fmt_est(val: f64, se: f64) -> String {
+    if se.is_finite() && se >= 1.0 {
+        // 10^place is the SE's magnitude; round both value and SE to that place.
+        let place = se.log10().floor() as i32;
+        let factor = 10f64.powi(-place);
+        let rounded_val = (val * factor).round() / factor;
+        let rounded_se = (se * factor).round() / factor;
+        return format!("{} ± {}", format_num(rounded_val), format_num(rounded_se));
+    }
+    format!("{}", round_to_se(val, se))
+}
+
 /// Format a deterministic number without floating-point dust: round to 12 decimal places and trim
 /// trailing zeros, so `1.0000000000000002` prints `1`, `1.49e-30` prints `0`, and `0.0871` stays
 /// `0.0871`. Non-finite values (`inf`/`nan`) print as-is. (Estimates use `round_to_se` instead.)
@@ -184,8 +202,8 @@ impl fmt::Display for Value {
             Value::Recipe(r) => write!(f, "{r}"),
             // No sampling on Display — keep it pure/cheap.
             Value::Dist(id) => write!(f, "<dist #{}>", id.0),
-            // Show only the digits the standard error justifies.
-            Value::Est { val, se } => write!(f, "{}", round_to_se(*val, *se)),
+            // Show only the digits the standard error justifies (and a `± se` when it's large).
+            Value::Est { val, se } => write!(f, "{}", fmt_est(*val, *se)),
             // `[a, b, c]` — comma-joined elements via their own Display.
             Value::Array(xs) => {
                 write!(f, "[")?;
@@ -222,5 +240,33 @@ impl fmt::Display for Value {
             Value::Summary(s) => write!(f, "{s}"),
             Value::Continue => write!(f, "continue"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_se_estimate_rounds_to_its_decimals() {
+        // Unchanged behavior: a sub-unit SE rounds `val` to its confident decimals, no `± se`.
+        assert_eq!(fmt_est(1.23456, 5e-4), "1.235");
+        assert_eq!(fmt_est(0.5, 0.01), "0.5");
+        assert_eq!(fmt_est(2.0, 0.0), "2"); // exact
+    }
+
+    #[test]
+    fn large_se_estimate_shows_the_uncertainty() {
+        // Regression for finding B3: a whole-unit-or-larger SE must not print a bare over-precise
+        // integer (`241`) — it renders `mean ± se`, both to the SE's leading figure.
+        assert_eq!(fmt_est(241.37, 500.0), "200 ± 500");
+        assert_eq!(fmt_est(1234.0, 50.0), "1230 ± 50");
+        assert_eq!(fmt_est(7.6, 3.2), "8 ± 3");
+        // The Est value renders through the same path.
+        let e = Value::Est {
+            val: 241.0,
+            se: 500.0,
+        };
+        assert_eq!(e.to_string(), "200 ± 500");
     }
 }

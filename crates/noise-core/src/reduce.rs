@@ -283,6 +283,13 @@ impl Reducer for MomentsReducer {
 /// averages over exactly the in-condition lanes. `count` comes out as the in-condition sample size
 /// `m`, which the standard error uses. (No SIMD lanes here: the per-element `is_nan` branch already
 /// breaks vectorization, and conditioning is not the hot path.)
+///
+/// KNOWN HOLE (finding B2): skipping *all* NaN lanes conflates "condition false" with "the quantity
+/// is NaN on an in-condition lane". An in-condition NaN quantity (e.g. `math::log(X)` where `X < 0`
+/// but the condition still holds) is silently dropped instead of propagated, biasing the estimate
+/// and tightening `m`'s standard error dishonestly. The fix is a dedicated condition column (see the
+/// note in `Engine::query_cond`); deferred because it would ripple through the single-column
+/// `Reducer`/`Runner` interface (JIT/wasm included).
 pub struct CondMomentsReducer;
 
 impl Reducer for CondMomentsReducer {

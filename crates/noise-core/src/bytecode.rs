@@ -204,7 +204,9 @@ fn lower(
                 if memo.contains_key(&id) {
                     continue; // reached via another path already
                 }
-                let dst = insts.len() as Reg;
+                // Checked cast (finding B7): a truncating `as Reg` past 2³² instructions would alias
+                // an unrelated register. Compile-time path (not per-lane), so `try_from` is free.
+                let dst = Reg::try_from(insts.len()).expect("bytecode exceeded 2^32 instructions");
                 match graph.node(id).clone() {
                     RvNode::Src(Source::Uniform(u)) => {
                         insts.push(Inst::Uniform {
@@ -254,7 +256,9 @@ fn lower(
                     RvNode::Gather { elems, index } => {
                         let table: Vec<Reg> = elems.iter().map(|e| memo[e]).collect();
                         let ri = memo[&index];
-                        let tbl = gathers.len() as u32;
+                        // Checked cast (finding B7): the gather-table index must not truncate.
+                        let tbl = u32::try_from(gathers.len())
+                            .expect("bytecode exceeded 2^32 gather tables");
                         gathers.push(table.into_boxed_slice());
                         insts.push(Inst::Gather {
                             dst,
@@ -335,12 +339,22 @@ pub fn run_batch(program: &Program, regs: &mut [Box<[f64]>], rng: &mut crate::rn
                 // Per lane: round the index, clamp into `0..len`, copy that element's lane value.
                 // Gather to a scratch column first so the immutable element reads don't alias the
                 // mutable `dst` write (one-register-per-node guarantees they're distinct anyway).
+                //
+                // NaN index → NaN result (finding B5). A NaN index selects no element, so the honest
+                // answer is NaN — propagating it the way every other IEEE op here does. This is a
+                // SEMANTIC CHOICE: the previous code let `NaN as usize == 0` silently read element 0,
+                // fabricating a real value from an undefined index. (±inf still clamp to the ends:
+                // `-inf` below `0`, `+inf` at/above `last`, which is the sensible saturating read.)
                 let tbl = &program.gathers[table as usize];
                 let last = tbl.len() - 1; // `gathers` never holds an empty table (eval rejects it)
                 let index = index as usize;
                 let mut scratch = [0.0f64; BATCH];
                 for k in 0..BATCH {
                     let raw = regs[index][k].round();
+                    if raw.is_nan() {
+                        scratch[k] = f64::NAN;
+                        continue;
+                    }
                     let i = if raw <= 0.0 {
                         0
                     } else if raw as usize >= last {
@@ -409,7 +423,7 @@ fn apply_bin(op: BinOp, a: f64, b: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dist::{RvGraph, RvKind, RvNode, Source, Uniform};
+    use crate::dist::{RvGraph, RvId, RvKind, RvNode, Source, Uniform};
 
     #[test]
     fn cse_shares_a_repeated_subexpression() {
@@ -444,6 +458,64 @@ mod tests {
         // Not is logical over a 0/1 column.
         assert_eq!(apply_un(UnOp::Not, 0.0), 1.0);
         assert_eq!(apply_un(UnOp::Not, 1.0), 0.0);
+    }
+
+    #[test]
+    fn gather_with_a_nan_index_yields_nan() {
+        // Finding B5 (SEMANTIC CHOICE): a NaN per-lane index propagates NaN, rather than silently
+        // reading element 0 (`NaN as usize == 0`). A finite index still selects; ±inf saturates.
+        let mut g = RvGraph::default();
+        let elems: Vec<RvId> = [10.0, 20.0, 30.0]
+            .iter()
+            .map(|&v| g.push(RvNode::ConstNum(v), RvKind::Num))
+            .collect();
+        // A per-lane NaN index: ln(-1) = NaN (kept as a node — compile lowers the raw graph).
+        let neg = g.push(RvNode::ConstNum(-1.0), RvKind::Num);
+        let nan_idx = g.push(RvNode::Unary(UnOp::Ln, neg), RvKind::Num);
+        let gather = g.push(
+            RvNode::Gather {
+                elems: elems.into_boxed_slice(),
+                index: nan_idx,
+            },
+            RvKind::Num,
+        );
+        let prog = compile(&g, gather);
+        let mut buf: Vec<Box<[f64]>> = (0..prog.n_regs)
+            .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+            .collect();
+        let mut rng = crate::rng::Rng::seed_from_u64(0);
+        run_batch(&prog, &mut buf, &mut rng);
+        let out = &buf[prog.root as usize];
+        assert!(
+            out.iter().all(|x| x.is_nan()),
+            "NaN index must gather NaN, not element 0; got {:?}",
+            &out[..4]
+        );
+    }
+
+    #[test]
+    fn gather_with_a_finite_index_selects_that_element() {
+        // Companion to the NaN case: an ordinary integer index still reads its element.
+        let mut g = RvGraph::default();
+        let elems: Vec<RvId> = [10.0, 20.0, 30.0]
+            .iter()
+            .map(|&v| g.push(RvNode::ConstNum(v), RvKind::Num))
+            .collect();
+        let idx = g.push(RvNode::ConstNum(1.0), RvKind::Num);
+        let gather = g.push(
+            RvNode::Gather {
+                elems: elems.into_boxed_slice(),
+                index: idx,
+            },
+            RvKind::Num,
+        );
+        let prog = compile(&g, gather);
+        let mut buf: Vec<Box<[f64]>> = (0..prog.n_regs)
+            .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+            .collect();
+        let mut rng = crate::rng::Rng::seed_from_u64(0);
+        run_batch(&prog, &mut buf, &mut rng);
+        assert!(buf[prog.root as usize].iter().all(|&x| x == 20.0));
     }
 
     #[test]

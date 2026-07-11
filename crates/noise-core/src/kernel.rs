@@ -273,10 +273,18 @@ pub struct NodeCost {
 
 /// Compute the [`NodeCost`] of `root`'s cone (see [`NodeCost`]).
 pub fn cost(graph: &RvGraph, root: RvId) -> NodeCost {
+    cost_roots(graph, &[root])
+}
+
+/// Compute the [`NodeCost`] of the *union* of several roots' cones — a joint pass evaluates every
+/// distinct node across all roots once per lane, so a shared `seen` set is the right accounting
+/// (nodes feeding more than one root are counted once, matching the shared instruction stream the
+/// joint drivers compile). Used to price the joint introspection passes (finding B8).
+pub fn cost_roots(graph: &RvGraph, roots: &[RvId]) -> NodeCost {
     // Iterative worklist (not recursion) so a deep chain can't overflow the stack (finding A4).
     let mut seen = HashSet::new();
     let mut c = NodeCost::default();
-    let mut stack = vec![root];
+    let mut stack: Vec<RvId> = roots.to_vec();
     while let Some(id) = stack.pop() {
         if !seen.insert(id) {
             continue;

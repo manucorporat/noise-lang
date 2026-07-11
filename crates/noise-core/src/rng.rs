@@ -70,6 +70,13 @@ impl Rng {
     /// `floor`. `count >= 1`, so `count == 1` always yields `k == 0` (a point mass at `lo`).
     #[inline]
     pub fn fill_uniform_int(&mut self, lo: f64, hi: f64, out: &mut [f64]) {
+        // The constant-bounds constructor (`builtins::call`) rejects `lo > hi` outright, so a
+        // Lemire draw here always has `hi >= lo`; assert it in debug (finding B4). The `.max(1.0)`
+        // keeps release well-defined (a point mass at `lo`) if that invariant is ever broken.
+        debug_assert!(
+            hi >= lo,
+            "fill_uniform_int needs hi >= lo (constant bounds are validated upstream), got ({lo}, {hi})"
+        );
         let count = (hi - lo + 1.0).max(1.0) as u64;
         for x in out.iter_mut() {
             let k = ((self.next_u64() as u128 * count as u128) >> 64) as u64;

@@ -228,6 +228,25 @@ mod tests {
     }
 
     #[test]
+    fn unif_int_with_inverted_dynamic_bounds_stays_in_range() {
+        // Finding B4: data-dependent bounds where `hi < lo` on every lane. The lowered draw clamps
+        // the width to >= 1, so an inverted lane degenerates to a point mass at `lo` — never a value
+        // *below* `lo` (the old `lo + floor((hi-lo+1)·U)` produced out-of-range values as low as 1).
+        let mut eng = Engine::new();
+        let rv = eng
+            .run_rv("use rand; lo ~ unif_int(3, 5); hi ~ unif_int(0, 2); x ~ unif_int(lo, hi); x")
+            .unwrap();
+        let draws = eng.sample(&rv, 8192, 123).unwrap();
+        for &x in &draws {
+            assert!(
+                (3.0..=5.0).contains(&x),
+                "inverted-bounds draw out of range: {x} (should degenerate to lo ∈ 3..=5)"
+            );
+            assert_eq!(x, x.round(), "draw must be an integer: {x}");
+        }
+    }
+
+    #[test]
     fn each_constructor_is_an_undrawn_recipe_that_displays_as_itself() {
         assert_eq!(display_of("unif(-1, 1)"), "unif(-1, 1)");
         assert_eq!(display_of("unif_int(1, 6)"), "unif_int(1, 6)");
@@ -3932,6 +3951,34 @@ mod tests {
         assert!(e.contains("never occurred"), "{e}");
     }
 
+    /// Finding B2 (DEFERRED — captures the *current, biased* behavior, not the correct one).
+    ///
+    /// The NaN conditioning sentinel conflates "condition false" with "the quantity is NaN on an
+    /// in-condition lane". Here `X ~ unif(-1,1)` and the condition `X > -1` holds for ~every lane,
+    /// but the quantity `log(X)` is NaN on the `X < 0` half. Those in-condition NaN lanes are
+    /// silently dropped, so the estimate collapses to the mean over the `X > 0` lanes,
+    /// `∫₀¹ ln(x) dx = -1`.
+    ///
+    /// The CORRECT answer is `NaN`: an in-condition NaN quantity occurs with probability ~1/2, so
+    /// the conditional expectation is undefined. This test pins the biased `-1` so a future
+    /// condition-column fix (see `Engine::query_cond`) has a visible before/after. When that lands,
+    /// update this assertion to expect a NaN estimate.
+    #[test]
+    fn conditioning_drops_in_condition_nan_lanes_biased_deferred_b2() {
+        let v = run("X ~ unif(-1, 1); E(log(X) | X > -1)").unwrap();
+        let val = match v {
+            Value::Num(n) => n,
+            Value::Est { val, .. } => val,
+            other => panic!("expected a number-ish estimate, got {other:?}"),
+        };
+        // CURRENT (biased) value; the honest value is NaN — see the doc comment above.
+        assert!(
+            (val - (-1.0)).abs() < 0.05,
+            "captured biased conditional mean = {val} (expected ≈ -1 under the current NaN-drop; \
+             the correct value is NaN once B2 is fixed)"
+        );
+    }
+
     /// `noise validate` must type/shape-check a `stats::` program without drawing a single sample —
     /// so the placeholders it returns have to carry the *right shape*, or indexing them would raise
     /// a phantom error.
@@ -3947,6 +3994,55 @@ mod tests {
         let shape = nums(&eng.check(&src).unwrap());
         assert_eq!(shape, vec![7.0, 7.0, 2.0, 5.0, 6.0, 5.0, 3.0, 3.0]);
         assert_eq!(eng.stats().samples, 0, "check mode must not draw");
+    }
+
+    #[test]
+    fn two_engines_on_one_thread_keep_independent_stats() {
+        // Finding B8: run-time counters are per-engine now, not a thread-local global. Two engines
+        // forcing on the same thread must not corrupt each other's stats.
+        let mut a = Engine::new();
+        let mut b = Engine::new();
+        a.run(&with_prelude("X ~ normal(0,1); E(X, 10000)"))
+            .unwrap();
+        assert_eq!(
+            a.stats().samples,
+            10000,
+            "engine A should count its own 10k draws"
+        );
+        // B runs a different query; A's counters must be untouched.
+        b.run(&with_prelude("Y ~ normal(0,1); E(Y, 50000)"))
+            .unwrap();
+        assert_eq!(b.stats().samples, 50000);
+        assert_eq!(
+            a.stats().samples,
+            10000,
+            "engine A's stats changed when engine B ran on the same thread"
+        );
+        // Re-running A resets only A (B stays at 50k).
+        a.run(&with_prelude("Z ~ normal(0,1); E(Z, 20000)"))
+            .unwrap();
+        assert_eq!(a.stats().samples, 20000);
+        assert_eq!(b.stats().samples, 50000);
+    }
+
+    #[test]
+    fn joint_introspection_passes_are_counted_in_stats() {
+        // Finding B8: the joint-pass drivers (`corr`/grid/fan) now record RunStats via the shared
+        // `for_each_joint_batch`. A `stats::corr(v)` pass used to be entirely invisible in the
+        // engine readout, contradicting the stats module's contract.
+        let mut eng = Engine::new();
+        eng.run(&with_prelude("v ~[4] normal(0,1); stats::corr(v)"))
+            .unwrap();
+        let s = eng.stats();
+        assert!(
+            s.samples > 0,
+            "a joint corr pass must be counted (was invisible before B8): {s:?}"
+        );
+        assert!(
+            s.forcings >= 1,
+            "the pass should register as a forcing: {s:?}"
+        );
+        assert!(s.rng_draws > 0, "the pass draws random numbers: {s:?}");
     }
 
     // --- inline inputs (PLAN-INPUTS) ---

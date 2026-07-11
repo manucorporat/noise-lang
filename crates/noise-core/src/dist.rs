@@ -297,7 +297,11 @@ pub struct RvGraph {
 
 impl RvGraph {
     pub fn push(&mut self, node: RvNode, kind: RvKind) -> RvId {
-        let id = RvId(self.nodes.len() as u32);
+        // Checked cast (finding B7): a truncating `as u32` past 2³² nodes would alias an unrelated
+        // node and silently corrupt results. Construction is capped well below this (finding A6),
+        // and `push` is a build-time path (not the per-lane sample loop), so the check is free
+        // insurance. `expect` rather than a debug-only assert so a release build can't truncate.
+        let id = RvId(u32::try_from(self.nodes.len()).expect("RvGraph exceeded 2^32 nodes"));
         self.nodes.push(node);
         self.kinds.push(kind);
         id

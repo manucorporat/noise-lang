@@ -120,6 +120,11 @@ pub struct Engine {
     /// value. First evaluation of a name registers here; later mentions reuse it. Drives host
     /// discovery (`Document.result.inputs`) and dedup / redeclaration checks (PLAN-INPUTS §3).
     input_manifest: Vec<ResolvedInput>,
+    /// Per-engine run-time counters (finding B8). Owned here — not a thread-local global — so two
+    /// engines on one thread (the playground sidecar pattern) keep independent stats and reading
+    /// them doesn't couple to whichever thread last forced. Installed as the thread's active
+    /// recorder around each forcing region (see [`crate::stats`]).
+    stats: crate::stats::Counters,
 }
 
 /// One item in a program's output stream — the unit `take_output` returns, in source order. `Print`
@@ -188,6 +193,7 @@ impl Engine {
             datasets: Vec::new(),
             input_overrides: Vec::new(),
             input_manifest: Vec::new(),
+            stats: crate::stats::new_counters(),
         }
     }
 
@@ -256,7 +262,7 @@ impl Engine {
     /// [`run`](Engine::run). The CLI/playground read this to show how much Monte-Carlo work the
     /// program triggered. See [`crate::stats`].
     pub fn stats(&self) -> crate::stats::RunStats {
-        crate::stats::snapshot()
+        self.stats.get()
     }
 
     /// The live top-level bindings after a [`run`](Engine::run), as `(name, kind)` pairs sorted by
@@ -285,8 +291,10 @@ impl Engine {
     /// an empty program). Inline `input::` declarations resolve against any host overrides set with
     /// [`set_input_overrides`](Engine::set_input_overrides); with none, each input uses its default.
     pub fn run(&mut self, src: &str) -> Result<Value> {
-        // Fresh run-time counters for this program (the playground reads them after `run`).
-        crate::stats::reset();
+        // Fresh run-time counters for this program (the playground reads them after `run`), and
+        // install this engine's counters as the thread's recorder for the whole run (finding B8).
+        let _rec = crate::stats::install(&self.stats);
+        self.stats.set(crate::stats::RunStats::default());
         self.dropped = 0;
         self.first_dropped_span = None;
         self.input_manifest.clear();
@@ -352,7 +360,8 @@ impl Engine {
     /// [`set_input_overrides`](Engine::set_input_overrides). Both hosts (CLI, wasm) render *this*.
     pub fn run_to_document(&mut self, src: &str) -> crate::doc::Document {
         use crate::doc::Document;
-        crate::stats::reset();
+        let _rec = crate::stats::install(&self.stats);
+        self.stats.set(crate::stats::RunStats::default());
         self.dropped = 0;
         self.first_dropped_span = None;
         self.input_manifest.clear();
@@ -1507,7 +1516,12 @@ impl Engine {
                     .push(RvNode::Binary(BinOp::Add, lo, scaled), RvKind::Num)
             }
             Recipe::UniformIntDyn { lo, hi } => {
-                // lo + floor((hi − lo + 1)·U),  U ~ unif(0,1) → inclusive integers lo..=hi.
+                // lo + floor(max(hi − lo + 1, 1)·U),  U ~ unif(0,1) → inclusive integers lo..=hi.
+                // The `max(·, 1)` clamp (finding B4) makes an inverted per-lane range well-defined:
+                // if `hi < lo` on some lane the raw width `hi − lo + 1` is ≤ 0, which without the
+                // clamp yields floored *negative* offsets and thus values *below* `lo` (out of any
+                // sensible range). Clamping the width to ≥ 1 degenerates that lane to a point mass
+                // at `lo` — the same well-defined behavior the constant path gives for `lo == hi`.
                 let u = self.graph.push(
                     RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
                     RvKind::Num,
@@ -1517,9 +1531,21 @@ impl Engine {
                     .graph
                     .push(RvNode::Binary(BinOp::Sub, hi, lo), RvKind::Num);
                 let one = self.graph.push(RvNode::ConstNum(1.0), RvKind::Num);
-                let width = self
+                let width_raw = self
                     .graph
                     .push(RvNode::Binary(BinOp::Add, diff, one), RvKind::Num);
+                // width = max(width_raw, 1) via select(width_raw < 1, 1, width_raw).
+                let narrow = self
+                    .graph
+                    .push(RvNode::Binary(BinOp::Lt, width_raw, one), RvKind::Bool);
+                let width = self.graph.push(
+                    RvNode::Select {
+                        cond: narrow,
+                        a: one,
+                        b: width_raw,
+                    },
+                    RvKind::Num,
+                );
                 let scaled = self
                     .graph
                     .push(RvNode::Binary(BinOp::Mul, u, width), RvKind::Num);
@@ -1828,6 +1854,18 @@ impl Engine {
                 span,
             ));
         }
+        // KNOWN HOLE (finding B2): the NaN sentinel conflates "condition is false" with "the
+        // quantity itself is NaN on an in-condition lane". The conditional reducers/collectors drop
+        // *every* NaN lane, so an in-condition NaN quantity is silently discarded rather than
+        // propagated — biasing the estimate and reporting a falsely-tight SE (the dropped lanes
+        // don't count against `m`). Example: `E(math::log(X) | X > -1)` with `X ~ unif(-1,1)` returns
+        // ≈ -1 (the mean over the `X > 0` lanes) when the honest answer is NaN — `log(X)` is NaN on
+        // the `X < 0` lanes, which are *in condition* with probability ~1/2. The correct fix is a
+        // dedicated condition column (as `sample_pairs` carries one), keeping the quantity's NaN
+        // distinct from the sentinel; it is deferred because the single-root reduce/backend path
+        // (`reduce`/`Runner`, incl. JIT/wasm) produces one column per batch, and re-routing to a
+        // two-root interpreter pass would change RNG consumption order. See the matching notes on
+        // `reduce::CondMomentsReducer` and `sampler::cond_sample_n`.
         let nan = self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num);
         let root = self.graph.push(
             RvNode::Select {
@@ -2762,10 +2800,12 @@ impl Engine {
             return self.binop_complex(op, l, r, span);
         }
         // Algebraic identity folds before lifting: `0*x → 0`, `1*x → x`, `x+0/0+x → x`, `x-0 → x`.
-        // These keep an RV out of the graph where it provably doesn't matter — and, crucially, let
+        // These keep an RV out of the graph where it (mostly) doesn't matter — and, crucially, let
         // `math::i * x` keep a *literal* `0` real channel (`0*x`), so a complex `exp` over a random
         // angle (`e^{i·X}`) still sees a constant real part. Only fires when the non-constant side is
-        // numeric, so `0 * bool_event` still type-errors rather than silently folding to 0.
+        // numeric, so `0 * bool_event` still type-errors rather than silently folding to 0. NOTE the
+        // `0*x → 0` fold trades away non-finite propagation for discrete RVs (finding B6) — see
+        // [`Self::fold_identity`] for the honest accounting.
         if let Some(folded) = self.fold_identity(op, &l, &r) {
             return Ok(folded);
         }
@@ -2788,8 +2828,18 @@ impl Engine {
     /// surviving operand is a numeric RV (`dist<number>`) and the other side is the literal `0`/`1`.
     /// This keeps a provably-irrelevant RV out of the graph — and, crucially, lets `math::i * x`
     /// keep a *literal* `0` real channel (`0*x`), so a complex `exp` over a random angle (`e^{i·X}`)
-    /// still sees a constant real part. (`0*x → 0` discards `x`'s inf/NaN propagation, but only for a
-    /// measure-zero set of draws; for constant operands the fold never fires.) `None` falls through.
+    /// still sees a constant real part.
+    ///
+    /// The `1*x`, `x+0`, `0+x`, `x-0` folds are exact for *every* IEEE value of `x` (including
+    /// ±inf/NaN), so they are always sound. `0*x → 0` is NOT (finding B6): honest IEEE gives
+    /// `0*inf == NaN` and `0*NaN == NaN`, and for a **discrete** RV those inputs occur with real
+    /// probability, not measure zero — e.g. `X ~ unif_int(0,5); 0*(1/X)` folds to `0`, but the
+    /// honest result is `NaN` on the `X == 0` lane (probability 1/6). We keep the fold deliberately:
+    /// the payoff (a literal `0` complex real channel, and pruning provably-irrelevant RVs) is worth
+    /// more than faithful non-finite propagation for `0*x`, and a *correct* "is `x` finite?" guard
+    /// isn't local (overflow, plus `Div`/`Ln`/`Pow` reachability, would all have to be proven). The
+    /// trade-off is this: `0*x` discards `x`'s non-finite lanes. For constant operands the fold never
+    /// fires (`eval_binary` evaluates `0*inf` honestly). `None` falls through.
     fn fold_identity(&self, op: BinOp, l: &Value, r: &Value) -> Option<Value> {
         let is0 = |v: &Value| matches!(v, Value::Num(n) if *n == 0.0);
         let is1 = |v: &Value| matches!(v, Value::Num(n) if *n == 1.0);
@@ -4613,12 +4663,15 @@ impl Engine {
     /// `v` under `seed`. The graph is read-only here — building/lifting already happened.
     pub fn sample(&self, v: &Value, n: usize, seed: u64) -> Result<Vec<f64>> {
         let id = self.expect_dist(v)?;
+        // Account this forcing into the engine's own counters (finding B8).
+        let _rec = crate::stats::install(&self.stats);
         Ok(sampler::sample_n(&self.graph, id, n, seed))
     }
 
     /// Rust sampling API (for tests): empirical mean + population variance of the RV `v`.
     pub fn moments(&self, v: &Value, n: usize, seed: u64) -> Result<Moments> {
         let id = self.expect_dist(v)?;
+        let _rec = crate::stats::install(&self.stats);
         Ok(sampler::moments(&self.graph, id, n, seed))
     }
 }
