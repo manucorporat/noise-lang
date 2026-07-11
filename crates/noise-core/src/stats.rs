@@ -23,6 +23,7 @@ use std::rc::Rc;
 
 /// A snapshot of the counters accumulated since the last reset.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[must_use = "RunStats is a read-only counter snapshot; discarding it makes the stats() call dead (finding F10)"]
 pub struct RunStats {
     /// Number of forcing operations (`P`/`E`/`Var`/`Q`/`sample`/joint pass) executed.
     pub forcings: u64,

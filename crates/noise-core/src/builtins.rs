@@ -43,26 +43,36 @@ const MAX_PERMUTATION_N: usize = 2048;
 /// refinement.
 const P_DEFAULT_SEED: u64 = 0;
 
+/// The engine knobs a builtin/query dispatch needs, bundled into one parameter object (finding F6)
+/// so the `call`/`prob`/`moment`/`quantile` signatures don't grow a new positional argument every
+/// time a knob is added. The engine builds one per call and threads it by reference.
+///
+/// - `graph` — the (immutable) sample-DAG a query reads to estimate a probability/moment/quantile.
+/// - `default_n` — the Monte Carlo budget when a call carries no explicit sample count (default
+///   [`P_DEFAULT_N`], set via `engine::set_max_samples`).
+/// - `max_opts` — the optional per-query operation budget (`engine::set_max_opts`, `0` = unlimited):
+///   each query auto-clamps its draw count so `draws × cone-node-count ≤ max_opts` (see
+///   [`clamp_to_op_budget`]).
+/// - `check` — validate-only mode: build/type-check the graph but skip the Monte Carlo pass,
+///   handing back a neutral in-range placeholder.
+/// - `span` — the call site, for spanned errors.
+#[derive(Clone, Copy)]
+pub struct QueryCtx<'g> {
+    pub graph: &'g RvGraph,
+    pub default_n: usize,
+    pub max_opts: u64,
+    pub check: bool,
+    pub span: Span,
+}
+
 /// Called from `eval.rs`'s `Expr::Call` arm.
 ///
 /// Distribution constructors (`unif`, `unif_int`, `bernoulli`) return a **recipe** — an undrawn
 /// `Value::Recipe`, *not* a graph node. They never touch the graph: drawing is `~`'s job (see
-/// `Engine::draw`). `P` reads the graph to estimate a probability.
-///
-/// `default_n` is the Monte Carlo budget the sampling builtins (`P`/`E`/`Var`/`Q`) use when the
-/// call carries no explicit sample count — the engine threads its current setting (default
-/// [`P_DEFAULT_N`], adjustable via `engine::set_max_samples`) through here. `max_opts` is the
-/// optional per-query operation budget (`engine::set_max_opts`, `0` = unlimited): each query
-/// auto-clamps its draw count so `draws × cone-node-count ≤ max_opts` (see [`clamp_to_op_budget`]).
-pub fn call(
-    name: &str,
-    arg_vals: &[Value],
-    graph: &RvGraph,
-    default_n: usize,
-    max_opts: u64,
-    span: Span,
-    check: bool,
-) -> Result<Value> {
+/// `Engine::draw`). `P` reads the graph to estimate a probability. The engine knobs travel in
+/// [`QueryCtx`].
+pub fn call(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let (graph, span) = (ctx.graph, ctx.span);
     match name {
         "unif" => {
             let [lo, hi] = two_args(name, arg_vals, graph, span)?;
@@ -226,17 +236,11 @@ pub fn call(
             }
             Ok(Value::Recipe(Recipe::Permutation { n: n as usize }))
         }
-        "sqrt" => {
-            let x = one_num(name, arg_vals, span)?;
-            if x < 0.0 {
-                return Err(NoiseError::runtime(
-                    format!("sqrt needs x >= 0, got {x}"),
-                    span,
-                ));
-            }
-            Ok(Value::Num(x.sqrt()))
-        }
-        // `log`/`log10` are handled in `eval::lib_call` (they lift over RVs and need `&mut` graph).
+        // `sqrt` is handled in `eval::lib_call`/`math_ufunc` (it lifts over RVs and is complex-aware,
+        // returning NaN — not an error — on a negative real, so `sqrt(-1)` is NaN). There is
+        // deliberately no `sqrt` arm here: `lib_call` intercepts it before `builtins::call` ever
+        // runs, so a scalar arm would be dead code with *contradicting* semantics (finding F3).
+        // `log`/`log10` are likewise handled in `eval::lib_call`.
         "gcd" => {
             // Greatest common divisor (Euclid), defined on integers via |a|, |b|; gcd(0, 0) = 0.
             // Deterministic integer op (a `Dist` argument errors in `as_num`).
@@ -272,15 +276,15 @@ pub fn call(
             }
             Ok(Value::Num(modpow_int(base, exp as u64, modulus) as f64))
         }
-        "E" | "Var" => moment(name, arg_vals, graph, default_n, max_opts, span, check),
+        "E" | "Var" => moment(name, arg_vals, ctx),
         "round" => {
             // round(x, digits) — round x to `digits` decimal places. Handy for messages.
             let [x, digits] = two_nums(name, arg_vals, span)?;
             let factor = 10f64.powi(digits as i32);
             Ok(Value::Num((x * factor).round() / factor))
         }
-        "P" => prob(arg_vals, graph, default_n, max_opts, span, check),
-        "Q" => quantile(arg_vals, graph, default_n, max_opts, span, check),
+        "P" => prob(arg_vals, ctx),
+        "Q" => quantile(arg_vals, ctx),
         // --- pure collection builtins (no graph access; PLAN-COLLECTIONS §3) ---
         "Len" => len(name, arg_vals, span),
         // pure vector constructors / rearrangers (graph-free; just move `Value`s around)
@@ -292,8 +296,8 @@ pub fn call(
         // noise RV nodes and read the realization cache, so it needs `&mut Engine`).
         "sine" | "cosine" => wave(name, arg_vals, span),
         // `Print` is intercepted in `eval.rs` (it needs `&mut self` to append to the capture
-        // buffer), so it never reaches here; this arm is unreachable and kept only for clarity.
-        "Print" => Ok(Value::Unit),
+        // buffer), so it never reaches here — there is deliberately no `"Print"` arm (finding F3):
+        // a `Value::Unit`-returning arm would be dead code that masks a dispatch-order regression.
         other => Err(NoiseError::runtime(
             format!("unknown function '{other}'"),
             span,
@@ -325,14 +329,14 @@ fn clamp_to_op_budget(n: usize, graph: &RvGraph, root: RvId, max_opts: u64) -> u
     n.min(cap)
 }
 
-fn prob(
-    arg_vals: &[Value],
-    graph: &RvGraph,
-    default_n: usize,
-    max_opts: u64,
-    span: Span,
-    check: bool,
-) -> Result<Value> {
+fn prob(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let QueryCtx {
+        graph,
+        default_n,
+        max_opts,
+        check,
+        span,
+    } = *ctx;
     if arg_vals.is_empty() || arg_vals.len() > 2 {
         return Err(NoiseError::runtime(
             format!(
@@ -394,15 +398,14 @@ fn prob(
 /// standard error (`E` ↔ mean, `Var` ↔ population variance). `P` is the special case for
 /// events; `E`/`Var` are total over any number or numeric RV (a bool RV works too — its mean is
 /// `P`). A deterministic number is exact: `E(5) = 5 ± 0`, `Var(5) = 0 ± 0`.
-fn moment(
-    name: &str,
-    arg_vals: &[Value],
-    graph: &RvGraph,
-    default_n: usize,
-    max_opts: u64,
-    span: Span,
-    check: bool,
-) -> Result<Value> {
+fn moment(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let QueryCtx {
+        graph,
+        default_n,
+        max_opts,
+        check,
+        span,
+    } = *ctx;
     if arg_vals.is_empty() || arg_vals.len() > 2 {
         return Err(NoiseError::runtime(
             format!(
@@ -471,14 +474,14 @@ fn moment(
 ///
 /// Returns a plain `Num` (not an `Est`): a sample quantile's standard error depends on the density
 /// at that point, so we don't claim auto-rounded precision the way `P`/`E` do.
-fn quantile(
-    arg_vals: &[Value],
-    graph: &RvGraph,
-    default_n: usize,
-    max_opts: u64,
-    span: Span,
-    check: bool,
-) -> Result<Value> {
+fn quantile(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let QueryCtx {
+        graph,
+        default_n,
+        max_opts,
+        check,
+        span,
+    } = *ctx;
     if arg_vals.len() < 2 || arg_vals.len() > 3 {
         return Err(NoiseError::runtime(
             format!(
@@ -521,7 +524,7 @@ fn quantile(
             let n = clamp_to_op_budget(n, graph, *id, max_opts);
             let mut draws = sampler::sample_n(graph, *id, n, P_DEFAULT_SEED);
             draws.sort_by(f64::total_cmp);
-            Ok(Value::Num(empirical_quantile(&draws, q)))
+            Ok(Value::Num(crate::num::quantile_sorted(&draws, q)))
         }
         other => Err(NoiseError::runtime(
             format!(
@@ -573,15 +576,14 @@ fn opt_count(name: &str, v: Option<&Value>, default_n: usize, span: Span) -> Res
 /// conditioning root `select(cond, event_indicator, NaN)` (built in `eval.rs`); `tail` is the
 /// optional `[n]` sample count after the `|`-expression. The estimate is a probability with the
 /// standard error of `m ≈ n·P(cond)` in-condition draws (so it self-rounds like an unconditional `P`).
-pub fn prob_cond(
-    graph: &RvGraph,
-    root: RvId,
-    tail: &[Value],
-    default_n: usize,
-    max_opts: u64,
-    span: Span,
-    check: bool,
-) -> Result<Value> {
+pub fn prob_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let QueryCtx {
+        graph,
+        default_n,
+        max_opts,
+        check,
+        span,
+    } = *ctx;
     if tail.len() > 1 {
         return Err(NoiseError::runtime(
             format!(
@@ -609,17 +611,14 @@ pub fn prob_cond(
 /// `E(x | cond)` / `Var(x | cond)` — the conditional mean/variance over the worlds where `cond`
 /// holds. `root` is `select(cond, x, NaN)`; `tail` is the optional `[n]`. The standard error uses the
 /// in-condition sample size.
-#[allow(clippy::too_many_arguments)] // engine knobs travel positionally for now; a QueryCtx parameter object is planned
-pub fn moment_cond(
-    name: &str,
-    graph: &RvGraph,
-    root: RvId,
-    tail: &[Value],
-    default_n: usize,
-    max_opts: u64,
-    span: Span,
-    check: bool,
-) -> Result<Value> {
+pub fn moment_cond(name: &str, root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let QueryCtx {
+        graph,
+        default_n,
+        max_opts,
+        check,
+        span,
+    } = *ctx;
     if tail.len() > 1 {
         return Err(NoiseError::runtime(
             format!(
@@ -655,15 +654,14 @@ pub fn moment_cond(
 /// `Q(x | cond, q)` / `Q(x | cond, q, n)` — the conditional quantile over the worlds where `cond`
 /// holds. `root` is `select(cond, x, NaN)`; `tail` is `[q]` or `[q, n]`. Estimated by collecting the
 /// in-condition draws (NaN lanes dropped), sorting, and interpolating — like the unconditional `Q`.
-pub fn quantile_cond(
-    graph: &RvGraph,
-    root: RvId,
-    tail: &[Value],
-    default_n: usize,
-    max_opts: u64,
-    span: Span,
-    check: bool,
-) -> Result<Value> {
+pub fn quantile_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let QueryCtx {
+        graph,
+        default_n,
+        max_opts,
+        check,
+        span,
+    } = *ctx;
     if tail.is_empty() || tail.len() > 2 {
         return Err(NoiseError::runtime(
             format!(
@@ -690,20 +688,7 @@ pub fn quantile_cond(
         return Err(cond_never(n, span));
     }
     draws.sort_by(f64::total_cmp);
-    Ok(Value::Num(empirical_quantile(&draws, q)))
-}
-
-/// Linear-interpolated empirical quantile of a **sorted, non-empty** sample (the `type-7` rule,
-/// numpy's default): position `q*(len-1)`, blended between its floor/ceil order statistics.
-fn empirical_quantile(sorted: &[f64], q: f64) -> f64 {
-    let n = sorted.len();
-    if n == 1 {
-        return sorted[0];
-    }
-    let pos = q * (n - 1) as f64;
-    let lo = pos.floor() as usize;
-    let hi = pos.ceil() as usize;
-    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
+    Ok(Value::Num(crate::num::quantile_sorted(&draws, q)))
 }
 
 /// `iota(n)` — `[0, 1, …, n-1]` (the same array as `0..n`; a handy alias).

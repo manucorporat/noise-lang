@@ -94,22 +94,11 @@ impl Engine {
             RvKind::Num,
         );
         let tail = &arg_vals[1..];
-        let (default_n, max_opts, check) = (self.max_samples, self.max_opts, self.check_mode);
+        let ctx = self.query_ctx(span);
         match qname {
-            "P" => builtins::prob_cond(&self.graph, root, tail, default_n, max_opts, span, check),
-            "E" | "Var" => builtins::moment_cond(
-                qname,
-                &self.graph,
-                root,
-                tail,
-                default_n,
-                max_opts,
-                span,
-                check,
-            ),
-            "Q" => {
-                builtins::quantile_cond(&self.graph, root, tail, default_n, max_opts, span, check)
-            }
+            "P" => builtins::prob_cond(root, tail, &ctx),
+            "E" | "Var" => builtins::moment_cond(qname, root, tail, &ctx),
+            "Q" => builtins::quantile_cond(root, tail, &ctx),
             _ => unreachable!("query_cond dispatched with an unknown name"),
         }
     }
@@ -601,7 +590,7 @@ impl Engine {
             "samples" => "samples",
             other => {
                 return Err(NoiseError::runtime(
-                    format!("unknown plot 'plot::{other}' (try histogram, line, heatmap, fan, scatter, corr, explain, value)"),
+                    format!("unknown plot 'plot::{other}' (try {})", PLOT_FNS.join(", ")),
                     span,
                 ))
             }
@@ -826,8 +815,11 @@ impl Engine {
     /// values); a scalar or matrix is a friendly spanned error.
     fn fan_summary(&mut self, args: &[Spanned], arg_vals: &[Value], span: Span) -> Result<Value> {
         use crate::introspect::{Payload, Summary, View};
-        let label = label_of(&args[0]);
+        // `fan_chart` validates the arity first (`plot::fan()` with no args must be a clean error,
+        // not an `args[0]` panic — the no-panics contract). After it succeeds there is exactly one
+        // argument, so labelling by `args[0]` is safe.
         let c = self.fan_chart("plot::fan", arg_vals, span)?;
+        let label = label_of(&args[0]);
         Ok(Value::Summary(Rc::new(Summary {
             view: View::Fan,
             label,

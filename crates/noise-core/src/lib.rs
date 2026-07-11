@@ -40,6 +40,7 @@ pub mod introspect;
 pub(crate) mod jit;
 pub(crate) mod kernel;
 pub(crate) mod lexer;
+pub(crate) mod num;
 pub(crate) mod parser;
 pub(crate) mod reduce;
 pub(crate) mod rng;

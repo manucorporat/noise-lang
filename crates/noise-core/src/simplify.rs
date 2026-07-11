@@ -211,22 +211,17 @@ impl Builder {
     fn binary(&mut self, op: BinOp, l: RvId, r: RvId, kind: RvKind) -> RvId {
         use BinOp::*;
         let (ln, rn) = (self.as_num(l), self.as_num(r));
-        // Constant folding over two numeric constants.
+        // Constant folding over two numeric constants — via the shared scalar kernel (finding F4),
+        // so `%`/`^`/comparison semantics can't drift from the VM and the const-fold. Arithmetic
+        // yields a `ConstNum`; comparisons yield a `ConstBool` (the kernel returns 0/1, recovered
+        // with `!= 0.0`). `And`/`Or` on numbers are never reached (kind-checked upstream).
         if let (Some(a), Some(b)) = (ln, rn) {
             match op {
-                Add => return self.num(a + b),
-                Sub => return self.num(a - b),
-                Mul => return self.num(a * b),
-                Div => return self.num(a / b),
-                Mod => return self.num(a - b * (a / b).floor()),
-                Pow => return self.num(a.powf(b)),
-                Lt => return self.boolean(a < b),
-                Gt => return self.boolean(a > b),
-                Le => return self.boolean(a <= b),
-                Ge => return self.boolean(a >= b),
-                Eq => return self.boolean(a == b),
-                Ne => return self.boolean(a != b),
-                And | Or => {} // not valid on numbers; never reached (kind-checked)
+                Add | Sub | Mul | Div | Mod | Pow => {
+                    return self.num(crate::num::fold_binop(op, a, b))
+                }
+                And | Or => {}
+                _ => return self.boolean(crate::num::fold_binop(op, a, b) != 0.0),
             }
         }
         // Constant folding over two boolean constants.

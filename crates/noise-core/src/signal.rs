@@ -168,7 +168,15 @@ impl SigExpr {
                 }
             }
             SigExpr::Konst(c) => *c,
-            SigExpr::Noise { .. } => unreachable!("sample_f64 on a noise-bearing tree"),
+            // Caller contract (finding F10): `sample_f64`/`eval_at` are only ever called on
+            // noise-*free* trees — a noise-bearing tree is drawn through `Engine::materialize_sig`
+            // (the realization cache), never folded deterministically. A `debug_assert!` documents
+            // and checks the contract in tests; in release we degrade to a defined `NaN` sample
+            // rather than aborting the process on a would-be-impossible input.
+            SigExpr::Noise { .. } => {
+                debug_assert!(false, "sample_f64/eval_at reached a Noise leaf — a noise-bearing tree must go through Engine::materialize_sig");
+                f64::NAN
+            }
             SigExpr::Unary(op, a) => apply_unary(*op, a.eval_at(k, n, cache)),
             SigExpr::Binop(op, a, b) => {
                 scalar_binop(*op, a.eval_at(k, n, cache), b.eval_at(k, n, cache))
@@ -206,25 +214,11 @@ pub fn apply_unary(op: SigUnOp, x: f64) -> f64 {
 }
 
 /// Scalar binary kernel for the deferred arithmetic (matches the evaluator's IEEE-754 behaviour;
-/// comparisons yield 0/1 like every signal-land boolean).
+/// comparisons yield 0/1 like every signal-land boolean). A thin alias for the shared kernel
+/// (finding F4) so the signal folder can never drift from the VM / const-fold / simplifier.
 #[inline]
 pub fn scalar_binop(op: BinOp, a: f64, b: f64) -> f64 {
-    match op {
-        BinOp::Add => a + b,
-        BinOp::Sub => a - b,
-        BinOp::Mul => a * b,
-        BinOp::Div => a / b,
-        BinOp::Mod => a - b * (a / b).floor(),
-        BinOp::Pow => a.powf(b),
-        BinOp::Lt => (a < b) as i32 as f64,
-        BinOp::Gt => (a > b) as i32 as f64,
-        BinOp::Le => (a <= b) as i32 as f64,
-        BinOp::Ge => (a >= b) as i32 as f64,
-        BinOp::Eq => (a == b) as i32 as f64,
-        BinOp::Ne => (a != b) as i32 as f64,
-        BinOp::And => ((a != 0.0) && (b != 0.0)) as i32 as f64,
-        BinOp::Or => ((a != 0.0) || (b != 0.0)) as i32 as f64,
-    }
+    crate::num::fold_binop(op, a, b)
 }
 
 /// Node budget for [`SigExpr`]'s `Display`. The tree is a shared-`Rc` DAG printed *as a tree*, so a

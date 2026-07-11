@@ -177,19 +177,8 @@ pub fn fmt_est(val: f64, se: f64) -> String {
 /// trailing zeros, so `1.0000000000000002` prints `1`, `1.49e-30` prints `0`, and `0.0871` stays
 /// `0.0871`. Non-finite values (`inf`/`nan`) print as-is. (Estimates use `round_to_se` instead.)
 pub fn format_num(n: f64) -> String {
-    if n == 0.0 {
-        return "0".to_string(); // also collapses -0
-    }
-    if !n.is_finite() {
-        return format!("{n}");
-    }
-    let s = format!("{n:.12}");
-    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-    if trimmed.is_empty() || trimmed == "-0" {
-        "0".to_string()
-    } else {
-        trimmed.to_string()
-    }
+    // Shared dust-trimming core (finding F5); 12 places = full value precision.
+    crate::num::trim_float(n, 12)
 }
 
 impl fmt::Display for Value {

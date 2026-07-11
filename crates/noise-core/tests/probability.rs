@@ -290,6 +290,13 @@ fn engine_module_scoping_and_validation() {
     assert!(run_raw("engine::set_max_samples(50); use rand; X ~ unif(0,1); P(X < 0.5)").is_ok());
     assert!(run_raw("use engine; set_max_samples(50); 1").is_ok());
     assert!(run_raw("use engine; set_max_opts(50); 1").is_ok());
+    // `set_max_ops` is the correctly-named knob (it caps operations); `set_max_opts` is a retained
+    // back-compat alias (finding F9). Both set the same budget and both remain reachable.
+    assert!(run_raw("use engine; set_max_ops(50); 1").is_ok());
+    assert!(run_raw("engine::set_max_ops(50); 1").is_ok());
+    // The new name's error text names the invoked spelling.
+    let err_ops = run_raw("engine::set_max_ops(0)").unwrap_err().to_string();
+    assert!(err_ops.contains("set_max_ops"), "{err_ops}");
     // Out of scope without a `use`/path, with a fix-it message naming the module.
     let err = run_raw("set_max_samples(50)").unwrap_err().to_string();
     assert!(err.contains("engine") && err.contains("use"), "{err}");

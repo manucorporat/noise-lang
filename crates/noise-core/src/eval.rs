@@ -221,6 +221,19 @@ impl Engine {
         }
     }
 
+    /// Bundle the current engine knobs into a [`builtins::QueryCtx`] for a builtin/query dispatch at
+    /// `span` (finding F6). One place threads `graph`/`max_samples`/`max_opts`/`check_mode`, so the
+    /// dispatch call sites don't repeat the knob list.
+    pub(crate) fn query_ctx(&self, span: Span) -> builtins::QueryCtx<'_> {
+        builtins::QueryCtx {
+            graph: &self.graph,
+            default_n: self.max_samples,
+            max_opts: self.max_opts,
+            check: self.check_mode,
+            span,
+        }
+    }
+
     /// Set the host **input overrides** for the next run (PLAN-INPUTS §5): `name -> value`, applied
     /// to matching `input::` declarations by name. Values are clamped/snapped to each input's spec
     /// exactly like the default. Overriding a name the program never declares is a post-run error
@@ -446,6 +459,7 @@ impl Engine {
 
     /// Convenience alias of [`Engine::run`]: the last statement's value is the RV.
     /// Tests do `let rv = eng.run_rv("X ~ unif(-1,1); X ^ 2")?;`.
+    #[must_use = "run_rv returns the program's value/error; discarding it ignores both (finding F10)"]
     pub fn run_rv(&mut self, src: &str) -> Result<Value> {
         self.run(src)
     }
@@ -455,6 +469,7 @@ impl Engine {
     /// sampling in `P`/`E`/`Var`/`Q` (see [`Engine::check_mode`]). Returns the last value (whose
     /// estimator results are placeholders) so callers can just check for `Ok`. Fast regardless of
     /// the configured sample budget.
+    #[must_use = "check returns the validation result; discarding it ignores any error (finding F10)"]
     pub fn check(&mut self, src: &str) -> Result<Value> {
         self.check_mode = true;
         let result = self.run(src);
@@ -656,10 +671,7 @@ fn input_value_to_value(v: InputValue) -> Value {
 /// resolution because they need `&mut` graph (sampling roots) and the variable scope (`explain`).
 #[inline]
 fn is_introspection(name: &str) -> bool {
-    matches!(
-        name,
-        "describe" | "hist" | "samples" | "corr" | "scatter" | "explain"
-    )
+    INTROSPECT_FNS.contains(&name)
 }
 
 /// A short label for an introspected operand, taken from its *source* expression (the evaluated
@@ -789,10 +801,140 @@ const MODULES: [&str; 8] = [
     "rand", "math", "vec", "signal", "engine", "builtin", "plot", "stats",
 ];
 
-/// The `stats::` functions — the raw-data twin of each `plot::` chart. Not in [`module_of`]: they
+/// The `stats::` functions — the raw-data twin of each `plot::` chart. Not in [`BUILTINS`]: they
 /// resolve through the early `stats::` interception in `eval`, so this list exists only to point a
-/// bare `fan(path)` at `stats::fan(path)`.
+/// bare `fan(path)` at `stats::fan(path)`. Kept in sync with [`Engine::stats_call`]'s dispatch by
+/// the registry coverage test (finding F2).
 const STATS_FNS: [&str; 5] = ["histogram", "quantiles", "moments", "fan", "corr"];
+
+/// The always-on **introspection** builtins — reachable unqualified without a `use` (they precede
+/// module resolution in `eval`). Single source for [`is_introspection`] and the coverage test
+/// (finding F2). `plot::`-only verbs (`line`/`heatmap`/`value`/`show`/`dist`/`fan`) are *not* here —
+/// they exist only under `plot::` (see [`PLOT_FNS`]).
+const INTROSPECT_FNS: [&str; 6] = ["describe", "hist", "samples", "corr", "scatter", "explain"];
+
+/// The `plot::` chart verbs. A superset of [`INTROSPECT_FNS`] (each introspection is also plottable)
+/// plus the chart-only intents (`line`/`heatmap`/`value`/`show`/`dist`/`fan`). Single source for
+/// [`Engine::plot_call`]'s dispatch/hint and the coverage test (finding F2).
+const PLOT_FNS: [&str; 13] = [
+    "histogram",
+    "hist",
+    "line",
+    "heatmap",
+    "value",
+    "show",
+    "dist",
+    "describe",
+    "scatter",
+    "corr",
+    "explain",
+    "samples",
+    "fan",
+];
+
+/// The builtin/constant registry — the single enumerable source of truth for **name scoping**
+/// (finding F2): each `(name, module)` pair says which module owns a name. `module_of` is a lookup
+/// into this table, and the registry coverage test walks it to prove every registered name actually
+/// dispatches (and appears in the editor grammar), so the ≥7 formerly-disjoint name tables can't
+/// silently drift. The *implementation* of a name (`lib_call` vs `builtins::call`) is orthogonal;
+/// this governs only access.
+///
+/// Module builtins are **lowercase** (`sum`, `mse`, `normal`). The always-on core (`P`, `Q`, `E`,
+/// `Var`, `Print`, `Len`) is the lone exception — it is **capital-only**. The math **constants**
+/// `pi`/`e` are lowercase — note `E` (capital) is the expectation builtin while `e` (lowercase) is
+/// Euler's number, so these two are intentionally distinct and never aliased.
+const BUILTINS: &[(&str, &str)] = &[
+    // --- rand: distribution constructors, incl. `rotation`/`permutation` (recipes drawn with `~`).
+    ("unif", "rand"),
+    ("unif_int", "rand"),
+    ("bernoulli", "rand"),
+    ("normal", "rand"),
+    ("normal_int", "rand"),
+    ("normal_complex", "rand"),
+    ("exponential", "rand"),
+    ("exponential_int", "rand"),
+    ("poisson", "rand"),
+    ("geometric", "rand"),
+    ("categorical", "rand"),
+    ("rotation", "rand"),
+    ("permutation", "rand"),
+    ("empirical", "rand"),
+    ("block_bootstrap", "rand"),
+    // --- math: constants (pi/e real, i/j the imaginary unit), then real + complex-aware ufuncs.
+    ("pi", "math"),
+    ("e", "math"),
+    ("i", "math"),
+    ("j", "math"),
+    ("sqrt", "math"),
+    ("round", "math"),
+    ("log", "math"),
+    ("log10", "math"),
+    ("sin", "math"),
+    ("cos", "math"),
+    ("atan", "math"),
+    ("sign", "math"),
+    ("gcd", "math"),
+    ("modpow", "math"),
+    ("exp", "math"),
+    ("abs", "math"),
+    ("arg", "math"),
+    ("conj", "math"),
+    ("re", "math"),
+    ("im", "math"),
+    ("floor", "math"),
+    ("ceil", "math"),
+    // --- vec: collections / linear algebra (vector add/sub/matvec are the `+`/`-`/`@` operators).
+    ("sum", "vec"),
+    ("count", "vec"),
+    ("any", "vec"),
+    ("all", "vec"),
+    ("max", "vec"),
+    ("min", "vec"),
+    ("mean", "vec"),
+    ("dot", "vec"),
+    ("vdot", "vec"),
+    ("normsq", "vec"),
+    ("norm", "vec"),
+    ("transpose", "vec"),
+    ("adjoint", "vec"),
+    ("normalize", "vec"),
+    ("has_duplicates", "vec"),
+    ("count_duplicates", "vec"),
+    ("mse", "vec"),
+    ("ones", "vec"),
+    ("zeros", "vec"),
+    ("iota", "vec"),
+    ("outer", "vec"),
+    ("quantize", "vec"),
+    // prefix scans + the product reducer (PLAN-FINANCE F3): paths as fixed-horizon arrays.
+    ("prod", "vec"),
+    ("cumsum", "vec"),
+    ("cumprod", "vec"),
+    ("cummax", "vec"),
+    ("cummin", "vec"),
+    // --- signal: DSP waveforms + colored noise generators + materialization.
+    ("sine", "signal"),
+    ("cosine", "signal"),
+    ("sample", "signal"),
+    ("noise_white", "signal"),
+    ("noise_white_complex", "signal"),
+    ("noise_brown", "signal"),
+    ("noise_pink", "signal"),
+    ("noise_ou", "signal"),
+    // --- engine: run-time knobs. `set_max_ops` is canonical; `set_max_opts` is a back-compat
+    //     alias (finding F9).
+    ("set_max_samples", "engine"),
+    ("set_max_ops", "engine"),
+    ("set_max_opts", "engine"),
+    ("set_resolution", "engine"),
+    // --- builtin: always-on core (capital-only). No `range`/`push` (arrays are fixed-size).
+    ("P", "builtin"),
+    ("Q", "builtin"),
+    ("E", "builtin"),
+    ("Var", "builtin"),
+    ("Print", "builtin"),
+    ("Len", "builtin"),
+];
 
 /// Whether `m` names a known module.
 #[inline]
@@ -800,54 +942,11 @@ fn is_module(m: &str) -> bool {
     MODULES.contains(&m)
 }
 
-/// The module each builtin / constant belongs to — the single source of truth for scoping. The
-/// *implementation* (lib_call vs builtins::call) is orthogonal; this only governs name access.
-///
-/// Module builtins are **lowercase** (`sum`, `mse`, `normal`). The always-on core (`P`, `Q`, `E`,
-/// `Var`, `Print`, `Len`) is the lone exception — it is **capital-only**. The two math
-/// **constants** `pi`/`e` are lowercase — note that `E` (capital) is the expectation builtin while
-/// `e` (lowercase) is Euler's number, so these two are intentionally distinct and never aliased.
+/// The module a builtin/constant belongs to — a lookup into the [`BUILTINS`] registry (finding F2).
 fn module_of(name: &str) -> Option<&'static str> {
-    Some(match name {
-        // distribution constructors, including `rotation` (a recipe for a random orthonormal matrix,
-        // drawn with `~` like any distribution). Batched sampling is the prefix `~[shape]` operator,
-        // not a builtin — see the `Sample` AST node.
-        "unif" | "unif_int" | "bernoulli" | "normal" | "normal_int" | "normal_complex"
-        | "exponential" | "exponential_int" | "poisson" | "geometric" | "categorical"
-        | "rotation" | "permutation" | "empirical" | "block_bootstrap" => "rand",
-        // math constants (lowercase only): pi/e (real), i/j (the imaginary unit, complex)
-        "pi" | "e" | "i" | "j" => "math",
-        "sqrt" | "round" | "log" | "log10" | "sin" | "cos" | "atan" | "sign" => "math",
-        // deterministic integer number theory (modular-arithmetic core)
-        "gcd" | "modpow" => "math",
-        // complex-aware math ufuncs (PLAN-COMPLEX §4) + the real rounding family (§8). `exp` is the
-        // exponential *function* here; the exponential *distribution* was renamed `rand::exponential`
-        // precisely so this name is free.
-        "exp" | "abs" | "arg" | "conj" | "re" | "im" | "floor" | "ceil" => "math",
-        // collections / linear algebra (vector add/sub/matvec are the `+`/`-`/`@` operators)
-        "sum" | "count" | "any" | "all" | "max" | "min" | "mean" | "dot" | "vdot" | "normsq"
-        | "norm" | "transpose" | "adjoint" | "normalize" | "has_duplicates"
-        | "count_duplicates" | "mse" | "ones" | "zeros" | "iota" | "outer" | "quantize" => "vec",
-        // prefix scans + the product reducer (PLAN-FINANCE F3): paths as fixed-horizon arrays.
-        "prod" | "cumsum" | "cumprod" | "cummax" | "cummin" => "vec",
-        // signal generation (DSP waveforms) + colored noise + materialization
-        "sine"
-        | "cosine"
-        | "sample"
-        | "noise_white"
-        | "noise_white_complex"
-        | "noise_brown"
-        | "noise_pink"
-        | "noise_ou" => "signal",
-        // run-time knobs: tune the evaluator itself (e.g. the Monte Carlo budget and the signal
-        // resolution). Imperative settings, not value-producing builtins.
-        "set_max_samples" | "set_max_opts" | "set_resolution" => "engine",
-        // always-on core: probability/expectation, IO, array length. These are **capital-only** (no
-        // lowercase alias). Arrays are fixed-size: the half-open range has dedicated `a..b` syntax
-        // (not a `range` builtin), and there is no `Push` (arrays are never grown).
-        "P" | "Q" | "E" | "Var" | "Print" | "Len" => "builtin",
-        _ => return None,
-    })
+    BUILTINS
+        .iter()
+        .find_map(|&(n, m)| if n == name { Some(m) } else { None })
 }
 
 /// Built-in math constants, resolved as a fallback after variable lookup. Unlike a global
@@ -894,6 +993,25 @@ fn forbid_undrawn(v: &Value, span: Span) -> Result<()> {
         )),
         _ => Ok(()),
     }
+}
+
+/// Reject the `continue` control sentinel in a **data position** (finding F8). `continue` is a loop
+/// control statement — it short-circuits the enclosing `{ block }` / comprehension body — not a
+/// value: it may not be bound (`x = continue`), stored in an array (`[1, continue, 3]`), or passed
+/// as a call argument (`f(continue)`). Caught at the data-entry point with an accurate span, so the
+/// error points at the misuse rather than surfacing later as a baffling "arithmetic on continue".
+#[inline]
+fn forbid_continue(v: &Value, span: Span) -> Result<()> {
+    if matches!(v, Value::Continue) {
+        return Err(NoiseError::runtime(
+            "`continue` is a loop control statement, not a value — it can only appear as a \
+             statement inside a `for`/comprehension body, not be bound, stored, or passed as an \
+             argument"
+                .to_string(),
+            span,
+        ));
+    }
+    Ok(())
 }
 
 /// Extract a constant scalar (`Num`/`Est`) for deferring into a signal's pipeline; `None` for
@@ -1053,13 +1171,7 @@ fn eval_est_binary(op: BinOp, a: f64, sa: f64, b: f64, sb: f64, span: Span) -> R
     }
 }
 
-/// Floored modulo `a − b·floor(a/b)` (PLAN-COMPLEX §8): the result takes the **sign of `b`**, so
-/// `x % n ∈ [0, n)` for `n > 0` — what modular/clock arithmetic wants (unlike Rust's `%`, which
-/// truncates toward zero). IEEE edge cases follow `floor`: `x % 0` is `NaN` (no panic).
-#[inline]
-fn floored_mod(a: f64, b: f64) -> f64 {
-    a - b * (a / b).floor()
-}
+use crate::num::floored_mod;
 
 /// View a `Num`/`Est` as `(value, standard_error)`; anything else is `None`.
 fn as_est(v: &Value) -> Option<(f64, f64)> {
@@ -1087,15 +1199,9 @@ fn eval_binary(op: BinOp, l: Value, r: Value, span: Span) -> Result<Value> {
     }
     match op {
         Add | Sub | Mul | Div | Mod | Pow => match (l, r) {
-            (Value::Num(a), Value::Num(b)) => Ok(Value::Num(match op {
-                Add => a + b,
-                Sub => a - b,
-                Mul => a * b,
-                Div => a / b,
-                Mod => floored_mod(a, b),
-                Pow => a.powf(b),
-                _ => unreachable!(),
-            })),
+            // The shared scalar kernel (finding F4) — `op` is one of the six arithmetic ops here,
+            // so this is bit-identical to the old hand-written match.
+            (Value::Num(a), Value::Num(b)) => Ok(Value::Num(crate::num::fold_binop(op, a, b))),
             (a, b) => Err(NoiseError::runtime(
                 format!("arithmetic on {} and {}", a.type_name(), b.type_name()),
                 span,
@@ -1143,5 +1249,109 @@ fn eval_binary(op: BinOp, l: Value, r: Value, span: Span) -> Result<Value> {
                 span,
             )),
         },
+    }
+}
+
+#[cfg(test)]
+mod registry_coverage {
+    //! Finding F2: the builtin namespace used to be defined in ≥7 disjoint tables (`module_of`,
+    //! `lib_call`, `builtins::call`, `is_introspection`, `STATS_FNS`, `plot_call`, `stats_call`)
+    //! plus the editor grammar, which had already drifted. These cross-check tests make the tables
+    //! consistent and fail loudly if any future change registers a name in one place but not the
+    //! others.
+    use super::*;
+    use crate::Engine;
+
+    /// Run a snippet on a fresh engine and return the error message (empty string on success).
+    fn err_of(src: &str) -> String {
+        match Engine::new().run(src) {
+            Ok(_) => String::new(),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// A name "dispatches" if resolving/calling it does NOT fall through to the generic
+    /// "unknown function" / "module has no function" arms — an arity or type error still proves the
+    /// name was recognized and routed to an implementation.
+    fn dispatched(msg: &str, name: &str) -> bool {
+        !msg.contains(&format!("unknown function '{name}'"))
+            && !msg.contains(&format!("has no function '{name}'"))
+            && !msg.contains(&format!("unknown plot 'plot::{name}'"))
+            && !msg.contains(&format!("unknown 'stats::{name}'"))
+    }
+
+    const CONSTANTS: [&str; 4] = ["pi", "e", "i", "j"];
+
+    #[test]
+    fn every_registered_name_dispatches() {
+        for &(name, module) in BUILTINS {
+            assert!(is_module(module), "{name} claims unknown module {module}");
+            let src = if CONSTANTS.contains(&name) {
+                // Constants are values, not calls — reference them through their module path.
+                format!("{module}::{name}")
+            } else if module == "builtin" {
+                // The always-on core is capital-only and unqualified.
+                format!("{name}()")
+            } else {
+                format!("{module}::{name}()")
+            };
+            let msg = err_of(&src);
+            assert!(
+                dispatched(&msg, name),
+                "registry name `{module}::{name}` does not dispatch — got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn introspection_plot_stats_names_dispatch() {
+        // Introspection builtins are always-on and unqualified.
+        for &name in &INTROSPECT_FNS {
+            let msg = err_of(&format!("{name}()"));
+            assert!(dispatched(&msg, name), "introspection `{name}`: {msg}");
+        }
+        // `plot::` and `stats::` verbs are always qualified.
+        for &name in &PLOT_FNS {
+            let msg = err_of(&format!("plot::{name}()"));
+            assert!(dispatched(&msg, name), "plot::{name}: {msg}");
+        }
+        for &name in &STATS_FNS {
+            let msg = err_of(&format!("stats::{name}()"));
+            assert!(dispatched(&msg, name), "stats::{name}: {msg}");
+        }
+    }
+
+    /// Every user-writable builtin/constant name (the scoped registry) must be highlighted by the
+    /// editor's TextMate grammar, so adding a builtin without teaching the grammar fails here. Reads
+    /// the canonical grammar at test time; if it isn't present (e.g. a packaged tarball), skips.
+    #[test]
+    fn registry_names_are_in_the_textmate_grammar() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../editors/vscode-noise/syntaxes/noise.tmLanguage.json"
+        );
+        let Ok(grammar) = std::fs::read_to_string(path) else {
+            eprintln!("grammar not found at {path}; skipping coverage check");
+            return;
+        };
+        // The grammar lists names as `\b(a|b|c)\b` alternations; a simple `|name|`/`(name|`/`|name)`
+        // membership check is enough (all names are plain identifiers).
+        let has = |n: &str| {
+            grammar.contains(&format!("|{n}|"))
+                || grammar.contains(&format!("({n}|"))
+                || grammar.contains(&format!("|{n})"))
+                || grammar.contains(&format!("({n})"))
+        };
+        let mut missing = Vec::new();
+        for &(name, _) in BUILTINS {
+            if !has(name) {
+                missing.push(name);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these registered builtins are not highlighted by the TextMate grammar \
+             (editors/vscode-noise/syntaxes/noise.tmLanguage.json): {missing:?}"
+        );
     }
 }

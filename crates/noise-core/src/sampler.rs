@@ -11,6 +11,7 @@ use crate::dist::{RvGraph, RvId};
 use crate::rng::Rng;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[must_use = "Moments carries the sampled mean/variance; computing them without using them wastes the sampling pass (finding F10)"]
 pub struct Moments {
     pub mean: f64,
     pub variance: f64,

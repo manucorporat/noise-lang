@@ -416,14 +416,8 @@ pub fn fan(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> FanChart {
 /// Linear-interpolated empirical quantile of a **sorted, non-empty** sample (numpy's type-7 rule —
 /// the same rule `builtins::Q` uses, redefined here so introspection has no cross-module dep).
 pub fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
-    let n = sorted.len();
-    if n == 1 {
-        return sorted[0];
-    }
-    let pos = q * (n - 1) as f64;
-    let lo = pos.floor() as usize;
-    let hi = pos.ceil() as usize;
-    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
+    // The shared type-7 empirical quantile (finding F5) — one home, used by the `Q` builtin too.
+    crate::num::quantile_sorted(sorted, q)
 }
 
 /// Bin `draws` into a [`Histogram`] of `nbins` equal-width buckets over `[min, max]` (a degenerate

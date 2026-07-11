@@ -321,6 +321,7 @@ pub fn supported(graph: &RvGraph, root: RvId) -> bool {
 /// single lane actually evaluates — the playground multiplies them by the draw count for its
 /// "operations" / "random numbers" readout. Backend-independent: computed on the simplified graph.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[must_use = "NodeCost is a pure cost measurement; discarding it makes the cone walk dead work (finding F10)"]
 pub struct NodeCost {
     /// Distinct nodes in the cone — one per-lane operation each.
     pub ops: u64,

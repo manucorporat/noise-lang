@@ -401,23 +401,9 @@ fn apply_un(op: UnOp, x: f64) -> f64 {
 /// produce 0.0/1.0 columns (the bool convention from PLAN.md, pre-wiring Phase 3's `P()`).
 #[inline]
 fn apply_bin(op: BinOp, a: f64, b: f64) -> f64 {
-    match op {
-        BinOp::Add => a + b,
-        BinOp::Sub => a - b,
-        BinOp::Mul => a * b,
-        BinOp::Div => a / b,
-        BinOp::Mod => a - b * (a / b).floor(),
-        BinOp::Pow => a.powf(b),
-        BinOp::Lt => (a < b) as i32 as f64,
-        BinOp::Gt => (a > b) as i32 as f64,
-        BinOp::Le => (a <= b) as i32 as f64,
-        BinOp::Ge => (a >= b) as i32 as f64,
-        BinOp::Eq => (a == b) as i32 as f64,
-        BinOp::Ne => (a != b) as i32 as f64,
-        // Logical ops over 0/1 indicator columns.
-        BinOp::And => ((a != 0.0) && (b != 0.0)) as i32 as f64,
-        BinOp::Or => ((a != 0.0) || (b != 0.0)) as i32 as f64,
-    }
+    // The single shared scalar kernel (finding F4) — same computation the signal folder, the
+    // `eval` constant-fold, and the graph simplifier use, so the VM can never drift from them.
+    crate::num::fold_binop(op, a, b)
 }
 
 #[cfg(test)]

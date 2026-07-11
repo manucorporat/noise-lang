@@ -22,13 +22,14 @@ struct Opts {
 }
 
 /// Parse the optional `opts_json` into engine input overrides. Returns an error string (surfaced as
-/// a failed document) if the JSON or an input value is malformed.
-fn parse_opts(opts_json: Option<String>) -> Result<Vec<(String, InputValue)>, String> {
+/// a failed document) if the JSON or an input value is malformed. Takes `&str` (borrowed) rather
+/// than an owned `Option<String>` so the host's JSON isn't copied just to be parsed (finding G4).
+fn parse_opts(opts_json: Option<&str>) -> Result<Vec<(String, InputValue)>, String> {
     let json = match opts_json {
         Some(j) if !j.trim().is_empty() => j,
         _ => return Ok(Vec::new()),
     };
-    let opts: Opts = serde_json::from_str(&json).map_err(|e| format!("invalid opts JSON: {e}"))?;
+    let opts: Opts = serde_json::from_str(json).map_err(|e| format!("invalid opts JSON: {e}"))?;
     let mut out = Vec::new();
     for (name, v) in opts.inputs {
         let iv = match v {
@@ -63,10 +64,13 @@ fn doc_error(message: String) -> serde_json::Value {
     })
 }
 
+/// The hand-written last-resort document returned if serializing a real `Document` ever fails. It
+/// must stay shape-compatible with [`doc_error`] (asserted by a test) so the host never receives an
+/// unreadable payload.
+const SERIALIZATION_FALLBACK: &str = r#"{"meta":{"tags":[],"extra":{}},"blocks":[],"comments":[],"result":{"value":null,"error":{"message":"internal serialization error","span":{"start":0,"end":0},"line":1,"col":1,"code":"runtime_error"},"stats":{"forcings":0,"samples":0,"ops":0,"rng_draws":0},"truncated":null,"inputs":[]}}"#;
+
 fn to_json_string(value: &serde_json::Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| {
-        r#"{"meta":{"tags":[],"extra":{}},"blocks":[],"comments":[],"result":{"value":null,"error":{"message":"internal serialization error","span":{"start":0,"end":0},"line":1,"col":1,"code":"runtime_error"},"stats":{"forcings":0,"samples":0,"ops":0,"rng_draws":0},"truncated":null,"inputs":[]}}"#.into()
-    })
+    serde_json::to_string(value).unwrap_or_else(|_| SERIALIZATION_FALLBACK.into())
 }
 
 /// Turn a caught panic payload into a human-readable message for the `doc_error` document. Keeps the
@@ -93,7 +97,7 @@ pub fn run(src: &str, opts_json: Option<String>) -> String {
 }
 
 fn run_impl(src: &str, opts_json: Option<String>) -> String {
-    let overrides = match parse_opts(opts_json) {
+    let overrides = match parse_opts(opts_json.as_deref()) {
         Ok(o) => o,
         Err(e) => return to_json_string(&doc_error(e)),
     };
@@ -160,6 +164,22 @@ struct Request {
 }
 
 impl Request {
+    /// Validate the host-supplied binding **names** against the engine's live bindings before they
+    /// are string-interpolated into source (finding G5). The `vars` are binding names; an unknown
+    /// one otherwise produces a baffling downstream *parse/undefined-name* error from the synthesized
+    /// call — this returns a clean, direct message instead. (The `given` field is a full condition
+    /// expression, not a bare name, so it is left for the evaluator to check.)
+    fn validate_names(&self, known: &std::collections::HashSet<&str>) -> Result<(), String> {
+        for name in &self.vars {
+            if !known.contains(name.as_str()) {
+                return Err(format!(
+                    "unknown variable `{name}` (not a binding in this program)"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn to_call(&self) -> Option<String> {
         let target = self.vars.first()?;
         let cond = |e: &str| match &self.given {
@@ -235,7 +255,7 @@ fn run_with_introspection_impl(
     requests_json: &str,
     opts_json: Option<String>,
 ) -> String {
-    let overrides = match parse_opts(opts_json) {
+    let overrides = match parse_opts(opts_json.as_deref()) {
         Ok(o) => o,
         Err(e) => {
             let payload = serde_json::json!({ "document": doc_error(e), "bindings": [], "introspections": [] });
@@ -247,25 +267,32 @@ fn run_with_introspection_impl(
     let document = engine.run_to_document(src);
     let ran_ok = document.result.error.is_none();
 
-    let bindings: Vec<Binding> = engine
-        .bindings()
-        .into_iter()
+    let live = engine.bindings();
+    let bindings: Vec<Binding> = live
+        .iter()
         .map(|(name, kind)| Binding {
-            name,
+            name: name.clone(),
             kind: kind.to_string(),
         })
         .collect();
+    // The set of valid binding names, for validating each request's `vars` before interpolation.
+    let known: std::collections::HashSet<&str> = live.iter().map(|(n, _)| n.as_str()).collect();
 
     let requests: Vec<Request> = serde_json::from_str(requests_json).unwrap_or_default();
     let mut introspections = Vec::with_capacity(requests.len());
     if ran_ok {
         for req in &requests {
-            let out = match req.to_call() {
-                None => PlotOut::failed("empty request".into()),
-                Some(call) => match engine.run(&call) {
-                    Ok(Value::Summary(s)) => PlotOut::from(&*s),
-                    Ok(_) => PlotOut::failed("not a random variable".into()),
-                    Err(e) => PlotOut::failed(e.to_string()),
+            // Validate host-supplied names first (finding G5): an unknown binding gets a clean
+            // error rather than a baffling downstream parse error from the synthesized call.
+            let out = match req.validate_names(&known) {
+                Err(e) => PlotOut::failed(e),
+                Ok(()) => match req.to_call() {
+                    None => PlotOut::failed("empty request".into()),
+                    Some(call) => match engine.run(&call) {
+                        Ok(Value::Summary(s)) => PlotOut::from(&*s),
+                        Ok(_) => PlotOut::failed("not a random variable".into()),
+                        Err(e) => PlotOut::failed(e.to_string()),
+                    },
                 },
             };
             engine.take_output(); // discard stray output from a resolved expression
@@ -279,4 +306,99 @@ fn run_with_introspection_impl(
         "introspections": introspections,
     });
     to_json_string(&payload)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Finding G6: the wasm host had zero tests. These cover the pure, host-facing seams — opts
+    //! parsing/clamping, the `Request` protocol, and the `doc_error` JSON contract *including* the
+    //! hand-written serialization-failure fallback that must stay shape-compatible with a real
+    //! `doc_error`. They run natively (no wasm needed) since every helper here is plain Rust.
+    use super::*;
+
+    #[test]
+    fn parse_opts_reads_numbers_and_bools() {
+        // absent / empty → no overrides
+        assert_eq!(parse_opts(None).unwrap(), vec![]);
+        assert_eq!(parse_opts(Some("   ")).unwrap(), vec![]);
+        // a well-formed opts object → typed overrides
+        let got = parse_opts(Some(r#"{"inputs":{"n":6,"flag":true}}"#)).unwrap();
+        assert!(got.contains(&("n".to_string(), InputValue::Num(6.0))));
+        assert!(got.contains(&("flag".to_string(), InputValue::Bool(true))));
+    }
+
+    #[test]
+    fn parse_opts_rejects_malformed() {
+        // invalid JSON
+        assert!(parse_opts(Some("{not json")).is_err());
+        // an input override that is neither a number nor a bool
+        assert!(parse_opts(Some(r#"{"inputs":{"s":"hi"}}"#)).is_err());
+    }
+
+    #[test]
+    fn request_parses_and_builds_calls() {
+        // a bare describe
+        let r: Request = serde_json::from_str(r#"{"vars":["x"]}"#).unwrap();
+        assert_eq!(r.to_call().as_deref(), Some("describe(x)"));
+        // conditioned describe
+        let r: Request = serde_json::from_str(r#"{"vars":["x"],"given":"y > 0"}"#).unwrap();
+        assert_eq!(r.to_call().as_deref(), Some("describe((x) | (y > 0))"));
+        // two-var correlation
+        let r: Request = serde_json::from_str(r#"{"vars":["a","b"]}"#).unwrap();
+        assert_eq!(r.to_call().as_deref(), Some("corr(a, b)"));
+        // explain
+        let r: Request = serde_json::from_str(r#"{"vars":["z"],"explain":true}"#).unwrap();
+        assert_eq!(r.to_call().as_deref(), Some("explain(z)"));
+        // empty request → no call
+        let r: Request = serde_json::from_str(r#"{"vars":[]}"#).unwrap();
+        assert_eq!(r.to_call(), None);
+    }
+
+    #[test]
+    fn request_validates_names_against_bindings() {
+        let known: std::collections::HashSet<&str> = ["x", "y"].into_iter().collect();
+        let ok: Request = serde_json::from_str(r#"{"vars":["x"]}"#).unwrap();
+        assert!(ok.validate_names(&known).is_ok());
+        let bad: Request = serde_json::from_str(r#"{"vars":["nope"]}"#).unwrap();
+        let e = bad.validate_names(&known).unwrap_err();
+        assert!(e.contains("nope"), "message was: {e}");
+        // `given` is an expression, not a name — it is not validated here.
+        let cond: Request = serde_json::from_str(r#"{"vars":["y"],"given":"x > 0"}"#).unwrap();
+        assert!(cond.validate_names(&known).is_ok());
+    }
+
+    #[test]
+    fn doc_error_has_the_stable_shape() {
+        let v = doc_error("boom".into());
+        assert_eq!(v["result"]["error"]["message"], "boom");
+        // The Phase-4 line/col/code fields must be present (the JS host reads them).
+        assert_eq!(v["result"]["error"]["line"], 1);
+        assert_eq!(v["result"]["error"]["col"], 1);
+        assert_eq!(v["result"]["error"]["code"], "runtime_error");
+        assert_eq!(v["result"]["error"]["span"]["start"], 0);
+        assert!(v["blocks"].is_array());
+        assert!(v["result"]["stats"].is_object());
+    }
+
+    /// The hand-written [`SERIALIZATION_FALLBACK`] string must parse to the SAME shape as a real
+    /// `doc_error`, or a serialization failure would hand the host a document it can't read.
+    #[test]
+    fn serialization_fallback_matches_doc_error_shape() {
+        let real = doc_error("internal serialization error".into());
+        let fallback: serde_json::Value = serde_json::from_str(SERIALIZATION_FALLBACK).unwrap();
+        let keys = |v: &serde_json::Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        // Same top-level keys, same result keys, same error sub-shape (message differs, not shape).
+        assert_eq!(keys(&fallback), keys(&real));
+        assert_eq!(keys(&fallback["result"]), keys(&real["result"]));
+        assert_eq!(
+            keys(&fallback["result"]["error"]),
+            keys(&real["result"]["error"])
+        );
+        assert_eq!(fallback["result"]["error"]["code"], "runtime_error");
+        assert_eq!(fallback, real); // message is identical too, so the whole payload matches
+    }
 }

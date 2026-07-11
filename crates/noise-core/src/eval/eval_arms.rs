@@ -153,6 +153,7 @@ impl Engine {
         let mut out = Vec::with_capacity(elems.len());
         for e in elems {
             let v = self.eval(e)?;
+            forbid_continue(&v, e.span)?; // `[1, continue, 3]` is a misuse (finding F8)
             forbid_undrawn(&v, e.span)?;
             out.push(v);
         }
@@ -369,6 +370,9 @@ impl Engine {
             Some((base, call_args)) => self.input_call(base, call_args, Some(name), rhs.span)?,
             None => self.eval(rhs)?,
         };
+        // `x = continue` binds a loop-control sentinel into a data position (finding F8) — reject it
+        // here, at the binding, instead of letting it surface later as "arithmetic on continue".
+        forbid_continue(&v, rhs.span)?;
         // The core-model split (LANG.md §2): `~` is the *only* thing that draws.
         //   `~` on a recipe instantiates a FRESH random variable (a sample-DAG node); on a point
         //        mass / already-drawn value it binds as-is (a Dirac draw is just the constant).
@@ -415,6 +419,37 @@ impl Engine {
         for a in args {
             arg_vals.push(self.eval(a)?);
         }
+        // Reject `continue` in any argument position (finding F8) — a separate pass so the hot,
+        // deeply-recursive arg-eval loop above keeps its lean stack frame (the recursion budget).
+        for (a, v) in args.iter().zip(&arg_vals) {
+            forbid_continue(v, a.span)?; // `f(continue)` is a misuse
+        }
+        // A user function (unqualified) shadows a builtin of the same name. This is the *only*
+        // recursive tail of `eval_call` (`f() = f()`), so it stays here — everything else routes
+        // through the `#[inline(never)]` `dispatch_call`, which keeps this frame small (and off the
+        // `MAX_CALL_DEPTH` recursion path) by not merging the builtin-dispatch locals into it.
+        if module.is_none() {
+            if let Some(f) = self.funcs.get(base).cloned() {
+                return self.call_user_fn(base, &f, arg_vals, span);
+            }
+        }
+        self.dispatch_call(module, base, args, arg_vals, span)
+    }
+
+    /// The non-user-function tail of [`eval_call`](Self::eval_call): `plot::`/`stats::` charts,
+    /// conditioned queries, variable introspection, the `&mut`-needing library reducers, `Print`,
+    /// and the pure `builtins::call`. Marked `#[inline(never)]` on purpose: it holds the widest
+    /// locals in call dispatch, and keeping them in their own stack frame (rather than merged into
+    /// the recursive `eval_call`) preserves the `MAX_CALL_DEPTH` budget on a small test stack.
+    #[inline(never)]
+    fn dispatch_call(
+        &mut self,
+        module: Option<&str>,
+        base: &str,
+        args: &[Spanned],
+        arg_vals: Vec<Value>,
+        span: Span,
+    ) -> Result<Value> {
         // `plot::*` — the charting surface for examples. Computes a summary (reusing the
         // introspection core) and *captures* it like `Print`, returning unit.
         if module == Some("plot") {
@@ -424,11 +459,7 @@ impl Engine {
         if module == Some("stats") {
             return self.stats_call(base, &arg_vals, span);
         }
-        // A user function (unqualified) shadows a builtin of the same name.
         if module.is_none() {
-            if let Some(f) = self.funcs.get(base).cloned() {
-                return self.call_user_fn(base, &f, arg_vals, span);
-            }
             // A query over a conditioned value — `P(a)` / `E(a)` / `Var(a)` / `Q(a, q)` where
             // `a` is `X | C`. Fuse the condition into `select(C, quantity, NaN)` here (needs
             // `&mut` graph) and hand the root to the conditional estimators.
@@ -461,15 +492,7 @@ impl Engine {
             self.emit(Output::Text(line));
             Ok(Value::Unit)
         } else {
-            builtins::call(
-                base,
-                &arg_vals,
-                &self.graph,
-                self.max_samples,
-                self.max_opts,
-                span,
-                self.check_mode,
-            )
+            builtins::call(base, &arg_vals, &self.query_ctx(span))
         }
     }
 

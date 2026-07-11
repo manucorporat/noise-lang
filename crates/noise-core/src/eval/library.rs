@@ -32,20 +32,23 @@ impl Engine {
         Ok(Value::Unit)
     }
 
-    /// `engine::set_max_opts(N)` — cap the *operations* each `P`/`E`/`Var`/`Q` query may spend for
+    /// `engine::set_max_ops(N)` — cap the *operations* each `P`/`E`/`Var`/`Q` query may spend for
     /// the rest of the run. A forcing over a cone of `C` distinct nodes costs `n×C` per-lane ops, so
     /// the query auto-clamps its draw count to `N/C` (never below 1): a heavy cone simply draws
     /// fewer samples (looser estimate) instead of doing unbounded work. This bounds each query's
     /// complexity *deterministically*, independent of the model's size — a budget, not an error.
     /// Pairs with `set_max_samples`, which caps draws; the query uses the smaller of the two.
     /// Returns unit (it's a setting, not a value).
-    fn lib_set_max_opts(&mut self, args: &[Value], span: Span) -> Result<Value> {
-        let [n] = arity1("set_max_opts", args, span)?;
-        let n = self.count_arg("set_max_opts", n, span)?;
+    ///
+    /// `name` is the invoked spelling: `set_max_ops` (correct — it caps *operations*, matching
+    /// `MAX_OPS_DEFAULT`) or the retained back-compat alias `set_max_opts` (finding F9), so error
+    /// messages name whichever the program actually wrote.
+    fn lib_set_max_ops(&mut self, name: &str, args: &[Value], span: Span) -> Result<Value> {
+        let [n] = arity1(name, args, span)?;
+        let n = self.count_arg(name, n, span)?;
         if n < 1 {
             return Err(NoiseError::runtime(
-                "set_max_opts(N) needs N >= 1 (the operation budget must allow at least one op)"
-                    .to_string(),
+                format!("{name}(N) needs N >= 1 (the operation budget must allow at least one op)"),
                 span,
             ));
         }
@@ -64,7 +67,9 @@ impl Engine {
     ) -> Option<Result<Value>> {
         let r = match name {
             "set_max_samples" => self.lib_set_max_samples(args, span),
-            "set_max_opts" => self.lib_set_max_opts(args, span),
+            // `set_max_ops` is the correct name (it caps operations); `set_max_opts` is a retained
+            // back-compat alias (finding F9). Both set the same knob.
+            "set_max_ops" | "set_max_opts" => self.lib_set_max_ops(name, args, span),
             "set_resolution" => self.lib_set_resolution(args, span),
             // materializing a signal may draw noise RV nodes / read the realization cache, so
             // `sample` needs `&mut self` and can't live in the pure `builtins::call`.
@@ -132,7 +137,20 @@ impl Engine {
     fn lib_noise_ou(&mut self, args: &[Value], span: Span) -> Result<Value> {
         let [s, t] = arity2("noise_ou", args, span)?;
         let sigma = self.noise_sigma(s, span)?;
-        let tau = self.noise_sigma(t, span)?; // reuse the number-extractor, then range-check
+        // `tau` is a correlation *time*, not a strength — extract it with its own message rather
+        // than reusing `noise_sigma`'s "noise strength must be a number" text (finding F9).
+        let tau = match t {
+            Value::Num(n) | Value::Est { val: n, .. } => *n,
+            other => {
+                return Err(NoiseError::runtime(
+                    format!(
+                        "noise_ou correlation time tau must be a number, got {}",
+                        other.type_name()
+                    ),
+                    span,
+                ))
+            }
+        };
         if tau <= 0.0 || !tau.is_finite() {
             return Err(NoiseError::runtime(
                 format!("noise_ou(sigma, tau) needs a finite correlation time tau > 0, got {tau}"),
@@ -749,15 +767,7 @@ impl Engine {
     /// quantum/linear-algebra "dagger". For a real matrix it is the plain transpose.
     fn lib_adjoint(&mut self, args: &[Value], span: Span) -> Result<Value> {
         let [m] = arity1("adjoint", args, span)?;
-        let t = builtins::call(
-            "transpose",
-            std::slice::from_ref(m),
-            &self.graph,
-            self.max_samples,
-            self.max_opts,
-            span,
-            self.check_mode,
-        )?;
+        let t = builtins::call("transpose", std::slice::from_ref(m), &self.query_ctx(span))?;
         self.math_ufunc("conj", &[t], span)
     }
 

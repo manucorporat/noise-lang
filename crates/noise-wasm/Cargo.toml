@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "WebAssembly bindings for the Noise probabilistic language (browser playground)."
+keywords = ["probabilistic", "monte-carlo", "wasm", "language", "sampling"]
+categories = ["wasm", "science", "mathematics"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

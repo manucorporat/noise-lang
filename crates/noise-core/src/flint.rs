@@ -193,21 +193,10 @@ pub fn text_card(s: &Summary) -> String {
     }
 }
 
-/// Trim float dust for compact display (mirrors `value::format_num`'s intent, local to avoid a dep).
+/// Trim float dust for compact chart labels — the shared dust-trimmer (finding F5) at 4 decimal
+/// places (compact), where `value::format_num` uses 12 (full value precision).
 fn fmt_n(x: f64) -> String {
-    if !x.is_finite() {
-        return format!("{x}");
-    }
-    if x == 0.0 {
-        return "0".to_string();
-    }
-    let s = format!("{x:.4}");
-    let t = s.trim_end_matches('0').trim_end_matches('.');
-    if t.is_empty() || t == "-0" {
-        "0".to_string()
-    } else {
-        t.to_string()
-    }
+    crate::num::trim_float(x, 4)
 }
 
 fn min_max(xs: &[f64]) -> (f64, f64) {

@@ -842,6 +842,36 @@ fn continue_filters_in_comprehensions_and_loops() {
     assert!(run("1 + continue").is_err());
 }
 
+/// Finding F8: `continue` is a loop control statement, not a value. Using it in a data position —
+/// bound, stored in an array, or passed as an argument — is now caught at that position with a
+/// clear "not a value" message, instead of leaking a `Value::Continue` sentinel that later surfaced
+/// as a baffling "arithmetic on continue and number" at the wrong place.
+#[test]
+fn continue_rejected_in_data_positions() {
+    // Bound to a name: the error points at the binding, not the later `x + 1`.
+    let e = run("x = continue; x + 1").unwrap_err().to_string();
+    assert!(e.contains("continue"), "message was: {e}");
+    assert!(
+        e.contains("not a value") || e.contains("control statement"),
+        "message was: {e}"
+    );
+    // Stored in an array element.
+    assert!(run("[1, continue, 3]").is_err());
+    // Passed as a call argument.
+    assert!(run("use math; sqrt(continue)").is_err());
+    // Sampled into a binding.
+    assert!(run("x ~ continue").is_err());
+    // Legitimate `continue` inside a loop / comprehension still works (regression guard).
+    assert_eq!(
+        display_of("[for x in 0..6 { if x % 2 != 0 { continue }; x }]"),
+        "[0, 2, 4]"
+    );
+    assert_eq!(
+        num("acc = 0; for x in 0..4 { if x == 2 { continue }; acc = acc + x }; acc"),
+        4.0
+    );
+}
+
 // ===================== categorical / outer: deeper coverage =====================
 
 #[test]

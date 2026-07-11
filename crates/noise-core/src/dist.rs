@@ -6,11 +6,12 @@
 //! variable bound to a `Dist` reuses its single `RvId`, so `X + X` references one draw of X.
 //!
 //! `Source` is a concrete enum (not `Box<dyn Distribution>`) so `RvNode` stays
-//! `Clone`/`PartialEq` and allocation-free; the `Distribution` trait remains the Phase-3
-//! extension seam (add a `Source` variant + a struct + impl).
+//! `Clone`/`PartialEq` and allocation-free. A new distribution is added by extending the `Source`
+//! and `Recipe` enums (and an `Inst` if it samples) — `normal` is the worked example — not by
+//! implementing a trait: sampling is done column-at-a-time by the bytecode VM (`bytecode.rs`),
+//! never through per-value dynamic dispatch.
 
 use crate::ast::{BinOp, UnOp};
-use crate::rng::Rng;
 
 /// Handle into the engine-owned [`RvGraph`]. Cheap, `Copy`, structural-identity equality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -22,25 +23,12 @@ pub struct RvId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DataId(pub u32);
 
-/// A distribution fills a whole column of samples in one call.
-// Vestigial extension seam (finding F7): one impl, no trait-dispatch callers. Kept until F7 is
-// resolved; `allow(dead_code)` because privatizing the module unmasked the never-used warning.
-#[allow(dead_code)]
-pub trait Distribution {
-    fn sample_into(&self, rng: &mut Rng, out: &mut [f64]);
-}
-
+/// The `lo`/`hi` bounds of a continuous `unif(lo, hi)` source. A plain data holder inside
+/// [`Source::Uniform`]; sampling happens in the columnar VM (`Inst::Uniform`), not here.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Uniform {
     pub lo: f64,
     pub hi: f64,
-}
-
-impl Distribution for Uniform {
-    #[inline]
-    fn sample_into(&self, rng: &mut Rng, out: &mut [f64]) {
-        rng.fill_uniform(self.lo, self.hi, out);
-    }
 }
 
 /// Value-kind carried alongside every `RvId` so lifting can enforce the deterministic type

@@ -173,6 +173,19 @@ fn sqrt_and_pi_builtins() {
     assert!(run_num("sqrt(-1)").is_nan());
 }
 
+/// Finding F3: `sqrt` is dispatched by `eval::lib_call` (NaN on a negative real), and the old
+/// scalar `builtins::call` `sqrt` arm — which *errored* on negatives — was dead code with
+/// contradicting semantics. This pins the language-design decision (NaN, not an error) so a
+/// dispatch reorder can never silently flip it. Whether `sqrt(-1)` *should* be NaN vs an error is a
+/// language choice, settled here as NaN (matching IEEE / the interpreter oracle).
+#[test]
+fn sqrt_negative_is_nan_not_error() {
+    // Both the bare (prelude `use math`) and qualified forms take the same lib_call path.
+    assert!(run_num("sqrt(-1)").is_nan());
+    assert!(run_raw("use math; sqrt(-4)").unwrap().to_string() == "NaN");
+    assert!(run_raw("math::sqrt(-9)").unwrap().to_string() == "NaN");
+}
+
 #[test]
 fn boolean_literals() {
     assert!(boolean("true"));

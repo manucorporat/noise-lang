@@ -255,14 +255,6 @@ impl Engine {
             (Value::Signal(a), Value::Signal(b)) => {
                 Ok(Value::Signal(Rc::new(SigExpr::Binop(op, a, b))))
             }
-            (Value::Signal(a), rhs) if scalar_const(&rhs).is_some() => {
-                let c = Rc::new(SigExpr::Konst(scalar_const(&rhs).unwrap()));
-                Ok(Value::Signal(Rc::new(SigExpr::Binop(op, a, c))))
-            }
-            (lhs, Value::Signal(b)) if scalar_const(&lhs).is_some() => {
-                let c = Rc::new(SigExpr::Konst(scalar_const(&lhs).unwrap()));
-                Ok(Value::Signal(Rc::new(SigExpr::Binop(op, c, b))))
-            }
             // A sized array fixes the sample count: materialize the signal, then broadcast.
             (Value::Signal(s), arr @ Value::Array(_)) => {
                 let mat = Value::Array(Rc::new(self.materialize_sig(&s, array_len(&arr), span)?));
@@ -272,16 +264,27 @@ impl Engine {
                 let mat = Value::Array(Rc::new(self.materialize_sig(&s, array_len(&arr), span)?));
                 self.binop(op, arr, mat, span)
             }
-            (l, r) => {
-                let other = if matches!(l, Value::Signal(_)) { r } else { l };
-                Err(NoiseError::runtime(
-                    format!(
-                        "cannot combine a signal with {} — `signal::sample(sig, n)` it to an array first",
-                        other.type_name()
-                    ),
-                    span,
-                ))
-            }
+            // signal ∘ scalar-const (either order) → defer as a `Konst` leaf. `if let` computes the
+            // constant once (finding F10), replacing a `scalar_const(..).is_some()` guard + re-eval.
+            (Value::Signal(a), rhs) => match scalar_const(&rhs) {
+                Some(k) => Ok(Value::Signal(Rc::new(SigExpr::Binop(
+                    op,
+                    a,
+                    Rc::new(SigExpr::Konst(k)),
+                )))),
+                None => Err(signal_combine_error(&rhs, span)),
+            },
+            (lhs, Value::Signal(b)) => match scalar_const(&lhs) {
+                Some(k) => Ok(Value::Signal(Rc::new(SigExpr::Binop(
+                    op,
+                    Rc::new(SigExpr::Konst(k)),
+                    b,
+                )))),
+                None => Err(signal_combine_error(&lhs, span)),
+            },
+            // `binop_signal` is only entered with a signal operand, so one of the arms above always
+            // matches; this keeps the match exhaustive.
+            _ => unreachable!("binop_signal called without a signal operand"),
         }
     }
 
@@ -675,4 +678,17 @@ impl Engine {
         }
         Ok(n as usize)
     }
+}
+
+/// The teaching error for combining a lazy signal with a value it can't defer against (finding F10,
+/// shared by the two `binop_signal` scalar arms): only another signal, a scalar constant, a complex
+/// value, or a sized array is legal — anything else must be materialized with `signal::sample`.
+fn signal_combine_error(other: &Value, span: Span) -> NoiseError {
+    NoiseError::runtime(
+        format!(
+            "cannot combine a signal with {} — `signal::sample(sig, n)` it to an array first",
+            other.type_name()
+        ),
+        span,
+    )
 }
