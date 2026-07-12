@@ -22,22 +22,67 @@ pub type Reg = u32;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Inst {
-    Uniform { dst: Reg, lo: f64, hi: f64 },
-    UniformInt { dst: Reg, lo: f64, hi: f64 },
-    Normal { dst: Reg, mu: f64, sigma: f64 },
-    Exp { dst: Reg, rate: f64 },
-    Poisson { dst: Reg, lambda: f64 },
-    Geometric { dst: Reg, p: f64 },
-    ConstNum { dst: Reg, val: f64 },
-    ConstBool { dst: Reg, val: f64 }, // 0.0 / 1.0
-    Un { dst: Reg, op: UnOp, a: Reg },
-    Bin { dst: Reg, op: BinOp, a: Reg, b: Reg },
+    Uniform {
+        dst: Reg,
+        lo: f64,
+        hi: f64,
+    },
+    UniformInt {
+        dst: Reg,
+        lo: f64,
+        hi: f64,
+    },
+    Normal {
+        dst: Reg,
+        mu: f64,
+        sigma: f64,
+    },
+    Exp {
+        dst: Reg,
+        rate: f64,
+    },
+    Poisson {
+        dst: Reg,
+        lambda: f64,
+    },
+    Geometric {
+        dst: Reg,
+        p: f64,
+    },
+    ConstNum {
+        dst: Reg,
+        val: f64,
+    },
+    ConstBool {
+        dst: Reg,
+        val: f64,
+    }, // 0.0 / 1.0
+    Un {
+        dst: Reg,
+        op: UnOp,
+        a: Reg,
+    },
+    Bin {
+        dst: Reg,
+        op: BinOp,
+        a: Reg,
+        b: Reg,
+    },
     /// Per-lane select: `dst = cond ? a : b` (lifted `if`).
-    Select { dst: Reg, cond: Reg, a: Reg, b: Reg },
+    Select {
+        dst: Reg,
+        cond: Reg,
+        a: Reg,
+        b: Reg,
+    },
     /// Per-lane gather: `dst = table[round(clamp(index))]`. `table` indexes `Program::gathers`
     /// (the element registers); `index` is the register holding the per-lane index. Kept out of
     /// `Inst` itself so the enum stays `Copy`.
-    Gather { dst: Reg, table: u32, index: Reg },
+    Gather {
+        dst: Reg,
+        table: u32,
+        index: Reg,
+    },
 }
 
 pub struct Program {
@@ -79,12 +124,37 @@ pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
     let mut memo: HashMap<RvId, Reg> = HashMap::new();
     let mut insts: Vec<Inst> = Vec::new();
     let mut gathers: Vec<Box<[Reg]>> = Vec::new();
-    let regs: Vec<Reg> =
-        roots.iter().map(|&r| lower(graph, r, &mut memo, &mut insts, &mut gathers)).collect();
+    let regs: Vec<Reg> = roots
+        .iter()
+        .map(|&r| lower(graph, r, &mut memo, &mut insts, &mut gathers))
+        .collect();
     let root = regs.first().copied().unwrap_or(0);
-    (Program { n_regs: insts.len(), insts, root, gathers }, regs)
+    (
+        Program {
+            n_regs: insts.len(),
+            insts,
+            root,
+            gathers,
+        },
+        regs,
+    )
 }
 
+/// A worklist item for the iterative post-order lowering (below).
+enum Task {
+    /// First visit: schedule this node's emission after its children.
+    Visit(RvId),
+    /// Second visit: all children are lowered (in `memo`); emit this node's instruction.
+    Emit(RvId),
+}
+
+/// Lower `id`'s cone into `insts`, memoizing each `RvId` → `Reg` (CSE).
+///
+/// **Iterative** post-order DFS with an explicit `Task` worklist, *not* recursion: a graph can be
+/// hundreds of thousands of nodes deep (`cumsum(~[200000] noise_white(1))` builds a 200k-deep `Add`
+/// chain), which would overflow a recursive lowerer's call stack and abort (finding A4). The
+/// worklist models the same post-order — children emit before their parent, left operand before
+/// right — so register numbering and instruction order are identical to the old recursive lowerer.
 fn lower(
     graph: &RvGraph,
     id: RvId,
@@ -95,84 +165,113 @@ fn lower(
     if let Some(&reg) = memo.get(&id) {
         return reg;
     }
-    // Lower children first, then self, so registers are assigned in post-order.
-    let node = graph.node(id).clone();
-    let inst = match node {
-        RvNode::Src(Source::Uniform(u)) => {
-            let dst = insts.len() as Reg;
-            insts.push(Inst::Uniform { dst, lo: u.lo, hi: u.hi });
-            dst
+    let mut stack = vec![Task::Visit(id)];
+    while let Some(task) = stack.pop() {
+        match task {
+            Task::Visit(id) => {
+                if memo.contains_key(&id) {
+                    continue;
+                }
+                // Emit `id` only after its children; push children in reverse so they pop (and so
+                // emit) in operand order — matching the recursive lowerer's register assignment.
+                stack.push(Task::Emit(id));
+                let push_child = |stack: &mut Vec<Task>, c: RvId| {
+                    if !memo.contains_key(&c) {
+                        stack.push(Task::Visit(c));
+                    }
+                };
+                match graph.node(id) {
+                    RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+                    RvNode::Unary(_, a) => push_child(&mut stack, *a),
+                    RvNode::Binary(_, a, b) => {
+                        push_child(&mut stack, *b);
+                        push_child(&mut stack, *a);
+                    }
+                    RvNode::Select { cond, a, b } => {
+                        push_child(&mut stack, *b);
+                        push_child(&mut stack, *a);
+                        push_child(&mut stack, *cond);
+                    }
+                    RvNode::Gather { elems, index } => {
+                        push_child(&mut stack, *index);
+                        for &e in elems.iter().rev() {
+                            push_child(&mut stack, e);
+                        }
+                    }
+                }
+            }
+            Task::Emit(id) => {
+                if memo.contains_key(&id) {
+                    continue; // reached via another path already
+                }
+                // Checked cast (finding B7): a truncating `as Reg` past 2³² instructions would alias
+                // an unrelated register. Compile-time path (not per-lane), so `try_from` is free.
+                let dst = Reg::try_from(insts.len()).expect("bytecode exceeded 2^32 instructions");
+                match graph.node(id).clone() {
+                    RvNode::Src(Source::Uniform(u)) => {
+                        insts.push(Inst::Uniform {
+                            dst,
+                            lo: u.lo,
+                            hi: u.hi,
+                        });
+                    }
+                    RvNode::Src(Source::UniformInt { lo, hi }) => {
+                        insts.push(Inst::UniformInt { dst, lo, hi });
+                    }
+                    RvNode::Src(Source::Normal { mu, sigma }) => {
+                        insts.push(Inst::Normal { dst, mu, sigma });
+                    }
+                    RvNode::Src(Source::Exp { rate }) => insts.push(Inst::Exp { dst, rate }),
+                    RvNode::Src(Source::Poisson { lambda }) => {
+                        insts.push(Inst::Poisson { dst, lambda });
+                    }
+                    RvNode::Src(Source::Geometric { p }) => insts.push(Inst::Geometric { dst, p }),
+                    RvNode::ConstNum(v) => insts.push(Inst::ConstNum { dst, val: v }),
+                    RvNode::ConstBool(b) => insts.push(Inst::ConstBool {
+                        dst,
+                        val: if b { 1.0 } else { 0.0 },
+                    }),
+                    RvNode::Unary(op, a) => {
+                        let ra = memo[&a];
+                        insts.push(Inst::Un { dst, op, a: ra });
+                    }
+                    RvNode::Binary(op, a, b) => {
+                        let (ra, rb) = (memo[&a], memo[&b]);
+                        insts.push(Inst::Bin {
+                            dst,
+                            op,
+                            a: ra,
+                            b: rb,
+                        });
+                    }
+                    RvNode::Select { cond, a, b } => {
+                        let (rc, ra, rb) = (memo[&cond], memo[&a], memo[&b]);
+                        insts.push(Inst::Select {
+                            dst,
+                            cond: rc,
+                            a: ra,
+                            b: rb,
+                        });
+                    }
+                    RvNode::Gather { elems, index } => {
+                        let table: Vec<Reg> = elems.iter().map(|e| memo[e]).collect();
+                        let ri = memo[&index];
+                        // Checked cast (finding B7): the gather-table index must not truncate.
+                        let tbl = u32::try_from(gathers.len())
+                            .expect("bytecode exceeded 2^32 gather tables");
+                        gathers.push(table.into_boxed_slice());
+                        insts.push(Inst::Gather {
+                            dst,
+                            table: tbl,
+                            index: ri,
+                        });
+                    }
+                }
+                memo.insert(id, dst);
+            }
         }
-        RvNode::Src(Source::UniformInt { lo, hi }) => {
-            let dst = insts.len() as Reg;
-            insts.push(Inst::UniformInt { dst, lo, hi });
-            dst
-        }
-        RvNode::Src(Source::Normal { mu, sigma }) => {
-            let dst = insts.len() as Reg;
-            insts.push(Inst::Normal { dst, mu, sigma });
-            dst
-        }
-        RvNode::Src(Source::Exp { rate }) => {
-            let dst = insts.len() as Reg;
-            insts.push(Inst::Exp { dst, rate });
-            dst
-        }
-        RvNode::Src(Source::Poisson { lambda }) => {
-            let dst = insts.len() as Reg;
-            insts.push(Inst::Poisson { dst, lambda });
-            dst
-        }
-        RvNode::Src(Source::Geometric { p }) => {
-            let dst = insts.len() as Reg;
-            insts.push(Inst::Geometric { dst, p });
-            dst
-        }
-        RvNode::ConstNum(v) => {
-            let dst = insts.len() as Reg;
-            insts.push(Inst::ConstNum { dst, val: v });
-            dst
-        }
-        RvNode::ConstBool(b) => {
-            let dst = insts.len() as Reg;
-            insts.push(Inst::ConstBool { dst, val: if b { 1.0 } else { 0.0 } });
-            dst
-        }
-        RvNode::Unary(op, a) => {
-            let ra = lower(graph, a, memo, insts, gathers);
-            let dst = insts.len() as Reg;
-            insts.push(Inst::Un { dst, op, a: ra });
-            dst
-        }
-        RvNode::Binary(op, a, b) => {
-            let ra = lower(graph, a, memo, insts, gathers);
-            let rb = lower(graph, b, memo, insts, gathers);
-            let dst = insts.len() as Reg;
-            insts.push(Inst::Bin { dst, op, a: ra, b: rb });
-            dst
-        }
-        RvNode::Select { cond, a, b } => {
-            let rc = lower(graph, cond, memo, insts, gathers);
-            let ra = lower(graph, a, memo, insts, gathers);
-            let rb = lower(graph, b, memo, insts, gathers);
-            let dst = insts.len() as Reg;
-            insts.push(Inst::Select { dst, cond: rc, a: ra, b: rb });
-            dst
-        }
-        RvNode::Gather { elems, index } => {
-            // Lower every element register and the index, then record the table for the VM.
-            let table: Vec<Reg> =
-                elems.iter().map(|&e| lower(graph, e, memo, insts, gathers)).collect();
-            let ri = lower(graph, index, memo, insts, gathers);
-            let tbl = gathers.len() as u32;
-            gathers.push(table.into_boxed_slice());
-            let dst = insts.len() as Reg;
-            insts.push(Inst::Gather { dst, table: tbl, index: ri });
-            dst
-        }
-    };
-    memo.insert(id, inst);
-    inst
+    }
+    memo[&id]
 }
 
 /// Run one batch: fill every register column for `BATCH` lanes by walking the instructions.
@@ -229,19 +328,33 @@ pub fn run_batch(program: &Program, regs: &mut [Box<[f64]>], rng: &mut crate::rn
             Inst::Select { dst, cond, a, b } => {
                 let (dst, cond, a, b) = (dst as usize, cond as usize, a as usize, b as usize);
                 for k in 0..BATCH {
-                    regs[dst][k] = if regs[cond][k] != 0.0 { regs[a][k] } else { regs[b][k] };
+                    regs[dst][k] = if regs[cond][k] != 0.0 {
+                        regs[a][k]
+                    } else {
+                        regs[b][k]
+                    };
                 }
             }
             Inst::Gather { dst, table, index } => {
                 // Per lane: round the index, clamp into `0..len`, copy that element's lane value.
                 // Gather to a scratch column first so the immutable element reads don't alias the
                 // mutable `dst` write (one-register-per-node guarantees they're distinct anyway).
+                //
+                // NaN index → NaN result (finding B5). A NaN index selects no element, so the honest
+                // answer is NaN — propagating it the way every other IEEE op here does. This is a
+                // SEMANTIC CHOICE: the previous code let `NaN as usize == 0` silently read element 0,
+                // fabricating a real value from an undefined index. (±inf still clamp to the ends:
+                // `-inf` below `0`, `+inf` at/above `last`, which is the sensible saturating read.)
                 let tbl = &program.gathers[table as usize];
                 let last = tbl.len() - 1; // `gathers` never holds an empty table (eval rejects it)
                 let index = index as usize;
                 let mut scratch = [0.0f64; BATCH];
                 for k in 0..BATCH {
                     let raw = regs[index][k].round();
+                    if raw.is_nan() {
+                        scratch[k] = f64::NAN;
+                        continue;
+                    }
                     let i = if raw <= 0.0 {
                         0
                     } else if raw as usize >= last {
@@ -288,35 +401,24 @@ fn apply_un(op: UnOp, x: f64) -> f64 {
 /// produce 0.0/1.0 columns (the bool convention from PLAN.md, pre-wiring Phase 3's `P()`).
 #[inline]
 fn apply_bin(op: BinOp, a: f64, b: f64) -> f64 {
-    match op {
-        BinOp::Add => a + b,
-        BinOp::Sub => a - b,
-        BinOp::Mul => a * b,
-        BinOp::Div => a / b,
-        BinOp::Mod => a - b * (a / b).floor(),
-        BinOp::Pow => a.powf(b),
-        BinOp::Lt => (a < b) as i32 as f64,
-        BinOp::Gt => (a > b) as i32 as f64,
-        BinOp::Le => (a <= b) as i32 as f64,
-        BinOp::Ge => (a >= b) as i32 as f64,
-        BinOp::Eq => (a == b) as i32 as f64,
-        BinOp::Ne => (a != b) as i32 as f64,
-        // Logical ops over 0/1 indicator columns.
-        BinOp::And => ((a != 0.0) && (b != 0.0)) as i32 as f64,
-        BinOp::Or => ((a != 0.0) || (b != 0.0)) as i32 as f64,
-    }
+    // The single shared scalar kernel (finding F4) — same computation the signal folder, the
+    // `eval` constant-fold, and the graph simplifier use, so the VM can never drift from them.
+    crate::num::fold_binop(op, a, b)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dist::{RvGraph, RvKind, RvNode, Source, Uniform};
+    use crate::dist::{RvGraph, RvId, RvKind, RvNode, Source, Uniform};
 
     #[test]
     fn cse_shares_a_repeated_subexpression() {
         // X + X: the shared `X` must compile to ONE register, so total = 2 (X, the Add) not 3.
         let mut g = RvGraph::default();
-        let x = g.push(RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })), RvKind::Num);
+        let x = g.push(
+            RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
+            RvKind::Num,
+        );
         let sum = g.push(RvNode::Binary(BinOp::Add, x, x), RvKind::Num);
         let prog = compile(&g, sum);
         assert_eq!(prog.n_regs, 2, "X must be shared (CSE), not duplicated");
@@ -342,6 +444,64 @@ mod tests {
         // Not is logical over a 0/1 column.
         assert_eq!(apply_un(UnOp::Not, 0.0), 1.0);
         assert_eq!(apply_un(UnOp::Not, 1.0), 0.0);
+    }
+
+    #[test]
+    fn gather_with_a_nan_index_yields_nan() {
+        // Finding B5 (SEMANTIC CHOICE): a NaN per-lane index propagates NaN, rather than silently
+        // reading element 0 (`NaN as usize == 0`). A finite index still selects; ±inf saturates.
+        let mut g = RvGraph::default();
+        let elems: Vec<RvId> = [10.0, 20.0, 30.0]
+            .iter()
+            .map(|&v| g.push(RvNode::ConstNum(v), RvKind::Num))
+            .collect();
+        // A per-lane NaN index: ln(-1) = NaN (kept as a node — compile lowers the raw graph).
+        let neg = g.push(RvNode::ConstNum(-1.0), RvKind::Num);
+        let nan_idx = g.push(RvNode::Unary(UnOp::Ln, neg), RvKind::Num);
+        let gather = g.push(
+            RvNode::Gather {
+                elems: elems.into_boxed_slice(),
+                index: nan_idx,
+            },
+            RvKind::Num,
+        );
+        let prog = compile(&g, gather);
+        let mut buf: Vec<Box<[f64]>> = (0..prog.n_regs)
+            .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+            .collect();
+        let mut rng = crate::rng::Rng::seed_from_u64(0);
+        run_batch(&prog, &mut buf, &mut rng);
+        let out = &buf[prog.root as usize];
+        assert!(
+            out.iter().all(|x| x.is_nan()),
+            "NaN index must gather NaN, not element 0; got {:?}",
+            &out[..4]
+        );
+    }
+
+    #[test]
+    fn gather_with_a_finite_index_selects_that_element() {
+        // Companion to the NaN case: an ordinary integer index still reads its element.
+        let mut g = RvGraph::default();
+        let elems: Vec<RvId> = [10.0, 20.0, 30.0]
+            .iter()
+            .map(|&v| g.push(RvNode::ConstNum(v), RvKind::Num))
+            .collect();
+        let idx = g.push(RvNode::ConstNum(1.0), RvKind::Num);
+        let gather = g.push(
+            RvNode::Gather {
+                elems: elems.into_boxed_slice(),
+                index: idx,
+            },
+            RvKind::Num,
+        );
+        let prog = compile(&g, gather);
+        let mut buf: Vec<Box<[f64]>> = (0..prog.n_regs)
+            .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+            .collect();
+        let mut rng = crate::rng::Rng::seed_from_u64(0);
+        run_batch(&prog, &mut buf, &mut rng);
+        assert!(buf[prog.root as usize].iter().all(|&x| x == 20.0));
     }
 
     #[test]

@@ -31,30 +31,48 @@ pub const MAX_OPS_DEFAULT: u64 = 1_000_000_000;
 /// The time-axis twin of [`P_DEFAULT_N`] — a measurement knob, not part of the question — sized
 /// so toy programs never need to mention it.
 pub const RESOLUTION_DEFAULT: usize = 256;
+/// Maximum dimension of a `rotation(d)` draw (finding A6). Drawing it Gram–Schmidt-orthonormalizes a
+/// `d×d` Gaussian seed — `O(d³)` sample-graph nodes — so an uncapped `d` (`rotation(500)`) builds
+/// ~10⁸ nodes and OOMs/aborts. Teaching rotations are small (`d ≤ ~64`; the flagship uses 20).
+const MAX_ROTATION_DIM: usize = 128;
+/// Maximum length of a `permutation(n)` draw (finding A6). It builds `O(n²)` comparison nodes (each
+/// element is the rank of its key), so `permutation(1e5)` builds ~10¹⁰ nodes and OOMs. Card decks /
+/// the prisoners riddle use `n ≤ ~365`; 2048 leaves ample headroom while bounding the blow-up.
+const MAX_PERMUTATION_N: usize = 2048;
 /// A fixed seed keeps a run reproducible; threading an explicit seed through `P` is a later
 /// refinement.
 const P_DEFAULT_SEED: u64 = 0;
+
+/// The engine knobs a builtin/query dispatch needs, bundled into one parameter object (finding F6)
+/// so the `call`/`prob`/`moment`/`quantile` signatures don't grow a new positional argument every
+/// time a knob is added. The engine builds one per call and threads it by reference.
+///
+/// - `graph` — the (immutable) sample-DAG a query reads to estimate a probability/moment/quantile.
+/// - `default_n` — the Monte Carlo budget when a call carries no explicit sample count (default
+///   [`P_DEFAULT_N`], set via `engine::set_max_samples`).
+/// - `max_opts` — the optional per-query operation budget (`engine::set_max_opts`, `0` = unlimited):
+///   each query auto-clamps its draw count so `draws × cone-node-count ≤ max_opts` (see
+///   [`clamp_to_op_budget`]).
+/// - `check` — validate-only mode: build/type-check the graph but skip the Monte Carlo pass,
+///   handing back a neutral in-range placeholder.
+/// - `span` — the call site, for spanned errors.
+#[derive(Clone, Copy)]
+pub struct QueryCtx<'g> {
+    pub graph: &'g RvGraph,
+    pub default_n: usize,
+    pub max_opts: u64,
+    pub check: bool,
+    pub span: Span,
+}
 
 /// Called from `eval.rs`'s `Expr::Call` arm.
 ///
 /// Distribution constructors (`unif`, `unif_int`, `bernoulli`) return a **recipe** — an undrawn
 /// `Value::Recipe`, *not* a graph node. They never touch the graph: drawing is `~`'s job (see
-/// `Engine::draw`). `P` reads the graph to estimate a probability.
-///
-/// `default_n` is the Monte Carlo budget the sampling builtins (`P`/`E`/`Var`/`Q`) use when the
-/// call carries no explicit sample count — the engine threads its current setting (default
-/// [`P_DEFAULT_N`], adjustable via `engine::set_max_samples`) through here. `max_opts` is the
-/// optional per-query operation budget (`engine::set_max_opts`, `0` = unlimited): each query
-/// auto-clamps its draw count so `draws × cone-node-count ≤ max_opts` (see [`clamp_to_op_budget`]).
-pub fn call(
-    name: &str,
-    arg_vals: &[Value],
-    graph: &RvGraph,
-    default_n: usize,
-    max_opts: u64,
-    span: Span,
-    check: bool,
-) -> Result<Value> {
+/// `Engine::draw`). `P` reads the graph to estimate a probability. The engine knobs travel in
+/// [`QueryCtx`].
+pub fn call(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let (graph, span) = (ctx.graph, ctx.span);
     match name {
         "unif" => {
             let [lo, hi] = two_args(name, arg_vals, graph, span)?;
@@ -74,7 +92,10 @@ pub fn call(
                         ));
                     }
                     // Treat bounds as inclusive integers (normalize once, at recipe construction).
-                    Ok(Value::Recipe(Recipe::UniformInt { lo: lo.round(), hi: hi.round() }))
+                    Ok(Value::Recipe(Recipe::UniformInt {
+                        lo: lo.round(),
+                        hi: hi.round(),
+                    }))
                 }
                 // A random bound can't be range-checked here; the draw transform handles it per lane.
                 None => Ok(Value::Recipe(Recipe::UniformIntDyn { lo, hi })),
@@ -138,7 +159,11 @@ pub fn call(
                             span,
                         ));
                     }
-                    Ok(Value::Recipe(if int { Recipe::ExpInt { rate } } else { Recipe::Exp { rate } }))
+                    Ok(Value::Recipe(if int {
+                        Recipe::ExpInt { rate }
+                    } else {
+                        Recipe::Exp { rate }
+                    }))
                 }
                 rv => Ok(Value::Recipe(Recipe::ExpDyn { rate: rv, int })),
             }
@@ -174,6 +199,17 @@ pub fn call(
                     span,
                 ));
             }
+            // Drawing a rotation Gram–Schmidt-orthonormalizes a `d×d` Gaussian seed — `O(d³)` graph
+            // nodes — so an unbounded `d` OOMs/aborts at build time (finding A6). Cap it cleanly.
+            if d > MAX_ROTATION_DIM as f64 {
+                return Err(NoiseError::runtime(
+                    format!(
+                        "rotation({d}) is too large (max dimension {MAX_ROTATION_DIM}) — it builds \
+                         an O(d³) sample graph; use a smaller dimension"
+                    ),
+                    span,
+                ));
+            }
             Ok(Value::Recipe(Recipe::Rotation { d: d as usize }))
         }
         "permutation" => {
@@ -187,16 +223,24 @@ pub fn call(
                     span,
                 ));
             }
+            // Drawing a permutation builds `O(n²)` comparison nodes (each element is the rank of its
+            // key), so an unbounded `n` OOMs at build time (finding A6). Cap it cleanly.
+            if n > MAX_PERMUTATION_N as f64 {
+                return Err(NoiseError::runtime(
+                    format!(
+                        "permutation({n}) is too large (max length {MAX_PERMUTATION_N}) — it builds \
+                         an O(n²) sample graph; use a smaller length"
+                    ),
+                    span,
+                ));
+            }
             Ok(Value::Recipe(Recipe::Permutation { n: n as usize }))
         }
-        "sqrt" => {
-            let x = one_num(name, arg_vals, span)?;
-            if x < 0.0 {
-                return Err(NoiseError::runtime(format!("sqrt needs x >= 0, got {x}"), span));
-            }
-            Ok(Value::Num(x.sqrt()))
-        }
-        // `log`/`log10` are handled in `eval::lib_call` (they lift over RVs and need `&mut` graph).
+        // `sqrt` is handled in `eval::lib_call`/`math_ufunc` (it lifts over RVs and is complex-aware,
+        // returning NaN — not an error — on a negative real, so `sqrt(-1)` is NaN). There is
+        // deliberately no `sqrt` arm here: `lib_call` intercepts it before `builtins::call` ever
+        // runs, so a scalar arm would be dead code with *contradicting* semantics (finding F3).
+        // `log`/`log10` are likewise handled in `eval::lib_call`.
         "gcd" => {
             // Greatest common divisor (Euclid), defined on integers via |a|, |b|; gcd(0, 0) = 0.
             // Deterministic integer op (a `Dist` argument errors in `as_num`).
@@ -232,15 +276,15 @@ pub fn call(
             }
             Ok(Value::Num(modpow_int(base, exp as u64, modulus) as f64))
         }
-        "E" | "Var" => moment(name, arg_vals, graph, default_n, max_opts, span, check),
+        "E" | "Var" => moment(name, arg_vals, ctx),
         "round" => {
             // round(x, digits) — round x to `digits` decimal places. Handy for messages.
             let [x, digits] = two_nums(name, arg_vals, span)?;
             let factor = 10f64.powi(digits as i32);
             Ok(Value::Num((x * factor).round() / factor))
         }
-        "P" => prob(arg_vals, graph, default_n, max_opts, span, check),
-        "Q" => quantile(arg_vals, graph, default_n, max_opts, span, check),
+        "P" => prob(arg_vals, ctx),
+        "Q" => quantile(arg_vals, ctx),
         // --- pure collection builtins (no graph access; PLAN-COLLECTIONS §3) ---
         "Len" => len(name, arg_vals, span),
         // pure vector constructors / rearrangers (graph-free; just move `Value`s around)
@@ -252,8 +296,8 @@ pub fn call(
         // noise RV nodes and read the realization cache, so it needs `&mut Engine`).
         "sine" | "cosine" => wave(name, arg_vals, span),
         // `Print` is intercepted in `eval.rs` (it needs `&mut self` to append to the capture
-        // buffer), so it never reaches here; this arm is unreachable and kept only for clarity.
-        "Print" => Ok(Value::Unit),
+        // buffer), so it never reaches here — there is deliberately no `"Print"` arm (finding F3):
+        // a `Value::Unit`-returning arm would be dead code that masks a dispatch-order regression.
         other => Err(NoiseError::runtime(
             format!("unknown function '{other}'"),
             span,
@@ -285,7 +329,14 @@ fn clamp_to_op_budget(n: usize, graph: &RvGraph, root: RvId, max_opts: u64) -> u
     n.min(cap)
 }
 
-fn prob(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, span: Span, check: bool) -> Result<Value> {
+fn prob(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let QueryCtx {
+        graph,
+        default_n,
+        max_opts,
+        check,
+        span,
+    } = *ctx;
     if arg_vals.is_empty() || arg_vals.len() > 2 {
         return Err(NoiseError::runtime(
             format!(
@@ -310,7 +361,10 @@ fn prob(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, sp
     };
     match &arg_vals[0] {
         // A deterministic event is exact — no sampling, no error.
-        Value::Bool(b) => Ok(Value::Est { val: if *b { 1.0 } else { 0.0 }, se: 0.0 }),
+        Value::Bool(b) => Ok(Value::Est {
+            val: if *b { 1.0 } else { 0.0 },
+            se: 0.0,
+        }),
         Value::Dist(id) if graph.kind(*id) == RvKind::Bool => {
             // Validate-only mode: the event graph is built and type-checked; skip the Monte Carlo
             // estimate and hand back a neutral, in-range placeholder (a valid probability, so it's
@@ -344,10 +398,20 @@ fn prob(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, sp
 /// standard error (`E` ↔ mean, `Var` ↔ population variance). `P` is the special case for
 /// events; `E`/`Var` are total over any number or numeric RV (a bool RV works too — its mean is
 /// `P`). A deterministic number is exact: `E(5) = 5 ± 0`, `Var(5) = 0 ± 0`.
-fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, span: Span, check: bool) -> Result<Value> {
+fn moment(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let QueryCtx {
+        graph,
+        default_n,
+        max_opts,
+        check,
+        span,
+    } = *ctx;
     if arg_vals.is_empty() || arg_vals.len() > 2 {
         return Err(NoiseError::runtime(
-            format!("{name} expects 1 or 2 arguments (quantity, optional sample count), got {}", arg_vals.len()),
+            format!(
+                "{name} expects 1 or 2 arguments (quantity, optional sample count), got {}",
+                arg_vals.len()
+            ),
             span,
         ));
     }
@@ -410,7 +474,20 @@ fn moment(name: &str, arg_vals: &[Value], graph: &RvGraph, default_n: usize, max
 ///
 /// Returns a plain `Num` (not an `Est`): a sample quantile's standard error depends on the density
 /// at that point, so we don't claim auto-rounded precision the way `P`/`E` do.
-fn quantile(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64, span: Span, check: bool) -> Result<Value> {
+///
+/// Note: `P` and `Q` on the *same* underlying event/quantity each force their **own independent
+/// sampling pass** over a *different* cone — an event-indicator graph for `P`, the numeric quantity
+/// for `Q` — so even at the same seed they realize different draws. Their answers agree only up to
+/// Monte Carlo error and can diverge most in the **tail** (where few samples land): `Q(X, 0.99)` need
+/// not be the exact `c` for which `P(X > c) == 0.01`.
+fn quantile(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let QueryCtx {
+        graph,
+        default_n,
+        max_opts,
+        check,
+        span,
+    } = *ctx;
     if arg_vals.len() < 2 || arg_vals.len() > 3 {
         return Err(NoiseError::runtime(
             format!(
@@ -453,10 +530,13 @@ fn quantile(arg_vals: &[Value], graph: &RvGraph, default_n: usize, max_opts: u64
             let n = clamp_to_op_budget(n, graph, *id, max_opts);
             let mut draws = sampler::sample_n(graph, *id, n, P_DEFAULT_SEED);
             draws.sort_by(f64::total_cmp);
-            Ok(Value::Num(empirical_quantile(&draws, q)))
+            Ok(Value::Num(crate::num::quantile_sorted(&draws, q)))
         }
         other => Err(NoiseError::runtime(
-            format!("Q expects a number or numeric random variable, got {}", other.type_name()),
+            format!(
+                "Q expects a number or numeric random variable, got {}",
+                other.type_name()
+            ),
             span,
         )),
     }
@@ -502,18 +582,20 @@ fn opt_count(name: &str, v: Option<&Value>, default_n: usize, span: Span) -> Res
 /// conditioning root `select(cond, event_indicator, NaN)` (built in `eval.rs`); `tail` is the
 /// optional `[n]` sample count after the `|`-expression. The estimate is a probability with the
 /// standard error of `m ≈ n·P(cond)` in-condition draws (so it self-rounds like an unconditional `P`).
-pub fn prob_cond(
-    graph: &RvGraph,
-    root: RvId,
-    tail: &[Value],
-    default_n: usize,
-    max_opts: u64,
-    span: Span,
-    check: bool,
-) -> Result<Value> {
+pub fn prob_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let QueryCtx {
+        graph,
+        default_n,
+        max_opts,
+        check,
+        span,
+    } = *ctx;
     if tail.len() > 1 {
         return Err(NoiseError::runtime(
-            format!("P(event | cond) takes an optional sample count, got {} extra argument(s)", tail.len()),
+            format!(
+                "P(event | cond) takes an optional sample count, got {} extra argument(s)",
+                tail.len()
+            ),
             span,
         ));
     }
@@ -535,19 +617,20 @@ pub fn prob_cond(
 /// `E(x | cond)` / `Var(x | cond)` — the conditional mean/variance over the worlds where `cond`
 /// holds. `root` is `select(cond, x, NaN)`; `tail` is the optional `[n]`. The standard error uses the
 /// in-condition sample size.
-pub fn moment_cond(
-    name: &str,
-    graph: &RvGraph,
-    root: RvId,
-    tail: &[Value],
-    default_n: usize,
-    max_opts: u64,
-    span: Span,
-    check: bool,
-) -> Result<Value> {
+pub fn moment_cond(name: &str, root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let QueryCtx {
+        graph,
+        default_n,
+        max_opts,
+        check,
+        span,
+    } = *ctx;
     if tail.len() > 1 {
         return Err(NoiseError::runtime(
-            format!("{name}(x | cond) takes an optional sample count, got {} extra argument(s)", tail.len()),
+            format!(
+                "{name}(x | cond) takes an optional sample count, got {} extra argument(s)",
+                tail.len()
+            ),
             span,
         ));
     }
@@ -562,24 +645,29 @@ pub fn moment_cond(
     }
     let cf = count as f64;
     if name == "Var" {
-        Ok(Value::Est { val: m.variance, se: m.variance.abs() * (2.0 / cf).sqrt() })
+        Ok(Value::Est {
+            val: m.variance,
+            se: m.variance.abs() * (2.0 / cf).sqrt(),
+        })
     } else {
-        Ok(Value::Est { val: m.mean, se: (m.variance / cf).sqrt() })
+        Ok(Value::Est {
+            val: m.mean,
+            se: (m.variance / cf).sqrt(),
+        })
     }
 }
 
 /// `Q(x | cond, q)` / `Q(x | cond, q, n)` — the conditional quantile over the worlds where `cond`
 /// holds. `root` is `select(cond, x, NaN)`; `tail` is `[q]` or `[q, n]`. Estimated by collecting the
 /// in-condition draws (NaN lanes dropped), sorting, and interpolating — like the unconditional `Q`.
-pub fn quantile_cond(
-    graph: &RvGraph,
-    root: RvId,
-    tail: &[Value],
-    default_n: usize,
-    max_opts: u64,
-    span: Span,
-    check: bool,
-) -> Result<Value> {
+pub fn quantile_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value> {
+    let QueryCtx {
+        graph,
+        default_n,
+        max_opts,
+        check,
+        span,
+    } = *ctx;
     if tail.is_empty() || tail.len() > 2 {
         return Err(NoiseError::runtime(
             format!(
@@ -606,26 +694,15 @@ pub fn quantile_cond(
         return Err(cond_never(n, span));
     }
     draws.sort_by(f64::total_cmp);
-    Ok(Value::Num(empirical_quantile(&draws, q)))
-}
-
-/// Linear-interpolated empirical quantile of a **sorted, non-empty** sample (the `type-7` rule,
-/// numpy's default): position `q*(len-1)`, blended between its floor/ceil order statistics.
-fn empirical_quantile(sorted: &[f64], q: f64) -> f64 {
-    let n = sorted.len();
-    if n == 1 {
-        return sorted[0];
-    }
-    let pos = q * (n - 1) as f64;
-    let lo = pos.floor() as usize;
-    let hi = pos.ceil() as usize;
-    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
+    Ok(Value::Num(crate::num::quantile_sorted(&draws, q)))
 }
 
 /// `iota(n)` — `[0, 1, …, n-1]` (the same array as `0..n`; a handy alias).
 fn iota(name: &str, args: &[Value], span: Span) -> Result<Value> {
     let n = count_arg(name, args, span)?;
-    Ok(Value::Array(Rc::new((0..n).map(|i| Value::Num(i as f64)).collect())))
+    Ok(Value::Array(Rc::new(
+        (0..n).map(|i| Value::Num(i as f64)).collect(),
+    )))
 }
 
 /// `ones(n)` / `zeros(n)` — an `n`-vector filled with `fill`.
@@ -640,7 +717,11 @@ fn filled(name: &str, args: &[Value], fill: f64, span: Span) -> Result<Value> {
 /// form `sine(n, freq)` is the **eager** shorthand: it materializes `n` samples immediately
 /// (handy for a quick concrete waveform).
 fn wave(name: &str, args: &[Value], span: Span) -> Result<Value> {
-    let w = if name == "cosine" { Wave::Cosine } else { Wave::Sine };
+    let w = if name == "cosine" {
+        Wave::Cosine
+    } else {
+        Wave::Sine
+    };
     match args {
         [freq] => Ok(Value::Signal(SigExpr::wave(w, as_num(freq, span)?))),
         [_n, freq] => {
@@ -660,7 +741,7 @@ fn wave(name: &str, args: &[Value], span: Span) -> Result<Value> {
 /// Pure: it only rearranges the existing element `Value`s (no graph nodes built).
 fn transpose(name: &str, args: &[Value], span: Span) -> Result<Value> {
     if args.len() != 1 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 1 argument, got {}", args.len()),
             span,
         ));
@@ -676,7 +757,10 @@ fn transpose(name: &str, args: &[Value], span: Span) -> Result<Value> {
         let r = as_array(name, row, span)?;
         if r.len() != cols {
             return Err(NoiseError::runtime(
-                format!("{name} needs a rectangular matrix; rows have lengths {cols} and {}", r.len()),
+                format!(
+                    "{name} needs a rectangular matrix; rows have lengths {cols} and {}",
+                    r.len()
+                ),
                 span,
             ));
         }
@@ -703,7 +787,7 @@ fn count_arg(name: &str, args: &[Value], span: Span) -> Result<usize> {
 /// `Len(xs)` — the number of elements (a build-time constant).
 fn len(name: &str, args: &[Value], span: Span) -> Result<Value> {
     if args.len() != 1 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 1 argument, got {}", args.len()),
             span,
         ));
@@ -716,7 +800,7 @@ fn len(name: &str, args: &[Value], span: Span) -> Result<Value> {
 fn as_array<'a>(name: &str, v: &'a Value, span: Span) -> Result<&'a Rc<Vec<Value>>> {
     match v {
         Value::Array(xs) => Ok(xs),
-        other => Err(NoiseError::runtime(
+        other => Err(NoiseError::type_mismatch(
             format!("{name} expects an array, got {}", other.type_name()),
             span,
         )),
@@ -725,7 +809,7 @@ fn as_array<'a>(name: &str, v: &'a Value, span: Span) -> Result<&'a Rc<Vec<Value
 
 fn one_num(name: &str, args: &[Value], span: Span) -> Result<f64> {
     if args.len() != 1 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 1 argument, got {}", args.len()),
             span,
         ));
@@ -735,7 +819,7 @@ fn one_num(name: &str, args: &[Value], span: Span) -> Result<f64> {
 
 fn two_nums(name: &str, args: &[Value], span: Span) -> Result<[f64; 2]> {
     if args.len() != 2 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 2 arguments, got {}", args.len()),
             span,
         ));
@@ -745,12 +829,16 @@ fn two_nums(name: &str, args: &[Value], span: Span) -> Result<[f64; 2]> {
 
 fn three_nums(name: &str, args: &[Value], span: Span) -> Result<[f64; 3]> {
     if args.len() != 3 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 3 arguments, got {}", args.len()),
             span,
         ));
     }
-    Ok([as_num(&args[0], span)?, as_num(&args[1], span)?, as_num(&args[2], span)?])
+    Ok([
+        as_num(&args[0], span)?,
+        as_num(&args[1], span)?,
+        as_num(&args[2], span)?,
+    ])
 }
 
 /// Largest exactly-representable `f64` integer (`2^53`). The integer builtins (`gcd`/`modpow`)
@@ -791,7 +879,7 @@ fn as_num(v: &Value, span: Span) -> Result<f64> {
     match v {
         Value::Num(n) => Ok(*n),
         Value::Est { val, .. } => Ok(*val),
-        other => Err(NoiseError::runtime(
+        other => Err(NoiseError::type_mismatch(
             format!("expected a number, got {}", other.type_name()),
             span,
         )),
@@ -807,15 +895,15 @@ fn dist_arg(name: &str, v: &Value, graph: &RvGraph, span: Span) -> Result<DistAr
         Value::Num(n) => Ok(DistArg::Const(*n)),
         Value::Est { val, .. } => Ok(DistArg::Const(*val)),
         Value::Dist(id) if graph.kind(*id) == RvKind::Num => Ok(DistArg::Rv(*id)),
-        Value::Dist(id) => Err(NoiseError::runtime(
+        Value::Dist(id) => Err(NoiseError::type_mismatch(
             format!("{name} parameter must be a number or numeric random variable, got {}", graph.kind(*id).type_name()),
             span,
         )),
-        Value::Recipe(_) => Err(NoiseError::runtime(
+        Value::Recipe(_) => Err(NoiseError::not_drawn(
             format!("{name} parameter is an undrawn distribution — draw it with `~` first (e.g. `m ~ unif(0,1); {name}(…, m)`)"),
             span,
         )),
-        other => Err(NoiseError::runtime(
+        other => Err(NoiseError::type_mismatch(
             format!("{name} parameter must be a number or numeric random variable, got {}", other.type_name()),
             span,
         )),
@@ -825,7 +913,7 @@ fn dist_arg(name: &str, v: &Value, graph: &RvGraph, span: Span) -> Result<DistAr
 /// Arity-1 distribution parameter (constant or RV).
 fn one_arg(name: &str, args: &[Value], graph: &RvGraph, span: Span) -> Result<DistArg> {
     if args.len() != 1 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 1 argument, got {}", args.len()),
             span,
         ));
@@ -836,12 +924,15 @@ fn one_arg(name: &str, args: &[Value], graph: &RvGraph, span: Span) -> Result<Di
 /// Arity-2 distribution parameters (each constant or RV).
 fn two_args(name: &str, args: &[Value], graph: &RvGraph, span: Span) -> Result<[DistArg; 2]> {
     if args.len() != 2 {
-        return Err(NoiseError::runtime(
+        return Err(NoiseError::arity(
             format!("{name} expects 2 arguments, got {}", args.len()),
             span,
         ));
     }
-    Ok([dist_arg(name, &args[0], graph, span)?, dist_arg(name, &args[1], graph, span)?])
+    Ok([
+        dist_arg(name, &args[0], graph, span)?,
+        dist_arg(name, &args[1], graph, span)?,
+    ])
 }
 
 /// If both parameters are constants, return them as plain `f64`s (the fast path that keeps the

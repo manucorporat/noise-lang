@@ -10,9 +10,12 @@ description = "REPL and file runner for the Noise language."
 keywords = ["probabilistic", "monte-carlo", "language", "repl", "sampling"]
 categories = ["command-line-utilities", "science", "mathematics"]
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "noise"
 path = "src/main.rs"
 
 [dependencies]
-noise-core = { path = "../noise-core", version = "0.1.2" }
+noise-core.workspace = true

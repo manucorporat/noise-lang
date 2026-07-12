@@ -15,6 +15,7 @@ use crate::error::{NoiseError, Result, Span};
 /// The type of an input. `Real` is the continuous slider; `Int` snaps to whole numbers; `Bool` is a
 /// checkbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive] // more input control kinds are expected; keep host matches wildcard-safe (E2)
 pub enum InputKind {
     Real,
     Int,
@@ -87,7 +88,10 @@ impl InputSpec {
         match (self.kind, self.default) {
             (InputKind::Bool, InputValue::Num(_)) => {
                 return Err(NoiseError::runtime(
-                    format!("input `{}` is a bool but its default is a number", self.name),
+                    format!(
+                        "input `{}` is a bool but its default is a number",
+                        self.name
+                    ),
                     span,
                 ))
             }
@@ -122,18 +126,19 @@ impl InputSpec {
 
     /// Validate + resolve a host override (or, with `override_ = None`, the default) into the
     /// concrete value to bind. Type-checks against the kind, clamps to `[min, max]`, snaps to
-    /// `step` — one implementation, so every host agrees.
-    pub fn resolve(&self, override_: Option<InputValue>) -> Result<InputValue> {
+    /// `step` — one implementation, so every host agrees. `span` locates the `input::` declaration
+    /// so a type-mismatch error points at it rather than `0..0` (finding D6).
+    pub fn resolve(&self, override_: Option<InputValue>, span: Span) -> Result<InputValue> {
         let raw = override_.unwrap_or(self.default);
         match (self.kind, raw) {
             (InputKind::Bool, InputValue::Bool(b)) => Ok(InputValue::Bool(b)),
             (InputKind::Bool, InputValue::Num(_)) => Err(NoiseError::runtime(
                 format!("input `{}` is a bool; got a number", self.name),
-                Span::new(0, 0),
+                span,
             )),
             (InputKind::Real | InputKind::Int, InputValue::Bool(_)) => Err(NoiseError::runtime(
                 format!("input `{}` is a number; got a bool", self.name),
-                Span::new(0, 0),
+                span,
             )),
             (kind, InputValue::Num(n)) => {
                 let mut v = n;
@@ -217,4 +222,30 @@ pub fn is_ident(s: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_type_mismatch_carries_the_declaration_span() {
+        // A bool input given a number override must fail with the declaration's span, not `0..0`
+        // (finding D6).
+        let spec = InputSpec {
+            name: "flag".into(),
+            kind: InputKind::Bool,
+            min: None,
+            max: None,
+            step: None,
+            default: InputValue::Bool(false),
+            label: None,
+        };
+        let decl = Span::new(17, 42);
+        let err = spec
+            .resolve(Some(InputValue::Num(1.0)), decl)
+            .expect_err("bool input with a number override should error");
+        assert_eq!(err.span, decl, "error must point at the declaration");
+        assert_ne!(err.span, Span::default(), "not the sentinel 0..0 span");
+    }
 }

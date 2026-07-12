@@ -87,12 +87,17 @@ impl Dist1 {
     /// `draws` (a condition that never held) is the caller's error to raise — this assumes non-empty.
     pub fn from_draws(draws: &[f64], boolean: bool, head_k: usize) -> Dist1 {
         let n = draws.len() as u64;
+        let nf = n as f64;
+        // Two-pass mean → variance (finding B1). The textbook single-pass `E[x²] − E[x]²`
+        // catastrophically cancels when the mean dwarfs the spread: at `normal(1e8, 1)` both terms
+        // are ~1e16 (past f64's ~1e15 integer resolution), so their difference — the true variance
+        // ~1 — was reported as sd ≈ 17. The draws are already fully materialized here, so a second
+        // pass accumulating squared deviations from the mean is exact-enough and the simplest fix.
+        // min/max still fall out of the first pass.
         let mut sum = 0.0;
-        let mut sum_sq = 0.0;
         let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
         for &x in draws {
             sum += x;
-            sum_sq += x * x;
             if x < min {
                 min = x;
             }
@@ -100,9 +105,13 @@ impl Dist1 {
                 max = x;
             }
         }
-        let nf = n as f64;
         let mean = sum / nf;
-        let sd = (sum_sq / nf - mean * mean).max(0.0).sqrt();
+        let mut sum_dev_sq = 0.0;
+        for &x in draws {
+            let dev = x - mean;
+            sum_dev_sq += dev * dev;
+        }
+        let sd = (sum_dev_sq / nf).max(0.0).sqrt();
         let mut sorted = draws.to_vec();
         sorted.sort_by(f64::total_cmp);
         let head = draws.iter().take(head_k).copied().collect();
@@ -145,24 +154,51 @@ impl Dist2 {
     pub fn from_pairs(pairs: &[(f64, f64)], max_points: usize) -> Dist2 {
         let n = pairs.len() as u64;
         let nf = n as f64;
-        let (mut sa, mut sb, mut saa, mut sbb, mut sab) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        // Two-pass means → (co)variance (finding B1). Single-pass `E[xy] − E[x]E[y]` (and the
+        // per-side `E[x²] − E[x]²`) cancels catastrophically at large means — the same failure the
+        // one-variable summary had. Pairs are materialized, so accumulate deviations from the means
+        // in a second pass: exact-enough and stable regardless of offset.
+        let (mut sa, mut sb) = (0.0, 0.0);
         for &(x, y) in pairs {
             sa += x;
             sb += y;
-            saa += x * x;
-            sbb += y * y;
-            sab += x * y;
         }
         let mean_a = sa / nf;
         let mean_b = sb / nf;
-        let var_a = (saa / nf - mean_a * mean_a).max(0.0);
-        let var_b = (sbb / nf - mean_b * mean_b).max(0.0);
-        let cov = sab / nf - mean_a * mean_b;
+        let (mut saa, mut sbb, mut sab) = (0.0, 0.0, 0.0);
+        for &(x, y) in pairs {
+            let dx = x - mean_a;
+            let dy = y - mean_b;
+            saa += dx * dx;
+            sbb += dy * dy;
+            sab += dx * dy;
+        }
+        let var_a = (saa / nf).max(0.0);
+        let var_b = (sbb / nf).max(0.0);
+        let cov = sab / nf;
         let (sd_a, sd_b) = (var_a.sqrt(), var_b.sqrt());
-        let corr = if sd_a > 0.0 && sd_b > 0.0 { (cov / (sd_a * sd_b)).clamp(-1.0, 1.0) } else { 0.0 };
+        let corr = if sd_a > 0.0 && sd_b > 0.0 {
+            (cov / (sd_a * sd_b)).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
         let stride = (pairs.len() / max_points.max(1)).max(1);
-        let points = pairs.iter().step_by(stride).take(max_points).copied().collect();
-        Dist2 { n, corr, cov, mean_a, mean_b, sd_a, sd_b, points }
+        let points = pairs
+            .iter()
+            .step_by(stride)
+            .take(max_points)
+            .copied()
+            .collect();
+        Dist2 {
+            n,
+            corr,
+            cov,
+            mean_a,
+            mean_b,
+            sd_a,
+            sd_b,
+            points,
+        }
     }
 }
 
@@ -248,7 +284,11 @@ impl Explain {
         let mut drivers: Vec<Driver> = candidates
             .into_iter()
             .map(|(name, corr)| {
-                let share = if total > 0.0 { corr * corr / total } else { 0.0 };
+                let share = if total > 0.0 {
+                    corr * corr / total
+                } else {
+                    0.0
+                };
                 Driver { name, corr, share }
             })
             .collect();
@@ -310,7 +350,14 @@ pub fn dist2(
 
 /// Per-cell moments of an array of `roots` (row-major, `rows×cols`) in one joint pass — the data
 /// behind a vector/matrix plot. A vector passes `rows = 1`.
-pub fn grid(graph: &RvGraph, roots: &[RvId], rows: usize, cols: usize, n: usize, seed: u64) -> DistGrid {
+pub fn grid(
+    graph: &RvGraph,
+    roots: &[RvId],
+    rows: usize,
+    cols: usize,
+    n: usize,
+    seed: u64,
+) -> DistGrid {
     let moments = sampler::grid_moments(graph, roots, n, seed);
     DistGrid {
         rows,
@@ -322,7 +369,10 @@ pub fn grid(graph: &RvGraph, roots: &[RvId], rows: usize, cols: usize, n: usize,
 
 /// The element×element correlation matrix of a vector of `roots` (one joint pass).
 pub fn corr_grid(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> CorrMatrix {
-    CorrMatrix { n: roots.len(), corr: sampler::corr_matrix(graph, roots, n, seed) }
+    CorrMatrix {
+        n: roots.len(),
+        corr: sampler::corr_matrix(graph, roots, n, seed),
+    }
 }
 
 /// Memory budget for a fan chart's joint draw matrix, in `f64` cells (`cols × n` ≈ 32 MB at the
@@ -351,7 +401,8 @@ pub fn fan(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> FanChart {
         mean: Vec::with_capacity(cols),
     };
     for mut col in draws {
-        fc.mean.push(col.iter().sum::<f64>() / col.len().max(1) as f64);
+        fc.mean
+            .push(col.iter().sum::<f64>() / col.len().max(1) as f64);
         col.sort_by(f64::total_cmp);
         fc.q05.push(quantile_sorted(&col, 0.05));
         fc.q25.push(quantile_sorted(&col, 0.25));
@@ -365,14 +416,8 @@ pub fn fan(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> FanChart {
 /// Linear-interpolated empirical quantile of a **sorted, non-empty** sample (numpy's type-7 rule —
 /// the same rule `builtins::Q` uses, redefined here so introspection has no cross-module dep).
 pub fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
-    let n = sorted.len();
-    if n == 1 {
-        return sorted[0];
-    }
-    let pos = q * (n - 1) as f64;
-    let lo = pos.floor() as usize;
-    let hi = pos.ceil() as usize;
-    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
+    // The shared type-7 empirical quantile (finding F5) — one home, used by the `Q` builtin too.
+    crate::num::quantile_sorted(sorted, q)
 }
 
 /// Bin `draws` into a [`Histogram`] of `nbins` equal-width buckets over `[min, max]` (a degenerate
@@ -388,7 +433,11 @@ pub fn histogram(draws: &[f64], boolean: bool, nbins: usize) -> Histogram {
         for &x in draws {
             bins[(x != 0.0) as usize] += 1;
         }
-        return Histogram { lo: 0.0, hi: 1.0, bins };
+        return Histogram {
+            lo: 0.0,
+            hi: 1.0,
+            bins,
+        };
     }
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     for &x in draws {
@@ -401,7 +450,11 @@ pub fn histogram(draws: &[f64], boolean: bool, nbins: usize) -> Histogram {
     }
     let nbins = nbins.max(1);
     if !lo.is_finite() || !hi.is_finite() || lo == hi {
-        return Histogram { lo, hi, bins: vec![draws.len() as u64] };
+        return Histogram {
+            lo,
+            hi,
+            bins: vec![draws.len() as u64],
+        };
     }
     let span = hi - lo;
     let mut bins = vec![0u64; nbins];
@@ -424,7 +477,9 @@ impl Histogram {
             return vec![0.0, 1.0];
         }
         let width = (self.hi - self.lo) / self.bins.len() as f64;
-        (0..self.bins.len()).map(|i| self.lo + (i as f64 + 0.5) * width).collect()
+        (0..self.bins.len())
+            .map(|i| self.lo + (i as f64 + 0.5) * width)
+            .collect()
     }
 }
 
@@ -451,6 +506,7 @@ pub enum View {
 /// distribution / relationship; `Value` is a scalar+CI; `Grid` is a vector/matrix; `CorrMatrix` is
 /// an element×element heatmap; `Explain` is the driver fan-out.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive] // new introspection payload shapes land across plan cycles; keep hosts wildcard-safe (E2)
 pub enum Payload {
     One(Dist1),
     Two(Dist2),
@@ -497,7 +553,101 @@ mod tests {
         // a roughly flat histogram: no bucket dominates
         let max = *d.hist.bins.iter().max().unwrap();
         let min = *d.hist.bins.iter().min().unwrap();
-        assert!(max - min <= 2, "flat sample should bin evenly: {:?}", d.hist.bins);
+        assert!(
+            max - min <= 2,
+            "flat sample should bin evenly: {:?}",
+            d.hist.bins
+        );
+    }
+
+    #[test]
+    fn dist1_sd_is_stable_at_huge_mean() {
+        // Regression for finding B1: `normal(1e8, 1)` reported sd ≈ 17 via `E[x²] − E[x]²`; the
+        // two-pass gives the true ~1.0.
+        use crate::dist::{RvKind, RvNode, Source};
+        let mut g = RvGraph::default();
+        let id = g.push(
+            RvNode::Src(Source::Normal {
+                mu: 1e8,
+                sigma: 1.0,
+            }),
+            RvKind::Num,
+        );
+        let draws = crate::sampler::sample_n(&g, id, 200_000, 0);
+        let d = Dist1::from_draws(&draws, false, 5);
+        assert!(
+            (d.sd - 1.0).abs() < 0.05,
+            "sd = {} (should be ~1.0, not the ~17 the cancelling formula gave)",
+            d.sd
+        );
+        assert!((d.mean - 1e8).abs() < 0.05, "mean = {}", d.mean);
+        // Matches a straight two-pass reference over the very same draws (exact agreement).
+        let n = draws.len() as f64;
+        let mean = draws.iter().sum::<f64>() / n;
+        let var = draws.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n;
+        assert!(
+            (d.sd - var.sqrt()).abs() < 1e-9,
+            "sd {} vs ref {}",
+            d.sd,
+            var.sqrt()
+        );
+    }
+
+    #[test]
+    fn dist1_sd_matches_sampler_moments_on_ordinary_data() {
+        // At ordinary scales the two-pass sd agrees with `sampler::moments` (both correct here).
+        use crate::dist::{RvKind, RvNode, Source};
+        let mut g = RvGraph::default();
+        let id = g.push(
+            RvNode::Src(Source::Normal {
+                mu: 3.0,
+                sigma: 2.0,
+            }),
+            RvKind::Num,
+        );
+        let draws = crate::sampler::sample_n(&g, id, 200_000, 0);
+        let d = Dist1::from_draws(&draws, false, 5);
+        let m = crate::sampler::moments(&g, id, 200_000, 0);
+        // Different sampling streams (single-stream vs per-chunk), so compare within MC error.
+        assert!(
+            (d.sd - m.variance.sqrt()).abs() < 0.05,
+            "dist1 sd {} vs moments sd {}",
+            d.sd,
+            m.variance.sqrt()
+        );
+    }
+
+    #[test]
+    fn dist2_cov_is_stable_at_huge_mean() {
+        // Regression for finding B1: two identical series offset to a mean of 1e8. Single-pass
+        // `E[xy] − E[x]E[y]` cancels; the two-pass recovers a positive covariance and corr ~ 1.
+        let base = 1e8;
+        let pairs: Vec<(f64, f64)> = (0..1000)
+            .map(|i| {
+                let z = i as f64 / 1000.0;
+                (base + z, base + z)
+            })
+            .collect();
+        let d = Dist2::from_pairs(&pairs, 100);
+        assert!((d.corr - 1.0).abs() < 1e-6, "corr = {}", d.corr);
+        assert!(
+            d.cov > 0.0,
+            "cov = {} (should be positive, not cancelled)",
+            d.cov
+        );
+        // Exact two-pass reference.
+        let n = pairs.len() as f64;
+        let (ma, mb) = (
+            pairs.iter().map(|p| p.0).sum::<f64>() / n,
+            pairs.iter().map(|p| p.1).sum::<f64>() / n,
+        );
+        let cov_ref = pairs.iter().map(|(x, y)| (x - ma) * (y - mb)).sum::<f64>() / n;
+        assert!(
+            (d.cov - cov_ref).abs() < 1e-9,
+            "cov {} vs ref {}",
+            d.cov,
+            cov_ref
+        );
     }
 
     #[test]

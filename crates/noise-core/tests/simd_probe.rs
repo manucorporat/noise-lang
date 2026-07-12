@@ -68,6 +68,9 @@
 //! Run: `cargo test -p noise-core --release --test simd_probe -- --ignored --nocapture`
 
 #![cfg(target_arch = "aarch64")]
+// Hand-written NEON probe: every fn here is deliberately `unsafe fn` end-to-end, so the
+// workspace-level `unsafe_op_in_unsafe_fn` warning would only add noise on aarch64 machines.
+#![allow(unsafe_op_in_unsafe_fn)]
 
 use std::arch::aarch64::*;
 use std::time::Instant;
@@ -190,7 +193,12 @@ unsafe fn vstates<const V: usize>(seed: u64) -> [VState; V] {
     for (v, slot) in out.iter_mut().enumerate() {
         let (a, b) = (raw[2 * v], raw[2 * v + 1]);
         let pack = |k: usize| vld1q_u64([a[k], b[k]].as_ptr());
-        *slot = VState { s0: pack(0), s1: pack(1), s2: pack(2), s3: pack(3) };
+        *slot = VState {
+            s0: pack(0),
+            s1: pack(1),
+            s2: pack(2),
+            s3: pack(3),
+        };
     }
     out
 }

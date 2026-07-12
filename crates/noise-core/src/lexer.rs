@@ -4,7 +4,7 @@
 //! and later phases (comparisons, `!`, `if`/`else`, `^`, strings) can grow without
 //! re-touching the lexer. See LANG.md for the canonical token table.
 
-use crate::error::{NoiseError, ErrorKind, Result, Span};
+use crate::error::{ErrorKind, NoiseError, Result, Span};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokKind {
@@ -29,7 +29,7 @@ pub enum TokKind {
     Star,
     Slash,
     Percent,  // % — floored modulo
-    Caret, // ^ — exponentiation (reads like math)
+    Caret,    // ^ — exponentiation (reads like math)
     At,       // @ — matrix product
     Eq,       // =
     Tilde,    // ~
@@ -120,7 +120,8 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
         let start = i;
 
         // numbers: integer or decimal. Leading `-` is handled by the parser (unary minus).
-        if c.is_ascii_digit() || (c == '.' && i + 1 < n && (bytes[i + 1] as char).is_ascii_digit()) {
+        if c.is_ascii_digit() || (c == '.' && i + 1 < n && (bytes[i + 1] as char).is_ascii_digit())
+        {
             let mut seen_dot = false;
             while i < n {
                 let d = bytes[i] as char;
@@ -135,12 +136,43 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
                     break;
                 }
             }
+            // Scientific-notation exponent: `1e6`, `1.5e-3`, `2E10` (finding D9). Only consume the
+            // `e`/`E` when a valid exponent (optional sign + at least one digit) actually follows —
+            // otherwise leave it for identifier lexing so `math::e` and names like `e2e` are
+            // unaffected, and a bare `1e` stays `Number(1)` then `Ident("e")`.
+            if i < n && (bytes[i] == b'e' || bytes[i] == b'E') {
+                let mut j = i + 1;
+                if j < n && (bytes[j] == b'+' || bytes[j] == b'-') {
+                    j += 1;
+                }
+                if j < n && bytes[j].is_ascii_digit() {
+                    j += 1;
+                    while j < n && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    i = j;
+                }
+            }
             let text = &src[start..i];
             let value: f64 = text.parse().map_err(|_| NoiseError {
                 kind: ErrorKind::Parse(format!("invalid number {text:?}")),
                 span: Span::new(start, i),
             })?;
-            out.push(Token { kind: TokKind::Number(value), span: Span::new(start, i) });
+            // A finite decimal that overflows `f64` parses as `Ok(inf)` — a 300-digit literal or a
+            // `1e400`. Silently becoming infinity is a footgun (finding D9): diagnose it instead.
+            if !value.is_finite() {
+                return Err(NoiseError {
+                    kind: ErrorKind::Parse(format!(
+                        "number literal {text:?} is too large — it overflows to infinity (the \
+                         largest finite f64 is about 1.8e308)"
+                    )),
+                    span: Span::new(start, i),
+                });
+            }
+            out.push(Token {
+                kind: TokKind::Number(value),
+                span: Span::new(start, i),
+            });
             continue;
         }
 
@@ -166,7 +198,10 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
                 "use" => TokKind::Use,
                 _ => TokKind::Ident(text.to_string()),
             };
-            out.push(Token { kind, span: Span::new(start, i) });
+            out.push(Token {
+                kind,
+                span: Span::new(start, i),
+            });
             continue;
         }
 
@@ -182,15 +217,21 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
                     Some(rel) => tag_start + rel,
                     None => {
                         return Err(NoiseError {
-                            kind: ErrorKind::Parse("unterminated template: ``` has no closing ```".into()),
+                            kind: ErrorKind::Parse(
+                                "unterminated template: ``` has no closing ```".into(),
+                            ),
                             span: Span::new(start, n),
                         })
                     }
                 };
                 let tag = src[tag_start..tag_end].trim();
-                let syntax = if tag.is_empty() { None } else { Some(tag.to_string()) };
+                let syntax = if tag.is_empty() {
+                    None
+                } else {
+                    Some(tag.to_string())
+                };
                 let body_offset = tag_end + 1; // just past the newline after the info line
-                // Find a closing line that is exactly ``` (after trimming surrounding whitespace).
+                                               // Find a closing line that is exactly ``` (after trimming surrounding whitespace).
                 let mut line_start = body_offset;
                 let close_body_end;
                 let close_fence_end;
@@ -206,7 +247,9 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
                     }
                     if line_end >= bytes.len() {
                         return Err(NoiseError {
-                            kind: ErrorKind::Parse("unterminated template: ``` has no closing ```".into()),
+                            kind: ErrorKind::Parse(
+                                "unterminated template: ``` has no closing ```".into(),
+                            ),
                             span: Span::new(start, n),
                         });
                     }
@@ -215,7 +258,11 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
                 let body = src[body_offset..close_body_end].to_string();
                 i = close_fence_end;
                 out.push(Token {
-                    kind: TokKind::Template { body, syntax, body_offset },
+                    kind: TokKind::Template {
+                        body,
+                        syntax,
+                        body_offset,
+                    },
                     span: Span::new(start, i),
                 });
                 continue;
@@ -227,14 +274,20 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
                 }
                 if j >= n {
                     return Err(NoiseError {
-                        kind: ErrorKind::Parse("unterminated template: `` ` `` has no closing backtick".into()),
+                        kind: ErrorKind::Parse(
+                            "unterminated template: `` ` `` has no closing backtick".into(),
+                        ),
                         span: Span::new(start, n),
                     });
                 }
                 let body = src[body_offset..j].to_string();
                 i = j + 1; // past the closing backtick
                 out.push(Token {
-                    kind: TokKind::Template { body, syntax: None, body_offset },
+                    kind: TokKind::Template {
+                        body,
+                        syntax: None,
+                        body_offset,
+                    },
                     span: Span::new(start, i),
                 });
                 continue;
@@ -256,12 +309,19 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
             }
             let text = src[body_start..i].to_string();
             i += 1; // closing quote
-            out.push(Token { kind: TokKind::Str(text), span: Span::new(start, i) });
+            out.push(Token {
+                kind: TokKind::Str(text),
+                span: Span::new(start, i),
+            });
             continue;
         }
 
         // multi/single-char operators and punctuation
-        let two = if i + 1 < n { Some(bytes[i + 1] as char) } else { None };
+        let two = if i + 1 < n {
+            Some(bytes[i + 1] as char)
+        } else {
+            None
+        };
         let (kind, len) = match (c, two) {
             ('=', Some('=')) => (TokKind::EqEq, 2),
             ('!', Some('=')) => (TokKind::BangEq, 2),
@@ -294,17 +354,29 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
             (',', _) => (TokKind::Comma, 1),
             (';', _) => (TokKind::Semi, 1),
             _ => {
+                // `c` was decoded via `bytes[i] as char`, which mangles any non-ASCII byte (a
+                // leading UTF-8 byte like `π`'s `0xCF` becomes `Ï`) and would emit a 1-byte span
+                // that is **not a char boundary** — a host slicing `&src[span]` for a caret then
+                // panics (finding D4). Decode the real char from the source and span its full
+                // width so the reported character is correct and the span is boundary-valid.
+                let real = src[start..].chars().next().unwrap_or(c);
                 return Err(NoiseError {
-                    kind: ErrorKind::UnexpectedChar(c),
-                    span: Span::new(start, start + 1),
-                })
+                    kind: ErrorKind::UnexpectedChar(real),
+                    span: Span::new(start, start + real.len_utf8()),
+                });
             }
         };
         i += len;
-        out.push(Token { kind, span: Span::new(start, i) });
+        out.push(Token {
+            kind,
+            span: Span::new(start, i),
+        });
     }
 
-    out.push(Token { kind: TokKind::Eof, span: Span::new(n, n) });
+    out.push(Token {
+        kind: TokKind::Eof,
+        span: Span::new(n, n),
+    });
     Ok(out)
 }
 
@@ -322,9 +394,9 @@ mod tests {
         assert_eq!(
             kinds("^ == != <= >= && || :: : .. = ~ @ < > ! + - * / % ( ) { } [ ] , ;"),
             vec![
-                Caret, EqEq, BangEq, Le, Ge, AmpAmp, PipePipe, ColonColon, Colon, DotDot, Eq, Tilde,
-                At, Lt, Gt, Bang, Plus, Minus, Star, Slash, Percent, LParen, RParen, LBrace, RBrace,
-                LBracket, RBracket, Comma, Semi, Eof,
+                Caret, EqEq, BangEq, Le, Ge, AmpAmp, PipePipe, ColonColon, Colon, DotDot, Eq,
+                Tilde, At, Lt, Gt, Bang, Plus, Minus, Star, Slash, Percent, LParen, RParen, LBrace,
+                RBrace, LBracket, RBracket, Comma, Semi, Eof,
             ]
         );
     }
@@ -335,7 +407,14 @@ mod tests {
         // `|` (conditioning bar) and `||` (logical or) lex as different tokens.
         assert_eq!(
             kinds("a | b || c"),
-            vec![Ident("a".into()), Pipe, Ident("b".into()), PipePipe, Ident("c".into()), Eof]
+            vec![
+                Ident("a".into()),
+                Pipe,
+                Ident("b".into()),
+                PipePipe,
+                Ident("c".into()),
+                Eof
+            ]
         );
     }
 
@@ -353,9 +432,17 @@ mod tests {
         use TokKind::*;
         // `0..10` is three tokens, not `0.` `.10`; spacing is irrelevant.
         assert_eq!(kinds("0..10"), vec![Number(0.0), DotDot, Number(10.0), Eof]);
-        assert_eq!(kinds("i+1 .. n"), vec![
-            Ident("i".into()), Plus, Number(1.0), DotDot, Ident("n".into()), Eof,
-        ]);
+        assert_eq!(
+            kinds("i+1 .. n"),
+            vec![
+                Ident("i".into()),
+                Plus,
+                Number(1.0),
+                DotDot,
+                Ident("n".into()),
+                Eof,
+            ]
+        );
         // a trailing-dot number still lexes as a decimal
         assert_eq!(kinds("10."), vec![Number(10.0), Eof]);
     }
@@ -375,8 +462,16 @@ mod tests {
         assert_eq!(
             kinds("if else for in continue use iffy _x x1"),
             vec![
-                If, Else, For, In, Continue, Use, Ident("iffy".into()), Ident("_x".into()),
-                Ident("x1".into()), Eof,
+                If,
+                Else,
+                For,
+                In,
+                Continue,
+                Use,
+                Ident("iffy".into()),
+                Ident("_x".into()),
+                Ident("x1".into()),
+                Eof,
             ]
         );
     }
@@ -386,7 +481,11 @@ mod tests {
         // Single backtick: raw body, no syntax tag, `body_offset` past the backtick.
         let toks = tokenize("`hi ${x}`").unwrap();
         match &toks[0].kind {
-            TokKind::Template { body, syntax, body_offset } => {
+            TokKind::Template {
+                body,
+                syntax,
+                body_offset,
+            } => {
                 assert_eq!(body, "hi ${x}");
                 assert_eq!(*syntax, None);
                 assert_eq!(*body_offset, 1);
@@ -413,7 +512,10 @@ mod tests {
 
     #[test]
     fn strings_lex_and_unterminated_is_an_error() {
-        assert_eq!(kinds("\"hi there\""), vec![TokKind::Str("hi there".into()), TokKind::Eof]);
+        assert_eq!(
+            kinds("\"hi there\""),
+            vec![TokKind::Str("hi there".into()), TokKind::Eof]
+        );
         let err = tokenize("\"no close").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnterminatedString));
     }
@@ -423,6 +525,58 @@ mod tests {
         let err = tokenize("1 ? 2").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedChar('?')));
         assert_eq!(err.span, Span::new(2, 3));
+    }
+
+    #[test]
+    fn non_ascii_char_reports_the_real_char_and_a_boundary_span() {
+        // `π` is two UTF-8 bytes (0xCF 0x80). Pre-fix this reported `'Ï'` with a 1-byte span at a
+        // non-char-boundary (finding D4). It must now report the actual char and a span covering
+        // the whole char — and, crucially, `&src[span]` must not panic (a caret host slices it).
+        let src = "π = 3";
+        let err = tokenize(src).unwrap_err();
+        assert!(
+            matches!(err.kind, ErrorKind::UnexpectedChar('π')),
+            "got {:?}",
+            err.kind
+        );
+        assert_eq!(err.span, Span::new(0, 2), "span covers both bytes of π");
+        // The span is a valid char boundary — slicing for a caret does not panic.
+        assert_eq!(&src[err.span.start..err.span.end], "π");
+        // And it round-trips through the line/col mapping used by the caret renderer (col 1).
+        assert_eq!(err.span.line_col(src), (1, 1));
+    }
+
+    #[test]
+    fn scientific_notation_lexes() {
+        use TokKind::*;
+        assert_eq!(kinds("1e6"), vec![Number(1_000_000.0), Eof]);
+        assert_eq!(kinds("1.5e-3"), vec![Number(0.0015), Eof]);
+        assert_eq!(kinds("2E10"), vec![Number(2e10), Eof]);
+        assert_eq!(kinds("6.022e23"), vec![Number(6.022e23), Eof]);
+        // a bare `e` with no exponent digits is not consumed into the number
+        assert_eq!(kinds("1e"), vec![Number(1.0), Ident("e".into()), Eof]);
+        // `1e+` (sign but no digit) also leaves `e` alone
+        assert_eq!(
+            kinds("1e+"),
+            vec![Number(1.0), Ident("e".into()), Plus, Eof]
+        );
+    }
+
+    #[test]
+    fn overflowing_number_literal_is_diagnosed_not_infinity() {
+        // Both a huge exponent and a 300-digit integer overflow f64 to inf; must be an error, not a
+        // silent `Number(inf)` (finding D9).
+        let err = tokenize("1e400").unwrap_err();
+        assert!(
+            matches!(err.kind, ErrorKind::Parse(_)),
+            "got {:?}",
+            err.kind
+        );
+        let huge = "9".repeat(400);
+        assert!(matches!(
+            tokenize(&huge).unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
     }
 
     #[test]

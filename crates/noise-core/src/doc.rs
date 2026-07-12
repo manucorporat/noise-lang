@@ -34,13 +34,30 @@ pub struct Document {
 /// each carrying the `stmt_span` of the statement that produced it (so a host can group them under
 /// their code block or highlight the producing line on hover).
 #[derive(Debug, Clone)]
+#[non_exhaustive] // the document model grows block kinds across plan cycles; keep hosts wildcard-safe (E2)
 pub enum Block {
-    Code { source: String, span: Span },
-    Note { text: String, syntax: Option<String>, stmt_span: Span },
-    Plot { title: String, text: String, charts: Vec<serde_json::Value>, stmt_span: Span },
+    Code {
+        source: String,
+        span: Span,
+    },
+    Note {
+        text: String,
+        syntax: Option<String>,
+        stmt_span: Span,
+    },
+    Plot {
+        title: String,
+        text: String,
+        charts: Vec<serde_json::Value>,
+        stmt_span: Span,
+    },
     /// An inline **input control** (PLAN-INPUTS §4): a host-tunable parameter declared with
     /// `input::…`, rendered as a slider/checkbox right after the code group that declares it.
-    Input { spec: InputSpec, value: InputValue, stmt_span: Span },
+    Input {
+        spec: InputSpec,
+        value: InputValue,
+        stmt_span: Span,
+    },
 }
 
 /// One comment in the layer. `self_span` is where the comment text lives in the source; `code_span`
@@ -78,6 +95,28 @@ pub struct DocValue {
 pub struct DocError {
     pub message: String,
     pub span: Span,
+    /// 1-based line and column of the span's start (finding D1). The byte `span` is kept for
+    /// back-compat; `line`/`col` are what a host renders for a human-usable `file:line:col`.
+    pub line: usize,
+    pub col: usize,
+    /// A stable machine-readable error code (finding D2), e.g. `"undefined_name"`. Lets hosts branch
+    /// without substring-matching `message`.
+    pub code: String,
+}
+
+impl DocError {
+    /// Build a `DocError` from a spanned engine error and the source it came from, computing the
+    /// 1-based line/col and carrying the structured error code.
+    fn from_error(error: &NoiseError, src: &str) -> DocError {
+        let (line, col) = error.span.line_col(src);
+        DocError {
+            message: error.to_string(),
+            span: error.span,
+            line,
+            col,
+            code: error.code().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -98,15 +137,21 @@ pub enum Seg {
 
 impl Document {
     /// A best-effort document for a lex/parse failure before evaluation: meta (if it parsed), no
-    /// blocks or comments, and the spanned error.
-    pub fn error_only(meta: Option<Frontmatter>, error: NoiseError, stats: RunStats) -> Document {
+    /// blocks or comments, and the spanned error. `src` is the program source, used to resolve the
+    /// error's byte span to a 1-based line/col (finding D1).
+    pub fn error_only(
+        meta: Option<Frontmatter>,
+        error: NoiseError,
+        stats: RunStats,
+        src: &str,
+    ) -> Document {
         Document {
             meta,
             blocks: Vec::new(),
             comments: Vec::new(),
             result: DocResult {
                 value: None,
-                error: Some(DocError { message: error.to_string(), span: error.span }),
+                error: Some(DocError::from_error(&error, src)),
                 stats,
                 truncated: None,
                 inputs: Vec::new(),
@@ -205,10 +250,14 @@ pub fn comment_layer(src: &str, stmts: &[Spanned]) -> Result<Vec<Comment>> {
     let li = LineIndex::new(src);
 
     // Statement line ranges, in source order.
-    let stmt_lines: Vec<(usize, usize)> =
-        stmts.iter().map(|s| (li.line(s.span.start), li.line(s.span.end))).collect();
-    let is_template: Vec<bool> =
-        stmts.iter().map(|s| matches!(s.expr, Expr::Template { .. })).collect();
+    let stmt_lines: Vec<(usize, usize)> = stmts
+        .iter()
+        .map(|s| (li.line(s.span.start), li.line(s.span.end)))
+        .collect();
+    let is_template: Vec<bool> = stmts
+        .iter()
+        .map(|s| matches!(s.expr, Expr::Template { .. }))
+        .collect();
 
     // Classify comments.
     struct C {
@@ -221,7 +270,11 @@ pub fn comment_layer(src: &str, stmts: &[Spanned]) -> Result<Vec<Comment>> {
         .map(|&span| {
             let line = li.line(span.start);
             let before = &src[li.line_start(line)..span.start];
-            C { span, line, own_line: before.trim().is_empty() }
+            C {
+                span,
+                line,
+                own_line: before.trim().is_empty(),
+            }
         })
         .collect();
 
@@ -325,9 +378,11 @@ pub fn assemble(
     let mut blocks = Vec::new();
 
     let push_emission = |blocks: &mut Vec<Block>, em: &Emission| match &em.output {
-        Output::Text(t) => {
-            blocks.push(Block::Note { text: t.clone(), syntax: None, stmt_span: em.stmt_span })
-        }
+        Output::Text(t) => blocks.push(Block::Note {
+            text: t.clone(),
+            syntax: None,
+            stmt_span: em.stmt_span,
+        }),
         Output::Note { text, syntax } => blocks.push(Block::Note {
             text: text.clone(),
             syntax: syntax.clone(),
@@ -352,7 +407,10 @@ pub fn assemble(
     for seg in &segs {
         match *seg {
             Seg::Code(span) => {
-                blocks.push(Block::Code { source: src[span.start..span.end].to_string(), span });
+                blocks.push(Block::Code {
+                    source: src[span.start..span.end].to_string(),
+                    span,
+                });
                 for (k, em) in emissions.iter().enumerate() {
                     if !used[k] && contains(span, em.stmt_span) {
                         used[k] = true;
@@ -381,10 +439,12 @@ pub fn assemble(
     let value = match (&error, &last) {
         (Some(_), _) => None,
         (None, Value::Unit) => None,
-        (None, v) => Some(DocValue { kind: value_kind(v).to_string(), text: v.to_string() }),
+        (None, v) => Some(DocValue {
+            kind: value_kind(v).to_string(),
+            text: v.to_string(),
+        }),
     };
-    let doc_error =
-        error.map(|e| DocError { message: e.to_string(), span: e.span });
+    let doc_error = error.map(|e| DocError::from_error(&e, src));
     let truncated = truncated.map(|(dropped, span)| Truncated {
         dropped,
         first_dropped_stmt_span: span,
@@ -394,7 +454,13 @@ pub fn assemble(
         meta,
         blocks,
         comments,
-        result: DocResult { value, error: doc_error, stats, truncated, inputs },
+        result: DocResult {
+            value,
+            error: doc_error,
+            stats,
+            truncated,
+            inputs,
+        },
     }
 }
 
@@ -449,20 +515,33 @@ impl Block {
                 "source": source,
                 "span": span_json(*span),
             }),
-            Block::Note { text, syntax, stmt_span } => serde_json::json!({
+            Block::Note {
+                text,
+                syntax,
+                stmt_span,
+            } => serde_json::json!({
                 "kind": "note",
                 "text": text,
                 "syntax": syntax,
                 "stmt_span": span_json(*stmt_span),
             }),
-            Block::Plot { title, text, charts, stmt_span } => serde_json::json!({
+            Block::Plot {
+                title,
+                text,
+                charts,
+                stmt_span,
+            } => serde_json::json!({
                 "kind": "plot",
                 "title": title,
                 "text": text,
                 "charts": charts,
                 "stmt_span": span_json(*stmt_span),
             }),
-            Block::Input { spec, value, stmt_span } => {
+            Block::Input {
+                spec,
+                value,
+                stmt_span,
+            } => {
                 let mut m = match spec.to_json_entry(*value, *stmt_span) {
                     serde_json::Value::Object(m) => m,
                     _ => serde_json::Map::new(),
@@ -480,6 +559,44 @@ impl Comment {
             "text": self.text,
             "self_span": span_json(self.self_span),
             "code_span": self.code_span.map(span_json),
+        })
+    }
+}
+
+impl DocResult {
+    fn to_json(&self) -> serde_json::Value {
+        let value = self
+            .value
+            .as_ref()
+            .map(|v| serde_json::json!({ "kind": v.kind, "text": v.text }));
+        let error = self.error.as_ref().map(|e| {
+            serde_json::json!({
+                "message": e.message,
+                "span": span_json(e.span),
+                "line": e.line,
+                "col": e.col,
+                "code": e.code,
+            })
+        });
+        let truncated = self.truncated.as_ref().map(|t| {
+            serde_json::json!({
+                "dropped": t.dropped,
+                "first_dropped_stmt_span": span_json(t.first_dropped_stmt_span),
+            })
+        });
+        let inputs: Vec<serde_json::Value> =
+            self.inputs.iter().map(ResolvedInput::to_json).collect();
+        serde_json::json!({
+            "value": value,
+            "error": error,
+            "stats": {
+                "forcings": self.stats.forcings,
+                "samples": self.stats.samples,
+                "ops": self.stats.ops,
+                "rng_draws": self.stats.rng_draws,
+            },
+            "truncated": truncated,
+            "inputs": inputs,
         })
     }
 }
@@ -560,8 +677,14 @@ mod tests {
         let src = "# c1\na = 1\n# c2\nb = 2";
         let d = doc(src);
         assert_eq!(d.comments.len(), 2);
-        assert_eq!(&src[d.comments[0].code_span.unwrap().start..d.comments[0].code_span.unwrap().end], "a = 1");
-        assert_eq!(&src[d.comments[1].code_span.unwrap().start..d.comments[1].code_span.unwrap().end], "b = 2");
+        assert_eq!(
+            &src[d.comments[0].code_span.unwrap().start..d.comments[0].code_span.unwrap().end],
+            "a = 1"
+        );
+        assert_eq!(
+            &src[d.comments[1].code_span.unwrap().start..d.comments[1].code_span.unwrap().end],
+            "b = 2"
+        );
     }
 
     #[test]
@@ -626,7 +749,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(spans.windows(2).all(|w| w[0] == w[1]), "all share one stmt_span");
+        assert!(
+            spans.windows(2).all(|w| w[0] == w[1]),
+            "all share one stmt_span"
+        );
     }
 
     #[test]
@@ -643,7 +769,12 @@ mod tests {
         let d = doc(src);
         assert_eq!(note_texts(&d), vec!["5"]);
         let root = src.find("f(5)").unwrap();
-        match d.blocks.iter().find(|b| matches!(b, Block::Note { .. })).unwrap() {
+        match d
+            .blocks
+            .iter()
+            .find(|b| matches!(b, Block::Note { .. }))
+            .unwrap()
+        {
             Block::Note { stmt_span, .. } => assert_eq!(stmt_span.start, root),
             _ => unreachable!(),
         }
@@ -655,9 +786,42 @@ mod tests {
     fn runtime_error_keeps_prior_blocks_and_spans_the_failure() {
         let src = "Print(\"a\")\nundefined_thing\nPrint(\"b\")";
         let d = doc(src);
-        assert_eq!(note_texts(&d), vec!["a"], "only emissions before the failure survive");
+        assert_eq!(
+            note_texts(&d),
+            vec!["a"],
+            "only emissions before the failure survive"
+        );
         let e = d.result.error.expect("a runtime error");
         assert_eq!(e.span.start, src.find("undefined_thing").unwrap());
+    }
+
+    #[test]
+    fn error_carries_line_col_and_code_in_the_document_and_json() {
+        // A mid-file undefined name: the DocError exposes 1-based line/col (finding D1) and the
+        // structured code (finding D2), and both reach the JSON wire format.
+        let src = "a = 1\ny = foo + 1";
+        let d = doc(src);
+        let e = d.result.error.as_ref().expect("a runtime error");
+        assert_eq!((e.line, e.col), (2, 5), "points at `foo` on line 2, col 5");
+        assert_eq!(e.code, "undefined_name");
+        let at = src.find("foo").unwrap();
+        assert_eq!(e.span.start, at, "byte span retained for back-compat");
+
+        let json = d.to_json();
+        let err = &json["result"]["error"];
+        assert_eq!(err["line"], 2);
+        assert_eq!(err["col"], 5);
+        assert_eq!(err["code"], "undefined_name");
+        assert_eq!(err["span"]["start"], at);
+    }
+
+    #[test]
+    fn lex_error_line_col_reflects_frontmatter_and_position() {
+        // A malformed token on line 3 reports line 3 (the byte→line map counts the newlines).
+        let d = doc("a = 1\nb = 2\nc = ?");
+        let e = d.result.error.expect("a parse/lex error");
+        assert_eq!(e.line, 3);
+        assert_eq!(e.code, "unexpected_char");
     }
 
     #[test]
@@ -682,34 +846,5 @@ mod tests {
         // Ends in a plot (unit) → no echoed value, same as the CLI's no-echo rule.
         let d = doc("X ~ rand::unif_int(1,6)\nplot::histogram(X)");
         assert!(d.result.value.is_none());
-    }
-}
-
-impl DocResult {
-    fn to_json(&self) -> serde_json::Value {
-        let value = self.value.as_ref().map(|v| serde_json::json!({ "kind": v.kind, "text": v.text }));
-        let error = self
-            .error
-            .as_ref()
-            .map(|e| serde_json::json!({ "message": e.message, "span": span_json(e.span) }));
-        let truncated = self.truncated.as_ref().map(|t| {
-            serde_json::json!({
-                "dropped": t.dropped,
-                "first_dropped_stmt_span": span_json(t.first_dropped_stmt_span),
-            })
-        });
-        let inputs: Vec<serde_json::Value> = self.inputs.iter().map(ResolvedInput::to_json).collect();
-        serde_json::json!({
-            "value": value,
-            "error": error,
-            "stats": {
-                "forcings": self.stats.forcings,
-                "samples": self.stats.samples,
-                "ops": self.stats.ops,
-                "rng_draws": self.stats.rng_draws,
-            },
-            "truncated": truncated,
-            "inputs": inputs,
-        })
     }
 }

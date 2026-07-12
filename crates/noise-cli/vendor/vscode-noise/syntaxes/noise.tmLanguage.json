@@ -57,7 +57,7 @@
     },
     "distributions": {
       "name": "support.function.distribution.noise",
-      "match": "\\b(unif_int|unif|normal_int|normal_complex|normal|bernoulli|poisson|geometric|exponential_int|exponential|categorical|rotation|permutation)\\b"
+      "match": "\\b(unif_int|unif|normal_int|normal_complex|normal|bernoulli|poisson|geometric|exponential_int|exponential|categorical|rotation|permutation|empirical|block_bootstrap)\\b"
     },
     "queries": {
       "name": "support.function.builtin.noise",
@@ -65,7 +65,7 @@
     },
     "builtins": {
       "name": "support.function.noise",
-      "match": "\\b(pi|e|i|j|sqrt|exp|abs|arg|conj|re|im|floor|ceil|round|log10|log|sin|cos|atan|sign|gcd|modpow|sum|count|any|all|max|min|mean|dot|vdot|normsq|norm|vadd|vsub|vsign|matvec|transpose|adjoint|normalize|outer|quantize|has_duplicate|mse|ones|zeros|iota|scale|sine|cosine|noise_white|sample)\\b"
+      "match": "\\b(pi|e|i|j|sqrt|exp|abs|arg|conj|re|im|floor|ceil|round|log10|log|sin|cos|atan|sign|gcd|modpow|sum|count_duplicates|count|any|all|max|min|mean|dot|vdot|normsq|norm|transpose|adjoint|normalize|has_duplicates|mse|ones|zeros|iota|outer|quantize|prod|cumsum|cumprod|cummax|cummin|sine|cosine|sample|noise_white_complex|noise_white|noise_brown|noise_pink|noise_ou|set_max_samples|set_max_opts|set_max_ops|set_resolution)\\b"
     },
     "operators": {
       "patterns": [

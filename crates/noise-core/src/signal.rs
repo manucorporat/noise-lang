@@ -14,6 +14,7 @@
 //! mention the SAME RV nodes (`static - static` is exactly 0). The undrawn generator
 //! (`Value::Noise`) never enters a tree: `~` is the only way in.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::{BinOp, UnOp};
@@ -111,24 +112,54 @@ impl SigExpr {
 
     /// Whether the tree contains a drawn-noise leaf (⇒ materializes into RV nodes, needs the
     /// engine; a noise-free tree folds to plain `f64`s via [`SigExpr::sample_f64`]).
+    ///
+    /// The tree is an `Rc` **DAG** — `for k in 0..40 { s = s + s }` shares one child under both
+    /// arms of every `Binop`, so a naive tree walk is `O(2^depth)` and hangs (finding A3). We
+    /// memoize per node by `Rc` identity (pointer), making it `O(distinct nodes)`.
     pub fn has_noise(&self) -> bool {
-        match self {
+        let mut cache: HashMap<*const SigExpr, bool> = HashMap::new();
+        self.has_noise_memo(&mut cache)
+    }
+
+    fn has_noise_memo(&self, cache: &mut HashMap<*const SigExpr, bool>) -> bool {
+        let key = self as *const SigExpr;
+        if let Some(&v) = cache.get(&key) {
+            return v;
+        }
+        let v = match self {
             SigExpr::Wave { .. } | SigExpr::Konst(_) => false,
             SigExpr::Noise { .. } => true,
-            SigExpr::Unary(_, a) => a.has_noise(),
-            SigExpr::Binop(_, a, b) | SigExpr::Atan2(a, b) => a.has_noise() || b.has_noise(),
-        }
+            SigExpr::Unary(_, a) => a.has_noise_memo(cache),
+            SigExpr::Binop(_, a, b) | SigExpr::Atan2(a, b) => {
+                a.has_noise_memo(cache) || b.has_noise_memo(cache)
+            }
+        };
+        cache.insert(key, v);
+        v
     }
 
     /// Materialize `n` samples of a **deterministic** tree (no `Noise` leaves — the caller
-    /// checks [`SigExpr::has_noise`]; a noise leaf here is a bug, not user error).
+    /// checks [`SigExpr::has_noise`]; a noise leaf here is a bug, not user error). Each sample
+    /// folds the shared-`Rc` DAG with a per-index memo keyed by node identity, so a diamond DAG
+    /// costs `O(n · distinct nodes)` rather than `O(n · 2^depth)` (finding A3).
     pub fn sample_f64(&self, n: usize) -> Vec<f64> {
-        (0..n).map(|k| self.eval_at(k, n)).collect()
+        let mut cache: HashMap<*const SigExpr, f64> = HashMap::new();
+        (0..n)
+            .map(|k| {
+                cache.clear();
+                self.eval_at(k, n, &mut cache)
+            })
+            .collect()
     }
 
-    /// One deterministic sample: the tree folded at index `k` of an `n`-sample window.
-    fn eval_at(&self, k: usize, n: usize) -> f64 {
-        match self {
+    /// One deterministic sample: the tree folded at index `k` of an `n`-sample window. `cache`
+    /// memoizes each node's value at this `k` by `Rc` identity (the caller clears it per index).
+    fn eval_at(&self, k: usize, n: usize, cache: &mut HashMap<*const SigExpr, f64>) -> f64 {
+        let key = self as *const SigExpr;
+        if let Some(&v) = cache.get(&key) {
+            return v;
+        }
+        let v = match self {
             SigExpr::Wave { wave, freq } => {
                 let phase = std::f64::consts::TAU * freq * (k as f64) / (n as f64);
                 match wave {
@@ -137,11 +168,23 @@ impl SigExpr {
                 }
             }
             SigExpr::Konst(c) => *c,
-            SigExpr::Noise { .. } => unreachable!("sample_f64 on a noise-bearing tree"),
-            SigExpr::Unary(op, a) => apply_unary(*op, a.eval_at(k, n)),
-            SigExpr::Binop(op, a, b) => scalar_binop(*op, a.eval_at(k, n), b.eval_at(k, n)),
-            SigExpr::Atan2(y, x) => y.eval_at(k, n).atan2(x.eval_at(k, n)),
-        }
+            // Caller contract (finding F10): `sample_f64`/`eval_at` are only ever called on
+            // noise-*free* trees — a noise-bearing tree is drawn through `Engine::materialize_sig`
+            // (the realization cache), never folded deterministically. A `debug_assert!` documents
+            // and checks the contract in tests; in release we degrade to a defined `NaN` sample
+            // rather than aborting the process on a would-be-impossible input.
+            SigExpr::Noise { .. } => {
+                debug_assert!(false, "sample_f64/eval_at reached a Noise leaf — a noise-bearing tree must go through Engine::materialize_sig");
+                f64::NAN
+            }
+            SigExpr::Unary(op, a) => apply_unary(*op, a.eval_at(k, n, cache)),
+            SigExpr::Binop(op, a, b) => {
+                scalar_binop(*op, a.eval_at(k, n, cache), b.eval_at(k, n, cache))
+            }
+            SigExpr::Atan2(y, x) => y.eval_at(k, n, cache).atan2(x.eval_at(k, n, cache)),
+        };
+        cache.insert(key, v);
+        v
     }
 }
 
@@ -171,41 +214,44 @@ pub fn apply_unary(op: SigUnOp, x: f64) -> f64 {
 }
 
 /// Scalar binary kernel for the deferred arithmetic (matches the evaluator's IEEE-754 behaviour;
-/// comparisons yield 0/1 like every signal-land boolean).
+/// comparisons yield 0/1 like every signal-land boolean). A thin alias for the shared kernel
+/// (finding F4) so the signal folder can never drift from the VM / const-fold / simplifier.
 #[inline]
 pub fn scalar_binop(op: BinOp, a: f64, b: f64) -> f64 {
-    match op {
-        BinOp::Add => a + b,
-        BinOp::Sub => a - b,
-        BinOp::Mul => a * b,
-        BinOp::Div => a / b,
-        BinOp::Mod => a - b * (a / b).floor(),
-        BinOp::Pow => a.powf(b),
-        BinOp::Lt => (a < b) as i32 as f64,
-        BinOp::Gt => (a > b) as i32 as f64,
-        BinOp::Le => (a <= b) as i32 as f64,
-        BinOp::Ge => (a >= b) as i32 as f64,
-        BinOp::Eq => (a == b) as i32 as f64,
-        BinOp::Ne => (a != b) as i32 as f64,
-        BinOp::And => ((a != 0.0) && (b != 0.0)) as i32 as f64,
-        BinOp::Or => ((a != 0.0) || (b != 0.0)) as i32 as f64,
-    }
+    crate::num::fold_binop(op, a, b)
 }
+
+/// Node budget for [`SigExpr`]'s `Display`. The tree is a shared-`Rc` DAG printed *as a tree*, so a
+/// diamond DAG (`for k in 0..40 { s = s + s }`) would emit `O(2^depth)` characters and OOM/hang
+/// (finding A3). Past this many emitted nodes the formatter prints `…` and stops — a printed signal
+/// is a diagnostic, not a serialization, so an abbreviation is the right behavior for a huge tree.
+const FMT_NODE_BUDGET: usize = 10_000;
 
 impl std::fmt::Display for SigExpr {
     /// `<signal 1 + 0.3*sine(3)>` — the tree in infix form, so a printed signal reads like the
     /// expression that built it.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "<signal ")?;
-        fmt_expr(self, f)?;
+        let mut budget = FMT_NODE_BUDGET;
+        fmt_expr(self, f, &mut budget)?;
         write!(f, ">")
     }
 }
 
-fn fmt_expr(e: &SigExpr, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+fn fmt_expr(e: &SigExpr, f: &mut std::fmt::Formatter<'_>, budget: &mut usize) -> std::fmt::Result {
+    if *budget == 0 {
+        return write!(f, "…");
+    }
+    *budget -= 1;
     match e {
-        SigExpr::Wave { wave: Wave::Sine, freq } => write!(f, "sine({})", crate::value::format_num(*freq)),
-        SigExpr::Wave { wave: Wave::Cosine, freq } => {
+        SigExpr::Wave {
+            wave: Wave::Sine,
+            freq,
+        } => write!(f, "sine({})", crate::value::format_num(*freq)),
+        SigExpr::Wave {
+            wave: Wave::Cosine,
+            freq,
+        } => {
             write!(f, "cosine({})", crate::value::format_num(*freq))
         }
         SigExpr::Konst(c) => write!(f, "{}", crate::value::format_num(*c)),
@@ -226,12 +272,12 @@ fn fmt_expr(e: &SigExpr, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 SigUnOp::Un(UnOp::Ln) => "log",
             };
             write!(f, "{name}(")?;
-            fmt_expr(a, f)?;
+            fmt_expr(a, f, budget)?;
             write!(f, ")")
         }
         SigExpr::Binop(op, a, b) => {
             write!(f, "(")?;
-            fmt_expr(a, f)?;
+            fmt_expr(a, f, budget)?;
             let sym = match op {
                 BinOp::Add => "+",
                 BinOp::Sub => "-",
@@ -249,14 +295,14 @@ fn fmt_expr(e: &SigExpr, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 BinOp::Or => "||",
             };
             write!(f, " {sym} ")?;
-            fmt_expr(b, f)?;
+            fmt_expr(b, f, budget)?;
             write!(f, ")")
         }
         SigExpr::Atan2(y, x) => {
             write!(f, "atan2(")?;
-            fmt_expr(y, f)?;
+            fmt_expr(y, f, budget)?;
             write!(f, ", ")?;
-            fmt_expr(x, f)?;
+            fmt_expr(x, f, budget)?;
             write!(f, ")")
         }
     }

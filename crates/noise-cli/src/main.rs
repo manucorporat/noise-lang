@@ -1,85 +1,142 @@
 //! `noise` CLI: run a file (`noise file.noise`), start a REPL (`noise`), or install
 //! the editor integration (`noise ide-integration`).
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use noise_core::{Engine, InputValue};
+
+/// Process exit codes (BSD `sysexits`-style, the subset a CLI needs): `0` success, `1` a program
+/// or I/O failure (parse/runtime error, unreadable file), `2` a *usage* error (bad flags/arguments).
+/// Separating usage (2) from runtime (1) is what lets scripts tell "you called me wrong" apart from
+/// "the program failed" (finding G2).
+const EXIT_RUNTIME: i32 = 1;
+const EXIT_USAGE: i32 = 2;
 
 /// The VS Code / Cursor syntax extension, baked into the binary so `ide-integration`
 /// is self-contained no matter where `noise` runs from. These are a vendored copy of
 /// `editors/vscode-noise/` kept in sync by `build.rs` — vendored (rather than reached
 /// via `../../../editors`) so the files survive the `cargo publish` tarball.
 const EXT_PKG_JSON: &str = include_str!("../vendor/vscode-noise/package.json");
-const EXT_LANG_CONFIG: &str =
-    include_str!("../vendor/vscode-noise/language-configuration.json");
-const EXT_TMLANGUAGE: &str =
-    include_str!("../vendor/vscode-noise/syntaxes/noise.tmLanguage.json");
+const EXT_LANG_CONFIG: &str = include_str!("../vendor/vscode-noise/language-configuration.json");
+const EXT_TMLANGUAGE: &str = include_str!("../vendor/vscode-noise/syntaxes/noise.tmLanguage.json");
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--help`/`-h` and `--version` are honored in ANY position (finding G1) and win over everything.
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print_help();
+        return;
+    }
+    if args.iter().any(|a| a == "--version") {
+        print_version();
+        return;
+    }
     match args.first().map(String::as_str) {
-        Some("-h") | Some("--help") => print_help(),
         Some("ide-integration") => install_ide_integration(),
-        Some("validate") => match args.get(1) {
-            Some(path) => validate_file(path),
-            None => {
-                eprintln!("error: `validate` needs a file path: noise validate <file>");
-                std::process::exit(1);
-            }
-        },
-        Some(_) => run_cli(&args),
-        None => repl(),
+        Some("validate") => run_validate(&args[1..]),
+        // Everything else is "run a program": a file path plus `--input` flags, or — when nothing is
+        // given and stdin is piped — a program read from stdin.
+        _ => run_or_repl(&args),
     }
 }
 
-/// Parse the `noise <file> [--input k=v]...` invocation, then run it. Splits `--input name=value`
-/// flags (repeatable) from the single positional file path.
-fn run_cli(args: &[String]) {
-    let mut path: Option<&str> = None;
-    let mut inputs: Vec<(String, InputValue)> = Vec::new();
+/// Print a usage error to stderr followed by the short usage, and exit with [`EXIT_USAGE`] (2).
+/// A usage error is the caller invoking `noise` wrong (bad/unknown flags, missing arguments) — kept
+/// distinct from a program failure (exit 1) so scripts can tell them apart (finding G2).
+fn usage_error(msg: &str) -> ! {
+    eprintln!("error: {msg}");
+    eprintln!("run `noise --help` for usage.");
+    std::process::exit(EXIT_USAGE);
+}
+
+/// The parsed form of a run/validate invocation: an optional positional file path and the repeatable
+/// `--input name=value` overrides. Pure and testable (finding G6) — it never touches the filesystem
+/// or exits the process; the caller decides what to do with the result.
+#[derive(Debug, Default, PartialEq)]
+struct Args {
+    file: Option<String>,
+    inputs: Vec<(String, InputValue)>,
+}
+
+/// Parse `--input name=value` / `-i name=value` / `--input=name=value` overrides and a single
+/// positional file path out of `args`. An unknown `-`-prefixed argument is a usage error (rather
+/// than being silently treated as a file path — finding G1); a second positional is a usage error.
+fn parse_args(args: &[String]) -> Result<Args, String> {
+    let mut out = Args::default();
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
         if a == "--input" || a == "-i" {
-            match args.get(i + 1) {
-                Some(kv) => match parse_input_arg(kv) {
-                    Ok(pair) => inputs.push(pair),
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        std::process::exit(1);
-                    }
-                },
-                None => {
-                    eprintln!("error: `{a}` needs a `name=value` argument");
-                    std::process::exit(1);
-                }
-            }
+            let kv = args
+                .get(i + 1)
+                .ok_or_else(|| format!("`{a}` needs a `name=value` argument"))?;
+            out.inputs.push(parse_input_arg(kv)?);
             i += 2;
         } else if let Some(kv) = a.strip_prefix("--input=") {
-            match parse_input_arg(kv) {
-                Ok(pair) => inputs.push(pair),
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            }
+            out.inputs.push(parse_input_arg(kv)?);
             i += 1;
-        } else if path.is_none() {
-            path = Some(a);
+        } else if a.starts_with('-') && a != "-" {
+            // An unknown flag is a usage error — not a file path (`noise --bogus`, finding G1).
+            // (`-` alone is allowed through as a positional: the conventional "stdin" placeholder.)
+            return Err(format!("unknown option {a:?}"));
+        } else if out.file.is_none() {
+            out.file = Some(a.clone());
             i += 1;
         } else {
-            eprintln!("error: unexpected argument {a:?}");
-            std::process::exit(1);
+            return Err(format!(
+                "unexpected argument {a:?} (only one file path is accepted)"
+            ));
         }
     }
-    match path {
-        Some(p) => run_file(p, inputs),
+    Ok(out)
+}
+
+/// `noise [file] [--input k=v]...` — run a program. With a file path, run it. With no path: if stdin
+/// is piped (not a terminal), read the whole program from stdin and run it; otherwise start the REPL
+/// (finding G2 — piped input no longer drops into the REPL and pollutes the stream with `»` prompts).
+fn run_or_repl(args: &[String]) {
+    let parsed = parse_args(args).unwrap_or_else(|e| usage_error(&e));
+    match parsed.file {
+        Some(p) => run_file(&p, parsed.inputs),
+        None if !io::stdin().is_terminal() => run_stdin(parsed.inputs),
         None => {
-            eprintln!("error: no file to run");
-            std::process::exit(1);
+            if !parsed.inputs.is_empty() {
+                usage_error("`--input` needs a program (a file, or piped stdin) to run against");
+            }
+            repl()
         }
     }
+}
+
+/// `noise validate <file> [--input k=v]...` — parse + build the graph without running. Now honors
+/// `--input` overrides (finding G2) so a program's inputs can be validated at specific values.
+fn run_validate(args: &[String]) {
+    let parsed = parse_args(args).unwrap_or_else(|e| usage_error(&e));
+    match parsed.file {
+        Some(p) => validate_file(&p, parsed.inputs),
+        None => usage_error("`validate` needs a file path: noise validate <file>"),
+    }
+}
+
+/// Read a whole program from stdin and run it (the piped, non-interactive path).
+fn run_stdin(inputs: Vec<(String, InputValue)>) {
+    let mut src = String::new();
+    if let Err(e) = io::stdin().read_to_string(&mut src) {
+        eprintln!("error: cannot read program from stdin: {e}");
+        std::process::exit(EXIT_RUNTIME);
+    }
+    let mut engine = Engine::new();
+    engine.set_input_overrides(inputs);
+    let doc = engine.run_to_document(&src);
+    if render_document(&doc, Some((&src, "<stdin>"))) {
+        std::process::exit(EXIT_RUNTIME);
+    }
+}
+
+fn print_version() {
+    // The tool is invoked as `noise` (the crate is `noise-cli`), so present the tool name.
+    println!("noise {}", env!("CARGO_PKG_VERSION"));
 }
 
 /// Parse a `name=value` input override. `true`/`false` become bools; everything else parses as a
@@ -106,13 +163,18 @@ fn parse_input_arg(kv: &str) -> std::result::Result<(String, InputValue), String
 }
 
 fn print_help() {
-    println!("noise — the Noise probabilistic language");
+    println!(
+        "noise — the Noise probabilistic language (v{})",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("usage:");
-    println!("  noise                    start a REPL");
-    println!("  noise <file>             run a program file");
-    println!("  noise <file> --input k=v tune an inline input (repeatable)");
-    println!("  noise validate <file>    parse and build the graph without producing output");
-    println!("  noise ide-integration    install the VS Code / Cursor syntax extension");
+    println!("  noise                       start a REPL (or run a program piped on stdin)");
+    println!("  noise <file>                run a program file");
+    println!("  noise <file> --input k=v    tune an inline input (repeatable; also -i k=v)");
+    println!("  noise validate <file>       parse and build the graph without producing output");
+    println!("  noise ide-integration       install the VS Code / Cursor syntax extension");
+    println!("  noise --version             print the version");
+    println!("  noise --help, -h            show this help");
 }
 
 /// Install the bundled syntax-highlighting extension into every editor we can find.
@@ -144,7 +206,10 @@ fn install_ide_integration() {
         // points at a source tree — leave it be rather than writing through it.
         if let Ok(meta) = std::fs::symlink_metadata(&dest) {
             if meta.file_type().is_symlink() {
-                println!("• {name}: already linked (dev install) → {}", dest.display());
+                println!(
+                    "• {name}: already linked (dev install) → {}",
+                    dest.display()
+                );
                 installed += 1;
                 continue;
             }
@@ -159,7 +224,9 @@ fn install_ide_integration() {
     }
 
     if installed == 0 {
-        eprintln!("no supported editor found (looked for ~/.cursor, ~/.vscode, ~/.vscode-insiders).");
+        eprintln!(
+            "no supported editor found (looked for ~/.cursor, ~/.vscode, ~/.vscode-insiders)."
+        );
         std::process::exit(1);
     }
     println!("\nReload the editor window to activate: Cmd/Ctrl+Shift+P → \"Reload Window\".");
@@ -170,7 +237,10 @@ fn write_extension(dest: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dest.join("syntaxes"))?;
     std::fs::write(dest.join("package.json"), EXT_PKG_JSON)?;
     std::fs::write(dest.join("language-configuration.json"), EXT_LANG_CONFIG)?;
-    std::fs::write(dest.join("syntaxes").join("noise.tmLanguage.json"), EXT_TMLANGUAGE)?;
+    std::fs::write(
+        dest.join("syntaxes").join("noise.tmLanguage.json"),
+        EXT_TMLANGUAGE,
+    )?;
     Ok(())
 }
 
@@ -185,7 +255,7 @@ fn run_file(path: &str, inputs: Vec<(String, InputValue)>) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: cannot read {path}: {e}");
-            std::process::exit(1);
+            std::process::exit(EXIT_RUNTIME);
         }
     };
     let mut engine = Engine::new();
@@ -194,15 +264,17 @@ fn run_file(path: &str, inputs: Vec<(String, InputValue)>) {
     // Render the one `Document`: notes as text and plots as their one-line text cards, in emission
     // order, then the final value (or the error). The CLI is just another renderer of the same
     // structure the playground uses (PLAN-LITERATE §D5).
-    let errored = render_document(&doc);
+    let errored = render_document(&doc, Some((&src, path)));
     if errored {
-        std::process::exit(1);
+        std::process::exit(EXIT_RUNTIME);
     }
 }
 
 /// Render a `Document` to the terminal: emitted notes/plots in order, then the final value or the
 /// error. Code blocks are the input file, so they're not re-printed. Returns whether the run errored.
-fn render_document(doc: &noise_core::doc::Document) -> bool {
+/// `source`, when present, is `(src, name)` used to render a `name:line:col` header and a caret line
+/// under the offending span (finding D1).
+fn render_document(doc: &noise_core::doc::Document, source: Option<(&str, &str)>) -> bool {
     use noise_core::doc::Block;
     for block in &doc.blocks {
         match block {
@@ -216,6 +288,8 @@ fn render_document(doc: &noise_core::doc::Document) -> bool {
                 };
                 println!("input {} = {shown}", spec.name);
             }
+            // `Block` is `#[non_exhaustive]` (E2): ignore any future block kind this CLI predates.
+            _ => {}
         }
     }
     if let Some(t) = &doc.result.truncated {
@@ -223,7 +297,10 @@ fn render_document(doc: &noise_core::doc::Document) -> bool {
     }
     match &doc.result.error {
         Some(e) => {
-            eprintln!("{}", e.message);
+            match source {
+                Some((src, name)) => eprintln!("{}", render_error(src, name, e)),
+                None => eprintln!("{}", e.message),
+            }
             true
         }
         None => {
@@ -236,25 +313,94 @@ fn render_document(doc: &noise_core::doc::Document) -> bool {
     }
 }
 
+/// Render a spanned error the rustc way: a `name:line:col: message` header, then a two-line caret
+/// block underlining the offending span in its source line (finding D1). Columns are character-based
+/// (UTF-8-safe, coordinating with D4), and a multi-line span points at its start line. Example:
+///
+/// ```text
+/// prog.noise:2:5: runtime error: undefined variable 'foo'
+///   |
+/// 2 | y = foo + 1
+///   |     ^^^
+/// ```
+fn render_error(src: &str, name: &str, err: &noise_core::doc::DocError) -> String {
+    render_span_error(src, name, &err.message, err.span)
+}
+
+/// Core caret renderer shared by the run path (a `DocError`) and `validate` (a raw `NoiseError`).
+fn render_span_error(
+    src: &str,
+    name: &str,
+    message: &str,
+    span: noise_core::error::Span,
+) -> String {
+    use std::fmt::Write;
+    let (line, col) = span.line_col(src);
+    // The engine's message ends with a redundant " (at start..end)" byte range; the line:col header
+    // and caret replace it, so trim it for the CLI.
+    let msg = strip_span_suffix(message);
+
+    let mut out = String::new();
+    let _ = writeln!(out, "{name}:{line}:{col}: {msg}");
+
+    let src_line = src.lines().nth(line.saturating_sub(1)).unwrap_or("");
+    let gutter = line.to_string();
+    let pad = " ".repeat(gutter.len());
+    let _ = writeln!(out, "{pad} |");
+    let _ = writeln!(out, "{gutter} | {src_line}");
+
+    // Indent the caret to `col`, preserving tabs so it lines up in a tab-using terminal.
+    let indent: String = src_line
+        .chars()
+        .take(col.saturating_sub(1))
+        .map(|c| if c == '\t' { '\t' } else { ' ' })
+        .collect();
+    // Caret width = the span's character count, clamped to what remains on this line (so a
+    // multi-line span just underlines to end of the start line), at least one `^`.
+    let span_chars = src
+        .get(span.start..span.end)
+        .map(|s| s.chars().count())
+        .unwrap_or(0);
+    let line_remaining = src_line
+        .chars()
+        .count()
+        .saturating_sub(col.saturating_sub(1));
+    let carets = "^".repeat(span_chars.min(line_remaining).max(1));
+    let _ = write!(out, "{pad} | {indent}{carets}");
+    out
+}
+
+/// Drop a trailing " (at start..end)" byte-range suffix from an engine error message (the CLI shows
+/// line:col + a caret instead).
+fn strip_span_suffix(msg: &str) -> &str {
+    if msg.ends_with(')') {
+        if let Some(idx) = msg.rfind(" (at ") {
+            return &msg[..idx];
+        }
+    }
+    msg
+}
+
 /// Parse `path` and evaluate it to build the sample-DAG, reporting any errors — but without
 /// running the Monte Carlo (`P`/`E`/`Var`/`Q` skip sampling) and without printing the program's
 /// output or its final value. This catches syntax errors and graph-construction errors (undefined
 /// names, type/shape mismatches, etc.) that pure parsing would miss, so it's a fast "does this
 /// program hold together?" check that finishes regardless of the program's sample budget.
-fn validate_file(path: &str) {
+fn validate_file(path: &str, inputs: Vec<(String, InputValue)>) {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: cannot read {path}: {e}");
-            std::process::exit(1);
+            std::process::exit(EXIT_RUNTIME);
         }
     };
     let mut engine = Engine::new();
+    engine.set_input_overrides(inputs);
     match engine.check(&src) {
         Ok(_) => println!("✓ {path}: valid"),
         Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
+            eprintln!("{}", render_span_error(&src, path, &e.to_string(), e.span));
+            std::process::exit(EXIT_RUNTIME);
         }
     }
 }
@@ -284,7 +430,163 @@ fn repl() {
             continue;
         }
         let doc = engine.run_to_document(line);
-        render_document(&doc);
+        render_document(&doc, Some((line, "<repl>")));
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noise_core::Engine;
+
+    /// Render the caret for the first error a program produces (the run path a user hits).
+    fn error_caret(src: &str, name: &str) -> String {
+        let doc = Engine::new().run_to_document(src);
+        let e = doc.result.error.expect("expected an error");
+        render_error(src, name, &e)
+    }
+
+    #[test]
+    fn strip_span_suffix_drops_only_the_trailing_byte_range() {
+        assert_eq!(
+            strip_span_suffix("runtime error: undefined variable 'x' (at 4..5)"),
+            "runtime error: undefined variable 'x'"
+        );
+        // no suffix → unchanged
+        assert_eq!(strip_span_suffix("boom"), "boom");
+        // a parenthesized message with no " (at " is untouched
+        assert_eq!(strip_span_suffix("f(x)"), "f(x)");
+    }
+
+    #[test]
+    fn caret_points_under_a_mid_file_error() {
+        // `foo` is undefined; it sits on line 2, column 5 — the caret must land under it.
+        let src = "a = 1\ny = foo + 1\n";
+        let rendered = error_caret(src, "prog.noise");
+        let expected = "\
+prog.noise:2:5: runtime error: undefined variable 'foo'
+  |
+2 | y = foo + 1
+  |     ^^^";
+        assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn caret_is_utf8_safe_and_does_not_panic() {
+        // A stray non-ASCII char (finding D4) must render a caret under the actual glyph without
+        // panicking on a non-char-boundary slice — the whole point of the D4 span fix.
+        let src = "x = 1\nπ = 3\n";
+        let rendered = error_caret(src, "u.noise");
+        let expected = "\
+u.noise:2:1: unexpected character 'π'
+  |
+2 | π = 3
+  | ^";
+        assert_eq!(rendered, expected);
+    }
+
+    // === argv parsing (findings G1/G2/G6) ===================================================
+
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_input_arg_numbers_bools_and_errors() {
+        assert_eq!(
+            parse_input_arg("dice=6").unwrap(),
+            ("dice".into(), InputValue::Num(6.0))
+        );
+        // whitespace around name/value is trimmed
+        assert_eq!(
+            parse_input_arg(" k = 2.5 ").unwrap(),
+            ("k".into(), InputValue::Num(2.5))
+        );
+        assert_eq!(
+            parse_input_arg("flag=true").unwrap(),
+            ("flag".into(), InputValue::Bool(true))
+        );
+        assert_eq!(
+            parse_input_arg("flag=false").unwrap(),
+            ("flag".into(), InputValue::Bool(false))
+        );
+        // no `=`, empty name, and non-number/bool value are all errors
+        assert!(parse_input_arg("noequals").is_err());
+        assert!(parse_input_arg("=5").is_err());
+        assert!(parse_input_arg("k=notanum").is_err());
+    }
+
+    #[test]
+    fn parse_args_splits_file_and_inputs() {
+        // file + repeated inputs in both `--input k=v` and `--input=k=v` and `-i` forms
+        let got = parse_args(&s(&[
+            "prog.noise",
+            "--input",
+            "a=1",
+            "--input=b=2",
+            "-i",
+            "c=true",
+        ]))
+        .unwrap();
+        assert_eq!(got.file.as_deref(), Some("prog.noise"));
+        assert_eq!(
+            got.inputs,
+            vec![
+                ("a".into(), InputValue::Num(1.0)),
+                ("b".into(), InputValue::Num(2.0)),
+                ("c".into(), InputValue::Bool(true)),
+            ]
+        );
+        // inputs may precede the file
+        assert_eq!(
+            parse_args(&s(&["-i", "n=3", "p.noise"]))
+                .unwrap()
+                .file
+                .as_deref(),
+            Some("p.noise")
+        );
+        // no args at all → no file, no inputs (the REPL/stdin case)
+        assert_eq!(parse_args(&[]).unwrap(), Args::default());
+    }
+
+    #[test]
+    fn parse_args_rejects_unknown_flags_and_extra_positionals() {
+        // an unknown `-`-flag is a usage error, NOT a file path (finding G1)
+        assert!(parse_args(&s(&["--version"])).is_err()); // handled earlier in main, never a file
+        assert!(parse_args(&s(&["--bogus"])).is_err());
+        assert!(parse_args(&s(&["-x"])).is_err());
+        // `--input` with no value is a usage error
+        assert!(parse_args(&s(&["--input"])).is_err());
+        // a second positional file is a usage error
+        assert!(parse_args(&s(&["a.noise", "b.noise"])).is_err());
+        // a bad input value is surfaced as an error (routed to exit 2 by the caller)
+        assert!(parse_args(&s(&["--input", "k=nope"])).is_err());
+    }
+
+    #[test]
+    fn parse_args_allows_bare_dash_as_positional() {
+        // `-` alone is the conventional stdin placeholder, not an unknown flag.
+        assert_eq!(parse_args(&s(&["-"])).unwrap().file.as_deref(), Some("-"));
+    }
+
+    /// Finding G3: the CLI ships a vendored copy of the editor grammar (baked in via `include_str!`)
+    /// so it survives the `cargo publish` tarball. The build script verifies the whole extension is
+    /// in sync; this test double-checks the grammar specifically as a CI signal, comparing the
+    /// baked-in vendored bytes against the canonical source on disk. Skips when the canonical tree
+    /// isn't present (a packaged build), where the vendored snapshot is authoritative.
+    #[test]
+    fn vendored_grammar_matches_canonical() {
+        let canonical = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../editors/vscode-noise/syntaxes/noise.tmLanguage.json"
+        );
+        let Ok(on_disk) = std::fs::read_to_string(canonical) else {
+            eprintln!("canonical grammar absent; skipping (packaged build)");
+            return;
+        };
+        assert_eq!(
+            on_disk, EXT_TMLANGUAGE,
+            "the vendored TextMate grammar is stale — run crates/noise-cli/vendor/sync.sh and commit"
+        );
+    }
+}

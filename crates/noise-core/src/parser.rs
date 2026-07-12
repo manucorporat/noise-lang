@@ -14,10 +14,23 @@ use crate::ast::*;
 use crate::error::{NoiseError, Result, Span};
 use crate::lexer::{tokenize, TokKind, Token};
 
+/// Maximum recursive-descent nesting depth. Deeply nested source — `((((…))))`, a long unary
+/// `-`/`~`/`!` chain, a right-leaning `^` tower, or nested `[`/`{`/`if` — recurses the parser one
+/// frame per level; without a ceiling a few thousand characters of input blow the call stack and
+/// **abort the process** (worse than a panic; the wasm playground's stack is far smaller than the
+/// native 8 MiB). Past this limit the parser returns a spanned error instead. Kept well below what
+/// even a small (1–2 MiB) stack can hold, and far above any hand-written expression's nesting.
+const MAX_PARSE_DEPTH: usize = 256;
+
 pub fn parse(src: &str) -> Result<Program> {
     let tokens = tokenize(src)?;
     let newlines = newline_flags(src, &tokens);
-    let mut p = Parser { tokens, newlines, pos: 0 };
+    let mut p = Parser {
+        tokens,
+        newlines,
+        pos: 0,
+        depth: 0,
+    };
     let stmts = p.parse_stmts(&[TokKind::Eof])?;
     p.expect(TokKind::Eof)?;
     Ok(Program { stmts })
@@ -41,6 +54,10 @@ struct Parser {
     /// Per-token "is preceded by a line break" flags; see `newline_flags`.
     newlines: Vec<bool>,
     pos: usize,
+    /// Current recursive-descent nesting depth, guarded by [`MAX_PARSE_DEPTH`]. Incremented on
+    /// entry to each recursive core (`parse_bp`, `parse_if`) and decremented on exit, so it tracks
+    /// live stack depth rather than total nodes.
+    depth: usize,
 }
 
 impl Parser {
@@ -79,7 +96,7 @@ impl Parser {
             Ok(self.bump())
         } else {
             Err(NoiseError::parse(
-                format!("expected {:?}, found {:?}", k, self.peek()),
+                format!("expected {}, found {}", describe(&k), describe(self.peek())),
                 self.span(),
             ))
         }
@@ -112,7 +129,10 @@ impl Parser {
                 }
             } else if !terminators.contains(self.peek()) && !self.newline_before() {
                 return Err(NoiseError::parse(
-                    format!("expected `;`, a line break, or end of block, found {:?}", self.peek()),
+                    format!(
+                        "expected `;`, a line break, or end of block, found {}",
+                        describe(self.peek())
+                    ),
                     self.span(),
                 ));
             }
@@ -143,7 +163,10 @@ impl Parser {
                 self.bump(); // =
                 let rhs = self.parse_expr()?;
                 let span = Span::new(start, rhs.span.end);
-                return Ok(Spanned::new(Expr::Bind(BindKind::Assign, name, Box::new(rhs)), span));
+                return Ok(Spanned::new(
+                    Expr::Bind(BindKind::Assign, name, Box::new(rhs)),
+                    span,
+                ));
             }
             // `Ident ~[shape]? rhs` → a sample binding. This is sugar for `Ident = ~[shape]? rhs`:
             // we leave the `~` in place so the prefix parser builds the draw, then bind the result
@@ -153,7 +176,10 @@ impl Parser {
                 self.bump(); // ident — cursor now sits on `~`
                 let rhs = self.parse_bp(0)?;
                 let span = Span::new(start, rhs.span.end);
-                return Ok(Spanned::new(Expr::Bind(BindKind::Assign, name, Box::new(rhs)), span));
+                return Ok(Spanned::new(
+                    Expr::Bind(BindKind::Assign, name, Box::new(rhs)),
+                    span,
+                ));
             }
         }
         self.parse_bp(0)
@@ -196,7 +222,7 @@ impl Parser {
                     TokKind::Ident(p) => params.push(p),
                     other => {
                         return Err(NoiseError::parse(
-                            format!("expected a parameter name, found {other:?}"),
+                            format!("expected a parameter name, found {}", describe(&other)),
                             t.span,
                         ))
                     }
@@ -213,17 +239,54 @@ impl Parser {
             BindKind::Sample
         } else {
             return Err(NoiseError::parse(
-                format!("expected `=` or `~` in function definition, found {:?}", self.peek()),
+                format!(
+                    "expected `=` or `~` in function definition, found {}",
+                    describe(self.peek())
+                ),
                 self.span(),
             ));
         };
         let body = self.parse_expr()?;
         let span = Span::new(start, body.span.end);
-        Ok(Spanned::new(Expr::FnDef { kind, name, params, body: Box::new(body) }, span))
+        Ok(Spanned::new(
+            Expr::FnDef {
+                kind,
+                name,
+                params,
+                body: Box::new(body),
+            },
+            span,
+        ))
     }
 
-    /// Precedence-climbing core for infix operators.
+    /// Increment the nesting depth, erroring past [`MAX_PARSE_DEPTH`]. Every recursive cycle in the
+    /// descent passes through `parse_bp` (and `if … else if …` chains through `parse_if`), so
+    /// guarding those two entry points bounds total stack depth. On error the depth is left
+    /// incremented — harmless, since a parse error aborts the whole parse.
+    fn enter(&mut self, span: Span) -> Result<()> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            return Err(NoiseError::parse(
+                format!(
+                    "expression nests too deeply (over {MAX_PARSE_DEPTH} levels) — deeply nested \
+                     parentheses, unary operators, or `if`/`[`/`{{` blocks; simplify or split it"
+                ),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Precedence-climbing core for infix operators. Depth-guarded (see [`Self::enter`]).
     fn parse_bp(&mut self, min_bp: u8) -> Result<Spanned> {
+        let span = self.span();
+        self.enter(span)?;
+        let r = self.parse_bp_inner(min_bp);
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_bp_inner(&mut self, min_bp: u8) -> Result<Spanned> {
         let mut lhs = self.parse_prefix()?;
         loop {
             // `..` is the lowest-binding infix form (Rust-style ranges sit below every operator,
@@ -251,7 +314,10 @@ impl Parser {
                 let rhs = self.parse_bp(COND_RBP)?;
                 let span = Span::new(lhs.span.start, rhs.span.end);
                 lhs = Spanned::new(
-                    Expr::Cond { event: Box::new(lhs), given: Box::new(rhs) },
+                    Expr::Cond {
+                        event: Box::new(lhs),
+                        given: Box::new(rhs),
+                    },
                     span,
                 );
                 continue;
@@ -308,7 +374,13 @@ impl Parser {
                 };
                 let body = self.parse_bp(PREFIX_BP)?;
                 let span = Span::new(start, body.span.end);
-                Ok(Spanned::new(Expr::Sample { shape, body: Box::new(body) }, span))
+                Ok(Spanned::new(
+                    Expr::Sample {
+                        shape,
+                        body: Box::new(body),
+                    },
+                    span,
+                ))
             }
             _ => self.parse_postfix(),
         }
@@ -340,7 +412,11 @@ impl Parser {
                 self.bump();
                 Ok(Spanned::new(Expr::Str(s), tok.span))
             }
-            TokKind::Template { body, syntax, body_offset } => {
+            TokKind::Template {
+                body,
+                syntax,
+                body_offset,
+            } => {
                 self.bump();
                 let parts = parse_template_parts(&body, body_offset)?;
                 Ok(Spanned::new(Expr::Template { parts, syntax }, tok.span))
@@ -369,7 +445,10 @@ impl Parser {
                         }
                         other => {
                             return Err(NoiseError::parse(
-                                format!("expected an identifier after `::`, found {other:?}"),
+                                format!(
+                                    "expected an identifier after `::`, found {}",
+                                    describe(&other)
+                                ),
                                 seg.span,
                             ))
                         }
@@ -380,7 +459,10 @@ impl Parser {
                     let span = Span::new(tok.span.start, call_end);
                     Ok(Spanned::new(Expr::Call(name, args), span))
                 } else {
-                    Ok(Spanned::new(Expr::Ident(name), Span::new(tok.span.start, end)))
+                    Ok(Spanned::new(
+                        Expr::Ident(name),
+                        Span::new(tok.span.start, end),
+                    ))
                 }
             }
             TokKind::Use => {
@@ -392,7 +474,10 @@ impl Parser {
                         Ok(Spanned::new(Expr::Use(module), span))
                     }
                     other => Err(NoiseError::parse(
-                        format!("expected a module name after `use`, found {other:?}"),
+                        format!(
+                            "expected a module name after `use`, found {}",
+                            describe(&other)
+                        ),
                         seg.span,
                     )),
                 }
@@ -412,7 +497,7 @@ impl Parser {
             }
             TokKind::LBracket => self.parse_array(),
             other => Err(NoiseError::parse(
-                format!("unexpected token {:?}", other),
+                format!("unexpected {}", describe(&other)),
                 tok.span,
             )),
         }
@@ -515,7 +600,10 @@ impl Parser {
         let open = self.expect(TokKind::LBracket)?;
         if *self.peek() == TokKind::RBracket {
             let close = self.expect(TokKind::RBracket)?;
-            return Ok(Spanned::new(Expr::Array(Vec::new()), Span::new(open.span.start, close.span.end)));
+            return Ok(Spanned::new(
+                Expr::Array(Vec::new()),
+                Span::new(open.span.start, close.span.end),
+            ));
         }
         // `[for x in iter (if cond) { body }]` — a comprehension, detected by a leading `for`. It
         // mirrors the `for x in xs { body }` loop statement exactly, just wrapped in `[ ]` so the
@@ -538,12 +626,18 @@ impl Parser {
     /// `for` loop statement wrapped in `[ ]` — a pure 1-to-1 map yielding `Len(iter)` elements.
     fn parse_comprehension(&mut self, start: usize) -> Result<Spanned> {
         self.expect(TokKind::For)?;
-        let var = match self.bump().kind {
+        // Capture the bumped token *before* consuming it, so the error underlines the offending
+        // token itself rather than the one after it (finding D5; mirrors `parse_fn_def`).
+        let var_tok = self.bump();
+        let var = match var_tok.kind {
             TokKind::Ident(name) => name,
             other => {
                 return Err(NoiseError::parse(
-                    format!("expected a loop variable name after `for`, found {other:?}"),
-                    self.span(),
+                    format!(
+                        "expected a loop variable name after `for`, found {}",
+                        describe(&other)
+                    ),
+                    var_tok.span,
                 ))
             }
         };
@@ -553,7 +647,11 @@ impl Parser {
         let close = self.expect(TokKind::RBracket)?;
         let span = Span::new(start, close.span.end);
         Ok(Spanned::new(
-            Expr::Comprehension { body: Box::new(body), var, iter: Box::new(iter) },
+            Expr::Comprehension {
+                body: Box::new(body),
+                var,
+                iter: Box::new(iter),
+            },
             span,
         ))
     }
@@ -562,12 +660,18 @@ impl Parser {
     /// binding) so the `{` of the body isn't swallowed as a block-primary.
     fn parse_for(&mut self) -> Result<Spanned> {
         let kw = self.expect(TokKind::For)?;
-        let var = match self.bump().kind {
+        // Capture the bumped token *before* consuming it so the error underlines the offending token
+        // (e.g. the `5` in `for 5 in xs`), not the one after it (finding D5; mirrors `parse_fn_def`).
+        let var_tok = self.bump();
+        let var = match var_tok.kind {
             TokKind::Ident(name) => name,
             other => {
                 return Err(NoiseError::parse(
-                    format!("expected a loop variable name after `for`, found {other:?}"),
-                    self.span(),
+                    format!(
+                        "expected a loop variable name after `for`, found {}",
+                        describe(&other)
+                    ),
+                    var_tok.span,
                 ))
             }
         };
@@ -576,7 +680,11 @@ impl Parser {
         let body = self.parse_block()?;
         let span = Span::new(kw.span.start, body.span.end);
         Ok(Spanned::new(
-            Expr::For { var, iter: Box::new(iter), body: Box::new(body) },
+            Expr::For {
+                var,
+                iter: Box::new(iter),
+                body: Box::new(body),
+            },
             span,
         ))
     }
@@ -589,7 +697,17 @@ impl Parser {
         Ok(Spanned::new(Expr::Block(stmts), span))
     }
 
+    /// Depth-guarded (see [`Self::enter`]) so an `if … else if … else if …` chain — which recurses
+    /// `parse_if → parse_if` without passing back through `parse_bp` between levels — can't overflow.
     fn parse_if(&mut self) -> Result<Spanned> {
+        let span = self.span();
+        self.enter(span)?;
+        let r = self.parse_if_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_if_inner(&mut self) -> Result<Spanned> {
         let kw = self.expect(TokKind::If)?;
         let cond = self.parse_bp(0)?;
         let then_block = self.parse_block()?;
@@ -653,6 +771,59 @@ fn infix_op(k: &TokKind) -> Option<(BinOp, u8, u8)> {
         TokKind::Caret => (Pow, 14, 13),
         _ => return None,
     })
+}
+
+/// A human-readable name for a token, for `expected …, found …` diagnostics — so a user sees
+/// `expected `=`, found the name `foo`` / `found end of input` instead of the raw `{:?}` debug form
+/// (`Eq` / `Ident("foo")` / `Eof`) that leaked Rust internals (finding D7). Punctuation is quoted;
+/// literals and names get a short description (the name itself is included where it helps).
+fn describe(k: &TokKind) -> String {
+    use TokKind::*;
+    match k {
+        Number(_) => "a number".to_string(),
+        Ident(s) => format!("the name `{s}`"),
+        Str(_) => "a string".to_string(),
+        Template { .. } => "a template".to_string(),
+        True => "`true`".to_string(),
+        False => "`false`".to_string(),
+        Plus => "`+`".to_string(),
+        Minus => "`-`".to_string(),
+        Star => "`*`".to_string(),
+        Slash => "`/`".to_string(),
+        Percent => "`%`".to_string(),
+        Caret => "`^`".to_string(),
+        At => "`@`".to_string(),
+        Eq => "`=`".to_string(),
+        Tilde => "`~`".to_string(),
+        EqEq => "`==`".to_string(),
+        BangEq => "`!=`".to_string(),
+        Lt => "`<`".to_string(),
+        Gt => "`>`".to_string(),
+        Le => "`<=`".to_string(),
+        Ge => "`>=`".to_string(),
+        AmpAmp => "`&&`".to_string(),
+        PipePipe => "`||`".to_string(),
+        Pipe => "`|`".to_string(),
+        Bang => "`!`".to_string(),
+        LParen => "`(`".to_string(),
+        RParen => "`)`".to_string(),
+        LBrace => "`{`".to_string(),
+        RBrace => "`}`".to_string(),
+        LBracket => "`[`".to_string(),
+        RBracket => "`]`".to_string(),
+        ColonColon => "`::`".to_string(),
+        Colon => "`:`".to_string(),
+        DotDot => "`..`".to_string(),
+        Comma => "`,`".to_string(),
+        Semi => "`;`".to_string(),
+        If => "`if`".to_string(),
+        Else => "`else`".to_string(),
+        For => "`for`".to_string(),
+        In => "`in`".to_string(),
+        Continue => "`continue`".to_string(),
+        Use => "`use`".to_string(),
+        Eof => "end of input".to_string(),
+    }
 }
 
 // === Template parsing (PLAN-LITERATE §D3) ========================================================
@@ -832,12 +1003,24 @@ fn trim_trailing_blank_line(s: &str) -> String {
 /// Parse a single expression from `src`, shifting all spans by `base_offset` so diagnostics point at
 /// the original source (used for `${…}` template holes). The whole slice must be one expression.
 fn parse_expr_str(src: &str, base_offset: usize) -> Result<Spanned> {
-    let mut tokens = tokenize(src)?;
+    // A **lexer** error inside the hole carries hole-local offsets and `?` would propagate it
+    // *before* the rebase loop below runs — so rebase its span here too (finding D3). This keeps
+    // LANG.md's promise that "errors inside a hole point at the real source location" for lex errors
+    // (`` `${π}` ``, a stray char, …), not just parse errors.
+    let mut tokens = tokenize(src).map_err(|mut e| {
+        e.span = Span::new(e.span.start + base_offset, e.span.end + base_offset);
+        e
+    })?;
     let newlines = newline_flags(src, &tokens);
     for t in &mut tokens {
         t.span = Span::new(t.span.start + base_offset, t.span.end + base_offset);
     }
-    let mut p = Parser { tokens, newlines, pos: 0 };
+    let mut p = Parser {
+        tokens,
+        newlines,
+        pos: 0,
+        depth: 0,
+    };
     let e = p.parse_expr()?;
     p.expect(TokKind::Eof)?;
     Ok(e)
@@ -850,7 +1033,11 @@ mod tests {
 
     fn parse_one(src: &str) -> Expr {
         let mut prog = parse(src).unwrap();
-        assert_eq!(prog.stmts.len(), 1, "expected exactly one statement in {src:?}");
+        assert_eq!(
+            prog.stmts.len(),
+            1,
+            "expected exactly one statement in {src:?}"
+        );
         prog.stmts.pop().unwrap().expr
     }
 
@@ -928,8 +1115,20 @@ mod tests {
 
     #[test]
     fn function_definition_is_distinguished_from_a_call() {
-        assert!(matches!(parse_one("f(x) = x"), Expr::FnDef { kind: BindKind::Assign, .. }));
-        assert!(matches!(parse_one("g() ~ unif(0,1)"), Expr::FnDef { kind: BindKind::Sample, .. }));
+        assert!(matches!(
+            parse_one("f(x) = x"),
+            Expr::FnDef {
+                kind: BindKind::Assign,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_one("g() ~ unif(0,1)"),
+            Expr::FnDef {
+                kind: BindKind::Sample,
+                ..
+            }
+        ));
         // a bare `f(x)` (no following `=`/`~`) is a call expression, not a definition
         assert!(matches!(parse_one("f(x)"), Expr::Call(_, _)));
     }
@@ -946,30 +1145,96 @@ mod tests {
         // all-named → Named, keeps source order and names
         match parse_one("f(b: 2, a: 1)") {
             Expr::Call(_, CallArgs::Named(a)) => {
-                assert_eq!(a.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+                assert_eq!(
+                    a.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+                    ["b", "a"]
+                );
             }
             other => panic!("got {other:?}"),
         }
         // a `::` path in argument position is NOT mistaken for a named entry
-        assert!(matches!(parse_one("f(rand::pi)"), Expr::Call(_, CallArgs::Positional(_))));
+        assert!(matches!(
+            parse_one("f(rand::pi)"),
+            Expr::Call(_, CallArgs::Positional(_))
+        ));
     }
 
     #[test]
     fn mixed_and_duplicate_named_args_are_errors() {
         // positional then named
-        assert!(matches!(parse("f(1, b: 2)").unwrap_err().kind, ErrorKind::Parse(_)));
+        assert!(matches!(
+            parse("f(1, b: 2)").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
         // named then positional
-        assert!(matches!(parse("f(a: 1, 2)").unwrap_err().kind, ErrorKind::Parse(_)));
+        assert!(matches!(
+            parse("f(a: 1, 2)").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
         // duplicate name
-        assert!(matches!(parse("f(a: 1, a: 2)").unwrap_err().kind, ErrorKind::Parse(_)));
+        assert!(matches!(
+            parse("f(a: 1, a: 2)").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
     }
 
     #[test]
     fn parse_errors_are_typed_and_dont_panic() {
-        for src in ["3 +", "(1 + 2", "f(x = 3", "1 2", "f(1,) = 1", "[1, 2", "for in xs {}"] {
+        for src in [
+            "3 +",
+            "(1 + 2",
+            "f(x = 3",
+            "1 2",
+            "f(1,) = 1",
+            "[1, 2",
+            "for in xs {}",
+        ] {
             let err = parse(src).unwrap_err();
-            assert!(matches!(err.kind, ErrorKind::Parse(_)), "{src:?} -> {:?}", err.kind);
+            assert!(
+                matches!(err.kind, ErrorKind::Parse(_)),
+                "{src:?} -> {:?}",
+                err.kind
+            );
         }
+    }
+
+    #[test]
+    fn deep_nesting_errors_instead_of_overflowing_the_stack() {
+        // A few thousand nested parens used to recurse the parser one frame per level and abort the
+        // process (SIGABRT / stack overflow). The depth guard now turns each of these into a clean
+        // parse error. We run on a generously-sized thread: *unoptimized* (debug) parser frames are
+        // large, so reaching the ~256-level guard needs several MiB — more than the 2 MiB default
+        // test-harness thread. The guard value is production-safe (it survives a 512 KiB release
+        // stack, well within the wasm playground's ~1 MiB). A *regression* (guard removed) either
+        // overflows even this thread (aborting the binary) or parses the balanced input to `Ok`
+        // (failing `unwrap_err`), so the guard is still genuinely exercised.
+        let body = || {
+            let deep_parens = format!("{}1{}", "(".repeat(2000), ")".repeat(2000));
+            assert!(matches!(
+                parse(&deep_parens).unwrap_err().kind,
+                ErrorKind::Parse(_)
+            ));
+            // Deep unary chains (`-`, `~`, `!`) recurse through the same `parse_bp` core.
+            assert!(matches!(
+                parse(&format!("{}1", "-".repeat(4000))).unwrap_err().kind,
+                ErrorKind::Parse(_)
+            ));
+            assert!(matches!(
+                parse(&format!("{}1", "!".repeat(4000))).unwrap_err().kind,
+                ErrorKind::Parse(_)
+            ));
+            // A deep `if … else if …` chain recurses `parse_if`; must return, never overflow.
+            let deep_if = format!("{}{{}}", "if 1 {} else ".repeat(4000));
+            let _ = parse(&deep_if);
+            // A moderate, realistic nesting still parses fine.
+            assert!(parse(&format!("{}1{}", "(".repeat(100), ")".repeat(100))).is_ok());
+        };
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(body)
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
@@ -1017,7 +1282,10 @@ mod tests {
             other => panic!("got {other:?}"),
         }
         // `~[]` (empty shape) is a parse error
-        assert!(matches!(parse("xs ~[] unif(0, 1)").unwrap_err().kind, ErrorKind::Parse(_)));
+        assert!(matches!(
+            parse("xs ~[] unif(0, 1)").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
     }
 
     #[test]
@@ -1146,7 +1414,65 @@ mod tests {
     #[test]
     fn two_values_on_one_line_without_a_separator_is_still_an_error() {
         // `1 2` (same line, no `;`) must stay an error — the newline rule shouldn't mask it.
-        assert!(matches!(parse("1 2").unwrap_err().kind, ErrorKind::Parse(_)));
+        assert!(matches!(
+            parse("1 2").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
+    }
+
+    #[test]
+    fn for_loop_bad_var_underlines_the_offender_not_the_next_token() {
+        // `for 5 in xs { }` — the error must point at `5`, not the `in` after it (finding D5).
+        let src = "for 5 in xs { }";
+        let err = parse(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::Parse(_)), "{:?}", err.kind);
+        assert_eq!(
+            &src[err.span.start..err.span.end],
+            "5",
+            "span should underline the `5`"
+        );
+        // Same for a comprehension.
+        let src2 = "[for 9 in xs { x }]";
+        let err2 = parse(src2).unwrap_err();
+        assert_eq!(&src2[err2.span.start..err2.span.end], "9");
+    }
+
+    #[test]
+    fn template_hole_lexer_error_span_points_at_the_real_source() {
+        // A stray character inside a `${…}` hole is a *lexer* error; its span must be rebased to the
+        // outer source, not left hole-local (finding D3). Here `?` sits at a known outer offset.
+        let src = "x = 1\n`val ${ ? }`";
+        let err = parse(src).unwrap_err();
+        let at = src.find('?').unwrap();
+        assert_eq!(
+            err.span,
+            Span::new(at, at + 1),
+            "the `?` error must point at its real offset in the full source"
+        );
+        // A non-ASCII stray inside a hole is also rebased and boundary-safe.
+        let src2 = "`${π}`";
+        let err2 = parse(src2).unwrap_err();
+        let at2 = src2.find('π').unwrap();
+        assert_eq!(err2.span, Span::new(at2, at2 + 'π'.len_utf8()));
+        assert_eq!(&src2[err2.span.start..err2.span.end], "π");
+    }
+
+    #[test]
+    fn unexpected_token_messages_read_in_human_terms() {
+        // No `{:?}` Rust-debug leakage: operators are quoted, names/EOF get words (finding D7).
+        let e = parse("f(x = 3").unwrap_err(); // `=` where a `,`/`)` is expected inside a call arg
+        let msg = e.to_string();
+        assert!(
+            !msg.contains("Ident("),
+            "should not print Rust debug: {msg}"
+        );
+        assert!(!msg.contains("Eof"), "should say 'end of input': {msg}");
+        // `1 2` on one line: "expected `;`, a line break, or end of block, found a number".
+        let e2 = parse("1 2").unwrap_err();
+        assert!(e2.to_string().contains("a number"), "{e2}");
+        // an unexpected primary token reads as words, not `RParen`.
+        let e3 = parse(")").unwrap_err();
+        assert!(e3.to_string().contains("`)`"), "{e3}");
     }
 
     #[test]
@@ -1158,9 +1484,18 @@ mod tests {
         // `use module;`
         assert!(matches!(parse_one("use rand"), Expr::Use(m) if m == "rand"));
         // a path can be indexed/called like any primary: `vec::range(0, 3)[1]`
-        assert!(matches!(parse_one("rand::normal(0, 1)[0]"), Expr::Index(_, _)));
+        assert!(matches!(
+            parse_one("rand::normal(0, 1)[0]"),
+            Expr::Index(_, _)
+        ));
         // errors: dangling `::`, bad `use`
-        assert!(matches!(parse("rand::").unwrap_err().kind, ErrorKind::Parse(_)));
-        assert!(matches!(parse("use ;").unwrap_err().kind, ErrorKind::Parse(_)));
+        assert!(matches!(
+            parse("rand::").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
+        assert!(matches!(
+            parse("use ;").unwrap_err().kind,
+            ErrorKind::Parse(_)
+        ));
     }
 }

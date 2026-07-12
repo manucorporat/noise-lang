@@ -30,6 +30,14 @@ pub fn simplify(graph: &RvGraph, root: RvId) -> (RvGraph, RvId) {
     (b.out, new_root)
 }
 
+/// A worklist item for the iterative post-order rewrite (see [`Builder::rewrite`]).
+enum Task {
+    /// First visit: schedule this node's rebuild after its children.
+    Visit(RvId),
+    /// Second visit: children are rebuilt (in `done`); rebuild this node.
+    Emit(RvId),
+}
+
 /// CSE key for the deterministic combinators (operands are already-interned new-graph ids).
 #[derive(PartialEq, Eq, Hash)]
 enum Key {
@@ -48,43 +56,93 @@ struct Builder {
 }
 
 impl Builder {
-    /// Post-order rewrite of `id`'s cone, memoized so a shared `RvId` is rebuilt once.
-    fn rewrite(&mut self, g: &RvGraph, id: RvId) -> RvId {
-        if let Some(&n) = self.done.get(&id) {
+    /// Post-order rewrite of `root`'s cone, memoized so a shared `RvId` is rebuilt once.
+    ///
+    /// **Iterative** post-order with an explicit `Task` worklist, *not* recursion: the cone can be
+    /// hundreds of thousands of nodes deep (a `cumsum` over `~[200000]`), which would overflow a
+    /// recursive rewriter's stack and abort (finding A4). The worklist reproduces the exact same
+    /// post-order — children rebuilt before their parent, left operand before right — so the
+    /// **relative order of surviving source nodes (hence their RNG consumption) is preserved**,
+    /// which is the correctness invariant this pass promises.
+    fn rewrite(&mut self, g: &RvGraph, root: RvId) -> RvId {
+        if let Some(&n) = self.done.get(&root) {
             return n;
         }
-        let kind = g.kind(id);
-        let new = match g.node(id) {
-            // A draw: copy as a fresh node. NEVER interned — independent draws stay independent.
-            RvNode::Src(s) => self.out.push(RvNode::Src(*s), kind),
-            RvNode::ConstNum(x) => self.num(*x),
-            RvNode::ConstBool(b) => self.boolean(*b),
-            RvNode::Unary(op, a) => {
-                let a = self.rewrite(g, *a);
-                self.unary(*op, a, kind)
+        let mut stack = vec![Task::Visit(root)];
+        while let Some(task) = stack.pop() {
+            match task {
+                Task::Visit(id) => {
+                    if self.done.contains_key(&id) {
+                        continue;
+                    }
+                    stack.push(Task::Emit(id));
+                    let done = &self.done;
+                    let mut push_child = |c: RvId| {
+                        if !done.contains_key(&c) {
+                            stack.push(Task::Visit(c));
+                        }
+                    };
+                    match g.node(id) {
+                        RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+                        RvNode::Unary(_, a) => push_child(*a),
+                        RvNode::Binary(_, l, r) => {
+                            push_child(*r);
+                            push_child(*l);
+                        }
+                        RvNode::Select { cond, a, b } => {
+                            push_child(*b);
+                            push_child(*a);
+                            push_child(*cond);
+                        }
+                        RvNode::Gather { elems, index } => {
+                            push_child(*index);
+                            for &e in elems.iter().rev() {
+                                push_child(e);
+                            }
+                        }
+                    }
+                }
+                Task::Emit(id) => {
+                    if self.done.contains_key(&id) {
+                        continue; // reached via another path already
+                    }
+                    let kind = g.kind(id);
+                    let new = match g.node(id) {
+                        // A draw: copy as a fresh node. NEVER interned — draws stay independent.
+                        RvNode::Src(s) => self.out.push(RvNode::Src(*s), kind),
+                        RvNode::ConstNum(x) => self.num(*x),
+                        RvNode::ConstBool(b) => self.boolean(*b),
+                        RvNode::Unary(op, a) => {
+                            let a = self.done[a];
+                            self.unary(*op, a, kind)
+                        }
+                        RvNode::Binary(op, l, r) => {
+                            let (l, r) = (self.done[l], self.done[r]);
+                            self.binary(*op, l, r, kind)
+                        }
+                        RvNode::Select { cond, a, b } => {
+                            let (cond, a, b) = (self.done[cond], self.done[a], self.done[b]);
+                            self.select(cond, a, b, kind)
+                        }
+                        // Gather: rebuild over the simplified operands. Not interned — distinct
+                        // gathers rarely coincide and a wrong merge would corrupt the selection.
+                        RvNode::Gather { elems, index } => {
+                            let elems: Vec<RvId> = elems.iter().map(|e| self.done[e]).collect();
+                            let index = self.done[index];
+                            self.out.push(
+                                RvNode::Gather {
+                                    elems: elems.into_boxed_slice(),
+                                    index,
+                                },
+                                kind,
+                            )
+                        }
+                    };
+                    self.done.insert(id, new);
+                }
             }
-            RvNode::Binary(op, l, r) => {
-                let l = self.rewrite(g, *l);
-                let r = self.rewrite(g, *r);
-                self.binary(*op, l, r, kind)
-            }
-            RvNode::Select { cond, a, b } => {
-                let cond = self.rewrite(g, *cond);
-                let a = self.rewrite(g, *a);
-                let b = self.rewrite(g, *b);
-                self.select(cond, a, b, kind)
-            }
-            // Gather: rebuild over the simplified operands. Not interned — distinct gathers (each
-            // hop indexes by a different RV) rarely coincide, and a wrong merge would corrupt the
-            // per-lane selection, so we copy it 1:1 like a source.
-            RvNode::Gather { elems, index } => {
-                let elems: Vec<RvId> = elems.iter().map(|&e| self.rewrite(g, e)).collect();
-                let index = self.rewrite(g, *index);
-                self.out.push(RvNode::Gather { elems: elems.into_boxed_slice(), index }, kind)
-            }
-        };
-        self.done.insert(id, new);
-        new
+        }
+        self.done[&root]
     }
 
     // --- interning constructors (the only way nodes enter `out`, besides sources) ---
@@ -141,7 +199,8 @@ impl Builder {
         }
         // Involutions: -(-x) and !(!x) collapse to x.
         if let RvNode::Unary(inner_op, inner) = *self.out.node(a) {
-            if (op == UnOp::Neg && inner_op == UnOp::Neg) || (op == UnOp::Not && inner_op == UnOp::Not)
+            if (op == UnOp::Neg && inner_op == UnOp::Neg)
+                || (op == UnOp::Not && inner_op == UnOp::Not)
             {
                 return inner;
             }
@@ -152,22 +211,17 @@ impl Builder {
     fn binary(&mut self, op: BinOp, l: RvId, r: RvId, kind: RvKind) -> RvId {
         use BinOp::*;
         let (ln, rn) = (self.as_num(l), self.as_num(r));
-        // Constant folding over two numeric constants.
+        // Constant folding over two numeric constants — via the shared scalar kernel (finding F4),
+        // so `%`/`^`/comparison semantics can't drift from the VM and the const-fold. Arithmetic
+        // yields a `ConstNum`; comparisons yield a `ConstBool` (the kernel returns 0/1, recovered
+        // with `!= 0.0`). `And`/`Or` on numbers are never reached (kind-checked upstream).
         if let (Some(a), Some(b)) = (ln, rn) {
             match op {
-                Add => return self.num(a + b),
-                Sub => return self.num(a - b),
-                Mul => return self.num(a * b),
-                Div => return self.num(a / b),
-                Mod => return self.num(a - b * (a / b).floor()),
-                Pow => return self.num(a.powf(b)),
-                Lt => return self.boolean(a < b),
-                Gt => return self.boolean(a > b),
-                Le => return self.boolean(a <= b),
-                Ge => return self.boolean(a >= b),
-                Eq => return self.boolean(a == b),
-                Ne => return self.boolean(a != b),
-                And | Or => {} // not valid on numbers; never reached (kind-checked)
+                Add | Sub | Mul | Div | Mod | Pow => {
+                    return self.num(crate::num::fold_binop(op, a, b))
+                }
+                And | Or => {}
+                _ => return self.boolean(crate::num::fold_binop(op, a, b) != 0.0),
             }
         }
         // Constant folding over two boolean constants.
@@ -229,14 +283,19 @@ mod tests {
     use crate::dist::Source;
 
     fn src(g: &mut RvGraph) -> RvId {
-        g.push(RvNode::Src(Source::Uniform(crate::dist::Uniform { lo: 0.0, hi: 1.0 })), RvKind::Num)
+        g.push(
+            RvNode::Src(Source::Uniform(crate::dist::Uniform { lo: 0.0, hi: 1.0 })),
+            RvKind::Num,
+        )
     }
     fn num(g: &mut RvGraph, x: f64) -> RvId {
         g.push(RvNode::ConstNum(x), RvKind::Num)
     }
     fn bin(g: &mut RvGraph, op: BinOp, a: RvId, b: RvId) -> RvId {
-        let k = if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne)
-        {
+        let k = if matches!(
+            op,
+            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne
+        ) {
             RvKind::Bool
         } else {
             RvKind::Num
@@ -291,13 +350,22 @@ mod tests {
     #[test]
     fn applies_identities() {
         // X + 0, X * 1, X ^ 1 all collapse to X (the same source node).
-        for (op, c) in [(BinOp::Add, 0.0), (BinOp::Mul, 1.0), (BinOp::Pow, 1.0), (BinOp::Div, 1.0)] {
+        for (op, c) in [
+            (BinOp::Add, 0.0),
+            (BinOp::Mul, 1.0),
+            (BinOp::Pow, 1.0),
+            (BinOp::Div, 1.0),
+        ] {
             let mut g = RvGraph::default();
             let x = src(&mut g);
             let c = num(&mut g, c);
             let root = bin(&mut g, op, x, c);
             let (out, r) = simplify(&g, root);
-            assert_eq!(out.node(r), &RvNode::Src(Source::Uniform(crate::dist::Uniform { lo: 0.0, hi: 1.0 })), "{op:?} identity should collapse to X");
+            assert_eq!(
+                out.node(r),
+                &RvNode::Src(Source::Uniform(crate::dist::Uniform { lo: 0.0, hi: 1.0 })),
+                "{op:?} identity should collapse to X"
+            );
         }
     }
 
@@ -326,7 +394,9 @@ mod tests {
         let root = bin(&mut g, BinOp::Eq, s1, s2);
         let (out, r) = simplify(&g, root);
         match out.node(r) {
-            RvNode::Binary(BinOp::Eq, a, b) => assert_eq!(a, b, "identical X+Y must CSE to one node"),
+            RvNode::Binary(BinOp::Eq, a, b) => {
+                assert_eq!(a, b, "identical X+Y must CSE to one node")
+            }
             other => panic!("expected Eq(s, s), got {other:?}"),
         }
         // ...but the two independent sources X and Y must NOT be merged.
@@ -366,13 +436,28 @@ mod tests {
         }
 
         let cases = [
-            ("dice_sum", "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B"),
-            ("pi", "use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1"),
-            ("poly_deep", "use rand; X ~ unif(0,1); ((X*X+X)*X - X)*X + X*X - X + 1"),
+            (
+                "dice_sum",
+                "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B",
+            ),
+            (
+                "pi",
+                "use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1",
+            ),
+            (
+                "poly_deep",
+                "use rand; X ~ unif(0,1); ((X*X+X)*X - X)*X + X*X - X + 1",
+            ),
             // CSE: a subexpression reused several times.
-            ("cse_reuse", "use rand; X ~ unif(0,1); Y ~ unif(0,1); (X+Y)*(X+Y) + (X+Y)*3 - (X+Y)"),
+            (
+                "cse_reuse",
+                "use rand; X ~ unif(0,1); Y ~ unif(0,1); (X+Y)*(X+Y) + (X+Y)*3 - (X+Y)",
+            ),
             // Identity-bearing: `* 1`, `+ 0`, `^ 1` that survive to graph nodes.
-            ("identities", "use rand; X ~ unif(0,1); (X * 1 + 0) ^ 1 + X*X"),
+            (
+                "identities",
+                "use rand; X ~ unif(0,1); (X * 1 + 0) ^ 1 + X*X",
+            ),
         ];
         println!("\n  cone size (nodes the backend lowers): before → after simplify");
         for (name, src) in cases {
@@ -384,7 +469,10 @@ mod tests {
             let before = cone(eng.graph(), id);
             let (out, r) = simplify(eng.graph(), id);
             let after = cone(&out, r);
-            println!("    {name:12} {before:3} → {after:3}  (-{})", before - after);
+            println!(
+                "    {name:12} {before:3} → {after:3}  (-{})",
+                before - after
+            );
         }
     }
 

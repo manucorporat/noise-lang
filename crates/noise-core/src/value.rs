@@ -15,6 +15,7 @@ use crate::introspect::Summary;
 use crate::signal::{NoiseSpec, SigExpr};
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive] // gains a variant nearly every plan cycle; hosts must keep a wildcard arm (E2)
 pub enum Value {
     Num(f64),
     Bool(bool),
@@ -31,7 +32,10 @@ pub enum Value {
     Dist(RvId),
     /// A Monte Carlo estimate: `val` with standard error `se` (`se == 0` ⇒ exact). Arithmetic
     /// propagates `se` (first order); `Display` rounds `val` to the digits `se` justifies.
-    Est { val: f64, se: f64 },
+    Est {
+        val: f64,
+        se: f64,
+    },
     /// A fixed-length array (PLAN-COLLECTIONS). Length is known at build time; elements are
     /// arbitrary `Value`s (`Num`, `Dist`, `Bool`, or nested `Array` for matrices). A vector of
     /// random variables is just an array of `Dist`. `Rc` keeps `push`/clone cheap.
@@ -58,7 +62,10 @@ pub enum Value {
     /// expressions stay `Num`. Invariant: `re`/`im` are always *real* values — scalars
     /// (`Num`/`Est`/`Dist`) or, for a **complex signal** (PLAN-SIGNALS §1.3), lazy `Signal`s
     /// (a complex signal is `Complex { re: Signal, im: Signal }` by composition, no new kind).
-    Complex { re: Box<Value>, im: Box<Value> },
+    Complex {
+        re: Box<Value>,
+        im: Box<Value>,
+    },
     /// A **conditioned value** — `event | given` (Bayes, scoped to a query). `quantity` is the RV
     /// being measured (an event for `P`, any number for `E`/`Var`/`Q`; its kind is `q_kind`),
     /// `condition` is the bool RV it is conditioned on. The two are kept *separate* (not yet fused)
@@ -67,7 +74,11 @@ pub enum Value {
     /// combined (the one rule that keeps conditioning consistent). Like a `Recipe`, a conditioned
     /// value is *consumed* by `P`/`E`/`Var`/`Q` (which fuse it into `select(condition, quantity, NaN)`
     /// and sample the subpopulation where the condition holds), never operated on past that.
-    Cond { quantity: RvId, q_kind: RvKind, condition: RvId },
+    Cond {
+        quantity: RvId,
+        q_kind: RvKind,
+        condition: RvId,
+    },
     /// An **introspection summary** — what `describe`/`hist`/`samples`/`corr`/`scatter`/`explain`
     /// evaluate to (see [`crate::introspect`]). It is a *value*: it binds, flows through, and
     /// `Display`s as its one-line text card (`crate::flint`, which also turns it into chart specs).
@@ -85,7 +96,10 @@ impl Value {
     /// Build a complex value from two real-scalar channels (the single constructor, so the
     /// `re`/`im`-are-real-scalars invariant lives in one place).
     pub fn complex(re: Value, im: Value) -> Value {
-        Value::Complex { re: Box::new(re), im: Box::new(im) }
+        Value::Complex {
+            re: Box::new(re),
+            im: Box::new(im),
+        }
     }
     /// A constant complex from two `f64`s — `re + im·i`.
     pub fn cnum(re: f64, im: f64) -> Value {
@@ -141,23 +155,30 @@ pub fn round_to_se(val: f64, se: f64) -> f64 {
     (val * factor).round() / factor
 }
 
+/// Render an estimate `val ± se` the way its precision justifies (finding B3). For a sub-unit
+/// standard error this is [`round_to_se`] — the value rounded to its confident decimals (e.g.
+/// `3.141`). But when `se >= 1`, rounding to `0` decimals prints every integer digit of `val`
+/// (`241`) even though the error swamps them — false precision exactly when the uncertainty is
+/// largest. So a whole-unit-or-larger SE renders explicitly as `mean ± se`, both rounded to the
+/// SE's leading significant figure (`200 ± 500`), so the uncertainty is never hidden.
+pub fn fmt_est(val: f64, se: f64) -> String {
+    if se.is_finite() && se >= 1.0 {
+        // 10^place is the SE's magnitude; round both value and SE to that place.
+        let place = se.log10().floor() as i32;
+        let factor = 10f64.powi(-place);
+        let rounded_val = (val * factor).round() / factor;
+        let rounded_se = (se * factor).round() / factor;
+        return format!("{} ± {}", format_num(rounded_val), format_num(rounded_se));
+    }
+    format!("{}", round_to_se(val, se))
+}
+
 /// Format a deterministic number without floating-point dust: round to 12 decimal places and trim
 /// trailing zeros, so `1.0000000000000002` prints `1`, `1.49e-30` prints `0`, and `0.0871` stays
 /// `0.0871`. Non-finite values (`inf`/`nan`) print as-is. (Estimates use `round_to_se` instead.)
 pub fn format_num(n: f64) -> String {
-    if n == 0.0 {
-        return "0".to_string(); // also collapses -0
-    }
-    if !n.is_finite() {
-        return format!("{n}");
-    }
-    let s = format!("{n:.12}");
-    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-    if trimmed.is_empty() || trimmed == "-0" {
-        "0".to_string()
-    } else {
-        trimmed.to_string()
-    }
+    // Shared dust-trimming core (finding F5); 12 places = full value precision.
+    crate::num::trim_float(n, 12)
 }
 
 impl fmt::Display for Value {
@@ -171,8 +192,8 @@ impl fmt::Display for Value {
             Value::Recipe(r) => write!(f, "{r}"),
             // No sampling on Display — keep it pure/cheap.
             Value::Dist(id) => write!(f, "<dist #{}>", id.0),
-            // Show only the digits the standard error justifies.
-            Value::Est { val, se } => write!(f, "{}", round_to_se(*val, *se)),
+            // Show only the digits the standard error justifies (and a `± se` when it's large).
+            Value::Est { val, se } => write!(f, "{}", fmt_est(*val, *se)),
             // `[a, b, c]` — comma-joined elements via their own Display.
             Value::Array(xs) => {
                 write!(f, "[")?;
@@ -199,11 +220,43 @@ impl fmt::Display for Value {
                     _ => write!(f, "{re} + {im}i"),
                 }
             }
-            Value::Cond { quantity, condition, .. } => {
+            Value::Cond {
+                quantity,
+                condition,
+                ..
+            } => {
                 write!(f, "<conditioned #{} | #{}>", quantity.0, condition.0)
             }
             Value::Summary(s) => write!(f, "{s}"),
             Value::Continue => write!(f, "continue"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_se_estimate_rounds_to_its_decimals() {
+        // Unchanged behavior: a sub-unit SE rounds `val` to its confident decimals, no `± se`.
+        assert_eq!(fmt_est(1.23456, 5e-4), "1.235");
+        assert_eq!(fmt_est(0.5, 0.01), "0.5");
+        assert_eq!(fmt_est(2.0, 0.0), "2"); // exact
+    }
+
+    #[test]
+    fn large_se_estimate_shows_the_uncertainty() {
+        // Regression for finding B3: a whole-unit-or-larger SE must not print a bare over-precise
+        // integer (`241`) — it renders `mean ± se`, both to the SE's leading figure.
+        assert_eq!(fmt_est(241.37, 500.0), "200 ± 500");
+        assert_eq!(fmt_est(1234.0, 50.0), "1230 ± 50");
+        assert_eq!(fmt_est(7.6, 3.2), "8 ± 3");
+        // The Est value renders through the same path.
+        let e = Value::Est {
+            val: 241.0,
+            se: 500.0,
+        };
+        assert_eq!(e.to_string(), "200 ± 500");
     }
 }

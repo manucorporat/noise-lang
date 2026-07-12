@@ -39,7 +39,7 @@ commands are at the end.
 ## The point: you write trivial code and get an expert kernel
 
 The thing to internalize is *what you didn't have to do*. Write `X ~ unif(-1,1); Y ~ unif(-1,1); 4 *
-P(X**2 + Y**2 < 1)` and the engine, with zero tuning, gives you:
+P(X^2 + Y^2 < 1)` and the engine, with zero tuning, gives you:
 
 | You'd otherwise hand-write… | Noise does it automatically |
 |---|---|
@@ -60,7 +60,7 @@ writes, and competitive with the Rust an expert spends an afternoon on.
 
 ## The problem
 
-Interpreting an AST once per draw is pointer-chasing death: for `X**2 + Y**2 < 1` you'd re-walk the
+Interpreting an AST once per draw is pointer-chasing death: for `X^2 + Y^2 < 1` you'd re-walk the
 tree, re-dispatch on every node, and re-box intermediate values a million times. The entire design
 exists to avoid that.
 
@@ -99,7 +99,7 @@ instead of per draw. This is already fast and is the floor everything else build
 
 ### 2. Graph simplification (free, once per compile)
 
-Before any backend, `simplify` constant-folds, applies finite-safe identities (`x+0`, `x*1`, `x**0`,
+Before any backend, `simplify` constant-folds, applies finite-safe identities (`x+0`, `x*1`, `x^0`,
 double `-`/`!`, …), and hash-conses common subexpressions (CSE) into a smaller DAG. Fewer nodes →
 fewer hot-loop ops and (for the interpreter) fewer materialized columns. Node-count reduction scales
 with redundancy: ~0% for `dice`, ~10% for a clean polynomial (a repeated `X*X`), up to ~67% for an
@@ -343,11 +343,22 @@ for free — the browser is not a second-class citizen.
 
 Honest negative results — each was implemented and/or measured, then rejected:
 
-- **Vectorized SIMD codegen (`f64x2` / NEON).** Built it, measured it, *removed* it. On Apple
-  Silicon the 2-wide vector ops (a 3-instruction vector `rotl`, no native `u64→f64`) couldn't beat
-  what the wide out-of-order core already extracts from scalar code. Multi-stream *scalar* RNG
-  (technique 5) is the form of SIMD that actually won, and it dominates the vector path on every
-  target — so the vector path is gone, not dormant.
+- **Vectorized SIMD codegen (`f64x2` / NEON).** Built it in Cranelift, measured it, *removed* it —
+  then re-probed the question from scratch with a hand-written, correctly-instruction-selected NEON
+  kernel (`crates/noise-core/tests/simd_probe.rs`) to be sure the removal wasn't just a
+  backend-lowering artifact. The probe's finding is more nuanced than "scalar always wins": on Apple
+  Silicon (M4 Pro), hand-written NEON *does* win at the extremes — **1.27× on pure RNG** (`rng_only`)
+  and **1.15× on the FP-throughput-bound class** (`poly_thru`, the `normal_poly`-shaped regime) — but
+  it **loses ~13–16%** on the RNG-bound and mixed graphs Noise actually runs (`pi` 0.87×, `dice`
+  0.84×) and is flat on deep arithmetic (`poly_deep` 0.99×). The loss in the middle is a
+  *port-contention* signature — the vector RNG and the vector FP work compete for the same four NEON
+  pipes, while the scalar kernel runs its integer RNG and its FP on disjoint port sets that the
+  out-of-order core overlaps for free — not "SIMD is slow". So on the graphs that dominate real
+  programs, multi-stream *scalar* RNG (technique 5) wins, and the vector path stays removed. A vector
+  path *would* buy up to ~1.15× on the transcendental/FP-bound class, but Cranelift can't currently
+  emit the instruction selection that earns it and the prize is bounded to that one graph class — so
+  vectorizing `approx::{ln, cos}` is a live but low-priority follow-up, not dormant headroom being
+  left on the table everywhere.
 - **LLVM JIT.** Would close the ~1.15× codegen gap but is a heavy, slow-to-compile, non-WASM-clean
   dependency. Wrong trade for a teaching language that JITs at runtime and must also ship to the
   browser.
