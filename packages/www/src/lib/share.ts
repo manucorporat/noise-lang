@@ -48,6 +48,8 @@ export interface ParsedHash {
   code?: string;
   /** Input overrides carried alongside `x=`/`c=` (a tuned example is shareable as tuned). */
   inputs?: Record<string, InputHashValue>;
+  /** The playground layout the link opens in: `code` | `split` | `render` (from `v=`). */
+  view?: string;
 }
 
 /** Parse the current location hash into a share target. */
@@ -57,14 +59,15 @@ export function parseHash(hash: string): ParsedHash {
   const params = new URLSearchParams(h);
   const raw = params.get('i');
   const inputs = raw ? parseInputs(raw) : undefined;
+  const view = params.get('v') ?? undefined;
   const id = params.get('x');
-  if (id) return { exampleId: id, inputs };
+  if (id) return { exampleId: id, inputs, view };
   const c = params.get('c');
   if (c) {
     const code = decodeCode(c);
-    if (code !== null) return { code, inputs };
+    if (code !== null) return { code, inputs, view };
   }
-  return { inputs };
+  return { inputs, view };
 }
 
 /** Build a shareable absolute URL: a clean `#x=id` when the code is an unmodified example,

@@ -8,16 +8,31 @@
 ---
 
 <section id="playground" class="playground">
-  <div class="pg-split" id="pg-split">
+  <div class="pg-split" id="pg-split" data-view="split">
     <div class="pg-editor-wrap glass">
       <div class="pg-toolbar">
-        <label class="pg-select-wrap">
-          <select id="pg-select" class="pg-select" aria-label="Choose an example"></select>
-        </label>
-        <button id="pg-run" class="btn btn-run" type="button">
-          <span class="btn-icon">▶</span> Run
-          <span class="kbd">⌘↵</span>
-        </button>
+        <div class="pg-viewtabs pg-viewtabs-edit" role="group" aria-label="Choose editor and render layout">
+          <button class="pg-viewtab" data-view="code" type="button" aria-pressed="false" title="Editor only">
+            <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M9 8l-4 4 4 4"></path><path d="M15 8l4 4-4 4"></path></svg>
+            <span>Code</span>
+          </button>
+          <button class="pg-viewtab pg-viewtab-split" data-view="split" type="button" aria-pressed="false" title="Editor and render side by side">
+            <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="7" height="14" rx="1"></rect><rect x="13" y="5" width="7" height="14" rx="1"></rect></svg>
+            <span>Split</span>
+          </button>
+          <button class="pg-viewtab" data-view="render" type="button" aria-pressed="false" title="Render only">
+            <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="1"></rect><path d="M4 9h16"></path></svg>
+            <span>Render</span>
+          </button>
+        </div>
+        <div class="pg-toolbar-right">
+          <label class="pg-select-wrap">
+            <select id="pg-select" class="pg-select" aria-label="Choose an example"></select>
+          </label>
+          <button id="pg-run" class="btn btn-run" type="button" title="Run (⌘↵)">
+            <span class="btn-icon">▶</span> Run
+          </button>
+        </div>
       </div>
       <div id="editor" class="pg-editor"></div>
     </div>
@@ -33,7 +48,22 @@
 
     <div class="pg-output-wrap glass">
       <div class="pg-output-head">
-        <span class="pg-output-title"><span class="dot"></span> Render</span>
+        <div class="pg-head-left">
+          <div class="pg-viewtabs pg-viewtabs-out" role="group" aria-label="Choose editor and render layout">
+            <button class="pg-viewtab" data-view="code" type="button" aria-pressed="false" title="Editor only">
+              <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M9 8l-4 4 4 4"></path><path d="M15 8l4 4-4 4"></path></svg>
+              <span>Code</span>
+            </button>
+            <button class="pg-viewtab pg-viewtab-split" data-view="split" type="button" aria-pressed="false" title="Editor and render side by side">
+              <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="7" height="14" rx="1"></rect><rect x="13" y="5" width="7" height="14" rx="1"></rect></svg>
+              <span>Split</span>
+            </button>
+            <button class="pg-viewtab" data-view="render" type="button" aria-pressed="false" title="Render only">
+              <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="1"></rect><path d="M4 9h16"></path></svg>
+              <span>Render</span>
+            </button>
+          </div>
+        </div>
         <div class="pg-head-right">
           <div id="pg-metrics" class="pg-metrics" hidden></div>
           <div class="pg-share" id="pg-share">
@@ -79,6 +109,46 @@
 <style>
   .playground { max-width: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1rem; }
 
+  /* Segmented control to switch the layout between Code-only, Split, and Render-only. It lives in the
+     header rows (never its own bar, to save vertical space): a copy in the editor toolbar carries it
+     in Code view, and a copy in the Render header carries it in Split/Render — exactly one shows per
+     view, so there's always one control, pinned to the far right. Both drive the same persisted state.
+     The Split segment is hidden on narrow screens where a two-pane split can't breathe. */
+  .pg-viewtabs {
+    display: inline-flex; align-items: stretch; gap: 2px;
+    padding: 1px; border: 1px solid var(--rule); border-radius: 8px; background: var(--paper-2);
+  }
+  /* The editor-toolbar copy leads the left (editor) panel and carries the toggle whenever the editor
+     is shown — Code and Split. Only in Render-only, where the editor panel is gone, does the
+     Render-header copy take over. So exactly one shows per view, always at the far left. */
+  .pg-viewtabs-edit { display: none; }
+  .pg-split[data-view='code'] .pg-viewtabs-edit,
+  .pg-split[data-view='split'] .pg-viewtabs-edit { display: inline-flex; }
+  .pg-viewtabs-out { display: none; }
+  .pg-split[data-view='render'] .pg-viewtabs-out { display: inline-flex; }
+  /* Toggle on the far left of the editor toolbar; the selector + Run ride together on the far right,
+     with the selector free to shrink so the row never wraps in the narrow split pane. */
+  .pg-toolbar-right { display: inline-flex; align-items: center; gap: 0.5rem; margin-left: auto; min-width: 0; }
+  .pg-toolbar-right .pg-select-wrap { min-width: 0; }
+  .pg-toolbar-right .pg-select { min-width: 0; }
+  /* Left cluster of the Render header: the view toggle (Render-only) + the "Render" label. */
+  .pg-head-left { display: inline-flex; align-items: center; gap: 0.6rem; min-width: 0; }
+  .pg-viewtab {
+    font: inherit; font-size: 0.72rem; font-variant: small-caps; letter-spacing: 0.05em;
+    line-height: 1; color: var(--ink-dim); background: transparent;
+    border: 1px solid transparent; border-radius: 6px;
+    padding: 0.12rem 0.6rem; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 0.36rem;
+    transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  }
+  .pg-viewtab svg { stroke: currentColor; stroke-width: 1.9; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .pg-viewtab:hover { color: var(--ink); }
+  .pg-viewtab[aria-pressed='true'] {
+    color: var(--ink); background: var(--paper); border-color: var(--rule);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  }
+  .pg-viewtab:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+
   /* A resizable two-pane split. `--pg-left` is the editor's width fraction, dragged by the handle. */
   .pg-split {
     display: grid;
@@ -86,9 +156,18 @@
     align-items: stretch;
     min-height: clamp(460px, calc(100vh - 13rem), 940px);
   }
+  /* Single-pane views: collapse to one column and hide the resizer + the pane being focused away. */
+  .pg-split[data-view='code'],
+  .pg-split[data-view='render'] { grid-template-columns: 1fr; }
+  .pg-split[data-view='code'] .pg-resizer,
+  .pg-split[data-view='code'] .pg-output-wrap,
+  .pg-split[data-view='render'] .pg-resizer,
+  .pg-split[data-view='render'] .pg-editor-wrap { display: none; }
+
   @media (max-width: 880px) {
     .pg-split { grid-template-columns: 1fr; min-height: 0; gap: 1rem; }
     .pg-resizer { display: none; }
+    .pg-viewtab-split { display: none; }
   }
 
   .pg-resizer {
@@ -115,10 +194,12 @@
     gap: 0.5rem;
     min-height: var(--pg-head, 2.3rem);
     box-sizing: border-box;
-    padding: 0.3rem 0.7rem;
+    /* Same horizontal padding as the Render header (.pg-output-head) so the view toggle sits at the
+       exact same x in both — it must not shift when the visible copy swaps between the two. */
+    padding: 0.3rem 0.85rem;
     border-bottom: 1px solid var(--rule);
     background: var(--paper);
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
   .pg-editor { flex: 1; min-height: 0; height: auto; width: 100%; }
   @media (max-width: 880px) { .pg-editor { flex: none; height: 320px; } }
@@ -132,7 +213,8 @@
     background: var(--paper-2);
     border: 1px solid var(--rule);
     border-radius: 4px;
-    padding: 0.25rem 1.7rem 0.25rem 0.6rem;
+    /* Compact vertical padding so the toolbar keeps to --pg-head and lines up with the Render header. */
+    padding: 0.12rem 1.7rem 0.12rem 0.6rem;
     cursor: pointer;
     max-width: 230px;
   }
@@ -148,7 +230,7 @@
     font: inherit;
     font-size: 0.82rem;
     border-radius: 4px;
-    padding: 0.25rem 0.65rem;
+    padding: 0.12rem 0.65rem;
     cursor: pointer;
     border: 1px solid var(--rule);
     display: inline-flex;
@@ -187,8 +269,6 @@
     font-size: 0.76rem; font-variant: small-caps; letter-spacing: 0.06em; color: var(--ink-dim);
     background: var(--paper);
   }
-  .pg-output-title { display: inline-flex; align-items: center; gap: 0.5rem; }
-  .pg-output-head .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 
   .pg-output {
     margin: 0; padding: 0.85rem; flex: 1; overflow: auto;
@@ -297,9 +377,17 @@
     max-width: 660px; margin: 0 auto;
     font-family: var(--serif); font-size: 1.04rem; line-height: 1.62; color: var(--ink);
   }
-  /* On a wide panel, reserve a right gutter for the margin notes (text left, notes right). */
+  /* On a wide panel, reserve a right gutter for the margin notes (text left, notes right). The gutter
+     is a right padding so the text column (600) + gutter (250) form one 850-wide block that stays
+     centred — otherwise a full-width Render pane would strand the text against the right edge. */
   @container (min-width: 781px) {
-    #pg-output .pg-paper { max-width: 600px; margin-left: auto; margin-right: 250px; }
+    #pg-output .pg-paper {
+      box-sizing: border-box;
+      max-width: 850px;
+      margin-left: auto;
+      margin-right: auto;
+      padding-right: 250px;
+    }
   }
 
   /* Paper header: the frontmatter title + abstract + keywords, typeset like a journal article.
@@ -501,6 +589,23 @@
   // so the header shows before the first run too. After a run, `renderPreview` uses `res.meta`.
   let currentHeaderMeta: { title?: string; abstract?: string; tags?: string[] } | null = null;
 
+  // The layout view (Code / Split / Render). Declared up here (before `shareHash`/`loadFromHash`
+  // run) so the fragment can carry it and reloads restore it. Source of truth on load: the `v=`
+  // fragment param, then the persisted preference, then Split. The controls are wired further down.
+  const VIEW_KEY = 'noise-pg-view';
+  type ViewMode = 'code' | 'split' | 'render';
+  const isViewMode = (v: unknown): v is ViewMode => v === 'code' || v === 'split' || v === 'render';
+  const readView = (): ViewMode => {
+    const fromHash = parseHash(location.hash).view;
+    if (isViewMode(fromHash)) return fromHash;
+    try {
+      const v = localStorage.getItem(VIEW_KEY);
+      if (isViewMode(v)) return v;
+    } catch {}
+    return 'split';
+  };
+  let viewPref: ViewMode = readView();
+
   const editor = monaco.editor.create($('editor'), {
     value: byId.get(defaultExampleId)?.code ?? examples[0]?.code ?? '',
     language: LANGUAGE_ID,
@@ -560,13 +665,16 @@
   }
 
   // The shareable fragment: #x=id (unmodified example) or #c=snapshot, plus #i=name:value for any
-  // tuned inputs — so a tuned example is shareable exactly as tuned.
+  // tuned inputs and #v=view for a non-default layout — so a tuned example in a chosen view is
+  // shareable exactly as seen. The default Split view is left off to keep the common link clean.
   function shareHash(): string {
     const code = editor.getValue();
     const ex = currentId ? byId.get(currentId) : undefined;
-    const base = ex && ex.code.trim() === code.trim() ? `#x=${currentId}` : `#c=${encodeCode(code)}`;
+    let hash = ex && ex.code.trim() === code.trim() ? `#x=${currentId}` : `#c=${encodeCode(code)}`;
     const nd = nonDefaultInputs();
-    return Object.keys(nd).length ? `${base}&i=${encodeInputs(nd)}` : base;
+    if (Object.keys(nd).length) hash += `&i=${encodeInputs(nd)}`;
+    if (viewPref !== 'split') hash += `&v=${viewPref}`;
+    return hash;
   }
 
   /** Read the program's frontmatter and refresh the pre-run paper header (title/abstract/tags), so
@@ -650,7 +758,7 @@
     select.value = id;
     inputValues = { ...(inputs ?? {}) };
     if (loadCode) editor.setValue(ex.code);
-    if (updateHash) setHash(`#x=${id}`);
+    if (updateHash) setHash(viewPref !== 'split' ? `#x=${id}&v=${viewPref}` : `#x=${id}`);
     clearOutput();
     // Refresh the header, then auto-run — inputs (and their controls) come from the run itself.
     void refreshHeader().then(() => { if (autoRun) void execute(); });
@@ -669,6 +777,8 @@
 
   function loadFromHash({ updateHash = false } = {}) {
     const parsed = parseHash(location.hash);
+    // A `v=` in the link opens (or re-opens, on an external hash change) in that layout.
+    if (isViewMode(parsed.view)) viewPref = parsed.view;
     if (parsed.exampleId && byId.has(parsed.exampleId)) {
       selectExample(parsed.exampleId, { loadCode: true, updateHash, inputs: parsed.inputs, autoRun: true });
     } else if (parsed.code !== undefined) {
@@ -1158,6 +1268,44 @@
     else if (e.key === 'ArrowRight') setLeft(cur + 3);
   });
 
+  // --- layout view switcher (Code / Split / Render) ---
+  // `viewPref` / `readView` are declared up top so the fragment carries the view and reloads restore
+  // it. The choice is also persisted so it survives a link with no `v=`. On narrow screens a
+  // side-by-side split doesn't fit, so `split` resolves to a single pane there while the stored
+  // preference is left intact for when the reader is back on a wide screen. There are two copies of
+  // the control (one per header row); both are wired here and only one shows per view.
+  const narrow = window.matchMedia('(max-width: 880px)');
+  const viewTabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.pg-viewtab'));
+
+  // What actually renders: `split` isn't offered on narrow screens, so it resolves to `code` there.
+  const effectiveView = (): ViewMode => (narrow.matches && viewPref === 'split' ? 'code' : viewPref);
+
+  function applyView() {
+    const eff = effectiveView();
+    split.dataset.view = eff;
+    for (const btn of viewTabs) btn.setAttribute('aria-pressed', String(btn.dataset.view === eff));
+    // Re-fit the editor and any charts now that a pane may have just (dis)appeared.
+    editor.layout();
+    for (const card of liveCards) drawCard(card.mount, card.charts);
+  }
+
+  function setView(v: ViewMode) {
+    viewPref = v;
+    try { localStorage.setItem(VIEW_KEY, v); } catch {}
+    setHash(shareHash());
+    applyView();
+  }
+
+  for (const btn of viewTabs) {
+    btn.addEventListener('click', () => {
+      const v = btn.dataset.view;
+      if (isViewMode(v)) setView(v);
+    });
+  }
+  // Re-resolve when crossing the narrow/wide boundary (e.g. a phone rotates or a window is resized).
+  narrow.addEventListener('change', applyView);
+  applyView();
+
   // --- wiring ---
   $('pg-run').addEventListener('click', execute);
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, execute);
@@ -1261,6 +1409,8 @@
   });
 
   window.addEventListener('hashchange', () => {
-    if (!suppressHash) loadFromHash();
+    if (suppressHash) return;
+    loadFromHash();
+    applyView(); // an external hash change may carry a different `v=`
   });
 </script>
