@@ -614,8 +614,8 @@ fn emit_node(
         RvNode::Src(Source::Exp { rate }) => emit_exp(fb, s, *rate),
         RvNode::Src(Source::Geometric { p }) => emit_geometric(fb, s, *p),
         RvNode::Src(Source::Poisson { .. }) => unreachable!("profitable() excludes Poisson"),
-        RvNode::Permutation { .. } | RvNode::ArrIndex { .. } => {
-            unreachable!("profitable() excludes the array-valued permutation nodes")
+        RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => {
+            unreachable!("profitable() excludes the array-valued draw nodes")
         }
         RvNode::Gather { elems, index } => {
             let xv = emit_node(fb, graph, *index, s, math, memo, tables);
@@ -1035,6 +1035,11 @@ fn emit_unary(fb: &mut FunctionBuilder, math: &MathRefs, op: UnOp, a: Value) -> 
         UnOp::Round => call1(fb, math.round, a),
         UnOp::Floor => fb.ins().floor(a),
         UnOp::Ceil => fb.ins().ceil(a),
+        // Native sqrt instruction — IEEE correctly rounded, so bit-identical to the interpreter's
+        // `f64::sqrt` on the whole domain (incl. sqrt(-0.0) = -0.0, sqrt(x<0) = NaN). This being a
+        // single fused instruction (not a `pow` libcall) is the point of `UnOp::Sqrt`
+        // (PLAN-PERF-2 §5).
+        UnOp::Sqrt => fb.ins().sqrt(a),
         UnOp::Ln => emit_ln_guarded(fb, a),
         // e^x via the library `exp` shim — bit-identical to the interpreter's `f64::exp` (the old
         // `pow(e, x)` could differ in the last bit; finding C9). Whole domain handled by libm.

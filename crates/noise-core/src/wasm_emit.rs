@@ -172,7 +172,7 @@ fn collect_gather_tables(
                 stack.push(*b);
             }
             // Interpreter-only (the gate rejects these cones before emission); keep the walk total.
-            RvNode::Permutation { .. } => {}
+            RvNode::Permutation { .. } | RvNode::Rotation { .. } => {}
             RvNode::ArrIndex { arr, index } => {
                 stack.push(*arr);
                 stack.push(*index);
@@ -413,8 +413,8 @@ fn emit_node(
         RvNode::Src(Source::Exp { rate }) => emit_exp(s, ctx, j, *rate),
         RvNode::Src(Source::Geometric { p }) => emit_geometric(s, ctx, j, *p),
         RvNode::Src(Source::Poisson { .. }) => unreachable!("profitable() excludes Poisson"),
-        RvNode::Permutation { .. } | RvNode::ArrIndex { .. } => {
-            unreachable!("profitable() excludes the array-valued permutation nodes")
+        RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => {
+            unreachable!("profitable() excludes the array-valued draw nodes")
         }
         RvNode::Gather { elems, index } => {
             let lx = emit_node(s, ctx, j, *index, memo, slot);
@@ -827,6 +827,12 @@ fn emit_unary(s: &mut InstructionSink, ctx: &Ctx, op: UnOp, a: u32) {
         }
         UnOp::Ceil => {
             s.local_get(a).f64_ceil();
+        }
+        UnOp::Sqrt => {
+            // Native `f64.sqrt` — IEEE correctly rounded (wasm spec), so bit-identical to the
+            // interpreter's `f64::sqrt` on the whole domain (incl. -0.0 → -0.0, x<0 → NaN). A
+            // single fused instruction, not a `pow` import call (PLAN-PERF-2 §5).
+            s.local_get(a).f64_sqrt();
         }
         UnOp::Ln => {
             use crate::approx::{LN_SUBNORMAL_CORR, LN_SUBNORMAL_SCALE};

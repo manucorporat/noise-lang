@@ -241,10 +241,12 @@ pub fn walk_cost(
         // policy from silently misclassifying a future op as fusible.
         match graph.node(id) {
             RvNode::Src(Source::Poisson { .. }) => return false, // Knuth loop stays interpreter-only
-            // The array-valued permutation draw and its per-lane element read stay
-            // interpreter-only, like Poisson: the Fisher–Yates shuffle is a per-lane loop with
-            // data-dependent swaps over an array register — not a fusible scalar expression.
-            RvNode::Permutation { .. } | RvNode::ArrIndex { .. } => return false,
+            // The array-valued draws (permutation's Fisher–Yates, rotation's Gaussian-fill + MGS)
+            // and their per-lane element read stay interpreter-only, like Poisson: per-lane loops
+            // over an array register — not fusible scalar expressions.
+            RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => {
+                return false
+            }
             RvNode::Gather { elems, index } => match gather_class(graph, elems) {
                 // Const-table gather is a LEAF over its elems: the emitters materialize the table
                 // in memory and never emit the element nodes, so only the index cone is walked (a
@@ -275,8 +277,12 @@ pub fn walk_cost(
                 match op {
                     UnOp::Sin | UnOp::Cos | UnOp::Ln => charge(1, fusible, libcalls), // inlined on both backends
                     UnOp::Atan | UnOp::Round | UnOp::Exp => *libcalls += 1, // still a call everywhere
-                    // Cheap fused instructions on every backend (native/wasm floor/ceil/neg, etc.).
-                    UnOp::Neg | UnOp::Not | UnOp::Sign | UnOp::Floor | UnOp::Ceil => *fusible += 1,
+                    // Cheap fused instructions on every backend (native/wasm floor/ceil/neg, and
+                    // sqrt — a single IEEE-exact instruction on both Cranelift and wasm, which is
+                    // why it is its own node and not `Pow(x, 0.5)`; PLAN-PERF-2 §5).
+                    UnOp::Neg | UnOp::Not | UnOp::Sign | UnOp::Floor | UnOp::Ceil | UnOp::Sqrt => {
+                        *fusible += 1
+                    }
                 }
                 stack.push(*a);
             }
@@ -374,7 +380,9 @@ fn latency_bound(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>) -> bool {
                 | Source::Poisson { .. },
             ) => return false,
             // Interpreter-only (walk_cost already rejects them); classify conservatively.
-            RvNode::Permutation { .. } | RvNode::ArrIndex { .. } => return false,
+            RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => {
+                return false
+            }
             // Gather lowers to compares/selects/loads — no transcendental, so it keeps the cone
             // latency-bound (like `Select`). Const-table elems are never emitted; only the index
             // (and, for the select chain, the elems) can break the predicate.
@@ -395,8 +403,9 @@ fn latency_bound(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>) -> bool {
                     UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Round | UnOp::Exp | UnOp::Ln => {
                         return false
                     }
-                    // Plain fused instructions keep the cone latency-bound.
-                    UnOp::Neg | UnOp::Not | UnOp::Sign | UnOp::Floor | UnOp::Ceil => {}
+                    // Plain fused instructions keep the cone latency-bound (sqrt is longer-latency
+                    // than floor/neg but still a pipelined single instruction, not a call).
+                    UnOp::Neg | UnOp::Not | UnOp::Sign | UnOp::Floor | UnOp::Ceil | UnOp::Sqrt => {}
                 }
                 stack.push(*a);
             }
@@ -445,7 +454,7 @@ fn latency_bound(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>) -> bool {
 pub fn supported(graph: &RvGraph, root: RvId) -> bool {
     match graph.node(root) {
         RvNode::Src(Source::Poisson { .. }) => false,
-        RvNode::Permutation { .. } | RvNode::ArrIndex { .. } => false, // interpreter-only
+        RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => false, // interpreter-only
         RvNode::Gather { elems, index } => match gather_class(graph, elems) {
             Some(GatherClass::ConstTable) => supported(graph, *index),
             Some(GatherClass::SelectChain) => {
@@ -515,6 +524,18 @@ pub fn cost_roots(graph: &RvGraph, roots: &[RvId]) -> NodeCost {
                 c.sources += (*n as u64).saturating_sub(1);
                 c.ops += *n as u64;
             }
+            // A whole-matrix Haar draw: `d²` normal draws per lane (`sources`) and ~`2d³` flops of
+            // native Gaussian-fill + modified Gram–Schmidt (each of the ~d²/2 row projections is a
+            // length-`d` dot plus a length-`d` axpy). The work didn't vanish when the graph-level
+            // MGS collapsed to one node — it moved into the `Inst::Rotation` loop — so charge it
+            // honestly here (consistent with Permutation's charge): under-charging would let
+            // `clamp_to_op_budget` admit more draws than the real per-draw cost supports, and the
+            // playground's ops readout would flatter rotation-heavy programs.
+            RvNode::Rotation { d } => {
+                let d = *d as u64;
+                c.sources += d * d;
+                c.ops += 2 * d * d * d;
+            }
             RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
             RvNode::Unary(_, a) => stack.push(*a),
             RvNode::Binary(_, a, b) => {
@@ -566,7 +587,8 @@ pub fn cone_size_roots(graph: &RvGraph, roots: &[RvId]) -> usize {
             RvNode::Src(_)
             | RvNode::ConstNum(_)
             | RvNode::ConstBool(_)
-            | RvNode::Permutation { .. } => {}
+            | RvNode::Permutation { .. }
+            | RvNode::Rotation { .. } => {}
             RvNode::Unary(_, a) => stack.push(*a),
             RvNode::Binary(_, a, b) => {
                 stack.push(*a);

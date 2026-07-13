@@ -96,6 +96,16 @@ pub enum Inst {
         dst: ArrReg,
         n: u32,
     },
+    /// Per-lane Haar rotation: fill array register `dst` (element count `d²`, row-major
+    /// `k = row·d + col`) with an independent random `d`×`d` orthonormal matrix per lane — `d²`
+    /// iid `N(0,1)` draws via the same Box–Muller fill every `Normal` source uses, then modified
+    /// Gram–Schmidt over the rows in place. A SOURCE: consumes exactly `2·⌈d²/2⌉ × BATCH` RNG
+    /// draws per batch (Box–Muller consumes uniforms in pairs — a fixed count even when `d²` is
+    /// odd; full batch, like every other source).
+    Rotation {
+        dst: ArrReg,
+        d: u32,
+    },
     /// Per-lane read `dst = arr[round(clamp(index))]` of an array register — `Inst::Gather`'s
     /// exact index semantics (ties-away round; NaN → NaN; clamp into `0..n`), but the table is a
     /// per-lane *random* array instead of a list of element registers.
@@ -238,7 +248,8 @@ fn lower(
                     RvNode::Src(_)
                     | RvNode::ConstNum(_)
                     | RvNode::ConstBool(_)
-                    | RvNode::Permutation { .. } => {}
+                    | RvNode::Permutation { .. }
+                    | RvNode::Rotation { .. } => {}
                     RvNode::Unary(_, a) => push_child(&mut stack, *a),
                     RvNode::Binary(_, a, b) => {
                         push_child(&mut stack, *b);
@@ -338,6 +349,16 @@ fn lower(
                         arrays.push(n);
                         arr_memo.insert(id, a);
                         insts.push(Inst::Permutation { dst: a, n });
+                    }
+                    RvNode::Rotation { d } => {
+                        // Same array-valued-source shape as Permutation: one instruction slot (the
+                        // scalar column at `dst` stays unwritten, keeping `n_regs == insts.len()`),
+                        // result in a fresh `d²`-element array register.
+                        let a = ArrReg::try_from(arrays.len())
+                            .expect("bytecode exceeded 2^32 array registers");
+                        arrays.push(d * d);
+                        arr_memo.insert(id, a);
+                        insts.push(Inst::Rotation { dst: a, d });
                     }
                     RvNode::ArrIndex { arr, index } => {
                         let (a, ri) = (arr_memo[&arr], memo[&index]);
@@ -476,6 +497,45 @@ pub fn run_batch(
                     }
                 }
             }
+            Inst::Rotation { dst, d } => {
+                // Per lane: fill the lane's contiguous `d²` run (row-major, `m[r*d + c]`) with iid
+                // standard normals via `fill_normal` — the SAME Box–Muller primitive `Inst::Normal`
+                // uses, so tails/quality match a hand-built Gaussian seed — then modified
+                // Gram–Schmidt the rows in place: subtract each earlier (already unit) row's
+                // projection, then normalize. This is the native-Rust replacement for the old
+                // graph-level MGS (`O(d³)` interpreted nodes per draw); the flops are the same
+                // `O(d³)`, they just run as three tight loops per lane. RNG consumption is fixed
+                // per batch (`2·⌈d²/2⌉` uniforms per lane × full BATCH — Box–Muller draws its pair
+                // even for an odd final slot), so a partial batch doesn't change the stream. A
+                // zero-norm row (probability 0 for Gaussians) would yield inf/NaN entries — the
+                // same IEEE answer the graph-level `normalize` produced.
+                let d = d as usize;
+                let dd = d * d;
+                let buf = &mut arrs[dst as usize];
+                for k in 0..BATCH {
+                    let m = &mut buf[k * dd..(k + 1) * dd];
+                    rng.fill_normal(0.0, 1.0, m);
+                    for r in 0..d {
+                        for p in 0..r {
+                            let mut dot = 0.0;
+                            for c in 0..d {
+                                dot += m[r * d + c] * m[p * d + c];
+                            }
+                            for c in 0..d {
+                                m[r * d + c] -= dot * m[p * d + c];
+                            }
+                        }
+                        let mut normsq = 0.0;
+                        for c in 0..d {
+                            normsq += m[r * d + c] * m[r * d + c];
+                        }
+                        let inv = 1.0 / normsq.sqrt();
+                        for c in 0..d {
+                            m[r * d + c] *= inv;
+                        }
+                    }
+                }
+            }
             Inst::ArrIndex { dst, arr, index } => {
                 // Per lane: `Inst::Gather`'s exact index semantics (ties-away `round`; NaN index →
                 // NaN, never element 0; `raw <= 0` → 0; `>= last` → last), reading lane `k`'s own
@@ -531,6 +591,9 @@ fn apply_un(op: UnOp, x: f64) -> f64 {
         // ln(0) = -inf, ln(x<0) = NaN). The code generators approximate these within MC noise.
         UnOp::Exp => x.exp(),
         UnOp::Ln => x.ln(),
+        // IEEE sqrt (correctly rounded, so the native sqrt instructions in both code generators
+        // are bit-identical to this): sqrt(-0.0) = -0.0, sqrt(x<0) = NaN (incl. -inf).
+        UnOp::Sqrt => x.sqrt(),
     }
 }
 
@@ -743,6 +806,84 @@ mod tests {
             assert_eq!(col(regs[4])[k], col(regs[1])[k], "+inf clamps to last");
             assert!(col(regs[5])[k].is_nan(), "NaN index must yield NaN");
         }
+    }
+
+    /// Build `Rotation(d)` plus its `d²` constant-index `ArrIndex` element reads (the shape
+    /// `draw_rotation` emits, row-major `k = row·d + col`) and return `(graph, element_roots)`.
+    fn rot_with_elems(d: usize) -> (RvGraph, Vec<RvId>) {
+        let mut g = RvGraph::default();
+        let arr = g.push(
+            RvNode::Rotation { d: d as u32 },
+            RvKind::Arr((d * d) as u32),
+        );
+        let roots = (0..d * d)
+            .map(|i| {
+                let index = g.push(RvNode::ConstNum(i as f64), RvKind::Num);
+                g.push(RvNode::ArrIndex { arr, index }, RvKind::Num)
+            })
+            .collect();
+        (g, roots)
+    }
+
+    #[test]
+    fn rotation_lanes_are_orthonormal() {
+        // Every lane's d² element reads must form an orthonormal matrix: each row unit-norm and
+        // each row pair orthogonal to f64 rounding (per-lane MGS keeps both < 1e-9 at d = 5; the
+        // determinant's sign is irrelevant — the draw is Haar over O(d)).
+        const D: usize = 5;
+        let (g, roots) = rot_with_elems(D);
+        let (prog, regs) = compile_roots(&g, &roots);
+        let (mut buf, mut arrs) = reg_files(&prog);
+        let mut rng = crate::rng::Rng::seed_from_u64(13);
+        for _ in 0..20 {
+            run_batch(&prog, &mut buf, &mut arrs, &mut rng);
+            for k in 0..BATCH {
+                let q = |r: usize, c: usize| buf[regs[r * D + c] as usize][k];
+                for r1 in 0..D {
+                    for r2 in r1..D {
+                        let dot: f64 = (0..D).map(|c| q(r1, c) * q(r2, c)).sum();
+                        let want = if r1 == r2 { 1.0 } else { 0.0 };
+                        assert!(
+                            (dot - want).abs() < 1e-9,
+                            "lane {k}: rows {r1}·{r2} = {dot}, want {want}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rotation_entries_match_haar_moments() {
+        // Haar sanity across lanes: each entry is symmetric about 0 (`E[q00] = 0`) and, the rows
+        // being unit with `d` exchangeable columns, `E[q00²] = 1/d` exactly. Bounds are ~5σ for
+        // this sample size (q00 ≈ N(0, 1/d) for the mean; Var(q00²) ≲ E[q00⁴] ≈ 3/d² for the
+        // second moment), seeded and deterministic like the permutation uniformity test.
+        const D: usize = 5;
+        let (g, roots) = rot_with_elems(D);
+        let (prog, regs) = compile_roots(&g, &roots);
+        let (mut buf, mut arrs) = reg_files(&prog);
+        let mut rng = crate::rng::Rng::seed_from_u64(17);
+        let batches = 20;
+        let (mut sum, mut sum_sq) = (0.0f64, 0.0f64);
+        for _ in 0..batches {
+            run_batch(&prog, &mut buf, &mut arrs, &mut rng);
+            for k in 0..BATCH {
+                let q00 = buf[regs[0] as usize][k];
+                sum += q00;
+                sum_sq += q00 * q00;
+            }
+        }
+        let n = (batches * BATCH) as f64;
+        let (mean, mean_sq) = (sum / n, sum_sq / n);
+        let sd_mean = (1.0 / D as f64).sqrt() / n.sqrt();
+        assert!(mean.abs() < 5.0 * sd_mean, "E[q00] = {mean}");
+        let sd_mean_sq = (3.0f64).sqrt() / D as f64 / n.sqrt();
+        assert!(
+            (mean_sq - 1.0 / D as f64).abs() < 5.0 * sd_mean_sq,
+            "E[q00²] = {mean_sq}, want {}",
+            1.0 / D as f64
+        );
     }
 
     #[test]

@@ -37,7 +37,8 @@ pub struct Uniform {
 pub enum RvKind {
     Num,
     Bool,
-    /// An **array-valued** node of the carried length (today only [`RvNode::Permutation`]). Never
+    /// An **array-valued** node of the carried length ([`RvNode::Permutation`] /
+    /// [`RvNode::Rotation`]). Never
     /// user-visible: the evaluator wraps such a node in per-element [`RvNode::ArrIndex`] reads and
     /// hands out those scalar `Value::Dist`s, so an `Arr`-kind id cannot become a forcing root or
     /// enter operator lifting (the scalar drivers' columns are `f64`).
@@ -149,8 +150,9 @@ pub enum Recipe {
         rate: f64,
     },
     /// A random `d`×`d` orthonormal matrix (a Haar rotation). Unlike the scalar recipes above this
-    /// is a *structured, multivariate* draw: `~` instantiates `d²` correlated Gaussian sources and
-    /// orthonormalizes them (Gram–Schmidt), yielding a `Value::Array` of arrays rather than a
+    /// is a *structured, multivariate* draw: `~` instantiates ONE array-valued [`RvNode::Rotation`]
+    /// source (a per-lane Gaussian fill + modified Gram–Schmidt in the VM) and returns `d` rows of
+    /// `d` scalar [`RvNode::ArrIndex`] element reads — a `Value::Array` of arrays rather than a
     /// scalar `Value::Dist`. See `Engine::draw_rotation`.
     Rotation {
         d: usize,
@@ -293,6 +295,17 @@ pub enum RvNode {
     /// data-dependent swaps, not a fusible expression).
     Permutation {
         n: u32,
+    },
+    /// A Haar-random `d`×`d` orthonormal matrix, drawn whole per lane — an **array-valued SOURCE**
+    /// (`RvKind::Arr(d²)`, row-major `k = row·d + col`). The VM fills `d²` iid standard normals and
+    /// modified-Gram–Schmidt-orthonormalizes the rows in native Rust (`Inst::Rotation`). This is
+    /// what keeps `rotation(d)` an `O(d²)` graph: the old lowering ran MGS *in the graph* —
+    /// `O(d³)` dot/sub/normalize nodes (~17.5k for turboquant's `d = 20`), re-interpreted per
+    /// draw. Like any source it is never CSE-merged (two draws stay independent rotations) and,
+    /// like `Permutation`, it stays interpreter-only (`kernel::walk_cost` returns false — a
+    /// per-lane triple loop over an array register, not a fusible scalar expression).
+    Rotation {
+        d: u32,
     },
     /// Scalar per-lane read `arr[index]` of an array-valued node: round the lane's `index`
     /// (ties away from zero), clamp into `0..n`, NaN index → NaN — the EXACT semantics of

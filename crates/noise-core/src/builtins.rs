@@ -31,9 +31,12 @@ pub const MAX_OPS_DEFAULT: u64 = 1_000_000_000;
 /// The time-axis twin of [`P_DEFAULT_N`] — a measurement knob, not part of the question — sized
 /// so toy programs never need to mention it.
 pub const RESOLUTION_DEFAULT: usize = 256;
-/// Maximum dimension of a `rotation(d)` draw (finding A6). Drawing it Gram–Schmidt-orthonormalizes a
-/// `d×d` Gaussian seed — `O(d³)` sample-graph nodes — so an uncapped `d` (`rotation(500)`) builds
-/// ~10⁸ nodes and OOMs/aborts. Teaching rotations are small (`d ≤ ~64`; the flagship uses 20).
+/// Maximum dimension of a `rotation(d)` draw (finding A6). The draw is `O(d²)` graph nodes now
+/// (one array-valued `RvNode::Rotation` + `d²` element reads — the old graph-level Gram–Schmidt's
+/// `O(d³)` node blowup is gone), but each rotation still costs the interpreter a `d² × BATCH` f64
+/// array register per worker (`d = 128` → 16 MiB), `d²` normal draws per lane, and `O(d³)` native
+/// Gram–Schmidt flops per lane, so an unbounded `d` remains a memory/time foot-gun. Teaching
+/// rotations are small (`d ≤ ~64`; the flagship uses 20).
 const MAX_ROTATION_DIM: usize = 128;
 /// Maximum length of a `permutation(n)` draw (finding A6). The draw is `O(n)` graph nodes now (one
 /// array-valued `RvNode::Permutation` + `n` element reads), but each permutation still costs the
@@ -192,8 +195,8 @@ pub fn call(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
         }
         "rotation" => {
             // A random d×d orthonormal matrix — a *recipe* like any other distribution, drawn with
-            // `~` (the actual Gram–Schmidt source draws happen in `Engine::draw_rotation`). `d` must
-            // be a non-negative integer (the matrix dimension).
+            // `~` (one array-valued source node + `d²` element reads, built in
+            // `Engine::draw_rotation`). `d` must be a non-negative integer (the matrix dimension).
             let d = one_num(name, arg_vals, span)?;
             if d.fract() != 0.0 || d < 0.0 || !d.is_finite() {
                 return Err(NoiseError::runtime(
@@ -201,13 +204,14 @@ pub fn call(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
                     span,
                 ));
             }
-            // Drawing a rotation Gram–Schmidt-orthonormalizes a `d×d` Gaussian seed — `O(d³)` graph
-            // nodes — so an unbounded `d` OOMs/aborts at build time (finding A6). Cap it cleanly.
+            // Sampling a rotation costs a `d² × BATCH` array column per worker plus `d²` normal
+            // draws and `O(d³)` Gram–Schmidt flops per lane, so an unbounded `d` is a memory/time
+            // foot-gun (finding A6; see MAX_ROTATION_DIM). Cap it cleanly.
             if d > MAX_ROTATION_DIM as f64 {
                 return Err(NoiseError::runtime(
                     format!(
-                        "rotation({d}) is too large (max dimension {MAX_ROTATION_DIM}) — it builds \
-                         an O(d³) sample graph; use a smaller dimension"
+                        "rotation({d}) is too large (max dimension {MAX_ROTATION_DIM}) — each \
+                         sample orthonormalizes a {d}×{d} matrix; use a smaller dimension"
                     ),
                     span,
                 ));

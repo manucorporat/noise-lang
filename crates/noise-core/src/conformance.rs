@@ -90,6 +90,21 @@ pub const CONST_CASES: &[(&str, &str)] = &[
     ),
     // --- non-integer `^` → a `powf` call on every backend (exact) ---
     ("pow_frac", "use rand; X ~ unif(0,0); (2.0 + X) ^ (0.5 + X)"),
+    // --- sqrt → the native sqrt instruction on both backends (`UnOp::Sqrt`, PLAN-PERF-2 §5):
+    // IEEE correctly rounded, so bit-identical to the interpreter's `f64::sqrt` across the whole
+    // domain. The edge cases are exactly where sqrt differs from the old `powf(x, 0.5)` lowering
+    // (sqrt(-0.0) = -0.0 not +0.0, sqrt(-inf and any x<0) = NaN not +inf), so these pin the new
+    // semantics at the bit level (the -0.0 case only passes if the sign bit survives). ---
+    ("sqrt_pos", "use rand; use math; X ~ unif(9,9); sqrt(X)"), // → 3
+    ("sqrt_neg_nan", "use rand; use math; X ~ unif(0,0); sqrt(X - 1.0)"), // sqrt(-1) → NaN
+    (
+        "sqrt_neg_zero",
+        "use rand; use math; X ~ unif(0,0); sqrt((0.0 - 1.0) * X)", // sqrt(-0.0) → -0.0
+    ),
+    (
+        "sqrt_pos_inf",
+        "use rand; use math; X ~ unif(0,0); sqrt((1.0 + X) / X)", // sqrt(1/0 = +inf) → +inf
+    ),
     // --- exp: a library call on every backend now (finding C9 — was `pow(e,x)`) ---
     ("exp", "use rand; use math; X ~ unif(0,0); exp(1.5 + X)"),
     ("atan", "use rand; use math; X ~ unif(0,0); atan(0.7 + X)"),
@@ -240,6 +255,13 @@ pub const RNG_CASES: &[(&str, &str, u64)] = &[
         "sin_large_arg",
         "use rand; use math; X ~ unif(0,1); sin(1000000000000.0 * X)",
         29,
+    ),
+    // sqrt over a real spread (drives the native-sqrt lowering per lane in both backends;
+    // E[√U] = 2/3 for U ~ unif(0,1))
+    (
+        "sqrt_uniform",
+        "use rand; use math; U ~ unif(0,1); sqrt(U)",
+        32,
     ),
     // mod / floor / ceil
     ("mod_uniform", "use rand; X ~ unif(0,10); X % 3", 19),

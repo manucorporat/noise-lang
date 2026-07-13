@@ -420,7 +420,8 @@ impl Engine {
             | UnOp::Floor
             | UnOp::Ceil
             | UnOp::Exp
-            | UnOp::Ln => {
+            | UnOp::Ln
+            | UnOp::Sqrt => {
                 if kind != RvKind::Num {
                     return Err(NoiseError::type_mismatch(
                         format!("cannot apply {} to {}", unop_name(op), kind.type_name()),

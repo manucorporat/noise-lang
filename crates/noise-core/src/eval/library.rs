@@ -356,39 +356,44 @@ impl Engine {
 
     /// Draw a `rotation(d)` recipe: a fresh `d`×`d` random **orthonormal** matrix per Monte Carlo
     /// sample (a Haar rotation: the random rotation `Π` of TurboQuant Algorithm 1, so `Π·x` is
-    /// uniform on the unit sphere and each coordinate is `≈ N(0, 1/d)`). Built by drawing a Gaussian
-    /// seed matrix and orthonormalizing its rows with (modified) Gram–Schmidt, lowered into the RV
-    /// graph — it reuses `dot`/`-`/`normalize`, so every entry is an ordinary RV node sampled per
-    /// lane. The cost is `O(d³)` graph nodes, so keep `d` modest (≤ ~32 for interactive runs). The
-    /// inner reducers can't actually fail here (we control the shapes), so the span is synthetic.
+    /// uniform on the unit sphere and each coordinate is `≈ N(0, 1/d)`). ONE array-valued
+    /// [`RvNode::Rotation`] source (a per-lane Gaussian fill + modified Gram–Schmidt in the VM,
+    /// `Inst::Rotation`) plus `d²` scalar [`RvNode::ArrIndex`] element reads at constant
+    /// row-major indices (`k = row·d + col`), returned as `d` nested row arrays — the exact
+    /// `Value` shape the old lowering produced, so `@`/`transpose`/`matvec`/indexing compose
+    /// element-wise unchanged. `O(d²)` graph nodes, replacing the graph-level MGS whose
+    /// dot/sub/normalize chains were `O(d³)` nodes per draw (~17.5k for turboquant's `d = 20`,
+    /// re-interpreted every forcing). The `Arr`-kind node itself never escapes as a `Value`: only
+    /// the scalar element reads do, so an array-valued forcing root is impossible by
+    /// construction. Shaped draws (`~[k] rotation(d)`) call this once per leaf, so each rotation
+    /// is a distinct source node — independent draws, like every recipe. Kept `Result` to match
+    /// the `draw` dispatch signature (this body cannot fail).
     pub(super) fn draw_rotation(&mut self, d: usize) -> Result<Value> {
-        let span = Span::default();
-        // Gaussian seed: `d` rows of `d` iid N(0,1) draws (a fresh source node per entry).
-        let mut seed = Vec::with_capacity(d);
-        for _ in 0..d {
-            let mut row = Vec::with_capacity(d);
-            for _ in 0..d {
-                row.push(self.draw(Recipe::Normal {
-                    mu: 0.0,
-                    sigma: 1.0,
-                })?);
-            }
-            seed.push(Value::Array(Rc::new(row)));
+        if d == 0 {
+            // No node for the empty draw: a zero-length array register has nothing to read.
+            return Ok(Value::Array(Rc::new(Vec::new())));
         }
-        // Modified Gram–Schmidt over the rows: subtract the projection onto each previously
-        // orthonormalized row (which, being unit, has projection coefficient `dot(u, qⱼ)`), then
-        // normalize. The resulting rows are orthonormal, hence the whole matrix is orthogonal.
-        let mut q: Vec<Value> = Vec::with_capacity(d);
-        for v in seed.into_iter() {
-            let mut u = v;
-            for qj in q.iter() {
-                let coeff = self.lib_dot(&[u.clone(), qj.clone()], span)?;
-                let proj = self.binop(BinOp::Mul, qj.clone(), coeff, span)?;
-                u = self.binop(BinOp::Sub, u, proj, span)?;
-            }
-            q.push(self.lib_normalize(&[u], span)?);
-        }
-        Ok(Value::Array(Rc::new(q)))
+        let arr = self.graph.push(
+            RvNode::Rotation { d: d as u32 },
+            RvKind::Arr((d * d) as u32),
+        );
+        let rows = (0..d)
+            .map(|r| {
+                let row = (0..d)
+                    .map(|c| {
+                        let index = self
+                            .graph
+                            .push(RvNode::ConstNum((r * d + c) as f64), RvKind::Num);
+                        Value::Dist(
+                            self.graph
+                                .push(RvNode::ArrIndex { arr, index }, RvKind::Num),
+                        )
+                    })
+                    .collect();
+                Value::Array(Rc::new(row))
+            })
+            .collect();
+        Ok(Value::Array(Rc::new(rows)))
     }
 
     /// Draw a `permutation(n)` recipe: a fresh uniform random permutation of `0..n` per Monte
@@ -921,11 +926,14 @@ impl Engine {
         Ok(acc)
     }
 
-    /// `norm(a)` — Euclidean length, `normsq(a) ^ 0.5` (so it lifts over RVs, and folds to
-    /// `sqrt` for constant vectors).
+    /// `norm(a)` — Euclidean length, `sqrt(normsq(a))` (so it lifts over RVs, and folds to
+    /// `f64::sqrt` for constant vectors). Via `cufunc_sqrt`, not `^ 0.5`: an RV vector gets a
+    /// fusible `UnOp::Sqrt` node instead of a `pow` libcall (PLAN-PERF-2 §5 — this is
+    /// `turboquant`'s hot path). `normsq`'s domain is {NaN, +0.0, positive, +inf}, where sqrt
+    /// and powf agree anyway.
     fn lib_norm(&mut self, args: &[Value], span: Span) -> Result<Value> {
         let ns = self.lib_normsq(args, span)?;
-        self.binop(BinOp::Pow, ns, Value::Num(0.5), span)
+        self.cufunc_sqrt(ns, span)
     }
 
     /// `mat @ vec` — matrix-vector product (`out[i] = dot(M[i], v)`). Private helper for the `@`
@@ -1123,12 +1131,15 @@ impl Engine {
         match name {
             "exp" => self.cufunc_exp(x, span),
             // |z| = √(re² + im²); for a real `x` this is √(x²) = |x| (and lifts/folds the same way).
+            // Routed through `cufunc_sqrt` (a `UnOp::Sqrt` node for an RV — fusible in codegen,
+            // unlike the old `Pow(s, 0.5)` libcall; PLAN-PERF-2 §5). `s` is a sum of squares, so
+            // its domain is {NaN, +0.0, positive, +inf}, where sqrt and powf agree anyway.
             "abs" => {
                 let (a, b) = self.complex_parts(x, span)?;
                 let aa = self.binop(BinOp::Mul, a.clone(), a, span)?;
                 let bb = self.binop(BinOp::Mul, b.clone(), b, span)?;
                 let s = self.binop(BinOp::Add, aa, bb, span)?;
-                self.binop(BinOp::Pow, s, Value::Num(0.5), span)
+                self.cufunc_sqrt(s, span)
             }
             "sqrt" => self.cufunc_sqrt(x, span),
             "arg" => self.cufunc_arg(x, span),
@@ -1187,18 +1198,25 @@ impl Engine {
         }
     }
 
-    /// `sqrt(z)`. Real `x` → IEEE `√x` (so `sqrt(-1.0)` stays `NaN`; a real RV lifts via `x ^ 0.5`).
+    /// `sqrt(z)`. Real `x` → IEEE `√x` on every path: a constant folds with `f64::sqrt` and a real
+    /// RV lifts to a `UnOp::Sqrt` node (native, correctly-rounded sqrt in every backend — fusible
+    /// in the codegen cost model, unlike the old `Pow(x, 0.5)` libcall; PLAN-PERF-2 §5). The node
+    /// also fixes the const/RV inconsistency the `x ^ 0.5` lowering had: `powf` gives
+    /// `(-0.0)^0.5 = +0.0` and `(-inf)^0.5 = +inf` where IEEE sqrt — and this builtin's constant
+    /// path — give `-0.0` and `NaN`. `sqrt(-1.0)` stays `NaN` everywhere.
     /// **Constant** complex → the principal square root. A complex *random variable* square root is
     /// not supported (exotic; would need per-lane branch logic) — a clear error.
     fn cufunc_sqrt(&mut self, x: Value, span: Span) -> Result<Value> {
         match x {
             Value::Num(n) => Ok(Value::Num(n.sqrt())),
             Value::Est { val, .. } => Ok(Value::Num(val.sqrt())),
-            Value::Dist(id) if self.graph.kind(id) == RvKind::Num => {
-                self.binop(BinOp::Pow, Value::Dist(id), Value::Num(0.5), span)
-            }
-            // A lazy signal defers as `x ^ 0.5` (the same lowering the RV path uses).
-            sig @ Value::Signal(_) => self.binop(BinOp::Pow, sig, Value::Num(0.5), span),
+            x @ Value::Dist(_) => self.lift_unary(UnOp::Sqrt, x, span),
+            // A lazy signal defers the same `Sqrt` step (materializes via `signal::apply_unary`;
+            // a noisy lane lifts to the same `UnOp::Sqrt` node through `sig_unary`).
+            Value::Signal(s) => Ok(Value::Signal(Rc::new(SigExpr::Unary(
+                SigUnOp::Un(UnOp::Sqrt),
+                s,
+            )))),
             Value::Complex { re, im } => match (scalar_const(&re), scalar_const(&im)) {
                 (Some(a), Some(b)) => {
                     let r = (a * a + b * b).sqrt();

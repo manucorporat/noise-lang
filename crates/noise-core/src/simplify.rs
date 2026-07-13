@@ -99,7 +99,8 @@ impl Builder {
                         RvNode::Src(_)
                         | RvNode::ConstNum(_)
                         | RvNode::ConstBool(_)
-                        | RvNode::Permutation { .. } => {}
+                        | RvNode::Permutation { .. }
+                        | RvNode::Rotation { .. } => {}
                         RvNode::Unary(_, a) => push_child(*a),
                         RvNode::Binary(_, l, r) => {
                             push_child(*r);
@@ -135,6 +136,9 @@ impl Builder {
                         RvNode::Permutation { n } => {
                             self.out.push(RvNode::Permutation { n: *n }, kind)
                         }
+                        // Same for the whole-matrix Haar draw: two `rotation(d)` draws must stay
+                        // independent rotations.
+                        RvNode::Rotation { d } => self.out.push(RvNode::Rotation { d: *d }, kind),
                         RvNode::ConstNum(x) => self.num(*x),
                         RvNode::ConstBool(b) => self.boolean(*b),
                         RvNode::Unary(op, a) => {
@@ -220,6 +224,7 @@ impl Builder {
                 UnOp::Ceil => return self.num(x.ceil()),
                 UnOp::Exp => return self.num(x.exp()),
                 UnOp::Ln => return self.num(x.ln()),
+                UnOp::Sqrt => return self.num(x.sqrt()),
                 UnOp::Not => {} // kind-checked away upstream; fall through
             }
         }
@@ -275,6 +280,17 @@ impl Builder {
             Div if rn == Some(1.0) => return l,
             Pow if rn == Some(1.0) => return l,
             Pow if rn == Some(0.0) => return self.num(1.0), // x^0 == 1 (matches powf, incl. inf/nan)
+            // `x ^ 0.5 → sqrt(x)` — a pow libcall becomes one native instruction — but ONLY when
+            // the base is provably a square/exponential, i.e. its domain is {NaN, +0.0, positive,
+            // +inf}. There powf and sqrt agree; on the two excluded inputs they do NOT
+            // (`powf(-0.0, 0.5) = +0.0` vs `sqrt(-0.0) = -0.0` — a *finite* lane, observable via
+            // `1/x`; `powf(-inf, 0.5) = +inf` vs `sqrt(-inf) = NaN`), so an unconditional rewrite
+            // would break this module's exact-for-all-draws charter. General `x ^ 0.5` keeps C99
+            // powf semantics; `math::sqrt`/`vec::norm`/complex `abs` build `UnOp::Sqrt` directly
+            // at eval time and don't rely on this rewrite (PLAN-PERF-2 §5).
+            Pow if rn == Some(0.5) && self.nonneg_base(l) => {
+                return self.unary(UnOp::Sqrt, l, kind)
+            }
             _ => {}
         }
         self.intern(Key::Binary(op, l, r), RvNode::Binary(op, l, r), kind)
@@ -304,6 +320,24 @@ impl Builder {
         match self.out.node(id) {
             RvNode::ConstBool(b) => Some(*b),
             _ => None,
+        }
+    }
+
+    /// Structural proof (in the new graph) that a node's per-lane value can only be in
+    /// {NaN, +0.0, positive, +inf} — the domain where `powf(x, 0.5)` and `sqrt(x)` agree exactly,
+    /// which is what licenses the `x ^ 0.5 → sqrt(x)` rewrite in [`Self::binary`]:
+    ///   * `a * a` with **the same id** on both sides (hash-consing makes a user's `x*x` share one
+    ///     id, and one id = one draw): `(±0)² = +0.0`, finite² ≥ 0 (or +inf on overflow),
+    ///     `(±inf)² = +inf`, NaN propagates. Never `-0.0`, never `-inf`.
+    ///   * `exp(_)`: range is [+0.0, +inf] ∪ {NaN} by construction.
+    ///
+    /// Deliberately NOT `sqrt(_)` (its own output includes `-0.0`) and not a general sign
+    /// analysis — a conservative allowlist keeps the charter auditable.
+    fn nonneg_base(&self, id: RvId) -> bool {
+        match self.out.node(id) {
+            RvNode::Binary(BinOp::Mul, a, b) => a == b,
+            RvNode::Unary(UnOp::Exp, _) => true,
+            _ => false,
         }
     }
 }
@@ -412,6 +446,35 @@ mod tests {
         assert_eq!(out.node(r), &RvNode::ConstNum(1.0));
         // The root is a leaf constant → nothing reachable, in particular no Src.
         assert!(matches!(out.node(r), RvNode::ConstNum(_)));
+    }
+
+    #[test]
+    fn pow_half_becomes_sqrt_only_for_provably_nonneg_bases() {
+        // (X * X) ^ 0.5 → sqrt(X * X): the base is a square (never -0.0 / -inf), so powf and
+        // sqrt agree on its whole domain and the rewrite is exact.
+        let mut g = RvGraph::default();
+        let x = src(&mut g);
+        let sq = bin(&mut g, BinOp::Mul, x, x);
+        let half = num(&mut g, 0.5);
+        let root = bin(&mut g, BinOp::Pow, sq, half);
+        let (out, r) = simplify(&g, root);
+        assert!(
+            matches!(out.node(r), RvNode::Unary(UnOp::Sqrt, _)),
+            "square base: expected Sqrt, got {:?}",
+            out.node(r)
+        );
+        // Plain X ^ 0.5 must stay a Pow: X could draw -0.0 or -inf, where powf(x, 0.5) and
+        // sqrt(x) disagree (+0.0 vs -0.0; +inf vs NaN) — the rewrite would change semantics.
+        let mut g = RvGraph::default();
+        let x = src(&mut g);
+        let half = num(&mut g, 0.5);
+        let root = bin(&mut g, BinOp::Pow, x, half);
+        let (out, r) = simplify(&g, root);
+        assert!(
+            matches!(out.node(r), RvNode::Binary(BinOp::Pow, ..)),
+            "unproven base: expected Pow to survive, got {:?}",
+            out.node(r)
+        );
     }
 
     #[test]
@@ -525,6 +588,32 @@ mod tests {
             .filter(|i| matches!(out.node(RvId(*i)), RvNode::Permutation { .. }))
             .count();
         assert_eq!(n_perm, 2, "independent permutation draws must stay distinct");
+        match out.node(r) {
+            RvNode::Binary(BinOp::Eq, a, b) => {
+                assert_ne!(a, b, "element reads of distinct draws must not merge")
+            }
+            other => panic!("expected Eq(e1, e2), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rotation_draws_are_never_merged() {
+        // Mirror of `permutation_draws_are_never_merged` for the whole-matrix Haar draw: two
+        // structurally-identical `Rotation` sources must survive as TWO nodes (independent
+        // rotations), and their same-index element reads must not be CSE'd into one.
+        let mut g = RvGraph::default();
+        let r1 = g.push(RvNode::Rotation { d: 3 }, RvKind::Arr(9));
+        let r2 = g.push(RvNode::Rotation { d: 3 }, RvKind::Arr(9));
+        let c1 = num(&mut g, 0.0);
+        let c2 = num(&mut g, 0.0);
+        let e1 = g.push(RvNode::ArrIndex { arr: r1, index: c1 }, RvKind::Num);
+        let e2 = g.push(RvNode::ArrIndex { arr: r2, index: c2 }, RvKind::Num);
+        let root = bin(&mut g, BinOp::Eq, e1, e2);
+        let (out, r) = simplify(&g, root);
+        let n_rot = (0..out.len() as u32)
+            .filter(|i| matches!(out.node(RvId(*i)), RvNode::Rotation { .. }))
+            .count();
+        assert_eq!(n_rot, 2, "independent rotation draws must stay distinct");
         match out.node(r) {
             RvNode::Binary(BinOp::Eq, a, b) => {
                 assert_ne!(a, b, "element reads of distinct draws must not merge")

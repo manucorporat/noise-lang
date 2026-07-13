@@ -810,7 +810,8 @@ fn ancestors(graph: &RvGraph, root: RvId) -> HashSet<RvId> {
             RvNode::Src(_)
             | RvNode::ConstNum(_)
             | RvNode::ConstBool(_)
-            | RvNode::Permutation { .. } => {}
+            | RvNode::Permutation { .. }
+            | RvNode::Rotation { .. } => {}
         }
     }
     seen
@@ -1100,6 +1101,7 @@ fn unop_name(op: UnOp) -> &'static str {
         UnOp::Ceil => "ceil",
         UnOp::Exp => "exp",
         UnOp::Ln => "log",
+        UnOp::Sqrt => "sqrt",
     }
 }
 
@@ -1118,6 +1120,7 @@ fn apply_unop_f64(op: UnOp, x: f64) -> f64 {
         UnOp::Ceil => x.ceil(),
         UnOp::Exp => x.exp(),
         UnOp::Ln => x.ln(),
+        UnOp::Sqrt => x.sqrt(),
         UnOp::Not => unreachable!("Not is a boolean op, not a numeric ufunc"),
     }
 }

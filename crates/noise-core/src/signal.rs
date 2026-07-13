@@ -203,6 +203,7 @@ pub fn apply_unary(op: SigUnOp, x: f64) -> f64 {
         SigUnOp::Un(UnOp::Ceil) => x.ceil(),
         SigUnOp::Un(UnOp::Exp) => x.exp(),
         SigUnOp::Un(UnOp::Ln) => x.ln(),
+        SigUnOp::Un(UnOp::Sqrt) => x.sqrt(),
         SigUnOp::Un(UnOp::Not) => {
             if x == 0.0 {
                 1.0
@@ -270,6 +271,7 @@ fn fmt_expr(e: &SigExpr, f: &mut std::fmt::Formatter<'_>, budget: &mut usize) ->
                 SigUnOp::Un(UnOp::Ceil) => "ceil",
                 SigUnOp::Un(UnOp::Exp) => "exp",
                 SigUnOp::Un(UnOp::Ln) => "log",
+                SigUnOp::Un(UnOp::Sqrt) => "sqrt",
             };
             write!(f, "{name}(")?;
             fmt_expr(a, f, budget)?;

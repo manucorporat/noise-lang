@@ -426,6 +426,22 @@ fn rotation_is_a_recipe_drawn_with_tilde() {
 }
 
 #[test]
+fn rotation_graph_is_quadratic_not_cubic() {
+    // Regression for the eval-time blowup (PLAN-PERF-2 item 3, stage 2): `rotation(d)` + a matvec
+    // must build O(d²) graph nodes — one array-valued source, d² constant-index element reads,
+    // ~2d² matvec arithmetic — not the old graph-level Gram–Schmidt's O(d³) dot/sub/normalize
+    // chains (~17.5k nodes for turboquant's d = 20, re-interpreted per draw). The bound is loose
+    // (< 2500 for d = 16, where the old lowering built >10k) so only a relapse trips it.
+    let mut eng = Engine::new();
+    eng.run(
+        "use rand; use vec; d = 16; Pi ~ rotation(d); x = normalize(ones(d)); E(normsq(Pi @ x))",
+    )
+    .unwrap();
+    let nodes = eng.graph().len();
+    assert!(nodes < 2500, "rotation(16) + matvec built {nodes} nodes");
+}
+
+#[test]
 fn quantize_snaps_to_nearest_centroid() {
     // Each coordinate snaps to its nearest codebook entry; cell boundaries are the midpoints.
     assert_eq!(

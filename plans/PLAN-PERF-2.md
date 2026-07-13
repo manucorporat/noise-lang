@@ -226,7 +226,36 @@ for a length-n series; fine at example sizes, dedup by content if anyone benchma
 * `Poisson` (a variable-length per-lane loop) is a genuinely poor codegen fit and **no example uses
   it** — left interpreted, as planned.
 
-### 3. Eval-time graph blowup (P1 — a language problem, not a backend one)
+### 3. ~~Eval-time graph blowup~~ (DONE, two stages — third pass, 2026-07-13)
+The diagnosis held with one correction: eval-time *construction* was milliseconds; the real cost of
+the blowup was **per-draw interpretation of the huge cones** (graph size is paid per draw per node).
+The fix is structured, array-valued nodes whose per-lane work runs as native Rust loops.
+
+**Infrastructure** (Stage 1): `RvKind::Arr(len)`, array registers in the interpreter (`ArrReg`,
+`Program.arrays` side-table — lane-major `n×BATCH` columns, `Inst` stays `Copy`), and
+`RvNode::ArrIndex { arr, index }` (scalar read with Gather's exact round/clamp/NaN semantics). An
+`Arr`-kind id is never wrapped in `Value::Dist`, so array-valued forcing roots are impossible by
+construction; eval keeps handing out eager element views (`ArrIndex(arr, ConstNum(i))`), so `sum`,
+`==`, comprehensions, `@` all compose unchanged. A peephole in the gather path turns `xs[rv]` over
+a complete in-order view of one array node into `ArrIndex(arr, rv)` directly.
+
+**Stage 1 — `RvNode::Permutation { n }`** (Fisher–Yates per lane, replacing the O(n²) argsort
+expansion): `prisoners` graph 500k → ~20k RvIds, cone 44.8k → 15.2k nodes. V8: **2.48×**
+(15.5 s → 6.2 s) — *while drawing ~2.2× more samples*, because the op-budget clamp re-raises the
+draw count as the cone shrinks; the per-draw win is ~5.5×. Native interp 12.2 s → 7.2 s.
+
+**Stage 2 — `RvNode::Rotation { d }`** (d² Box–Muller normals + modified Gram–Schmidt per lane,
+replacing the O(d³) graph-level MGS): `turboquant`'s interpreted cone 17.6k → ~1.8k
+instructions/draw. Native interp **19.4 s → 9.5 s** (2.05×). `cost_roots` still charges the honest
+native-loop work (2d³ ops + d² sources), so the playground readout and `clamp_to_op_budget` don't
+drift. Per-lane orthonormality (row·row = 1, rowᵢ·rowⱼ < 1e-9) and Haar moments pinned by tests;
+node-count regression tests keep both blowups from silently returning.
+
+Both nodes are **interpreter-only** (walk_cost declines, the Poisson pattern) — that alone was the
+win; codegen for them is a separate call (see the re-ranked list below). `turboquant`'s residual
+~1.8k-node cone (quantize select-chains, matvecs) is now its bottleneck.
+
+#### (original analysis)
 `turboquant` is **6.5 s in the browser** [measured] and the sampler is not the bottleneck.
 `rand::rotation(d)` expands to O(d³) nodes and `permutation(n)` to O(n²) — **before a single draw**.
 Its cone is ~17,500 ops *per sample* (1.75B ops total at 100k draws) and it exceeds

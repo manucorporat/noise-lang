@@ -41,11 +41,20 @@ pub enum UnOp {
     Floor,
     Ceil,
     // Real exponential / natural log ufuncs (`math::exp`/`math::log`, PLAN-FINANCE F1) — the
-    // lognormal/Kelly unlock. `Exp` lowers to a `pow(e, x)` call in both code generators (no new
-    // polynomial); `Ln` reuses the inlined `approx::ln` polynomial behind a full-domain guard
-    // (x > 0 → poly, 0 → -inf, < 0 → NaN, ±inf/NaN propagate) so it matches `f64::ln` semantics.
+    // lognormal/Kelly unlock. `Exp` lowers to a library-`exp` call in both code generators
+    // (finding C9 — the old `pow(e, x)` could differ in the last bit from `f64::exp`); `Ln` reuses
+    // the inlined `approx::ln` polynomial behind a full-domain guard (x > 0 → poly, 0 → -inf,
+    // < 0 → NaN, ±inf/NaN propagate) so it matches `f64::ln` semantics.
     Exp,
     Ln,
+    // IEEE square root (`math::sqrt` of an RV, `vec::norm`, complex `abs`). Its own node — NOT
+    // `Pow(x, 0.5)` — because both Cranelift and wasm have a single correctly-rounded `f64.sqrt`
+    // instruction, so `Sqrt` is *fusible* in the codegen cost model where non-integer `pow` is a
+    // libcall (PLAN-PERF-2 §5). Semantics are `f64::sqrt`, which differs from `powf(x, 0.5)` at
+    // exactly two inputs: `sqrt(-0.0) = -0.0` vs `powf(-0.0, 0.5) = +0.0`, and `sqrt(-inf) = NaN`
+    // vs `powf(-inf, 0.5) = +inf` (C99 pow). Every backend implements it as native sqrt, so all
+    // three stay bit-identical.
+    Sqrt,
 }
 
 /// `=` binds a deterministic value; `~` binds a random variable / distribution.
