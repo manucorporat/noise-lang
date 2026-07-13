@@ -108,7 +108,10 @@ surface permanently; async-first also buys cancellation and progress for free. (
 - **G3 — browser host.** `nz_gpu_*` inline-JS shim (device ownership, content-addressed
   pipeline cache with the same LRU/liveness story as `nz_kernel_*`), the async engine's
   `run_async` path (prerequisite: PLAN-PREGPU A1–A2), playground wiring, feature-detect +
-  silent fallback to today's wasm path.
+  silent fallback to today's wasm path. Cancellation comes for free from PLAN-PREGPU A3's
+  `CancelToken`/`AbortSignal` design: check the token before each dispatch submission and
+  abandon in-flight `mapAsync` readbacks (a dispatch already submitted can't be killed,
+  but nothing further is queued — abort latency is one chunk-range dispatch).
 - **G4 — exceed the CPU codegen.** `Gather` is plain array indexing in WGSL — this
   unlocks `prisoners`, `empirical`, `block_bootstrap`, permutation programs that no CPU
   codegen path will ever take. Knuth `Poisson` is a legal (divergent) loop bounded by

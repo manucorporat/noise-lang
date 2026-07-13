@@ -61,11 +61,24 @@ pub trait Backend {
 /// Returns the compiled program alongside the simplified cone's [`NodeCost`] — the per-draw
 /// operation/source counts the playground multiplies by the draw count for its run-time readout.
 /// Computing it here (on the post-simplify graph, once) keeps it backend-independent and exact.
-pub fn compile_root(graph: &RvGraph, root: RvId, draws: usize) -> (Box<dyn Program>, NodeCost) {
+///
+/// Returns `Arc`, not `Box`: identical forcings share ONE compile through the per-engine cache
+/// ([`crate::compile_cache`]) — a repeated query, an introspection pass forcing one root several
+/// times, a playground re-run on a persistent engine all hit instead of recompiling (and, under
+/// `jit`, instead of leaking another never-freed module). Simplify runs *before* the lookup (it's
+/// cheap relative to codegen, and the simplified cone is the correct cache key — see
+/// [`crate::compile_cache::key`]); with no cache installed this compiles exactly as before.
+pub fn compile_root(graph: &RvGraph, root: RvId, draws: usize) -> (Arc<dyn Program>, NodeCost) {
     // Simplify once (fold constants, apply identities, CSE) so the backend lowers a smaller DAG.
     // The rewritten graph is local — backends copy what they need, retaining no reference to it.
     let (graph, root) = crate::simplify::simplify(graph, root);
+    let key = crate::compile_cache::key(&graph, &[root], gate_bucket(draws));
+    if let Some(hit) = crate::compile_cache::lookup_single(&key) {
+        return hit;
+    }
     let cost = crate::kernel::cost(&graph, root);
+    #[cfg(test)]
+    probe::record_compile();
     // The Cranelift JIT is native-only: `not(target_arch = "wasm32")` guards against feature
     // unification turning `jit` on for a wasm32 build, which would otherwise select an impossible
     // backend (finding C7). On wasm32 the WASM-host backend always wins (the `jit` arm can't match
@@ -77,7 +90,50 @@ pub fn compile_root(graph: &RvGraph, root: RvId, draws: usize) -> (Box<dyn Progr
     let program = crate::wasm_host::WasmHostBackend::new().compile(&graph, root, draws);
     #[cfg(all(not(feature = "jit"), not(target_arch = "wasm32")))]
     let program = InterpBackend.compile(&graph, root, draws);
+    let program: Arc<dyn Program> = Arc::from(program);
+    crate::compile_cache::store_single(key, &program, cost);
     (program, cost)
+}
+
+/// The single `draws`-dependent input to each codegen gate (`kernel::profitable[_roots]` tests
+/// `draws >= min_draws`; nothing else about the artifact depends on the count), reduced to the
+/// decision bit so the compile cache keys on the DECISION, not the raw count: 200k and 300k draws
+/// share one entry, while a count below the gate compiles (and caches) the interpreter artifact
+/// under its own key rather than returning a stale kernel — or vice versa. Interpreter-only builds
+/// have no gate, so everything shares one bucket.
+fn gate_bucket(draws: usize) -> bool {
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    let bucket = draws >= crate::kernel::MIN_DRAWS_JIT;
+    #[cfg(target_arch = "wasm32")]
+    let bucket = draws >= crate::kernel::MIN_DRAWS_WASM;
+    #[cfg(all(not(feature = "jit"), not(target_arch = "wasm32")))]
+    let bucket = {
+        let _ = draws;
+        false
+    };
+    bucket
+}
+
+/// Test-only compile counter, proving the cache hits (or correctly misses). Thread-local, not a
+/// process global: the test harness runs tests concurrently, and compiles always happen on the
+/// forcing test's own (driver) thread, so a thread-local counts exactly that test's compiles.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COMPILES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Count one actual backend compile (a cache miss or an uncached call).
+    pub(crate) fn record_compile() {
+        COMPILES.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Total compiles on this thread so far (tests take deltas, so no reset is needed).
+    pub(crate) fn compiles() -> u64 {
+        COMPILES.with(Cell::get)
+    }
 }
 
 /// The multi-root twin of [`compile_root`] — the forcing path behind every joint introspection
@@ -91,13 +147,23 @@ pub fn compile_root(graph: &RvGraph, root: RvId, draws: usize) -> (Box<dyn Progr
 ///
 /// Returns the program alongside the union cone's [`NodeCost`] (per-draw ops/sources on the
 /// simplified graph), which the caller records into the engine's run stats.
+///
+/// `Arc` + cached like [`compile_root`]. The joint key additionally carries the roots' count and
+/// order (already part of [`crate::compile_cache::key`]) because column order is baked into the
+/// kernel — `[a, b]` and `[b, a]` are different artifacts over the same union cone.
 pub fn compile_roots(
     graph: &RvGraph,
     roots: &[RvId],
     draws: usize,
-) -> (Box<dyn JointProgram>, NodeCost) {
+) -> (Arc<dyn JointProgram>, NodeCost) {
     let (graph, roots) = crate::simplify::simplify_roots(graph, roots);
+    let key = crate::compile_cache::key(&graph, &roots, gate_bucket(draws));
+    if let Some(hit) = crate::compile_cache::lookup_joint(&key) {
+        return hit;
+    }
     let cost = crate::kernel::cost_roots(&graph, &roots);
+    #[cfg(test)]
+    probe::record_compile();
     // Same three-way cfg dispatch as `compile_root` (see there for why the cfgs are exclusive and
     // exhaustive over the {wasm32?} × {jit?} matrix).
     #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
@@ -106,6 +172,8 @@ pub fn compile_roots(
     let program = crate::wasm_host::WasmHostBackend::new().compile_joint(&graph, &roots, draws);
     #[cfg(all(not(feature = "jit"), not(target_arch = "wasm32")))]
     let program = InterpBackend.compile_joint(&graph, &roots, draws);
+    let program: Arc<dyn JointProgram> = Arc::from(program);
+    crate::compile_cache::store_joint(key, &program, cost);
     (program, cost)
 }
 

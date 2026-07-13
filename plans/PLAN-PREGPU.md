@@ -89,10 +89,51 @@ interleaving hazard once real suspension exists (note now, fix in PLAN-WEBGPU G3
 `input_call` and `render_template` are in the set even though they don't look like
 evaluation. `QueryCtx` borrows across `.await` are sound (shared graph borrow only).
 
+**Cancellation (AbortSignal).** The core stays web-agnostic: a cloneable
+`exec::CancelToken` (`Arc<AtomicBool>`; `cancelled()` is a relaxed load), threaded into
+the async entry points via run options — the sync wrappers pass a never-cancelled token,
+so nothing changes for existing callers. Two check tiers:
+
+- **statement boundaries** — A3's yield points between top-level statements;
+- **per reducer chunk** — inside `run_reduction`'s chunk loop, one relaxed load per
+  16,384-sample chunk (free), so aborting a single 10⁷-draw `prob(...)` takes
+  milliseconds, not the rest of the forcing.
+
+A tripped token surfaces as `Err(Error::Cancelled)` — a new non-program error (no
+diagnostic, no partial document), distinguishable from both program errors and panics.
+
+The wasm subtlety that shapes A3: on the single-threaded web build nothing can *set* the
+flag while Rust runs — `abort()` is JS that only executes when the engine returns to the
+event loop, and `'abort'` listeners fire from a task, so a microtask-only yield is not
+enough. The cooperative yield must be a real event-loop hop (a `setTimeout(0)`/
+`MessageChannel`-backed Promise via `wasm-bindgen-futures`), and it must happen *inside*
+long forcings, not just between statements: the `sampler::*_async` twins own an async
+chunk driver that walks `run_reduction`'s chunks (the per-chunk function stays sync) and
+hops the event loop on a ~50 ms timer — per-chunk cost stays one branch, and the hop is
+also what keeps the tab responsive. Native needs no yields: any thread can set the token
+(CLI Ctrl-C, embedding hosts), and the per-chunk check inside the `std::thread::scope`
+workers picks it up. The `wasm-threads` build is the same as single-threaded wasm from
+the main thread's perspective (workers share the flag through linear memory once set,
+but *setting* it still requires the driving thread to yield).
+
+JS surface follows the platform convention (`fetch`-style): `noise-wasm` exports
+`run_async(src, signal?: AbortSignal)` and `@noiselang/core` exposes `run(src, { signal })`.
+Semantics mirror `fetch`: if `signal.aborted` is already true, reject immediately;
+otherwise register an `'abort'` listener that sets the token (removed when the run
+settles), and reject with `signal.reason` — the standard `AbortError` `DOMException` — so
+callers' existing `err.name === "AbortError"` habits work unchanged.
+
+One semantic to state, not discover: a cancelled run leaves the `Engine` scope partially
+updated (bindings defined before the abort persist). Rule: treat a cancelled engine as
+stale — the playground's introspection sidecar, which relies on scope persisting across
+`run()`, must rebuild from a fresh `Engine` after a cancel rather than trust partial
+state.
+
 **Steps:** A1 spine (~400–800 mechanical lines; proof: an `exec` test drives a
 pending-once future through `block_on`) · A2 `run_async` wasm export + playground `await`
-· A3 cooperative yield between top-level statements + host cancellation flag — real
-suspension exercised end-to-end before any GPU code exists.
+· A3 cooperative event-loop yield (statement boundaries + the ~50 ms timer in the async
+chunk driver) + `CancelToken` → `AbortSignal` wiring — real suspension *and* abort
+exercised end-to-end before any GPU code exists.
 
 ## Track B — f32 lanes, f64 aggregation, everywhere
 

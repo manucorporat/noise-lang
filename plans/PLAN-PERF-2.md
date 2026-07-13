@@ -266,17 +266,35 @@ graph nodes. That is *ideal* at small `d` (everything in registers) and quadrati
 grows. **Structured nodes** (a `MatMul` / `Sort` / `Rank` node, or a loop node) instead of unrolling
 would collapse this. Sizeable; touches `eval/library.rs`, `dist.rs`, and every backend.
 
-### 4. No compile cache (P1 — and it bounds the JIT leak)
-Every forcing recompiles its cone from scratch: `noise_colors` compiles 14 kernels, `kelly` 13. A
-per-`Engine` cache keyed by the simplified graph would cut that, **and it is the right fix for the
-memory the JIT now leaks** (see P0 above): stop churning modules rather than reinstate the unsafe
-free. A REPL re-running the same program would then compile once, not once per run.
+### 4. ~~No compile cache~~ (DONE — third pass, 2026-07-14)
+Per-`Engine` cache (`compile_cache.rs`), installed thread-locally around each run with the same
+RAII pattern as `stats` (the forcing paths are free functions; threading an Engine handle down
+would have rippled through every signature). Key = the full canonical byte serialization of the
+post-simplify cone (f64s via `to_bits`, so `0.0 ≠ -0.0`; roots in order — column order is baked
+into joint kernels) + the **gate decision** (`draws ≥ min` is the only draws-dependent gate input,
+so bucketing by the decision is exact). Stores `Arc<dyn Program>`; `compile_root`/`compile_roots`
+now return `Arc` (the parallel reducer compiled untouched). 64 entries, clear-on-full; an evicted
+JIT program still retains its module bytes (never freed — the use-after-free trade), the cache's
+job is to stop the churn, which it does.
 
-### 5. `sqrt` is charged as a libcall (P2 — cheapest item here)
-`sqrt` lowers to `Binary(Pow, x, 0.5)`, and non-integer `pow` counts as a **libcall** in the cost
-model — so it argues *against* codegen — even though both Cranelift and wasm have a native
-`f64.sqrt` instruction. Add `UnOp::Sqrt` and most of `turboquant`'s and `am_vs_fm`'s libcalls become
-single fused instructions. Same story for `UnOp::Exp` (the JIT lowers it to a `pow(e, x)` call).
+**Honest measurement**: `example_times` is flat *by design* — it builds a fresh Engine per run and
+each forcing is a distinct cone. The real beneficiaries are same-Engine reuse: the playground's
+introspection sidecar (each follow-up `describe`/`corr` now compiles nothing) and REPL re-runs
+(`kelly` −22%, `dithering` −26% compile-side under jit in a same-engine probe). Note for the
+playground: `noise-wasm::run_to_document` creates a fresh Engine per call, so cross-run wins on
+the Rust side need the host to hold one Engine (the sidecar already does); the JS host's
+content-addressed kernel-instance cache remains the cross-run layer for emitted kernels.
+
+### 5. ~~`sqrt` is charged as a libcall~~ (DONE — third pass, 2026-07-14; exp was already fixed)
+`UnOp::Sqrt` threaded through every layer: eval's `sqrt`/`vec::norm`/complex `abs` emit it, the
+interpreter runs `f64::sqrt`, Cranelift emits `sqrt`, wasm emits `f64.sqrt` (both IEEE
+correctly-rounded → bit-identical to the oracle), and the cost model prices it **fusible**. The
+`Pow(x, 0.5) → Sqrt(x)` canonicalization is restricted to structurally-provable non-negative bases
+(`x*x`, `exp(_)`) because C99 `powf` and `sqrt` disagree at `-0.0` (`+0.0` vs `-0.0`) and `-inf`
+(`+inf` vs `NaN`) — general `x ^ 0.5` keeps powf semantics. Native interp: `am_vs_fm` −10.5%,
+`turboquant` −4.9%. Gate effect: `am_vs_fm`'s two hot cones went 64 libcalls → 0 (`fusible=703/0`,
+`512/0`), which matters on wasm where `MIN_DRAWS_WASM = 10k` admits them. The plan's `exp` claim
+was stale: exp has had a direct `nz_exp` shim / `Math.exp` import since finding C9 — untouched.
 
 ### 6. Quantiles don't parallelize (P2)
 `Q(...)` goes through `sample_n` → `for_each_batch`, which is sequential — it never touches

@@ -35,6 +35,7 @@ pub(crate) mod ast;
 pub(crate) mod backend;
 pub(crate) mod builtins;
 pub(crate) mod bytecode;
+pub(crate) mod compile_cache;
 /// Shared cross-backend conformance corpus (finding C2), consumed by the `jit` and `wasm_emit`
 /// test modules. Test-only data — no runtime footprint.
 #[cfg(test)]

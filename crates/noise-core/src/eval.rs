@@ -148,6 +148,14 @@ pub struct Engine {
     /// them doesn't couple to whichever thread last forced. Installed as the thread's active
     /// recorder around each forcing region (see [`crate::stats`]).
     stats: crate::stats::Counters,
+    /// Per-engine compiled-program cache (PLAN-PERF-2 §4): identical forcings (same simplified
+    /// cone, same gate decision) share ONE compile, so an introspection pass re-forcing a root, a
+    /// REPL, or a playground re-run on this persistent engine stop recompiling — and, under `jit`,
+    /// stop leaking never-freed modules. Owned here (dropped with the engine) and installed as the
+    /// thread's active cache around each forcing region, exactly like `stats` (see
+    /// [`crate::compile_cache`]). Purely an optimization: results are bit-identical with or
+    /// without a hit.
+    compile_cache: crate::compile_cache::Cache,
 }
 
 /// One item in a program's output stream — the unit `take_output` returns, in source order. `Print`
@@ -218,6 +226,7 @@ impl Engine {
             input_overrides: Vec::new(),
             input_manifest: Vec::new(),
             stats: crate::stats::new_counters(),
+            compile_cache: crate::compile_cache::new_cache(),
         }
     }
 
@@ -345,8 +354,10 @@ impl Engine {
     /// ```
     pub fn run(&mut self, src: &str) -> Result<Value> {
         // Fresh run-time counters for this program (the playground reads them after `run`), and
-        // install this engine's counters as the thread's recorder for the whole run (finding B8).
+        // install this engine's counters as the thread's recorder — and its compile cache as the
+        // thread's active cache — for the whole run (finding B8 / PLAN-PERF-2 §4).
         let _rec = crate::stats::install(&self.stats);
+        let _cache = crate::compile_cache::install(&self.compile_cache);
         self.stats.set(crate::stats::RunStats::default());
         self.dropped = 0;
         self.first_dropped_span = None;
@@ -414,6 +425,7 @@ impl Engine {
     pub fn run_to_document(&mut self, src: &str) -> crate::doc::Document {
         use crate::doc::Document;
         let _rec = crate::stats::install(&self.stats);
+        let _cache = crate::compile_cache::install(&self.compile_cache);
         self.stats.set(crate::stats::RunStats::default());
         self.dropped = 0;
         self.first_dropped_span = None;
@@ -644,8 +656,9 @@ impl Engine {
     /// `v` under `seed`. The graph is read-only here — building/lifting already happened.
     pub fn sample(&self, v: &Value, n: usize, seed: u64) -> Result<Vec<f64>> {
         let id = self.expect_dist(v)?;
-        // Account this forcing into the engine's own counters (finding B8).
+        // Account this forcing into the engine's own counters (finding B8), through its cache.
         let _rec = crate::stats::install(&self.stats);
+        let _cache = crate::compile_cache::install(&self.compile_cache);
         Ok(sampler::sample_n(&self.graph, id, n, seed))
     }
 
@@ -653,6 +666,7 @@ impl Engine {
     pub fn moments(&self, v: &Value, n: usize, seed: u64) -> Result<Moments> {
         let id = self.expect_dist(v)?;
         let _rec = crate::stats::install(&self.stats);
+        let _cache = crate::compile_cache::install(&self.compile_cache);
         Ok(sampler::moments(&self.graph, id, n, seed))
     }
 }
