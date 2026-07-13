@@ -34,7 +34,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module};
 
 use crate::ast::{BinOp, UnOp};
-use crate::backend::{Backend, InterpBackend, Program, Runner};
+use crate::backend::{Backend, InterpBackend, JointProgram, JointRunner, Program, Runner};
 use crate::bytecode::BATCH;
 use crate::dist::{RvGraph, RvId, RvNode, Source};
 use crate::kernel::{self, choose_streams, const_int_exponent, profitable, seed_state};
@@ -113,12 +113,42 @@ impl Backend for JitBackend {
         // graphs are fusible here and worth compiling. Only graphs still dominated by a real call
         // (`atan`/`round`/non-integer `pow`) stay on the interpreter. Any codegen failure also falls
         // back. Either way correctness is never at risk, only the speedup.
-        if !profitable(graph, root, /* inline_trans */ true, draws, kernel::MIN_DRAWS_JIT) {
+        if !profitable(
+            graph,
+            root,
+            /* inline_trans */ true,
+            draws,
+            kernel::MIN_DRAWS_JIT,
+        ) {
             return InterpBackend.compile(graph, root, draws);
         }
         match build(graph, root) {
             Ok(program) => Box::new(program),
             Err(_) => InterpBackend.compile(graph, root, draws),
+        }
+    }
+
+    /// The joint (multi-root) path: one fused kernel computing every root per lane from a *shared*
+    /// memo — shared sources are drawn once per lane, so the roots stay jointly sampled exactly as
+    /// the multi-root interpreter samples them. Gated like [`Self::compile`], on the union cone.
+    fn compile_joint(
+        &self,
+        graph: &RvGraph,
+        roots: &[RvId],
+        draws: usize,
+    ) -> Box<dyn JointProgram> {
+        if !kernel::profitable_roots(
+            graph,
+            roots,
+            /* inline_trans */ true,
+            draws,
+            kernel::MIN_DRAWS_JIT,
+        ) {
+            return InterpBackend.compile_joint(graph, roots, draws);
+        }
+        match build_joint(graph, roots) {
+            Ok(program) => Box::new(program),
+            Err(_) => InterpBackend.compile_joint(graph, roots, draws),
         }
     }
 }
@@ -217,17 +247,93 @@ impl Runner for JitRunner {
     }
 }
 
+/// A compiled multi-root JIT program: the same `Arc`-shared kernel artifact, but the kernel fills
+/// one BATCH-strided column per root (column `r` at `out[r*BATCH ..]`), all drawn jointly per lane.
+struct JitJointProgram {
+    inner: Arc<JitProgramInner>,
+    /// Number of roots (output columns) the kernel writes.
+    k: usize,
+}
+
+impl JointProgram for JitJointProgram {
+    fn runner(&self) -> Box<dyn JointRunner> {
+        Box::new(JitJointRunner {
+            inner: self.inner.clone(),
+            k: self.k,
+            buf: vec![0.0; self.k * BATCH],
+            state: seed_state(0, self.inner.streams),
+        })
+    }
+}
+
+/// Per-worker joint runner: one flat `k×BATCH` column buffer plus the xoshiro state.
+struct JitJointRunner {
+    inner: Arc<JitProgramInner>,
+    k: usize,
+    buf: Vec<f64>,
+    state: Vec<u64>,
+}
+
+impl JointRunner for JitJointRunner {
+    fn reseed(&mut self, seed: u64) {
+        self.state = seed_state(seed, self.inner.streams);
+    }
+
+    fn next_batch(&mut self) {
+        debug_assert_eq!(self.buf.len(), self.k * BATCH);
+        // SAFETY: `func` is a finalized kernel with this exact ABI; `buf` holds `k * BATCH` f64s
+        // (the kernel writes lanes `0..BATCH` of each of the `k` BATCH-strided columns) and `state`
+        // holds the `4 * streams`-word RNG state, both valid for the duration of the call.
+        unsafe {
+            (self.inner.func)(self.buf.as_mut_ptr(), BATCH as i64, self.state.as_mut_ptr());
+        }
+    }
+
+    fn col(&self, j: usize) -> &[f64] {
+        &self.buf[j * BATCH..(j + 1) * BATCH]
+    }
+
+    fn batch_cap(&self) -> usize {
+        BATCH
+    }
+}
+
 /// Build the JIT module + kernel for `root` (the caller falls back to the interpreter on error),
 /// choosing the stream count from the graph via [`choose_streams`].
 fn build(graph: &RvGraph, root: RvId) -> Result<JitProgram, String> {
     build_with(graph, root, choose_streams(graph, root))
 }
 
+/// Single-root [`build_kernel`], wrapped as a [`Program`].
+fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram, String> {
+    Ok(JitProgram {
+        inner: Arc::new(build_kernel(graph, &[root], streams)?),
+    })
+}
+
+/// Multi-root [`build_kernel`], wrapped as a [`JointProgram`]; stream policy over the union cone.
+fn build_joint(graph: &RvGraph, roots: &[RvId]) -> Result<JitJointProgram, String> {
+    let streams = kernel::choose_streams_roots(graph, roots);
+    Ok(JitJointProgram {
+        inner: Arc::new(build_kernel(graph, roots, streams)?),
+        k: roots.len(),
+    })
+}
+
 /// Build the kernel with `streams` independent xoshiro states interleaved per loop iteration.
 /// `streams == 1` is the plain fused kernel; higher values overlap the RNG latency chains. The
-/// skeleton is: load each stream's state → counted loop emitting `streams` samples per iteration →
+/// skeleton is: load each stream's state → counted loop emitting `streams` lanes per iteration →
 /// store state back → return.
-fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram, String> {
+///
+/// Multi-root: each stream's lane evaluates **every** root from one shared memo — a source feeding
+/// two roots is drawn once, so the roots are sampled *jointly* — and root `r`'s value is stored
+/// into its own BATCH-strided column at `out[r*BATCH + i + j]`. A single root (`roots == &[root]`)
+/// emits exactly the kernel this function always emitted.
+fn build_kernel(
+    graph: &RvGraph,
+    roots: &[RvId],
+    streams: usize,
+) -> Result<JitProgramInner, String> {
     assert!(
         streams >= 1 && BATCH.is_multiple_of(streams),
         "streams must divide BATCH"
@@ -331,18 +437,22 @@ fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram,
         let cond = fb.ins().icmp(IntCC::SignedLessThan, iv, n);
         fb.ins().brif(cond, body, &[], exit, &[]);
 
-        // body: for each stream emit the fused DAG (own memo — independent draws) and store the
-        // result at out[i + j]; then i += streams, loop.
+        // body: for each stream emit the fused DAG (own memo per stream — independent draws;
+        // shared across roots — joint draws) and store root `r` at out[r*BATCH + i + j] (the
+        // column stride is a constant store offset); then i += streams, loop.
         fb.switch_to_block(body);
         fb.seal_block(body);
         let iv = fb.use_var(i_var);
         for (j, st) in states.iter().enumerate() {
             let mut memo: HashMap<RvId, Value> = HashMap::new();
-            let result = emit_node(&mut fb, graph, root, st, &math, &mut memo);
             let idx = fb.ins().iadd_imm(iv, j as i64);
             let off = fb.ins().imul_imm(idx, 8);
             let addr = fb.ins().iadd(out, off);
-            fb.ins().store(MemFlags::trusted(), result, addr, 0);
+            for (r, &root) in roots.iter().enumerate() {
+                let result = emit_node(&mut fb, graph, root, st, &math, &mut memo);
+                fb.ins()
+                    .store(MemFlags::trusted(), result, addr, (r * BATCH * 8) as i32);
+            }
         }
         let inext = fb.ins().iadd_imm(iv, streams as i64);
         fb.def_var(i_var, inext);
@@ -373,12 +483,10 @@ fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram,
     // module is moved into the program so the code stays mapped for the pointer's lifetime.
     let func: KernelFn = unsafe { std::mem::transmute::<*const u8, KernelFn>(code) };
 
-    Ok(JitProgram {
-        inner: Arc::new(JitProgramInner {
-            _module: module,
-            func,
-            streams,
-        }),
+    Ok(JitProgramInner {
+        _module: module,
+        func,
+        streams,
     })
 }
 
@@ -1340,12 +1448,7 @@ mod tests {
             } else {
                 "never".into()
             };
-            println!(
-                "{k:>7}{nodes:>9}{jit_ms:>14.2}{i_ns:>12.2}{j_ns:>12.2}{breakeven:>14}"
-            );
+            println!("{k:>7}{nodes:>9}{jit_ms:>14.2}{i_ns:>12.2}{j_ns:>12.2}{breakeven:>14}");
         }
     }
-
-
-
 }

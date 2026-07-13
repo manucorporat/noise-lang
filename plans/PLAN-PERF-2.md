@@ -30,8 +30,9 @@ was the wrong instrument, and it hid three things:
    floor.
 
 The second pass fixed those. What remains is concentrated in one structural gap (introspection and
-plots bypass the backend seam entirely), two feature gaps in codegen (`Gather`, `Poisson`), and a
-language-level graph-blowup problem that makes `turboquant` the slowest program we have.
+plots bypass the backend seam entirely — **since closed, see item 1**), two feature gaps in codegen
+(`Gather`, `Poisson`), and a language-level graph-blowup problem that makes `turboquant` the
+slowest program we have.
 
 ---
 
@@ -159,21 +160,42 @@ multiplier ever exists to hang it on.
 
 ## Part 2 — What's left, ranked
 
-### 1. Introspection and plots bypass the backend seam entirely (P0 — biggest remaining win)
-`sampler::for_each_joint_batch` (sampler.rs ~L107) calls `bytecode::compile_roots` **directly**,
-never `backend::compile_root`. So every multi-root query — `plot::scatter` (`sample_pairs`),
-`plot::fan` (`grid_draws`), `plot::corr` (`corr_matrix`), `grid_moments`, `describe` — runs on the
-**interpreter, single-threaded**: no emitter, no JIT, no threads, not even the parallel reducer. The
-comment on that function admits it ("this is the interpreter path").
+### 1. ~~Introspection and plots bypass the backend seam entirely~~ (DONE — third pass, 2026-07-13)
+`sampler::for_each_joint_batch` called `bytecode::compile_roots` **directly**, never the backend
+seam. So every multi-root query — `plot::scatter` (`sample_pairs`), `plot::fan` (`grid_draws`),
+`plot::corr` (`corr_matrix`), `grid_moments`, `describe` — ran on the **interpreter,
+single-threaded**.
 
-Nearly every example ends in a `plot::`. `barrier_option`'s `plot::fan(path)` re-samples a 52-step
-GBM cone this way. This is the only item that touches almost every program, and it is mostly
-plumbing — the seam exists, the joint drivers just don't use it.
+**What was built.** The seam now has a multi-root twin at every level: `simplify_roots` (one shared
+builder, so cross-root source sharing — the thing that makes a paired statistic correct — survives
+the rewrite), `profitable_roots`/`choose_streams_roots`/`cone_size_roots` (one gate decision over
+the *union* cone), `Backend::compile_joint` → `JointProgram`/`JointRunner` (default = the
+multi-root bytecode interpreter, so any backend without a joint lowering is automatically correct),
+a multi-output Cranelift kernel and a multi-column wasm kernel (both: one shared memo per stream —
+joint draws by construction — each root stored to its own BATCH-strided column), and
+`nz_kernel_run_cols` in the JS host. Pinned by exact-pairing tests (`b == 2a` lane-for-lane on
+whichever backend the build selects) at both the sampler and the wasmi level.
 
-**Work:** a multi-root entry point on `Backend` (or route joint passes through `run_reduction`).
-**Verify:** `benches/examples.mjs` before/after; the plot-heavy examples should move.
-**Unmeasured** — nobody has ever timed this path in isolation. Do that first; it may be the single
-largest number in this document.
+**Measured first, as instructed — and the measurement re-ranked the work.** Timing
+`for_each_joint_batch` per example (native interpreter): 5% of corpus total, but concentrated —
+`nyquist` 100%, `dithering` 73%, `shor_period` 54%, `am_vs_fm` 47%. Probing the gate then showed
+**most joint time wasn't sampleable work at all**: the dominant case is a *deterministic* vector
+(`plot::line(signal::sample(...))`, a curve of already-forced `P()` results) reaching the joint
+driver as k constant roots and being re-evaluated `n × k` times — 200k draws × 60 elements in
+`birthday`, for values already known. Codegen correctly declines those (nothing fusible). The fix
+is in the driver: **a union cone with zero RNG sources is clamped to one batch** (all lanes are
+identical; quantiles/moments/correlations of a constant are that constant).
+
+**Results** (V8, `bench/examples.mjs`, before → after): `nyquist` **143×** (114 ms → 0.8 ms — the
+clamp), `dithering` 2.2×, `pi` 2.1×, `coin_streak` 2.6×, `irwin_hall` 1.9×, `am_vs_fm` 1.24×,
+`kelly`/`birthday`/`st_petersburg` ~1.13×, corpus total **1.09×** (67.8 s → 62.5 s). Native
+(Criterion, `--features jit`): `dithering` −26%, `kelly` −6.6% (significant); `am_vs_fm` unchanged
+natively because its 40k draws/forcing sit under `MIN_DRAWS_JIT` — exactly the regime split the
+two thresholds encode, and its browser win (1.24×) is the emitter earning its keep again.
+
+**Also fixed here:** `benches/examples.rs` had no `[[bench]] harness = false` entry, so it ran
+under libtest and **Criterion never executed** — the bench "passed" while measuring nothing. Any
+number anyone believed came from it came from somewhere else. It measures now.
 
 ### 2. `Gather` and `Poisson` hard-reject codegen (P1)
 `kernel::walk_cost` returns `false` for both, so the whole cone falls to the interpreter.
@@ -237,12 +259,19 @@ defensible answer.
 Two cheap things that would re-rank the list above:
 
 1. **The 1.30× WASM corpus figure predates threads.** The full `examples.mjs` corpus has never been
-   run against the *threaded* build. The real end-to-end browser number is unknown.
-2. **The joint/introspection path has never been timed.** Item 1 in Part 2 is ranked P0 on structural
-   grounds, not on a measurement. Time it before building it.
+   run against the *threaded* build. The real end-to-end browser number is unknown. **Still open.**
+   (The single-threaded corpus number is now 62.5 s after item 1 — that's the fresh baseline to
+   compare the threaded build against.)
+2. ~~The joint/introspection path has never been timed.~~ **Closed** — see item 1: 5% of corpus
+   total on the native interpreter (concentrated: `nyquist` 100%, `dithering` 73%, `am_vs_fm` 47%),
+   and its dominant cost was deterministic vectors being re-sampled, not missing codegen. Both
+   fixed. With the joint path off the table, the corpus is now overwhelmingly items 2 and 3:
+   `turboquant` (26.5 s in V8) + `prisoners` (15.8 s) are **two-thirds of the corpus total** by
+   themselves.
 
 Also worth fixing: `packages/core/bench/examples.mjs` takes >10 min over the full corpus (5 reps ×
-31 programs). Trim reps or subset it, or nobody will run it.
+31 programs). Trim reps or subset it, or nobody will run it. (A quick per-example wall-time
+diagnostic now exists natively: `bench_corpus.rs::example_times`.)
 
 ---
 

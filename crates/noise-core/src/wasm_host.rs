@@ -26,11 +26,11 @@ use std::sync::Arc;
 
 use wasm_bindgen::prelude::wasm_bindgen;
 
-use crate::backend::{Backend, InterpBackend, Program, Runner};
+use crate::backend::{Backend, InterpBackend, JointProgram, JointRunner, Program, Runner};
 use crate::bytecode::BATCH;
 use crate::dist::{RvGraph, RvId};
 use crate::kernel::seed_state;
-use crate::wasm_emit::emit_for;
+use crate::wasm_emit::{emit_for, emit_for_roots};
 
 // The JS host. An ES module (wasm-bindgen `inline_js`) whose module-level state persists across
 // calls. Instances are **content-addressed**: `nz_kernel_new` hashes the kernel bytes and reuses a
@@ -115,11 +115,23 @@ export function nz_kernel_run(handle, out, n) {
   out.set(new Float64Array(inst.exports.memory.buffer, 4096, n));
   return 0;
 }
+
+// Multi-column twin of nz_kernel_run for a joint (multi-root) kernel: the kernel fills `n` lanes
+// of each BATCH-strided column at 4096, and `out` (length k*BATCH) receives all columns in one
+// copy. Same status contract: -1 if the instance is gone (finding C5).
+export function nz_kernel_run_cols(handle, out, n) {
+  const inst = _byId.get(handle);
+  if (inst === undefined) return -1;
+  inst.exports.kernel(4096, n, 0);
+  out.set(new Float64Array(inst.exports.memory.buffer, 4096, out.length));
+  return 0;
+}
 "#)]
 extern "C" {
     fn nz_kernel_new(bytes: &[u8]) -> i32;
     fn nz_kernel_seed(handle: i32, state: &[u64]) -> i32;
     fn nz_kernel_run(handle: i32, out: &mut [f64], n: u32) -> i32;
+    fn nz_kernel_run_cols(handle: i32, out: &mut [f64], n: u32) -> i32;
 }
 
 /// The browser backend: emit a kernel for the graph and instantiate it in the JS host. Falls back to
@@ -148,6 +160,31 @@ impl Backend for WasmHostBackend {
         Box::new(WasmProgram {
             bytes: Arc::new(bytes),
             streams,
+            fallback,
+        })
+    }
+
+    /// The joint (multi-root) path: one emitted multi-column kernel, gated on the union cone —
+    /// this is what puts the emitter (2–7× over the wasm bytecode interpreter) under the plot /
+    /// introspection drivers, which were previously interpreter-only. Falls back to the multi-root
+    /// interpreter when the gate declines or the host can't instantiate.
+    fn compile_joint(
+        &self,
+        graph: &RvGraph,
+        roots: &[RvId],
+        draws: usize,
+    ) -> Box<dyn JointProgram> {
+        let Some((bytes, streams)) = emit_for_roots(graph, roots, draws) else {
+            return InterpBackend.compile_joint(graph, roots, draws);
+        };
+        // Multi-root interpreter fallback for the same graph, for the same C5 degradation story as
+        // the single-root path (instantiate failure / eviction → correct-slow, never a throw).
+        let fallback: Arc<dyn JointProgram> =
+            Arc::from(InterpBackend.compile_joint(graph, roots, draws));
+        Box::new(WasmJointProgram {
+            bytes: Arc::new(bytes),
+            streams,
+            k: roots.len(),
             fallback,
         })
     }
@@ -248,6 +285,97 @@ impl Runner for WasmRunner {
             self.switch_to_fallback(seed);
         }
         self.fell_back.as_mut().unwrap().next_batch(len)
+    }
+
+    fn batch_cap(&self) -> usize {
+        BATCH
+    }
+}
+
+/// A compiled multi-root browser program: the multi-column kernel's **bytes** plus a multi-root
+/// interpreter fallback. Bytes-not-handle for the same cross-worker reason as [`WasmProgram`].
+struct WasmJointProgram {
+    bytes: Arc<Vec<u8>>,
+    streams: usize,
+    /// Number of roots (BATCH-strided output columns) the kernel writes.
+    k: usize,
+    fallback: Arc<dyn JointProgram>,
+}
+
+impl JointProgram for WasmJointProgram {
+    fn runner(&self) -> Box<dyn JointRunner> {
+        // Same instantiate-on-the-driving-thread + placeholder-seed story as `WasmProgram::runner`.
+        let handle = nz_kernel_new(&self.bytes);
+        if handle < 0 {
+            return self.fallback.runner();
+        }
+        let state = seed_state(0, self.streams);
+        let fell_back = if nz_kernel_seed(handle, &state) < 0 {
+            Some(self.fallback.runner())
+        } else {
+            None
+        };
+        Box::new(WasmJointRunner {
+            handle,
+            streams: self.streams,
+            buf: vec![0.0; self.k * BATCH],
+            fallback: self.fallback.clone(),
+            fell_back,
+            last_seed: 0,
+        })
+    }
+}
+
+/// Per-runner joint state: the host handle plus one flat `k×BATCH` column buffer. Fallback story
+/// mirrors [`WasmRunner`] (finding C5): if the instance is ever gone, the rest of the run degrades
+/// to the multi-root interpreter, reseeded to `last_seed`.
+struct WasmJointRunner {
+    handle: i32,
+    streams: usize,
+    buf: Vec<f64>,
+    fallback: Arc<dyn JointProgram>,
+    fell_back: Option<Box<dyn JointRunner>>,
+    last_seed: u64,
+}
+
+impl WasmJointRunner {
+    fn switch_to_fallback(&mut self, seed: u64) {
+        let mut r = self.fallback.runner();
+        r.reseed(seed);
+        self.fell_back = Some(r);
+    }
+}
+
+impl JointRunner for WasmJointRunner {
+    fn reseed(&mut self, seed: u64) {
+        self.last_seed = seed;
+        if let Some(fb) = self.fell_back.as_mut() {
+            fb.reseed(seed);
+            return;
+        }
+        let state = seed_state(seed, self.streams);
+        if nz_kernel_seed(self.handle, &state) < 0 {
+            self.switch_to_fallback(seed); // instance evicted; degrade to the interpreter
+        }
+    }
+
+    fn next_batch(&mut self) {
+        if self.fell_back.is_none() {
+            if nz_kernel_run_cols(self.handle, &mut self.buf, BATCH as u32) >= 0 {
+                return;
+            }
+            // Instance evicted mid-run: fall back for this and all future batches (finding C5).
+            let seed = self.last_seed;
+            self.switch_to_fallback(seed);
+        }
+        self.fell_back.as_mut().unwrap().next_batch();
+    }
+
+    fn col(&self, j: usize) -> &[f64] {
+        match self.fell_back.as_ref() {
+            Some(fb) => fb.col(j),
+            None => &self.buf[j * BATCH..(j + 1) * BATCH],
+        }
     }
 
     fn batch_cap(&self) -> usize {

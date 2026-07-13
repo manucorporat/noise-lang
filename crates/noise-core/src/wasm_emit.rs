@@ -52,7 +52,7 @@ use wasm_encoder::{
 use crate::ast::{BinOp, UnOp};
 use crate::bytecode::BATCH;
 use crate::dist::{RvGraph, RvId, RvNode, Source};
-use crate::kernel::{choose_streams, cone_size, const_int_exponent};
+use crate::kernel::{choose_streams_roots, cone_size_roots, const_int_exponent};
 
 // --- imported-function indices (declared in import order, before the local `kernel`) ---
 // `ln` is inlined as a polynomial (`emit_ln`, mirroring `jit`). `sin`/`cos` are inlined too, but
@@ -124,11 +124,20 @@ struct Ctx<'g> {
 /// codegen-supported (no `Poisson`); it **panics** (assert / `unreachable!`) on an ungated graph, so
 /// it is `pub(crate)` — the public entry point is the gate-honoring [`emit_for`] (finding C10).
 pub(crate) fn emit(graph: &RvGraph, root: RvId, streams: usize) -> Vec<u8> {
+    emit_roots(graph, &[root], streams)
+}
+
+/// Multi-root [`emit`]: ONE kernel computing every root per lane from a shared per-stream memo
+/// (shared sources drawn once per lane — the roots stay *jointly* sampled), writing root `r`'s
+/// draws into its own BATCH-strided output column at `out + r*BATCH*8`. A single root emits
+/// exactly the module [`emit`] always emitted. Memory is sized for `k` columns after the state
+/// page (host convention: state low, columns at/after 4096).
+pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId], streams: usize) -> Vec<u8> {
     assert!(
         streams >= 1 && BATCH.is_multiple_of(streams),
         "streams must divide BATCH"
     );
-    let cone = cone_size(graph, root) as u32;
+    let cone = cone_size_roots(graph, roots) as u32;
 
     // --- types: (f64)->f64 for the unary shims, (f64,f64)->f64 for pow, kernel sig ---
     let mut types = TypeSection::new();
@@ -156,9 +165,9 @@ pub(crate) fn emit(graph: &RvGraph, root: RvId, streams: usize) -> Vec<u8> {
     let mut functions = FunctionSection::new();
     functions.function(2);
 
-    // --- one linear memory, sized to hold the largest output we emit (BATCH f64s) plus headroom ---
+    // --- one linear memory, sized for the state page plus one BATCH-f64 column per root ---
     let mut memories = MemorySection::new();
-    let bytes = 4096 + BATCH * 8; // host convention: state low, output at/after 4096
+    let bytes = 4096 + roots.len() * BATCH * 8; // host convention: state low, columns at/after 4096
     let pages = bytes.div_ceil(64 * 1024).max(1) as u64;
     memories.memory(MemoryType {
         minimum: pages,
@@ -194,7 +203,7 @@ pub(crate) fn emit(graph: &RvGraph, root: RvId, streams: usize) -> Vec<u8> {
     };
     {
         let mut s = func.instructions();
-        emit_kernel(&mut s, &ctx, root, streams);
+        emit_kernel(&mut s, &ctx, roots, streams);
     }
 
     let mut code = CodeSection::new();
@@ -219,28 +228,36 @@ pub(crate) fn emit(graph: &RvGraph, root: RvId, streams: usize) -> Vec<u8> {
 /// same `crate::approx` reference as the JIT), so `normal`/`exp`/trig graphs are fusible here too and
 /// the 2× transcendental win reaches the browser — the gate decision now matches the native JIT.
 pub fn emit_for(graph: &RvGraph, root: RvId, draws: usize) -> Option<(Vec<u8>, usize)> {
+    emit_for_roots(graph, &[root], draws)
+}
+
+/// Multi-root [`emit_for`] — the gate-honoring entry point behind the joint drivers
+/// (`scatter`/`describe`/`corr`/`fan`). One gate decision over the *union* cone, then one
+/// multi-column kernel ([`emit_roots`]).
+pub fn emit_for_roots(graph: &RvGraph, roots: &[RvId], draws: usize) -> Option<(Vec<u8>, usize)> {
     // `draws` gates emit-vs-interpret the same way it does natively: emitting + instantiating a
     // module is a fixed cost, fusion is a per-draw saving, so a short query is faster interpreted.
     //
     // The threshold is the browser's own (`MIN_DRAWS_WASM`), an order of magnitude below the JIT's:
     // instantiating a ~1 KB kernel is far cheaper than a Cranelift compile, so emission pays back
     // sooner here. Same rule, each backend's measured constant.
-    if !crate::kernel::profitable(
+    if !crate::kernel::profitable_roots(
         graph,
-        root,
+        roots,
         /* inline_trans */ true,
         draws,
         crate::kernel::MIN_DRAWS_WASM,
     ) {
         return None;
     }
-    let streams = choose_streams(graph, root);
-    Some((emit(graph, root, streams), streams))
+    let streams = choose_streams_roots(graph, roots);
+    Some((emit_roots(graph, roots, streams), streams))
 }
 
-/// The kernel skeleton: load each stream's state, run a counted loop emitting `streams` samples per
-/// iteration, store the state back. Mirrors `jit::build_with`.
-fn emit_kernel(s: &mut InstructionSink, ctx: &Ctx, root: RvId, streams: usize) {
+/// The kernel skeleton: load each stream's state, run a counted loop emitting `streams` lanes per
+/// iteration (each lane computing every root from one shared memo — joint draws — into its
+/// BATCH-strided column), store the state back. Mirrors `jit::build_kernel`.
+fn emit_kernel(s: &mut InstructionSink, ctx: &Ctx, roots: &[RvId], streams: usize) {
     // Load each stream's four state words from the strided seed layout `state[(k*streams+j)]`.
     for j in 0..streams {
         for k in 0..4 {
@@ -256,19 +273,23 @@ fn emit_kernel(s: &mut InstructionSink, ctx: &Ctx, root: RvId, streams: usize) {
     s.local_get(I).local_get(N).i32_ge_s().br_if(1); // break to the block end
 
     for j in 0..streams {
-        // Address of out[I + j]: out + (I + j) * 8, pushed before the value so f64.store sees both.
-        s.local_get(OUT)
-            .local_get(I)
-            .i32_const(j as i32)
-            .i32_add()
-            .i32_const(8)
-            .i32_mul()
-            .i32_add();
-        // Emit this stream's draw (own memo → independent draws), leaving its value in a local.
+        // One memo per stream (independent draws), shared across all roots (joint draws).
         let mut memo: HashMap<RvId, u32> = HashMap::new();
         let mut slot = 0u32;
-        let lroot = emit_node(s, ctx, j, root, &mut memo, &mut slot);
-        s.local_get(lroot).f64_store(mem8(0));
+        for (r, &root) in roots.iter().enumerate() {
+            // Address of out[I + j]: out + (I + j) * 8, pushed before the value so f64.store sees
+            // both; root `r`'s column stride is the constant store offset `r * BATCH * 8`.
+            s.local_get(OUT)
+                .local_get(I)
+                .i32_const(j as i32)
+                .i32_add()
+                .i32_const(8)
+                .i32_mul()
+                .i32_add();
+            // Emit this root's draw (stack-neutral), leaving its value in a local.
+            let lroot = emit_node(s, ctx, j, root, &mut memo, &mut slot);
+            s.local_get(lroot).f64_store(mem8((r * BATCH * 8) as u64));
+        }
     }
 
     s.local_get(I)
@@ -1048,7 +1069,8 @@ mod tests {
     fn stream_choice_and_distribution() {
         // RNG-bound, all inline → multi-stream.
         let (eng, id) = graph_of("use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B");
-        let (bytes, streams) = emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("inline graph should emit");
+        let (bytes, streams) =
+            emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("inline graph should emit");
         assert_eq!(streams, STREAMS, "inline graph should be multi-stream");
         let (wasm_mean, count) = run_emitted(&bytes, streams, 0xABCDEF, 64);
         let interp = moments(eng.graph(), id, count as usize, 0xABCDEF).mean;
@@ -1059,7 +1081,8 @@ mod tests {
 
         // `normal` now emits (inlined `ln`/`cos`), but is throughput-bound → single-stream.
         let (eng, id) = graph_of("use rand; X ~ normal(0,1); Y ~ normal(0,1); X + Y");
-        let (bytes, streams) = emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("normal graph should now emit");
+        let (bytes, streams) =
+            emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("normal graph should now emit");
         assert_eq!(streams, 1, "transcendental graph should be single-stream");
         let (wasm_mean, count) = run_emitted(&bytes, streams, 0xABCDEF, 64);
         let interp = moments(eng.graph(), id, count as usize, 0xABCDEF).mean;
@@ -1071,13 +1094,150 @@ mod tests {
         // Arithmetic-dominated but carries a `pow` call (non-const exponent) → still profitable
         // (fusible > libcalls), but choose_streams keeps it single-stream (the call won't overlap).
         let (eng, id) = graph_of("use rand; A ~ unif(1,2); B ~ unif(1,2); A ^ B");
-        let (bytes, streams) = emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("pow graph should emit");
+        let (bytes, streams) =
+            emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("pow graph should emit");
         assert_eq!(streams, 1, "call-bearing graph should be single-stream");
         let (wasm_mean, count) = run_emitted(&bytes, streams, 0xABCDEF, 64);
         let interp = moments(eng.graph(), id, count as usize, 0xABCDEF).mean;
         assert!(
             (wasm_mean - interp).abs() < 0.05,
             "pow: wasm={wasm_mean} interp={interp}"
+        );
+    }
+
+    /// Drive a multi-column joint kernel ([`emit_roots`]) through `wasmi`: seed once, run
+    /// `batches` batches, return the `k` concatenated columns. The kernel writes column `r` at
+    /// `out + r*BATCH*8` — the same layout `wasm_host::nz_kernel_run_cols` copies out.
+    fn run_emitted_joint(
+        bytes: &[u8],
+        streams: usize,
+        k: usize,
+        seed: u64,
+        batches: usize,
+    ) -> Vec<Vec<f64>> {
+        let engine = Engine::default();
+        let module = WasmModule::new(&engine, bytes).expect("emitted module must validate");
+        let mut store = Store::new(&engine, ());
+        let mut linker = <Linker<()>>::new(&engine);
+        linker.func_wrap("m", "atan", |x: f64| x.atan()).unwrap();
+        linker.func_wrap("m", "round", |x: f64| x.round()).unwrap();
+        linker
+            .func_wrap("m", "pow", |a: f64, b: f64| a.powf(b))
+            .unwrap();
+        linker.func_wrap("m", "sin", |x: f64| x.sin()).unwrap();
+        linker.func_wrap("m", "cos", |x: f64| x.cos()).unwrap();
+        linker.func_wrap("m", "exp", |x: f64| x.exp()).unwrap();
+        let instance = linker.instantiate_and_start(&mut store, &module).unwrap();
+        let memory = instance.get_memory(&store, "memory").unwrap();
+        let kernel = instance
+            .get_typed_func::<(i32, i32, i32), ()>(&store, "kernel")
+            .unwrap();
+        let (state_ptr, out_ptr) = (0i32, 4096i32);
+        let state = crate::kernel::seed_state(seed, streams);
+        let mut state_bytes = Vec::with_capacity(state.len() * 8);
+        for w in &state {
+            state_bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        memory
+            .write(&mut store, state_ptr as usize, &state_bytes)
+            .unwrap();
+        let mut cols = vec![Vec::new(); k];
+        let mut out_bytes = vec![0u8; k * BATCH * 8];
+        for _ in 0..batches {
+            kernel
+                .call(&mut store, (out_ptr, BATCH as i32, state_ptr))
+                .unwrap();
+            memory
+                .read(&store, out_ptr as usize, &mut out_bytes)
+                .unwrap();
+            for (j, col) in cols.iter_mut().enumerate() {
+                for chunk in out_bytes[j * BATCH * 8..(j + 1) * BATCH * 8].chunks_exact(8) {
+                    col.push(f64::from_le_bytes(chunk.try_into().unwrap()));
+                }
+            }
+        }
+        cols
+    }
+
+    /// THE joint invariant, on the emitted multi-column kernel: roots sharing a source read the
+    /// same per-lane draw. `[X, 2X]` is a pure-unif cone → multi-stream kernel, so this also pins
+    /// the stream-interleaved addressing of every column.
+    #[test]
+    fn joint_kernel_shares_draws_multi_stream() {
+        let mut g = RvGraph::default();
+        let x = g.push(
+            RvNode::Src(Source::Uniform(crate::dist::Uniform { lo: 0.0, hi: 1.0 })),
+            crate::dist::RvKind::Num,
+        );
+        let two = g.push(RvNode::ConstNum(2.0), crate::dist::RvKind::Num);
+        let x2 = g.push(RvNode::Binary(BinOp::Mul, x, two), crate::dist::RvKind::Num);
+        let (bytes, streams) =
+            emit_for_roots(&g, &[x, x2], ENOUGH_DRAWS).expect("pure-unif joint cone should emit");
+        assert_eq!(
+            streams, STREAMS,
+            "pure-unif joint cone should be multi-stream"
+        );
+        let cols = run_emitted_joint(&bytes, streams, 2, 11, 4);
+        for i in 0..cols[0].len() {
+            let (a, b) = (cols[0][i], cols[1][i]);
+            assert!(
+                (0.0..1.0).contains(&a),
+                "lane {i}: unif draw out of range: {a}"
+            );
+            assert_eq!(b, 2.0 * a, "lane {i}: columns must pair on one shared draw");
+        }
+        assert!(cols[0].windows(2).any(|w| w[0] != w[1]), "draws must vary");
+    }
+
+    /// Joint kernel with a transcendental cone (single-stream) must match the interpreter in
+    /// distribution per column — the multi-column twin of `assert_wasm_matches_interp`.
+    #[test]
+    fn joint_kernel_matches_interp_marginals() {
+        let mut g = RvGraph::default();
+        let z = g.push(
+            RvNode::Src(Source::Normal {
+                mu: 1.0,
+                sigma: 2.0,
+            }),
+            crate::dist::RvKind::Num,
+        );
+        let one = g.push(RvNode::ConstNum(1.0), crate::dist::RvKind::Num);
+        let z1 = g.push(RvNode::Binary(BinOp::Add, z, one), crate::dist::RvKind::Num);
+        let (bytes, streams) =
+            emit_for_roots(&g, &[z, z1], ENOUGH_DRAWS).expect("normal joint cone should emit");
+        assert_eq!(
+            streams, 1,
+            "transcendental joint cone should be single-stream"
+        );
+        let cols = run_emitted_joint(&bytes, streams, 2, 12, 32);
+        let n = cols[0].len() as f64;
+        let (m0, m1) = (
+            cols[0].iter().sum::<f64>() / n,
+            cols[1].iter().sum::<f64>() / n,
+        );
+        assert!((m0 - 1.0).abs() < 0.05, "E[Z]≈1, got {m0}");
+        assert!((m1 - 2.0).abs() < 0.05, "E[Z+1]≈2, got {m1}");
+        for i in 0..cols[0].len() {
+            assert_eq!(cols[1][i], cols[0][i] + 1.0, "lane {i} must pair");
+        }
+    }
+
+    /// The joint gate rejects an unsupported node anywhere in the union cone (here `Poisson` in the
+    /// second root), exactly like the single-root gate.
+    #[test]
+    fn joint_gate_rejects_unsupported_union() {
+        let mut g = RvGraph::default();
+        let x = g.push(
+            RvNode::Src(Source::Uniform(crate::dist::Uniform { lo: 0.0, hi: 1.0 })),
+            crate::dist::RvKind::Num,
+        );
+        let p = g.push(
+            RvNode::Src(Source::Poisson { lambda: 3.0 }),
+            crate::dist::RvKind::Num,
+        );
+        assert!(
+            emit_for_roots(&g, &[x, p], ENOUGH_DRAWS).is_none(),
+            "a Poisson root must keep the whole joint pass on the interpreter"
         );
     }
 

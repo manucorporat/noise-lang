@@ -30,6 +30,19 @@ pub fn simplify(graph: &RvGraph, root: RvId) -> (RvGraph, RvId) {
     (b.out, new_root)
 }
 
+/// Rewrite the union of several roots' cones into ONE fresh, simplified graph — the multi-root
+/// twin of [`simplify`], for the joint drivers. A single [`Builder`] (one `done` memo) rewrites
+/// every root, so a node feeding more than one root rebuilds to a *single* new node: cross-root
+/// sharing — the property that makes a paired statistic (covariance, a scatter point) correct —
+/// survives the rewrite. Simplifying each root separately would sever exactly that sharing.
+/// Roots are rewritten in input order, so the relative order of surviving sources (hence their
+/// RNG consumption) matches the multi-root bytecode lowerer's.
+pub fn simplify_roots(graph: &RvGraph, roots: &[RvId]) -> (RvGraph, Vec<RvId>) {
+    let mut b = Builder::default();
+    let new_roots = roots.iter().map(|&r| b.rewrite(graph, r)).collect();
+    (b.out, new_roots)
+}
+
 /// A worklist item for the iterative post-order rewrite (see [`Builder::rewrite`]).
 enum Task {
     /// First visit: schedule this node's rebuild after its children.

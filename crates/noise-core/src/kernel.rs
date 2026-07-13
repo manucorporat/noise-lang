@@ -89,17 +89,32 @@ pub fn profitable(
     draws: usize,
     min_draws: usize,
 ) -> bool {
+    profitable_roots(graph, &[root], inline_trans, draws, min_draws)
+}
+
+/// Multi-root [`profitable`]: gate the *union* of several roots' cones — the joint drivers compile
+/// all roots into one shared kernel, so one gate decision covers the whole pass. Shared nodes are
+/// weighed once (shared `seen`), matching what the joint kernel actually emits.
+pub fn profitable_roots(
+    graph: &RvGraph,
+    roots: &[RvId],
+    inline_trans: bool,
+    draws: usize,
+    min_draws: usize,
+) -> bool {
     let mut seen = HashSet::new();
     let (mut fusible, mut libcalls) = (0u32, 0u32);
-    if !walk_cost(
-        graph,
-        root,
-        &mut seen,
-        &mut fusible,
-        &mut libcalls,
-        inline_trans,
-    ) {
-        return false; // unsupported (Poisson / Gather) → interpreter
+    for &root in roots {
+        if !walk_cost(
+            graph,
+            root,
+            &mut seen,
+            &mut fusible,
+            &mut libcalls,
+            inline_trans,
+        ) {
+            return false; // unsupported (Poisson / Gather) → interpreter
+        }
     }
     // Route very large cones to the interpreter. The code generators (`jit::emit_node`,
     // `wasm_emit::emit_node`) emit each node **recursively**, so a hundreds-of-thousands-deep graph
@@ -260,8 +275,15 @@ pub fn walk_cost(
 /// worse register pressure on large kernels). Those — and any remaining real call (`atan`/`round`/
 /// non-integer `pow`) — stay single-stream. So the rule is "multi-stream iff latency-bound".
 pub fn choose_streams(graph: &RvGraph, root: RvId) -> usize {
+    choose_streams_roots(graph, &[root])
+}
+
+/// Multi-root [`choose_streams`]: one stream policy for a joint kernel — multi-stream only if
+/// *every* root's cone is latency-bound (any transcendental anywhere makes the whole loop body
+/// throughput-bound, exactly as it would in a single fused cone).
+pub fn choose_streams_roots(graph: &RvGraph, roots: &[RvId]) -> usize {
     let mut seen = HashSet::new();
-    if latency_bound(graph, root, &mut seen) {
+    if roots.iter().all(|&r| latency_bound(graph, r, &mut seen)) {
         STREAMS
     } else {
         1
@@ -429,9 +451,15 @@ pub fn cost_roots(graph: &RvGraph, roots: &[RvId]) -> NodeCost {
 /// value slots a stack-machine backend (WASM) must reserve, since it memoizes every node into a
 /// local rather than an SSA value.
 pub fn cone_size(graph: &RvGraph, root: RvId) -> usize {
+    cone_size_roots(graph, &[root])
+}
+
+/// Distinct nodes in the *union* of several roots' cones — the value-slot count of a joint kernel
+/// (shared nodes get one slot, matching the shared memo the joint emitters use).
+pub fn cone_size_roots(graph: &RvGraph, roots: &[RvId]) -> usize {
     // Iterative worklist (not recursion) so a deep chain can't overflow the stack (finding A4).
     let mut seen = HashSet::new();
-    let mut stack = vec![root];
+    let mut stack: Vec<RvId> = roots.to_vec();
     while let Some(id) = stack.pop() {
         if !seen.insert(id) {
             continue;

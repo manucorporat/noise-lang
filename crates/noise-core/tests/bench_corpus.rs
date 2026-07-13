@@ -40,6 +40,30 @@ fn every_example_still_runs_end_to_end() {
     }
 }
 
+/// Diagnostic (not an assertion): one warmed end-to-end wall-time per example — a quick per-program
+/// readout for comparing two working trees or feature sets without a full Criterion run (which owns
+/// the statistically careful numbers, but takes >10 minutes over this corpus).
+///
+/// `cargo test -p noise-core --release [--features jit] -- --ignored --nocapture example_times`
+#[test]
+#[ignore = "diagnostic: prints a table, asserts nothing"]
+fn example_times() {
+    println!("\n{:<20}{:>12}", "EXAMPLE", "TOTAL ms");
+    let mut total = 0.0f64;
+    for (label, src) in corpus::EXAMPLES {
+        // Warm once (allocator, lazy statics), then time a fresh engine end-to-end.
+        let mut eng = Engine::new();
+        let _ = eng.run_to_document(src);
+        let t0 = std::time::Instant::now();
+        let mut eng = Engine::new();
+        let _ = eng.run_to_document(src);
+        let ms = t0.elapsed().as_secs_f64() * 1e3;
+        total += ms;
+        println!("{label:<20}{ms:>12.1}");
+    }
+    println!("{:<20}{total:>12.1}", "TOTAL");
+}
+
 /// Diagnostic (not an assertion): the *shape* of each real program — how many queries it forces and
 /// how many samples each one draws. This is the number that decides whether a codegen backend can
 /// ever pay for itself: a program that forces 10 queries at 3k samples each compiles 10 kernels to

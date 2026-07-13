@@ -48,6 +48,13 @@ wat = "1"
 name = "sampling"
 harness = false
 
+# End-to-end benchmark over the real programs in `examples/` (see benches/examples.rs). Without
+# `harness = false` cargo runs this under libtest, which silently ignores Criterion's `main` — the
+# bench would "pass" while measuring nothing.
+[[bench]]
+name = "examples"
+harness = false
+
 [features]
 # Native Cranelift JIT backend (Phase 4 "B"). Off by default so the crate stays WASM-clean and
 # dependency-light; enable with `--features jit` on a native target. Falls back to the columnar

@@ -5,10 +5,8 @@
 //! is sliced to the true remaining length so over-count never biases moments. Swapping the
 //! backend (e.g. a Cranelift JIT) changes only how a batch is produced, not this loop.
 
-use crate::backend::compile_root;
-use crate::bytecode::{compile_roots, run_batch, BATCH};
+use crate::backend::{compile_root, compile_roots};
 use crate::dist::{RvGraph, RvId};
-use crate::rng::Rng;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[must_use = "Moments carries the sampled mean/variance; computing them without using them wastes the sampling pass (finding F10)"]
@@ -100,32 +98,42 @@ pub fn cond_sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f6
 
 /// Drive a **joint** pass over `roots` — the single batch loop the four joint drivers
 /// (`sample_pairs`/`grid_moments`/`grid_draws`/`corr_matrix`) share (finding B8). Compile the roots
-/// into ONE shared instruction stream ([`compile_roots`]) so every lane draws them jointly, **record
-/// the run-time cost** here (so a `describe`/`hist`/`corr`/`fan` pass is no longer invisible in the
-/// engine's stats readout), then loop `ceil(n / BATCH)` batches invoking `sink(buf, idx, take)`:
-/// `idx[j]` is the register holding `roots[j]`, and `take` is this (possibly partial final) batch's
-/// true length. A single ordered RNG stream (not the per-chunk reseed of [`moments`]) keeps lanes
-/// paired across roots; this is the interpreter path (the introspection budget is modest).
+/// through the backend seam ([`compile_roots`]) into ONE shared kernel so every lane draws them
+/// jointly — the JIT / WASM emitter lower a multi-output kernel where profitable, the multi-root
+/// bytecode interpreter otherwise — **record the run-time cost** here (so a
+/// `describe`/`hist`/`corr`/`fan` pass is no longer invisible in the engine's stats readout), then
+/// loop `ceil(n / cap)` batches invoking `sink(cols, take)`: `cols[j]` is `roots[j]`'s column and
+/// `take` is this (possibly partial final) batch's true length. A single ordered RNG stream (not
+/// the per-chunk reseed of [`moments`]) keeps the batch loop deterministic per backend; lane
+/// pairing across roots holds on every backend by construction (one shared instruction stream).
 fn for_each_joint_batch(
     graph: &RvGraph,
     roots: &[RvId],
     n: usize,
     seed: u64,
-    mut sink: impl FnMut(&[Box<[f64]>], &[usize], usize),
+    mut sink: impl FnMut(&[&[f64]], usize),
 ) {
-    let (prog, regs) = compile_roots(graph, roots);
-    let cost = crate::kernel::cost_roots(graph, roots);
+    if n == 0 {
+        return;
+    }
+    let (prog, cost) = compile_roots(graph, roots, n);
+    // A union cone with zero RNG sources is *deterministic*: every lane of every batch is the same
+    // value, so drawing the full budget is pure waste — and it is common, not a corner case. A plot
+    // of an already-computed vector (`plot::line(signal::sample(...))`, a curve of forced `P()`
+    // results) reaches here as k constant roots, which the interpreter would otherwise re-evaluate
+    // `n × k` times (200k draws × 60 elements in `birthday`). One batch fully characterizes the
+    // result (quantiles, moments, correlations of a constant are that constant), so clamp to it.
+    let mut runner = prog.runner();
+    runner.reseed(seed);
+    let cap = runner.batch_cap();
+    let n = if cost.sources == 0 { n.min(cap) } else { n };
     crate::stats::record(n, cost.ops, cost.sources);
-    let idx: Vec<usize> = regs.iter().map(|&r| r as usize).collect();
-    let mut buf: Vec<Box<[f64]>> = (0..prog.n_regs)
-        .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
-        .collect();
-    let mut rng = Rng::seed_from_u64(seed);
     let mut remaining = n;
     while remaining > 0 {
-        run_batch(&prog, &mut buf, &mut rng);
-        let take = remaining.min(BATCH);
-        sink(&buf, &idx, take);
+        runner.next_batch();
+        let take = remaining.min(cap);
+        let cols: Vec<&[f64]> = (0..roots.len()).map(|j| runner.col(j)).collect();
+        sink(&cols, take);
         remaining -= take;
     }
 }
@@ -135,8 +143,8 @@ fn for_each_joint_batch(
 /// ([`compile_roots`]), so each returned `(aᵢ, bᵢ)` is one lane's *paired* draw (shared upstream
 /// randomness). When `cond` is `Some(c)`, only the lanes where `c` holds (its draw ≠ 0) are kept —
 /// the conditional relationship `corr(A, B | C)`. A single ordered RNG stream (not the per-chunk
-/// reseed of [`moments`]) keeps the pairing exact; this is the interpreter path (the introspection
-/// budget is modest, so the JIT/wasm fast paths aren't needed here).
+/// reseed of [`moments`]) keeps the batch loop deterministic; pairing holds on every backend by
+/// construction (see [`for_each_joint_batch`]).
 pub fn sample_pairs(
     graph: &RvGraph,
     a: RvId,
@@ -154,12 +162,12 @@ pub fn sample_pairs(
     }
     let has_cond = cond.is_some();
     let mut out = Vec::with_capacity(n);
-    for_each_joint_batch(graph, &roots, n, seed, |buf, idx, take| {
-        let (ra, rb) = (idx[0], idx[1]);
-        let rc = if has_cond { Some(idx[2]) } else { None };
+    for_each_joint_batch(graph, &roots, n, seed, |cols, take| {
+        let (ca, cb) = (cols[0], cols[1]);
+        let cc = if has_cond { Some(cols[2]) } else { None };
         for k in 0..take {
-            if rc.is_none_or(|c| buf[c][k] != 0.0) {
-                out.push((buf[ra][k], buf[rb][k]));
+            if cc.is_none_or(|c| c[k] != 0.0) {
+                out.push((ca[k], cb[k]));
             }
         }
     });
@@ -184,9 +192,9 @@ pub fn grid_moments(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec
     }
     let (mut sum, mut sum_sq) = (vec![0.0f64; k], vec![0.0f64; k]);
     let mut count = 0u64;
-    for_each_joint_batch(graph, roots, n, seed, |buf, idx, take| {
+    for_each_joint_batch(graph, roots, n, seed, |cols, take| {
         for j in 0..k {
-            let col = &buf[idx[j]];
+            let col = cols[j];
             let (mut s, mut sq) = (0.0f64, 0.0f64);
             for &x in &col[..take] {
                 s += x;
@@ -219,13 +227,13 @@ pub fn grid_draws(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<V
     if k == 0 || n == 0 {
         return vec![Vec::new(); k];
     }
-    let mut cols: Vec<Vec<f64>> = (0..k).map(|_| Vec::with_capacity(n)).collect();
-    for_each_joint_batch(graph, roots, n, seed, |buf, idx, take| {
+    let mut out: Vec<Vec<f64>> = (0..k).map(|_| Vec::with_capacity(n)).collect();
+    for_each_joint_batch(graph, roots, n, seed, |cols, take| {
         for j in 0..k {
-            cols[j].extend_from_slice(&buf[idx[j]][..take]);
+            out[j].extend_from_slice(&cols[j][..take]);
         }
     });
-    cols
+    out
 }
 
 /// The full `k×k` correlation matrix over a set of roots in ONE joint pass — the forcing path behind
@@ -241,10 +249,10 @@ pub fn corr_matrix(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<
     let mut cross = vec![0.0f64; k * k]; // upper triangle filled; symmetrized at the end
     let mut vals = vec![0.0f64; k];
     let mut count = 0u64;
-    for_each_joint_batch(graph, roots, n, seed, |buf, idx, take| {
+    for_each_joint_batch(graph, roots, n, seed, |cols, take| {
         for lane in 0..take {
             for i in 0..k {
-                vals[i] = buf[idx[i]][lane];
+                vals[i] = cols[i][lane];
             }
             for i in 0..k {
                 sum[i] += vals[i];
@@ -281,12 +289,98 @@ pub fn corr_matrix(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dist::{RvKind, RvNode, Source};
+    use crate::ast::BinOp;
+    use crate::dist::{RvKind, RvNode, Source, Uniform};
 
     fn const_graph(v: f64) -> (RvGraph, RvId) {
         let mut g = RvGraph::default();
         let id = g.push(RvNode::ConstNum(v), RvKind::Num);
         (g, id)
+    }
+
+    /// The joint drivers now route through the backend seam (`backend::compile_roots`), so this
+    /// pins THE joint invariant on whichever backend this build selects (interpreter, or the JIT
+    /// joint kernel under `--features jit` — the draw count is above `MIN_DRAWS_JIT` on purpose):
+    /// two roots sharing a source must read the *same* per-lane draw. `b = 2a` exactly, every lane.
+    #[test]
+    fn sample_pairs_share_draws_on_every_backend() {
+        let mut g = RvGraph::default();
+        let x = g.push(
+            RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
+            RvKind::Num,
+        );
+        let two = g.push(RvNode::ConstNum(2.0), RvKind::Num);
+        let x2 = g.push(RvNode::Binary(BinOp::Mul, x, two), RvKind::Num);
+        let n = 150_000; // ≥ MIN_DRAWS_JIT: exercises the codegen joint path where available
+        let pairs = sample_pairs(&g, x, x2, None, n, 42);
+        assert_eq!(pairs.len(), n);
+        for &(a, b) in &pairs {
+            assert!((0.0..1.0).contains(&a), "unif(0,1) draw out of range: {a}");
+            assert_eq!(b, 2.0 * a, "roots must share the lane's draw of X");
+        }
+        // And the draws must actually vary (a broken column stride could repeat one lane).
+        assert!(pairs.windows(2).any(|w| w[0].0 != w[1].0));
+    }
+
+    /// Same invariant on a transcendental-bearing cone (`normal` → single-stream codegen kernels),
+    /// so both stream layouts of the joint kernel are pinned.
+    #[test]
+    fn sample_pairs_share_draws_single_stream_cone() {
+        let mut g = RvGraph::default();
+        let z = g.push(
+            RvNode::Src(Source::Normal {
+                mu: 0.0,
+                sigma: 1.0,
+            }),
+            RvKind::Num,
+        );
+        let one = g.push(RvNode::ConstNum(1.0), RvKind::Num);
+        let z1 = g.push(RvNode::Binary(BinOp::Add, z, one), RvKind::Num);
+        let n = 150_000;
+        let pairs = sample_pairs(&g, z, z1, None, n, 43);
+        assert_eq!(pairs.len(), n);
+        for &(a, b) in &pairs {
+            assert_eq!(b, a + 1.0, "roots must share the lane's draw of Z");
+        }
+        let mean = pairs.iter().map(|p| p.0).sum::<f64>() / n as f64;
+        assert!(mean.abs() < 0.02, "E[Z] should be ~0, got {mean}");
+    }
+
+    /// `grid_moments` through the seam: marginal moments of jointly-drawn roots must match each
+    /// root's own distribution (catches a column-stride/ordering bug in a multi-output kernel).
+    #[test]
+    fn grid_moments_match_marginals_through_the_seam() {
+        let mut g = RvGraph::default();
+        let x = g.push(
+            RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
+            RvKind::Num,
+        );
+        let y = g.push(
+            RvNode::Src(Source::Uniform(Uniform { lo: 2.0, hi: 4.0 })),
+            RvKind::Num,
+        );
+        let s = g.push(RvNode::Binary(BinOp::Add, x, y), RvKind::Num);
+        let ms = grid_moments(&g, &[x, y, s], 200_000, 7);
+        assert!(
+            (ms[0].mean - 0.5).abs() < 0.01,
+            "E[X]≈0.5, got {}",
+            ms[0].mean
+        );
+        assert!(
+            (ms[1].mean - 3.0).abs() < 0.01,
+            "E[Y]≈3.0, got {}",
+            ms[1].mean
+        );
+        assert!(
+            (ms[2].mean - 3.5).abs() < 0.01,
+            "E[X+Y]≈3.5, got {}",
+            ms[2].mean
+        );
+        assert!(
+            (ms[0].variance - 1.0 / 12.0).abs() < 0.01,
+            "Var[X]≈1/12, got {}",
+            ms[0].variance
+        );
     }
 
     #[test]
