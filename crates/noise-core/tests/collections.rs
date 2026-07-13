@@ -45,6 +45,27 @@ fn permutation_is_a_uniform_permutation() {
 }
 
 #[test]
+fn permutation_draws_are_independent() {
+    // two `~` draws are independent permutations (never CSE-merged into one array): their first
+    // elements agree with probability 1/n, not 1 (a merged/shared array would agree always).
+    let p = num("a ~ permutation(4); b ~ permutation(4); P(a[0] == b[0], 100000)");
+    assert!((p - 0.25).abs() < 0.01, "got {p}");
+}
+
+#[test]
+fn permutation_graph_is_linear_not_quadratic() {
+    // Regression for the eval-time blowup (PLAN-PERF-2 item 3): `permutation(n)` + a random index
+    // must build O(n) graph nodes — one array-valued source, n element reads, one ArrIndex for
+    // the random index — not the old argsort's O(n²) compare/add nodes (~2800 for n = 30, ~13k
+    // per prisoners forcing). The bound is loose (< 200 for n = 30) so only a relapse trips it.
+    let mut eng = Engine::new();
+    eng.run("use rand; p ~ permutation(30); i ~ unif_int(0, 29); x = p[i]; E(x)")
+        .unwrap();
+    let nodes = eng.graph().len();
+    assert!(nodes < 200, "permutation(30) + p[i] built {nodes} nodes");
+}
+
+#[test]
 fn random_index_is_a_gather() {
     // A random index selects a per-lane element. Over a constant array it's a plain lookup:
     // a uniform index makes the result uniform over the elements.

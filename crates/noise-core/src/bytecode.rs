@@ -20,6 +20,11 @@ pub const BATCH: usize = 1024;
 /// Register index into the column file.
 pub type Reg = u32;
 
+/// Register index into the **array** column file (`Program::arrays` gives each register's element
+/// count; a runner allocates `n × BATCH` f64s per register). A separate namespace from [`Reg`] so
+/// `Inst` stays `Copy` and the scalar file stays homogeneous.
+pub type ArrReg = u32;
+
 #[derive(Debug, Clone, Copy)]
 pub enum Inst {
     Uniform {
@@ -83,6 +88,22 @@ pub enum Inst {
         table: u32,
         index: Reg,
     },
+    /// Per-lane Fisher–Yates: fill array register `dst` (element count `n`) with an independent
+    /// uniform permutation of `0..n` per lane. A SOURCE: consumes exactly `(n-1) × BATCH` RNG
+    /// draws per batch (full batch, like every other source), via the same Lemire multiply-high
+    /// bounded draw `fill_uniform_int` uses.
+    Permutation {
+        dst: ArrReg,
+        n: u32,
+    },
+    /// Per-lane read `dst = arr[round(clamp(index))]` of an array register — `Inst::Gather`'s
+    /// exact index semantics (ties-away round; NaN → NaN; clamp into `0..n`), but the table is a
+    /// per-lane *random* array instead of a list of element registers.
+    ArrIndex {
+        dst: Reg,
+        arr: ArrReg,
+        index: Reg,
+    },
 }
 
 pub struct Program {
@@ -91,6 +112,13 @@ pub struct Program {
     pub root: Reg,
     /// Element-register tables for `Inst::Gather`, indexed by its `table` field.
     pub gathers: Vec<Box<[Reg]>>,
+    /// Element count of each **array register** (`Inst::Permutation`/`Inst::ArrIndex`), indexed by
+    /// [`ArrReg`]. A runner allocates `arrays[a] × BATCH` f64s per register, **lane-major**
+    /// (`buf[k*n + j]` is lane `k`'s element `j`): the Fisher–Yates fill writes a whole lane's
+    /// array at a time (contiguous swaps stay in one cache line for realistic `n`), where an
+    /// element-major layout would stride every swap `BATCH × 8` bytes apart. The ArrIndex read of
+    /// one element per lane strides either way, so the writer's layout wins.
+    pub arrays: Vec<u32>,
 }
 
 /// Lower the transitive cone of `root` to flat bytecode.
@@ -100,14 +128,25 @@ pub struct Program {
 /// register-liveness reuse is deferred to Phase 4 (BATCH×n_regs memory is fine here).
 pub fn compile(graph: &RvGraph, root: RvId) -> Program {
     let mut memo: HashMap<RvId, Reg> = HashMap::new();
+    let mut arr_memo: HashMap<RvId, ArrReg> = HashMap::new();
     let mut insts: Vec<Inst> = Vec::new();
     let mut gathers: Vec<Box<[Reg]>> = Vec::new();
-    let root_reg = lower(graph, root, &mut memo, &mut insts, &mut gathers);
+    let mut arrays: Vec<u32> = Vec::new();
+    let root_reg = lower(
+        graph,
+        root,
+        &mut memo,
+        &mut arr_memo,
+        &mut insts,
+        &mut gathers,
+        &mut arrays,
+    );
     Program {
         n_regs: insts.len(),
         insts,
         root: root_reg,
         gathers,
+        arrays,
     }
 }
 
@@ -122,11 +161,23 @@ pub fn compile(graph: &RvGraph, root: RvId) -> Program {
 /// raw graph (no simplify pass) so cross-root source sharing is preserved verbatim.
 pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
     let mut memo: HashMap<RvId, Reg> = HashMap::new();
+    let mut arr_memo: HashMap<RvId, ArrReg> = HashMap::new();
     let mut insts: Vec<Inst> = Vec::new();
     let mut gathers: Vec<Box<[Reg]>> = Vec::new();
+    let mut arrays: Vec<u32> = Vec::new();
     let regs: Vec<Reg> = roots
         .iter()
-        .map(|&r| lower(graph, r, &mut memo, &mut insts, &mut gathers))
+        .map(|&r| {
+            lower(
+                graph,
+                r,
+                &mut memo,
+                &mut arr_memo,
+                &mut insts,
+                &mut gathers,
+                &mut arrays,
+            )
+        })
         .collect();
     let root = regs.first().copied().unwrap_or(0);
     (
@@ -135,6 +186,7 @@ pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
             insts,
             root,
             gathers,
+            arrays,
         },
         regs,
     )
@@ -159,8 +211,10 @@ fn lower(
     graph: &RvGraph,
     id: RvId,
     memo: &mut HashMap<RvId, Reg>,
+    arr_memo: &mut HashMap<RvId, ArrReg>,
     insts: &mut Vec<Inst>,
     gathers: &mut Vec<Box<[Reg]>>,
+    arrays: &mut Vec<u32>,
 ) -> Reg {
     if let Some(&reg) = memo.get(&id) {
         return reg;
@@ -181,7 +235,10 @@ fn lower(
                     }
                 };
                 match graph.node(id) {
-                    RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+                    RvNode::Src(_)
+                    | RvNode::ConstNum(_)
+                    | RvNode::ConstBool(_)
+                    | RvNode::Permutation { .. } => {}
                     RvNode::Unary(_, a) => push_child(&mut stack, *a),
                     RvNode::Binary(_, a, b) => {
                         push_child(&mut stack, *b);
@@ -197,6 +254,10 @@ fn lower(
                         for &e in elems.iter().rev() {
                             push_child(&mut stack, e);
                         }
+                    }
+                    RvNode::ArrIndex { arr, index } => {
+                        push_child(&mut stack, *index);
+                        push_child(&mut stack, *arr);
                     }
                 }
             }
@@ -266,6 +327,26 @@ fn lower(
                             index: ri,
                         });
                     }
+                    RvNode::Permutation { n } => {
+                        // An array-valued source: its result lives in an ARRAY register, but it
+                        // still occupies one instruction slot, so the `dst == inst index` register
+                        // numbering invariant (`n_regs == insts.len()`) holds — the scalar column
+                        // at `dst` is simply never written. `arr_memo` maps the node to its array
+                        // register for the ArrIndex readers.
+                        let a = ArrReg::try_from(arrays.len())
+                            .expect("bytecode exceeded 2^32 array registers");
+                        arrays.push(n);
+                        arr_memo.insert(id, a);
+                        insts.push(Inst::Permutation { dst: a, n });
+                    }
+                    RvNode::ArrIndex { arr, index } => {
+                        let (a, ri) = (arr_memo[&arr], memo[&index]);
+                        insts.push(Inst::ArrIndex {
+                            dst,
+                            arr: a,
+                            index: ri,
+                        });
+                    }
                 }
                 memo.insert(id, dst);
             }
@@ -279,7 +360,16 @@ fn lower(
 /// Because first-cut allocation is one-register-per-node, `dst` is always distinct from
 /// `a`/`b`. We borrow per-iteration scalars (not slices) so the borrow checker is satisfied
 /// without splitting the register vector.
-pub fn run_batch(program: &Program, regs: &mut [Box<[f64]>], rng: &mut crate::rng::Rng) {
+///
+/// `arrs` is the **array register file** (one `arrays[a] × BATCH` buffer per [`ArrReg`], sized by
+/// `Program::arrays`) — a separate parameter, not part of `regs`, so the scalar file stays
+/// uniform-width and programs without array nodes pass `&mut []` for free.
+pub fn run_batch(
+    program: &Program,
+    regs: &mut [Box<[f64]>],
+    arrs: &mut [Box<[f64]>],
+    rng: &mut crate::rng::Rng,
+) {
     for inst in &program.insts {
         match *inst {
             Inst::Uniform { dst, lo, hi } => {
@@ -363,6 +453,53 @@ pub fn run_batch(program: &Program, regs: &mut [Box<[f64]>], rng: &mut crate::rn
                         raw as usize
                     };
                     scratch[k] = regs[tbl[i] as usize][k];
+                }
+                regs[dst as usize].copy_from_slice(&scratch);
+            }
+            Inst::Permutation { dst, n } => {
+                // Per lane: identity, then Fisher–Yates high-to-low with the same Lemire
+                // multiply-high bounded draw `fill_uniform_int` uses (`k = ⌊u64·count / 2⁶⁴⌋`,
+                // bias ≤ count/2⁶⁴). Lane-major (`buf[k*n + j]`, see `Program::arrays`): the
+                // shuffle's swaps stay within lane `k`'s contiguous n-element run. Consumes
+                // exactly `(n-1) × BATCH` draws per batch — full batch like every source, so a
+                // final partial batch doesn't change the stream.
+                let n = n as usize;
+                let buf = &mut arrs[dst as usize];
+                for k in 0..BATCH {
+                    let lane = &mut buf[k * n..(k + 1) * n];
+                    for (j, x) in lane.iter_mut().enumerate() {
+                        *x = j as f64;
+                    }
+                    for j in (1..n).rev() {
+                        let i = ((rng.next_u64() as u128 * (j as u128 + 1)) >> 64) as usize;
+                        lane.swap(i, j);
+                    }
+                }
+            }
+            Inst::ArrIndex { dst, arr, index } => {
+                // Per lane: `Inst::Gather`'s exact index semantics (ties-away `round`; NaN index →
+                // NaN, never element 0; `raw <= 0` → 0; `>= last` → last), reading lane `k`'s own
+                // array (`buf[k*n + i]`) instead of an element register's lane. Scratch first so
+                // the `regs[index]` read can't alias the `regs[dst]` write.
+                let buf = &arrs[arr as usize];
+                let n = buf.len() / BATCH; // never 0: eval builds no zero-length array node
+                let last = n - 1;
+                let index = index as usize;
+                let mut scratch = [0.0f64; BATCH];
+                for k in 0..BATCH {
+                    let raw = regs[index][k].round();
+                    if raw.is_nan() {
+                        scratch[k] = f64::NAN;
+                        continue;
+                    }
+                    let i = if raw <= 0.0 {
+                        0
+                    } else if raw as usize >= last {
+                        last
+                    } else {
+                        raw as usize
+                    };
+                    scratch[k] = buf[k * n + i];
                 }
                 regs[dst as usize].copy_from_slice(&scratch);
             }
@@ -470,7 +607,7 @@ mod tests {
             .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
             .collect();
         let mut rng = crate::rng::Rng::seed_from_u64(0);
-        run_batch(&prog, &mut buf, &mut rng);
+        run_batch(&prog, &mut buf, &mut [], &mut rng);
         let out = &buf[prog.root as usize];
         assert!(
             out.iter().all(|x| x.is_nan()),
@@ -500,8 +637,112 @@ mod tests {
             .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
             .collect();
         let mut rng = crate::rng::Rng::seed_from_u64(0);
-        run_batch(&prog, &mut buf, &mut rng);
+        run_batch(&prog, &mut buf, &mut [], &mut rng);
         assert!(buf[prog.root as usize].iter().all(|&x| x == 20.0));
+    }
+
+    /// Build `Permutation(n)` plus its `n` constant-index `ArrIndex` element reads (the shape
+    /// `draw_permutation` emits) and return `(graph, arr, element_roots)`.
+    fn perm_with_elems(n: usize) -> (RvGraph, RvId, Vec<RvId>) {
+        let mut g = RvGraph::default();
+        let arr = g.push(RvNode::Permutation { n: n as u32 }, RvKind::Arr(n as u32));
+        let roots = (0..n)
+            .map(|i| {
+                let index = g.push(RvNode::ConstNum(i as f64), RvKind::Num);
+                g.push(RvNode::ArrIndex { arr, index }, RvKind::Num)
+            })
+            .collect();
+        (g, arr, roots)
+    }
+
+    /// One worker's column file (scalar or array registers alike).
+    type RegFile = Vec<Box<[f64]>>;
+
+    /// Allocate the scalar + array register files a program needs (the runner's job in backend.rs).
+    fn reg_files(prog: &Program) -> (RegFile, RegFile) {
+        let regs = (0..prog.n_regs)
+            .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+            .collect();
+        let arrs = prog
+            .arrays
+            .iter()
+            .map(|&n| vec![0.0f64; n as usize * BATCH].into_boxed_slice())
+            .collect();
+        (regs, arrs)
+    }
+
+    #[test]
+    fn permutation_lanes_are_valid_and_uniform() {
+        // Every lane must hold a true permutation of 0..n (all distinct, sum = n(n-1)/2), and the
+        // Fisher–Yates must be uniform: over many lanes each value lands at each position with
+        // frequency ≈ 1/n (the χ²-style bound below is ~7σ at this sample size, like the
+        // `fill_uniform_int_is_uniform_over_range` test).
+        const N: usize = 6;
+        let (g, _, roots) = perm_with_elems(N);
+        let (prog, regs) = compile_roots(&g, &roots);
+        let (mut buf, mut arrs) = reg_files(&prog);
+        let mut rng = crate::rng::Rng::seed_from_u64(7);
+        let batches = 100;
+        let mut counts = [[0u64; N]; N]; // counts[position][value]
+        for _ in 0..batches {
+            run_batch(&prog, &mut buf, &mut arrs, &mut rng);
+            for k in 0..BATCH {
+                let mut seen = [false; N];
+                let mut sum = 0.0;
+                for (pos, &r) in regs.iter().enumerate() {
+                    let v = buf[r as usize][k];
+                    assert!(
+                        v.fract() == 0.0 && (0.0..N as f64).contains(&v),
+                        "non-permutation value {v}"
+                    );
+                    let vi = v as usize;
+                    assert!(!seen[vi], "duplicate value {vi} in one lane");
+                    seen[vi] = true;
+                    sum += v;
+                    counts[pos][vi] += 1;
+                }
+                assert_eq!(sum, (N * (N - 1) / 2) as f64, "lane is not a permutation");
+            }
+        }
+        let expected = (batches * BATCH) as f64 / N as f64;
+        for (pos, row) in counts.iter().enumerate() {
+            for (val, &c) in row.iter().enumerate() {
+                let dev = (c as f64 - expected).abs() / expected;
+                assert!(dev < 0.05, "position {pos} value {val}: deviation {dev:.4}");
+            }
+        }
+    }
+
+    #[test]
+    fn arr_index_edge_semantics_match_gather() {
+        // ArrIndex must copy Inst::Gather's index semantics exactly: ties-away round (2.5 → 3),
+        // raw <= 0 → element 0, past-the-end/+inf → last, NaN → NaN (never element 0). Checked
+        // lane-for-lane against the reference constant indices over the SAME permutation draw.
+        const N: usize = 4;
+        let mut g = RvGraph::default();
+        let arr = g.push(RvNode::Permutation { n: N as u32 }, RvKind::Arr(N as u32));
+        let read = |g: &mut RvGraph, v: f64| {
+            let index = g.push(RvNode::ConstNum(v), RvKind::Num);
+            g.push(RvNode::ArrIndex { arr, index }, RvKind::Num)
+        };
+        let first = read(&mut g, 0.0);
+        let last = read(&mut g, 3.0);
+        let neg = read(&mut g, -7.3); // <= 0 clamps to 0
+        let tie = read(&mut g, 2.5); // ties away → 3
+        let huge = read(&mut g, f64::INFINITY); // clamps to last
+        let nan = read(&mut g, f64::NAN); // NaN propagates
+        let roots = [first, last, neg, tie, huge, nan];
+        let (prog, regs) = compile_roots(&g, &roots);
+        let (mut buf, mut arrs) = reg_files(&prog);
+        let mut rng = crate::rng::Rng::seed_from_u64(11);
+        run_batch(&prog, &mut buf, &mut arrs, &mut rng);
+        let col = |r: Reg| &buf[r as usize];
+        for k in 0..BATCH {
+            assert_eq!(col(regs[2])[k], col(regs[0])[k], "negative index → element 0");
+            assert_eq!(col(regs[3])[k], col(regs[1])[k], "2.5 rounds away to 3");
+            assert_eq!(col(regs[4])[k], col(regs[1])[k], "+inf clamps to last");
+            assert!(col(regs[5])[k].is_nan(), "NaN index must yield NaN");
+        }
     }
 
     #[test]

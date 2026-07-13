@@ -31,8 +31,11 @@
 //! wasm interpreter and check distribution parity with the interpreter, mirroring `jit`'s tests).
 //!
 //! Scope mirrors the JIT: `unif`/`unif_int`/`normal`/`exp`/`geometric` sources, `+ - * /`,
-//! integer-constant `^`, comparisons, `&& ||`, unary `- !` and the math ufuncs, and lifted `if`.
-//! `Poisson` stays interpreter-only (rejected by the gate). `unif_int` uses the float method
+//! integer-constant `^`, comparisons, `&& ||`, unary `- !` and the math ufuncs, lifted `if`, and
+//! `Gather` — a const table becomes an active **data segment** after the output columns (indexed
+//! load; the `empirical`/bootstrap shape), a small non-const one a compare/select chain
+//! ([`crate::kernel::gather_class`]). `Poisson` and large non-const gathers stay interpreter-only
+//! (rejected by the gate). `unif_int` uses the float method
 //! (`lo + floor(u * count)`) rather than the native kernel's Lemire multiply-high — wasm has no
 //! 64×64→128 `mulhi`, and the float form is identical in distribution (what the parity tests check).
 
@@ -41,18 +44,20 @@
 // which masked the same warnings.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use wasm_encoder::{
-    BlockType, CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
-    Ieee64, ImportSection, InstructionSink, MemArg, MemorySection, MemoryType, Module, TypeSection,
-    ValType,
+    BlockType, CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection,
+    Function, FunctionSection, Ieee64, ImportSection, InstructionSink, MemArg, MemorySection,
+    MemoryType, Module, TypeSection, ValType,
 };
 
 use crate::ast::{BinOp, UnOp};
 use crate::bytecode::BATCH;
 use crate::dist::{RvGraph, RvId, RvNode, Source};
-use crate::kernel::{choose_streams_roots, cone_size_roots, const_int_exponent};
+use crate::kernel::{
+    choose_streams_roots, cone_size_roots, const_int_exponent, gather_class, GatherClass,
+};
 
 // --- imported-function indices (declared in import order, before the local `kernel`) ---
 // `ln` is inlined as a polynomial (`emit_ln`, mirroring `jit`). `sin`/`cos` are inlined too, but
@@ -117,6 +122,64 @@ struct Ctx<'g> {
     ti: u32,
     /// Base index of the [`T_F64`] transcendental f64 scratch locals.
     tf: u32,
+    /// Absolute byte address of each const gather table ([`GatherClass::ConstTable`]) in linear
+    /// memory — the data-segment region after the output columns (see [`collect_gather_tables`]).
+    gather_tables: HashMap<RvId, u64>,
+}
+
+/// Collect the const gather tables in the union cone of `roots`: absolute byte address per gather
+/// node (starting at `tables_base`, the first 8-aligned byte after the output columns) plus the
+/// concatenated little-endian f64 bytes for ONE active data segment at `tables_base`. Deduped by
+/// `RvId`, matching the emitters' per-node handling (a gather shared across streams/roots reads one
+/// table). Traversal skips const-table elems exactly like [`cone_size_roots`] — they are leaves.
+fn collect_gather_tables(
+    graph: &RvGraph,
+    roots: &[RvId],
+    tables_base: u64,
+) -> (HashMap<RvId, u64>, Vec<u8>) {
+    let mut seen = HashSet::new();
+    let mut stack: Vec<RvId> = roots.to_vec();
+    let mut addrs = HashMap::new();
+    let mut data = Vec::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        match graph.node(id) {
+            RvNode::Gather { elems, index } => {
+                if gather_class(graph, elems) == Some(GatherClass::ConstTable) {
+                    addrs.insert(id, tables_base + data.len() as u64);
+                    for &e in elems.iter() {
+                        let RvNode::ConstNum(x) = graph.node(e) else {
+                            unreachable!("ConstTable gather has only ConstNum elems");
+                        };
+                        data.extend_from_slice(&x.to_le_bytes());
+                    }
+                } else {
+                    stack.extend(elems.iter().copied());
+                }
+                stack.push(*index);
+            }
+            RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+            RvNode::Unary(_, a) => stack.push(*a),
+            RvNode::Binary(_, a, b) => {
+                stack.push(*a);
+                stack.push(*b);
+            }
+            RvNode::Select { cond, a, b } => {
+                stack.push(*cond);
+                stack.push(*a);
+                stack.push(*b);
+            }
+            // Interpreter-only (the gate rejects these cones before emission); keep the walk total.
+            RvNode::Permutation { .. } => {}
+            RvNode::ArrIndex { arr, index } => {
+                stack.push(*arr);
+                stack.push(*index);
+            }
+        }
+    }
+    (addrs, data)
 }
 
 /// Emit a complete WASM module computing `root` with the given RNG stream count. `streams` must
@@ -165,9 +228,14 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId], streams: usize) -> Vec
     let mut functions = FunctionSection::new();
     functions.function(2);
 
-    // --- one linear memory, sized for the state page plus one BATCH-f64 column per root ---
+    // --- one linear memory: state page, one BATCH-f64 column per root, then the gather tables ---
+    // Host convention: state low, columns at/after 4096 (the JS host only ever touches those two
+    // regions). Const gather tables live after the columns — `cols_end` is 8-aligned by
+    // construction — initialized by an active data segment, so the host needs no wiring at all.
     let mut memories = MemorySection::new();
-    let bytes = 4096 + roots.len() * BATCH * 8; // host convention: state low, columns at/after 4096
+    let cols_end = 4096 + roots.len() * BATCH * 8;
+    let (gather_tables, table_data) = collect_gather_tables(graph, roots, cols_end as u64);
+    let bytes = cols_end + table_data.len();
     let pages = bytes.div_ceil(64 * 1024).max(1) as u64;
     memories.memory(MemoryType {
         minimum: pages,
@@ -200,6 +268,7 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId], streams: usize) -> Vec
         cone,
         ti,
         tf,
+        gather_tables,
     };
     {
         let mut s = func.instructions();
@@ -217,6 +286,17 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId], streams: usize) -> Vec
         .section(&memories)
         .section(&exports)
         .section(&code);
+    // Const gather tables as ONE active data segment after the columns (binary section order puts
+    // data after code). Instantiation copies it in; the kernel only ever reads it.
+    if !table_data.is_empty() {
+        let mut data = DataSection::new();
+        data.active(
+            0,
+            &ConstExpr::i32_const(cols_end as i32),
+            table_data.iter().copied(),
+        );
+        module.section(&data);
+    }
     module.finish()
 }
 
@@ -333,7 +413,68 @@ fn emit_node(
         RvNode::Src(Source::Exp { rate }) => emit_exp(s, ctx, j, *rate),
         RvNode::Src(Source::Geometric { p }) => emit_geometric(s, ctx, j, *p),
         RvNode::Src(Source::Poisson { .. }) => unreachable!("profitable() excludes Poisson"),
-        RvNode::Gather { .. } => unreachable!("profitable() excludes Gather"),
+        RvNode::Permutation { .. } | RvNode::ArrIndex { .. } => {
+            unreachable!("profitable() excludes the array-valued permutation nodes")
+        }
+        RvNode::Gather { elems, index } => {
+            let lx = emit_node(s, ctx, j, *index, memo, slot);
+            match ctx.gather_tables.get(&id) {
+                // Const table (strategy A): round ties-away, clamp to [0, last], one indexed
+                // 8-byte load from the data segment — bit-identical to the interpreter's
+                // `Inst::Gather`. See `jit::emit_gather_table` for the edge-case reasoning
+                // (ties-away via `nearest` + `d == 0.5` correction; ±inf clamp to the ends;
+                // `i32.trunc_sat` maps NaN to 0 where plain trunc would trap, and the final
+                // `x != x` select restores NaN-index → NaN, never element 0).
+                Some(&addr) => {
+                    let last = (elems.len() - 1) as f64; // table never empty (eval rejects [])
+                    let r0 = ctx.tf; // scratch: nearest(x) (free — no nested emission here)
+                    s.f64_const(f64c(f64::NAN)); // NaN-guard arm (select pops a, b, cond)
+                    s.local_get(lx).f64_nearest().local_set(r0);
+                    // r = r0 + ((x - r0 == 0.5) ? 1 : 0) — ties-away correction
+                    s.local_get(r0);
+                    s.f64_const(f64c(1.0));
+                    s.f64_const(f64c(0.0));
+                    s.local_get(lx)
+                        .local_get(r0)
+                        .f64_sub()
+                        .f64_const(f64c(0.5))
+                        .f64_eq();
+                    s.select();
+                    s.f64_add();
+                    // clamp to [0, last] (f64.min/max propagate NaN; trunc_sat then yields 0)
+                    s.f64_const(f64c(0.0))
+                        .f64_max()
+                        .f64_const(f64c(last))
+                        .f64_min();
+                    s.i32_trunc_sat_f64_s().i32_const(8).i32_mul();
+                    s.f64_load(mem8(addr));
+                    // result = (x != x) ? NaN : loaded
+                    s.local_get(lx).local_get(lx).f64_ne();
+                    s.select();
+                }
+                // Small non-const table (strategy B): compare/select chain, no rounding — see
+                // `jit::emit_gather_chain`. The condition is flipped (`x >= i+0.5 ? acc : e[i]`)
+                // so the accumulator stays below the operand on the stack; for non-NaN `x` that
+                // is the same chain, and NaN lanes (which fail every compare and would fall
+                // through to e[0] here) are overridden by the final NaN guard anyway.
+                None => {
+                    let les: Vec<u32> = elems
+                        .iter()
+                        .map(|&e| emit_node(s, ctx, j, e, memo, slot))
+                        .collect();
+                    let last = les.len() - 1;
+                    s.f64_const(f64c(f64::NAN)); // NaN-guard arm
+                    s.local_get(les[last]); // acc = e[last]
+                    for i in (0..last).rev() {
+                        s.local_get(les[i]);
+                        s.local_get(lx).f64_const(f64c(i as f64 + 0.5)).f64_ge();
+                        s.select(); // acc = (x >= i+0.5) ? acc : e[i]
+                    }
+                    s.local_get(lx).local_get(lx).f64_ne();
+                    s.select(); // result = (x != x) ? NaN : acc
+                }
+            }
+        }
         RvNode::ConstNum(x) => {
             s.f64_const(f64c(*x));
         }
@@ -1239,6 +1380,40 @@ mod tests {
             emit_for_roots(&g, &[x, p], ENOUGH_DRAWS).is_none(),
             "a Poisson root must keep the whole joint pass on the interpreter"
         );
+    }
+
+    /// A const-table gather is a LEAF over its elems ([`crate::kernel::gather_class`]): a 10k-point
+    /// `empirical`-shaped table takes no value slots and doesn't trip `MAX_CODEGEN_NODES` — the gate
+    /// emits it, the table rides the active data segment after the output columns, the cone stays
+    /// latency-bound (multi-stream), and the kernel reproduces the uniform-over-the-data mean.
+    #[test]
+    fn const_table_gather_emits_as_leaf() {
+        let mut g = RvGraph::default();
+        let elems: Vec<RvId> = (0..10_000)
+            .map(|i| g.push(RvNode::ConstNum(i as f64), crate::dist::RvKind::Num))
+            .collect();
+        let idx = g.push(
+            RvNode::Src(Source::UniformInt {
+                lo: 0.0,
+                hi: 9999.0,
+            }),
+            crate::dist::RvKind::Num,
+        );
+        let root = g.push(
+            RvNode::Gather {
+                elems: elems.into_boxed_slice(),
+                index: idx,
+            },
+            crate::dist::RvKind::Num,
+        );
+        // The counted cone (= the wasm value-slot pool) is just {gather, index}.
+        assert_eq!(crate::kernel::cone_size(&g, root), 2);
+        let (bytes, streams) =
+            emit_for(&g, root, ENOUGH_DRAWS).expect("const-table gather should emit");
+        assert_eq!(streams, STREAMS, "gather cone stays latency-bound");
+        let (mean, _) = run_emitted(&bytes, streams, 42, 16);
+        // E over unif_int(0, 9999) of table[i] = i is 4999.5; fixed seed, generous tolerance.
+        assert!((mean - 4999.5).abs() < 100.0, "mean={mean}");
     }
 
     #[test]

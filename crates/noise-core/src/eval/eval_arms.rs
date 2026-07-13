@@ -266,6 +266,22 @@ impl Engine {
                 idx_span,
             ));
         }
+        // Peephole: `xs` is a whole array-valued draw viewed through its in-order constant element
+        // reads (the shape `draw_permutation` returns) — indexing it randomly is exactly one
+        // `ArrIndex` over the underlying node, not a width-`n` Gather over `n` element nodes.
+        // Semantics are identical (same round/clamp/NaN rules, and the clamp range `0..xs.len()`
+        // equals the array's `0..n` precisely because the view is *full* and in order). This is
+        // what keeps `deck[i]` O(1) graph nodes: prisoners' 450 cycle-walk reads build 450
+        // ArrIndex nodes instead of 450×30-element interpreted gathers.
+        if let Some(arr) = self.full_array_view(xs) {
+            return Ok(Value::Dist(self.graph.push(
+                RvNode::ArrIndex {
+                    arr,
+                    index: index_id,
+                },
+                RvKind::Num,
+            )));
+        }
         let mut elems = Vec::with_capacity(xs.len());
         let mut elem_kind: Option<RvKind> = None;
         for x in xs.iter() {
@@ -291,6 +307,35 @@ impl Engine {
             kind,
         );
         Ok(Value::Dist(id))
+    }
+
+    /// If `xs` is the **complete, in-order** element view of one array-valued node — every `xs[i]`
+    /// is `Value::Dist(ArrIndex(arr, ConstNum(i)))` over the same `arr`, and `xs.len()` equals the
+    /// array's declared length — return that `arr`. This is the shape [`Self::draw_permutation`]
+    /// hands out. Both conditions are load-bearing: a partial or reordered view would change what
+    /// a clamped/rounded random index selects, so it (correctly) falls back to a `Gather`.
+    fn full_array_view(&self, xs: &[Value]) -> Option<RvId> {
+        let mut arr: Option<RvId> = None;
+        for (i, x) in xs.iter().enumerate() {
+            let &Value::Dist(id) = x else { return None };
+            let &RvNode::ArrIndex { arr: a, index } = self.graph.node(id) else {
+                return None;
+            };
+            match arr {
+                None => arr = Some(a),
+                Some(a0) if a0 != a => return None,
+                _ => {}
+            }
+            match self.graph.node(index) {
+                RvNode::ConstNum(c) if *c == i as f64 => {}
+                _ => return None,
+            }
+        }
+        let arr = arr?; // empty `xs` never reaches here (gather rejects it), but stay total
+        match self.graph.kind(arr) {
+            RvKind::Arr(n) if n as usize == xs.len() => Some(arr),
+            _ => None,
+        }
     }
 
     pub(super) fn eval_for(&mut self, var: &str, iter: &Spanned, body: &Spanned) -> Result<Value> {

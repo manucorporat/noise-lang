@@ -392,33 +392,31 @@ impl Engine {
     }
 
     /// Draw a `permutation(n)` recipe: a fresh uniform random permutation of `0..n` per Monte
-    /// Carlo sample, returned as a length-`n` array. Built the same way `rotation` is — as
-    /// arithmetic over shared iid sources, so each element is an ordinary RV node and the entries
-    /// are jointly a permutation per lane. We draw `n` iid uniform keys and take their **argsort**:
-    /// `deck[k] = rank(keyₖ) = #{ j : keyⱼ < keyₖ }`. With continuous keys there are no ties (prob
-    /// 0), so the ranks are a permutation of `0..n`. Cost is `O(n²)` comparison nodes, so keep `n`
-    /// modest. The inner ops can't fail here (we control the shapes), so the span is synthetic.
+    /// Carlo sample, returned as a length-`n` array. ONE array-valued [`RvNode::Permutation`]
+    /// source (a per-lane Fisher–Yates in the VM) plus `n` scalar [`RvNode::ArrIndex`] element
+    /// reads at constant indices — `O(n)` graph nodes, replacing the old iid-keys **argsort**
+    /// lowering whose per-element rank counts were `O(n²)` compare/add nodes (~13k nodes per
+    /// forcing in `examples/prisoners.noise`). The `Arr`-kind node itself never escapes as a
+    /// `Value`: only these scalar element reads do, so an array-valued forcing root is impossible
+    /// by construction. A *random* index `deck[i]` re-fuses onto the same node via the
+    /// full-permutation peephole in `Engine::gather` (eval_arms.rs) instead of a width-`n` Gather.
     pub(super) fn draw_permutation(&mut self, n: usize) -> Result<Value> {
-        let span = Span::default();
-        // `n` iid uniform keys (a fresh source node each).
-        let mut keys = Vec::with_capacity(n);
-        for _ in 0..n {
-            keys.push(self.draw(Recipe::Uniform { lo: 0.0, hi: 1.0 })?);
+        if n == 0 {
+            // No node for the empty draw: a zero-length array register has nothing to read.
+            return Ok(Value::Array(Rc::new(Vec::new())));
         }
-        // Each element is the rank of its key: count how many other keys are strictly smaller.
-        let mut out = Vec::with_capacity(n);
-        for k in 0..n {
-            let mut rank = Value::Num(0.0);
-            for (j, key_j) in keys.iter().enumerate() {
-                if j == k {
-                    continue;
-                }
-                let lt = self.binop(BinOp::Lt, key_j.clone(), keys[k].clone(), span)?;
-                let ind = self.indicator(lt, span)?;
-                rank = self.binop(BinOp::Add, rank, ind, span)?;
-            }
-            out.push(rank);
-        }
+        let arr = self
+            .graph
+            .push(RvNode::Permutation { n: n as u32 }, RvKind::Arr(n as u32));
+        let out = (0..n)
+            .map(|i| {
+                let index = self.graph.push(RvNode::ConstNum(i as f64), RvKind::Num);
+                Value::Dist(
+                    self.graph
+                        .push(RvNode::ArrIndex { arr, index }, RvKind::Num),
+                )
+            })
+            .collect();
         Ok(Value::Array(Rc::new(out)))
     }
 

@@ -1,6 +1,9 @@
 # PLAN-WEBGPU — the GPU as a fourth lowering of the RvGraph
 
-**Date:** 2026-07-13 · **Status:** proposal (nothing started). G0 spike gates everything else.
+**Date:** 2026-07-13 · **Status:** proposal (nothing started). G0 spike gates everything
+else. **Depends on PLAN-PREGPU** (async engine, f32 lanes in all modes, the pcg4d
+counter RNG in all modes), which moves every cross-backend decision out of this plan —
+the GPU then lands as just another backend under one shared contract.
 
 ## The thesis
 
@@ -10,18 +13,15 @@ compute model — lanes are invocations, the fold is a reduction. We already hav
 lowerings of the same IR (bytecode interpreter, Cranelift JIT, WASM emitter); WGSL is a
 fourth, and structurally the easiest one:
 
-- **No RNG state chain.** The whole multi-stream apparatus in `kernel.rs` exists because
-  xoshiro is a serial dependency the OoO core must overlap. On GPU we switch to a
-  **counter-based RNG**: each lane hashes `(chunk_seed, lane, source_offset)` statelessly
-  — the same trick `chunk_seed()` already plays at chunk granularity (it *is* SplitMix64
-  as a counter hash), pushed down to lane level. Each source node gets a compile-time
-  constant offset, so every uniform in the kernel is an independent hash. No state
-  upload, no readback, no streams, no latency-vs-throughput policy — and no choice,
-  either: WGSL has no `u64`, so xoshiro256++ can't even be expressed on this target.
-  Generator: **pcg4d** (Jarzynski–Olano 2020; pure u32 ops, 4 uniforms per hash — one
-  Box–Muller pair per call), validated by G1's statistical battery, with Philox4x32-10
-  (BigCrush-certified, but needs a 16-bit-split emulated mulhi in WGSL) as the fallback
-  if pcg4d shows bias.
+- **No RNG state chain — and no RNG *decision* left.** PLAN-PREGPU Track C moves every
+  backend to the counter-based **pcg4d**, keyed
+  `(key_lo, key_hi, global_lane, source_offset)`, before this plan starts. The WGSL
+  emitter just spells the identical hash in WGSL — pcg4d is pure u32 ops precisely so it
+  can be, ~5 ALU ops per uniform — so the GPU's draws are **bit-identical** to the CPU
+  backends', not merely equidistributed. No state upload, no streams, no
+  latency-vs-throughput policy; each source node's offset is a compile-time constant, so
+  every uniform in the kernel is an independent hash. (xoshiro couldn't have come along
+  anyway: WGSL has no `u64`.)
 - **No transcendental inlining.** WGSL has native `log`/`exp`/`sin`/`cos`/`atan`/`pow`.
   The entire `approx.rs` polynomial apparatus (built because `normal` costs ln+sincos per
   draw on CPU) is unnecessary: Box–Muller is four built-ins. The ops the CPU cost model
@@ -42,41 +42,31 @@ noise-core (Rust)                          browser (www playground)
   same emitter, blocking poll (tests/CLI)      bridges sync eval ↔ async GPU (NEW)
 ```
 
-## What "32-bit mode" actually costs (the f64 question)
+## The 32-bit question (resolved upstream — PLAN-PREGPU Track B)
 
-WGSL has no `f64` and no timeline for one. So the GPU backend computes lanes in `f32`:
+WGSL has no `f64` and no timeline for one. Originally this plan carried a GPU-only "f32
+mode" with a weakened cross-backend contract; **PLAN-PREGPU instead moves every backend to
+f32 lanes / f64 aggregation first**, so by the time this plan runs there is no numeric
+fork — the GPU computes the same f32 lanes every CPU backend computes, over bit-identical
+pcg4d draws. What remains GPU-specific:
 
-- **Per-sample noise is fine.** Monte-Carlo standard error is `O(1/√N)`; f32 rounding is
-  ~1e-7 relative. For any N a demo runs, sampling noise dwarfs rounding by orders of
-  magnitude. `P`/`E` estimates move *within their own confidence interval*.
-- **Accumulation is not fine — keep it off the GPU or stage it.** Summing 1e6 f32s
-  naively loses digits. Phase 1: read raw f32 samples back, widen to f64, feed the
-  existing `Reducer::absorb` (unchanged fold). Phase 2 (optional): per-workgroup partial
-  `{count, Σx, Σx²}` over ≤4096 lanes in f32 (safe at that size), CPU folds partials in
-  f64 — shrinks a 1M-sample readback from 4 MB to ~50 KB.
-- **`unif_int` ranges above 2²⁴** don't fit an f32 mantissa. Draw and clamp in `u32`
-  (WGSL integer ops), convert at the end; ranges beyond 2³² decline to CPU.
+- **Aggregation placement.** Reducers stay f64 and stay off the GPU in phase 1: read raw
+  f32 samples back, widen, feed the existing `Reducer::absorb` (unchanged fold). Phase 2
+  (optional): per-workgroup partial `{count, Σx, Σx²}` over ≤4096 lanes in f32 (safe at
+  that size), CPU folds partials in f64 — shrinks a 1M-sample readback from 4 MB to
+  ~50 KB.
+- **`unif_int` needs no special case** — the ≤2²⁴ cap is already the language rule in all
+  modes (PLAN-PREGPU B); the WGSL lowering draws in u32 like everyone else.
 - **The NaN conditioning sentinel survives** — f32 has NaN; `select(C, q, NaN)` lowers as-is.
-- **Determinism contract changes tier.** Today: bit-identical for `(seed, n)` across
-  thread counts. GPU: *deterministic per `(seed, device)`*, statistically equivalent to
-  CPU, but not bit-equal to it (f32 + different RNG) nor across GPU vendors (WGSL
-  transcendental precision is implementation-defined). We reuse the exact
-  `chunk_seed(seed, chunk)` decomposition — lane's RNG key is
-  `(chunk_seed, lane_in_chunk)` — and fold partials in chunk order, so within one device
-  the answer never depends on dispatch size. Document the tier; conformance tests assert
-  statistical parity (KS tests + moment tolerances, mirroring `jit`'s parity suite), not bits.
+- **Residual determinism gap, GPU only.** CPU backends (and the draws everywhere) are
+  bit-identical per seed. On GPU, WGSL guarantees correctly-rounded `+ − ×` but allows
+  ≤2.5 ULP on `÷`/`sqrt` and vendor-specified transcendentals — so GPU *lanes* are
+  bit-identical to CPU for add/mul/select graphs and tight-ULP elsewhere, deterministic
+  per `(seed, device)` always (same chunk decomposition, chunk-ordered folds, dispatch-
+  size independent). Conformance asserts bitwise where the spec allows it, ULP/statistical
+  bounds where it doesn't — far stronger than the KS-only tier the original plan accepted.
 - **Non-goal:** double-single (two-f32) f64 emulation. ~10× cost to fix a problem the
   standard-error argument says we don't have. Revisit only if a real program disproves that.
-- **Non-goal: switching the CPU backends to the counter RNG.** Measured (scratch bench,
-  M-series, single thread): SplitMix64-as-counter 229 M u64/s vs xoshiro256++×4-stream
-  234 M u64/s — a wash, because independent counters expose the same ILP the 4-stream
-  interleave was built to expose. Unification wouldn't buy cross-backend bit-parity
-  anyway (f32 breaks it regardless), and it would invalidate every seeded output (the
-  `rng.rs` known-answer test, committed docs) plus force retuning `MIN_DRAWS_*`.
-  Worthwhile *separable* follow-up: a counter RNG on CPU would let us delete the whole
-  multi-stream layer (`STREAMS`, `seed_state`, `choose_streams`, `latency_bound`, the
-  stream-strided emitter layout) — try it after WebGPU ships, keep only if
-  neutral-or-better on the corpus.
 
 ## Where it plugs in (and why not the `Runner` seam)
 
@@ -91,15 +81,14 @@ per-chunk columns/partials, and absorbs them in chunk order. `Reducer` doesn't c
 graph or device failure falls back exactly like `wasm_host` does (correct-slow, never throw).
 
 **The async bridge (browser).** Evaluation is synchronous and queries force mid-eval, so
-`Engine::run` cannot await — this must change before G3. **Chosen (revised 2026-07-13):
-make the evaluator async — see PLAN-ASYNC.md** for the full migration (the async set, the
-one boxed recursion point in `eval`, sync wrappers via `exec::block_on`, and the
-`sampler::*_async` seam this backend routes into). The originally-sketched alternative —
-engine in a dedicated Web Worker blocking on `Atomics.wait` while the device-owning agent
-runs the async dispatch — still works and needs no evaluator changes, but it adds a second
-agent, a SAB protocol, and a deadlock surface permanently; async-first also buys
-cancellation and progress for free. (Native: `wgpu` + blocking poll, trivially sync —
-which is also our test harness either way.)
+`Engine::run` cannot await — **resolved upstream: PLAN-PREGPU Track A makes the evaluator
+async** (the async set, the one boxed recursion point in `eval`, sync wrappers via
+`exec::block_on`, and the `sampler::*_async` seam this backend routes into). The
+originally-sketched alternative — engine in a dedicated Web Worker blocking on
+`Atomics.wait` while the device-owning agent runs the async dispatch — still works and
+needs no evaluator changes, but it adds a second agent, a SAB protocol, and a deadlock
+surface permanently; async-first also buys cancellation and progress for free. (Native:
+`wgpu` + blocking poll, trivially sync — which is also our test harness either way.)
 
 ## Phases
 
@@ -109,15 +98,16 @@ which is also our test harness either way.)
   dispatch+readback latency, and whether a 40k-statement shader compiles at all. These
   are the only real unknowns; everything else in this plan is known-shape work.
 - **G1 — emitter + conformance (native).** `wgsl_emit.rs`: post-order walk of the
-  simplified cone, memoized `let vN: f32` per node, Philox/pcg4d sources, scope = the
-  CPU-codegen subset (no `Poisson`, no `Gather`). `wgpu` as a dev-dependency; statistical
-  parity tests vs the interpreter for every `Source` and op.
+  simplified cone, memoized `let vN: f32` per node, the shared pcg4d sources spelled in
+  WGSL, scope = the CPU-codegen subset (no `Poisson`, no `Gather`). `wgpu` as a
+  dev-dependency; parity tests vs the interpreter — bitwise for the draws and the
+  add/mul/select subset, ULP/statistical elsewhere.
 - **G2 — reduce-driver integration + gate (native, `gpu` feature).** Chunk-range
   dispatch, chunk-ordered fold, `MIN_WORK_GPU` measured the way `MIN_DRAWS_WASM` was
   (bench the corpus, find where the fixed costs pay back), node-count cap from G0 data.
 - **G3 — browser host.** `nz_gpu_*` inline-JS shim (device ownership, content-addressed
   pipeline cache with the same LRU/liveness story as `nz_kernel_*`), the async engine's
-  `run_async` path (prerequisite: PLAN-ASYNC A1–A2), playground wiring, feature-detect +
+  `run_async` path (prerequisite: PLAN-PREGPU A1–A2), playground wiring, feature-detect +
   silent fallback to today's wasm path.
 - **G4 — exceed the CPU codegen.** `Gather` is plain array indexing in WGSL — this
   unlocks `prisoners`, `empirical`, `block_bootstrap`, permutation programs that no CPU
@@ -161,8 +151,8 @@ answers the two questions that could sink it before any of that is spent.
 | risk | assessment |
 |---|---|
 | Giant shaders (17k–45k statements): compile time, register spills to private memory | **The** unknown. G0 measures it; mitigation = per-backend node cap (an analog of `MAX_CODEGEN_NODES`, likely lower) + interpreter fallback |
-| f32 changes published demo numbers | Estimates move within their own MC confidence interval; conformance suite quantifies per-example drift before shipping |
-| Cross-device reproducibility (vendor transcendental precision) | Accepted, documented tier: deterministic per `(seed, device)`. If it ever matters, emit our own `approx.rs` polynomials instead of built-ins |
+| f32 changes published demo numbers | Moved upstream: PLAN-PREGPU B re-baselines the corpus once, before any GPU exists — this plan inherits already-f32 numbers |
+| Cross-device reproducibility (vendor `÷`/`sqrt`/transcendental precision) | Accepted, documented: deterministic per `(seed, device)`, tight-ULP vs CPU. If exact cross-vendor parity ever matters, emit the shared `approx.rs` f32 polynomials (PLAN-PREGPU B3) instead of WGSL built-ins — trading some of the hardware-transcendental win for bitwise portability |
 | WebGPU availability (Safari shipped 2025, Firefox partial) | Feature-detect; gate declines → today's wasm path. Nothing regresses, ever |
 | Device loss / driver reset mid-run | Same story as `nz_kernel_*` eviction (finding C5): status-return, reseed, degrade to CPU for the rest of the run |
 | Async bridge deadlocks (Atomics.wait on a worker that owns nothing) | Device lives on a *different* agent than the engine worker by construction; timeout on the wait falls back to CPU |

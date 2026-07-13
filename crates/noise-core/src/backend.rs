@@ -150,23 +150,36 @@ struct InterpProgram {
 
 impl Program for InterpProgram {
     fn runner(&self) -> Box<dyn Runner> {
-        // Allocate this worker's column file once; reused across its batches.
+        // Allocate this worker's column file once; reused across its batches. Array registers
+        // (`Inst::Permutation`) get their own `n × BATCH` buffers, sized by `Program::arrays`.
         let regs = (0..self.inner.n_regs)
             .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
             .collect();
+        let arrs = alloc_arrays(&self.inner);
         // Placeholder RNG; the driver calls `reseed` before the first batch.
         Box::new(InterpRunner {
             prog: self.inner.clone(),
             regs,
+            arrs,
             rng: Rng::seed_from_u64(0),
         })
     }
+}
+
+/// Allocate a worker's array-register file (one lane-major `n × BATCH` buffer per array register;
+/// see `bytecode::Program::arrays`). Empty for the common no-array program.
+fn alloc_arrays(prog: &ByteProgram) -> Vec<Box<[f64]>> {
+    prog.arrays
+        .iter()
+        .map(|&n| vec![0.0f64; n as usize * BATCH].into_boxed_slice())
+        .collect()
 }
 
 /// Interpreter runner: a clone of the shared bytecode `Arc`, this worker's column file, and its RNG.
 struct InterpRunner {
     prog: Arc<ByteProgram>,
     regs: Vec<Box<[f64]>>,
+    arrs: Vec<Box<[f64]>>,
     rng: Rng,
 }
 
@@ -177,7 +190,7 @@ impl Runner for InterpRunner {
 
     fn next_batch(&mut self, len: usize) -> &[f64] {
         // Fill the full BATCH (so RNG consumption is constant per call), then slice to `len`.
-        run_batch(&self.prog, &mut self.regs, &mut self.rng);
+        run_batch(&self.prog, &mut self.regs, &mut self.arrs, &mut self.rng);
         &self.regs[self.prog.root as usize][..len]
     }
 
@@ -221,11 +234,13 @@ impl JointProgram for InterpJointProgram {
         let buf = (0..self.inner.n_regs)
             .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
             .collect();
+        let arrs = alloc_arrays(&self.inner);
         // Placeholder RNG; the driver calls `reseed` before the first batch.
         Box::new(InterpJointRunner {
             prog: self.inner.clone(),
             regs: self.regs.clone(),
             buf,
+            arrs,
             rng: Rng::seed_from_u64(0),
         })
     }
@@ -236,6 +251,7 @@ struct InterpJointRunner {
     prog: Arc<ByteProgram>,
     regs: Vec<usize>,
     buf: Vec<Box<[f64]>>,
+    arrs: Vec<Box<[f64]>>,
     rng: Rng,
 }
 
@@ -245,7 +261,7 @@ impl JointRunner for InterpJointRunner {
     }
 
     fn next_batch(&mut self) {
-        run_batch(&self.prog, &mut self.buf, &mut self.rng);
+        run_batch(&self.prog, &mut self.buf, &mut self.arrs, &mut self.rng);
     }
 
     fn col(&self, j: usize) -> &[f64] {

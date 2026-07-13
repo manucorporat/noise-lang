@@ -37,6 +37,11 @@ pub struct Uniform {
 pub enum RvKind {
     Num,
     Bool,
+    /// An **array-valued** node of the carried length (today only [`RvNode::Permutation`]). Never
+    /// user-visible: the evaluator wraps such a node in per-element [`RvNode::ArrIndex`] reads and
+    /// hands out those scalar `Value::Dist`s, so an `Arr`-kind id cannot become a forcing root or
+    /// enter operator lifting (the scalar drivers' columns are `f64`).
+    Arr(u32),
 }
 
 impl RvKind {
@@ -44,6 +49,7 @@ impl RvKind {
         match self {
             RvKind::Num => "dist<number>",
             RvKind::Bool => "dist<bool>",
+            RvKind::Arr(_) => "dist<array>",
         }
     }
 }
@@ -150,8 +156,9 @@ pub enum Recipe {
         d: usize,
     },
     /// A uniform random permutation of `0..n` (a length-`n` array, each value once). Like
-    /// `Rotation` this is a *structured* draw: `~` instantiates `n` iid uniform keys and takes
-    /// their argsort (each element is `rank(keyₖ)`), so every entry is an ordinary RV node and the
+    /// `Rotation` this is a *structured* draw: `~` instantiates ONE array-valued
+    /// [`RvNode::Permutation`] source (a per-lane Fisher–Yates in the VM) and returns its `n`
+    /// scalar [`RvNode::ArrIndex`] element reads, so every entry is an ordinary RV node and the
     /// `n` entries are jointly a permutation per Monte Carlo lane. See `Engine::draw_permutation`.
     Permutation {
         n: usize,
@@ -275,6 +282,24 @@ pub enum RvNode {
     /// (data-dependent addressing), so it forces the interpreter — see `kernel::walk_cost`.
     Gather {
         elems: Box<[RvId]>,
+        index: RvId,
+    },
+    /// A uniform random permutation of `0..n`, drawn whole (one Fisher–Yates per lane) — an
+    /// **array-valued SOURCE** (`RvKind::Arr(n)`). This is what keeps `permutation(n)` an `O(n)`
+    /// graph: the old argsort lowering spent `n²` compare/add nodes making each element a scalar
+    /// RV, which multiplied into ~13k nodes *per forcing* in `examples/prisoners.noise`. Like any
+    /// source it is never CSE-merged (two draws stay independent) and, like `Poisson`, it stays
+    /// interpreter-only (`kernel::walk_cost` returns false — the shuffle is a per-lane loop with
+    /// data-dependent swaps, not a fusible expression).
+    Permutation {
+        n: u32,
+    },
+    /// Scalar per-lane read `arr[index]` of an array-valued node: round the lane's `index`
+    /// (ties away from zero), clamp into `0..n`, NaN index → NaN — the EXACT semantics of
+    /// `Gather` (bytecode.rs), so `deck[i]` behaves identically whichever node the evaluator
+    /// builds. `arr` must be `RvKind::Arr(_)`; the result is `RvKind::Num`.
+    ArrIndex {
+        arr: RvId,
         index: RvId,
     },
 }

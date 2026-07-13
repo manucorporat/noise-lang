@@ -35,9 +35,11 @@ pub const RESOLUTION_DEFAULT: usize = 256;
 /// `d×d` Gaussian seed — `O(d³)` sample-graph nodes — so an uncapped `d` (`rotation(500)`) builds
 /// ~10⁸ nodes and OOMs/aborts. Teaching rotations are small (`d ≤ ~64`; the flagship uses 20).
 const MAX_ROTATION_DIM: usize = 128;
-/// Maximum length of a `permutation(n)` draw (finding A6). It builds `O(n²)` comparison nodes (each
-/// element is the rank of its key), so `permutation(1e5)` builds ~10¹⁰ nodes and OOMs. Card decks /
-/// the prisoners riddle use `n ≤ ~365`; 2048 leaves ample headroom while bounding the blow-up.
+/// Maximum length of a `permutation(n)` draw (finding A6). The draw is `O(n)` graph nodes now (one
+/// array-valued `RvNode::Permutation` + `n` element reads), but each permutation still costs the
+/// interpreter an `n × BATCH` f64 array register per worker (`n = 2048` → 16 MiB) and `n-1` RNG
+/// draws per lane, so an unbounded `n` remains a memory/time foot-gun. Card decks / the prisoners
+/// riddle use `n ≤ ~365`; 2048 leaves ample headroom while bounding the blow-up.
 const MAX_PERMUTATION_N: usize = 2048;
 /// A fixed seed keeps a run reproducible; threading an explicit seed through `P` is a later
 /// refinement.
@@ -213,8 +215,8 @@ pub fn call(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
             Ok(Value::Recipe(Recipe::Rotation { d: d as usize }))
         }
         "permutation" => {
-            // A uniform random permutation of `0..n` — a *recipe* drawn with `~` (the iid uniform
-            // key draws and their argsort happen in `Engine::draw_permutation`). `n` must be a
+            // A uniform random permutation of `0..n` — a *recipe* drawn with `~` (one array-valued
+            // source node + `n` element reads, built in `Engine::draw_permutation`). `n` must be a
             // non-negative integer (the permutation length).
             let n = one_num(name, arg_vals, span)?;
             if n.fract() != 0.0 || n < 0.0 || !n.is_finite() {
@@ -223,13 +225,14 @@ pub fn call(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
                     span,
                 ));
             }
-            // Drawing a permutation builds `O(n²)` comparison nodes (each element is the rank of its
-            // key), so an unbounded `n` OOMs at build time (finding A6). Cap it cleanly.
+            // Sampling a permutation costs an `n × BATCH` array column per worker plus `n-1` RNG
+            // draws per lane, so an unbounded `n` is a memory/time foot-gun (finding A6; see
+            // MAX_PERMUTATION_N). Cap it cleanly.
             if n > MAX_PERMUTATION_N as f64 {
                 return Err(NoiseError::runtime(
                     format!(
-                        "permutation({n}) is too large (max length {MAX_PERMUTATION_N}) — it builds \
-                         an O(n²) sample graph; use a smaller length"
+                        "permutation({n}) is too large (max length {MAX_PERMUTATION_N}) — each \
+                         sample shuffles a length-{n} array; use a smaller length"
                     ),
                     span,
                 ));

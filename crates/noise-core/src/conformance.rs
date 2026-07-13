@@ -106,6 +106,72 @@ pub const CONST_CASES: &[(&str, &str)] = &[
         "sin_neg_huge",
         "use rand; use math; X ~ unif(0,0); sin((0.0 + X) - 1000000000000.0)",
     ),
+    // --- Gather, const table (strategy A: ties-away round + clamp + indexed load). The index is a
+    // pinned draw, so every edge of the interpreter's `Inst::Gather` (bytecode.rs) is checked at
+    // the bit level: ties round AWAY from zero, sub-0.5 stays at 0, out-of-range/±inf clamp to the
+    // ends, and a NaN index yields NaN (never element 0). ---
+    (
+        // in-range index → element 2 (30)
+        "gather_in_range",
+        "use rand; I ~ unif_int(2,2); [10, 20, 30, 40][I]",
+    ),
+    (
+        // tie 2.5 rounds AWAY from zero → element 3 (40)
+        "gather_tie_2_5",
+        "use rand; X ~ unif(2.5,2.5); [10, 20, 30, 40][X]",
+    ),
+    (
+        // tie 1.5 rounds away → element 2 (30)
+        "gather_tie_1_5",
+        "use rand; X ~ unif(1.5,1.5); [10, 20, 30, 40][X]",
+    ),
+    (
+        // Largest f64 below 0.5 — the classic `floor(x + 0.5)` killer; must stay at element 0.
+        "gather_just_below_half",
+        "use rand; X ~ unif(0.49999999999999994, 0.49999999999999994); [10, 20, 30][X]",
+    ),
+    (
+        // negative index clamps to element 0 (10)
+        "gather_negative",
+        "use rand; X ~ unif(0,0); [10, 20, 30][X - 5]",
+    ),
+    (
+        // out-of-range index clamps to the last element (30)
+        "gather_huge",
+        "use rand; X ~ unif(0,0); [10, 20, 30][X + 1000000]",
+    ),
+    (
+        // -inf clamps to element 0 (10)
+        "gather_neg_inf",
+        "use rand; X ~ unif(0,0); [10, 20, 30][(X - 1) / 0]",
+    ),
+    (
+        // +inf clamps to the last element (30)
+        "gather_pos_inf",
+        "use rand; X ~ unif(0,0); [10, 20, 30][(X + 1) / 0]",
+    ),
+    (
+        // 0/0 = NaN index → NaN result, never element 0
+        "gather_nan",
+        "use rand; X ~ unif(0,0); [10, 20, 30][X / 0]",
+    ),
+    // --- Gather, non-const elems (strategy B: compare/select chain — same edges, exact ops) ---
+    (
+        "gather_chain_in_range",
+        "use rand; X ~ unif(0,0); Y ~ unif(5,5); [Y, Y + 1, Y + 2][X + 1]", // → 6
+    ),
+    (
+        "gather_chain_tie",
+        "use rand; X ~ unif(0,0); Y ~ unif(5,5); [Y, Y + 1, Y + 2][X + 0.5]", // away → 6
+    ),
+    (
+        "gather_chain_pos_inf",
+        "use rand; X ~ unif(0,0); Y ~ unif(5,5); [Y, Y + 1, Y + 2][(X + 1) / 0]", // → 7
+    ),
+    (
+        "gather_chain_nan",
+        "use rand; X ~ unif(0,0); Y ~ unif(5,5); [Y, Y + 1][X / 0]", // NaN index → NaN
+    ),
 ];
 
 /// **RNG programs — the distribution suite.** Each backend must agree with the interpreter *in
@@ -218,5 +284,18 @@ pub const RNG_CASES: &[(&str, &str, u64)] = &[
         "log_domain_inf",
         "use rand; use math; X ~ unif(1, 2); log(X / 0) > 100",
         28,
+    ),
+    // gather over a random index. Const table (strategy A) in the `rand::empirical` shape —
+    // uniform over the data, E = 2.5; non-const table (strategy B) with elems sharing one draw —
+    // E = E[U] + 1 = 1.5. Both drive the actual gather lowering per lane in each backend.
+    (
+        "gather_empirical",
+        "use rand; X ~ empirical([1, 2, 3, 4]); X",
+        30,
+    ),
+    (
+        "gather_chain_rng",
+        "use rand; U ~ unif(0,1); I ~ unif_int(0,2); [U, U + 1, U + 2][I]",
+        31,
     ),
 ];

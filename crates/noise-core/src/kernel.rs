@@ -71,6 +71,44 @@ pub fn const_int_exponent(graph: &RvGraph, id: RvId) -> Option<u32> {
     }
 }
 
+/// Largest non-const `Gather` table the backends lower as a compare/select chain
+/// ([`GatherClass::SelectChain`]). The chain is `len` selects per lane, emitted inline with every
+/// element's cone — cheap at bootstrap-block sizes, quadratic waste on a `permutation(5000)` deck,
+/// where the interpreter's indexed load wins. 8 covers the small structured draws without letting
+/// the chain dominate a kernel.
+pub const GATHER_SELECT_MAX: usize = 8;
+
+/// How the code generators lower a [`RvNode::Gather`] — the one shared classification the gate
+/// ([`walk_cost`]), the sizing walks ([`cone_size_roots`]) and both emitters must agree on, or the
+/// wasm local-slot pool would disagree with what actually gets emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatherClass {
+    /// Every element is a `ConstNum`: the table is materialized as an `f64` array at compile time
+    /// (JIT: program-owned buffer; wasm: an active data segment) and the node is a **leaf** over
+    /// its elems — round index, clamp, one indexed 8-byte load. This is the `rand::empirical` /
+    /// `block_bootstrap` / literal-array shape, so a 10k-point table costs one load per lane and
+    /// zero graph nodes.
+    ConstTable,
+    /// Small non-const table (≤ [`GATHER_SELECT_MAX`]): elems are emitted as ordinary nodes and
+    /// the pick is a branch-free compare/select chain (no rounding needed — see the emitters).
+    SelectChain,
+}
+
+/// Classify a `Gather` by its element list; `None` means the backends can't lower it (large
+/// non-const table — data-dependent addressing over per-lane values stays interpreter-only).
+pub fn gather_class(graph: &RvGraph, elems: &[RvId]) -> Option<GatherClass> {
+    if elems
+        .iter()
+        .all(|&e| matches!(graph.node(e), RvNode::ConstNum(_)))
+    {
+        Some(GatherClass::ConstTable)
+    } else if elems.len() <= GATHER_SELECT_MAX {
+        Some(GatherClass::SelectChain)
+    } else {
+        None
+    }
+}
+
 /// Whether codegen is expected to outperform the interpreter for this graph: the graph is supported
 /// (no `Poisson` — its Knuth loop stays interpreter-only) **and** the count of fused nodes strictly
 /// exceeds the transcendental-call weight. See [`walk_cost`] for the calibration.
@@ -113,7 +151,7 @@ pub fn profitable_roots(
             &mut libcalls,
             inline_trans,
         ) {
-            return false; // unsupported (Poisson / Gather) → interpreter
+            return false; // unsupported (Poisson / large non-const Gather) → interpreter
         }
     }
     // Route very large cones to the interpreter. The code generators (`jit::emit_node`,
@@ -203,7 +241,29 @@ pub fn walk_cost(
         // policy from silently misclassifying a future op as fusible.
         match graph.node(id) {
             RvNode::Src(Source::Poisson { .. }) => return false, // Knuth loop stays interpreter-only
-            RvNode::Gather { .. } => return false, // data-dependent addressing stays interpreter-only
+            // The array-valued permutation draw and its per-lane element read stay
+            // interpreter-only, like Poisson: the Fisher–Yates shuffle is a per-lane loop with
+            // data-dependent swaps over an array register — not a fusible scalar expression.
+            RvNode::Permutation { .. } | RvNode::ArrIndex { .. } => return false,
+            RvNode::Gather { elems, index } => match gather_class(graph, elems) {
+                // Const-table gather is a LEAF over its elems: the emitters materialize the table
+                // in memory and never emit the element nodes, so only the index cone is walked (a
+                // 10k-point `empirical` table must not trip MAX_CODEGEN_NODES). Fixed fused cost:
+                // round + clamp + convert + load.
+                Some(GatherClass::ConstTable) => {
+                    *fusible += 4;
+                    stack.push(*index);
+                }
+                // Small non-const table: one select per element, elems emitted as ordinary nodes.
+                Some(GatherClass::SelectChain) => {
+                    *fusible += elems.len() as u32;
+                    for &e in elems.iter() {
+                        stack.push(e);
+                    }
+                    stack.push(*index);
+                }
+                None => return false, // large non-const table stays interpreter-only
+            },
             RvNode::Src(Source::Normal { .. }) => charge(2, fusible, libcalls),
             RvNode::Src(Source::Exp { .. }) | RvNode::Src(Source::Geometric { .. }) => {
                 charge(1, fusible, libcalls)
@@ -313,7 +373,21 @@ fn latency_bound(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>) -> bool {
                 | Source::Geometric { .. }
                 | Source::Poisson { .. },
             ) => return false,
-            RvNode::Gather { .. } => return false, // interpreter-only (gated out before this)
+            // Interpreter-only (walk_cost already rejects them); classify conservatively.
+            RvNode::Permutation { .. } | RvNode::ArrIndex { .. } => return false,
+            // Gather lowers to compares/selects/loads — no transcendental, so it keeps the cone
+            // latency-bound (like `Select`). Const-table elems are never emitted; only the index
+            // (and, for the select chain, the elems) can break the predicate.
+            RvNode::Gather { elems, index } => match gather_class(graph, elems) {
+                Some(GatherClass::ConstTable) => stack.push(*index),
+                Some(GatherClass::SelectChain) => {
+                    for &e in elems.iter() {
+                        stack.push(e);
+                    }
+                    stack.push(*index);
+                }
+                None => return false, // interpreter-only (gated out before this)
+            },
             RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
             RvNode::Unary(op, a) => {
                 match op {
@@ -364,13 +438,21 @@ fn latency_bound(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>) -> bool {
 }
 
 /// Whether every node in the cone of `root` is something a code generator can emit — after "B2"
-/// that is everything except `Poisson`. (The backend selector uses [`profitable`], which also
-/// rejects Poisson; this stricter capability check is retained for tests.)
+/// that is everything except `Poisson` and large non-const `Gather` (see [`gather_class`]). (The
+/// backend selector uses [`profitable`], which rejects the same set; this stricter capability
+/// check is retained for tests.)
 #[cfg(test)]
 pub fn supported(graph: &RvGraph, root: RvId) -> bool {
     match graph.node(root) {
         RvNode::Src(Source::Poisson { .. }) => false,
-        RvNode::Gather { .. } => false,
+        RvNode::Permutation { .. } | RvNode::ArrIndex { .. } => false, // interpreter-only
+        RvNode::Gather { elems, index } => match gather_class(graph, elems) {
+            Some(GatherClass::ConstTable) => supported(graph, *index),
+            Some(GatherClass::SelectChain) => {
+                supported(graph, *index) && elems.iter().all(|&e| supported(graph, e))
+            }
+            None => false,
+        },
         RvNode::Src(_) => true,
         RvNode::ConstNum(_) | RvNode::ConstBool(_) => true,
         RvNode::Unary(_, a) => supported(graph, *a),
@@ -425,6 +507,14 @@ pub fn cost_roots(graph: &RvGraph, roots: &[RvId]) -> NodeCost {
                 c.ops += extra;
             }
             RvNode::Src(_) => c.sources += 1,
+            // A whole-array draw: the Fisher–Yates consumes exactly `n-1` bounded RNG draws per
+            // lane (what `sources` means — the playground's "random numbers" readout) and does
+            // ~2n per-lane work (n identity writes + n-1 swaps); charge n extra ops on top of the
+            // node's own 1 so the op budget (`max_opts`) sees the real cost.
+            RvNode::Permutation { n } => {
+                c.sources += (*n as u64).saturating_sub(1);
+                c.ops += *n as u64;
+            }
             RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
             RvNode::Unary(_, a) => stack.push(*a),
             RvNode::Binary(_, a, b) => {
@@ -436,10 +526,18 @@ pub fn cost_roots(graph: &RvGraph, roots: &[RvId]) -> NodeCost {
                 stack.push(*a);
                 stack.push(*b);
             }
+            // Priced over elems + index regardless of `gather_class`: this readout reflects what a
+            // single interpreter lane evaluates (the elem columns are materialized there even when
+            // codegen treats a const table as a leaf), and it must stay backend-independent.
             RvNode::Gather { elems, index } => {
                 for &e in elems.iter() {
                     stack.push(e);
                 }
+                stack.push(*index);
+            }
+            // One per-lane indexed read (the node's own 1 op) over the array + index cones.
+            RvNode::ArrIndex { arr, index } => {
+                stack.push(*arr);
                 stack.push(*index);
             }
         }
@@ -465,7 +563,10 @@ pub fn cone_size_roots(graph: &RvGraph, roots: &[RvId]) -> usize {
             continue;
         }
         match graph.node(id) {
-            RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+            RvNode::Src(_)
+            | RvNode::ConstNum(_)
+            | RvNode::ConstBool(_)
+            | RvNode::Permutation { .. } => {}
             RvNode::Unary(_, a) => stack.push(*a),
             RvNode::Binary(_, a, b) => {
                 stack.push(*a);
@@ -477,9 +578,20 @@ pub fn cone_size_roots(graph: &RvGraph, roots: &[RvId]) -> usize {
                 stack.push(*b);
             }
             RvNode::Gather { elems, index } => {
-                for &e in elems.iter() {
-                    stack.push(e);
+                // Must mirror the emitters exactly — this count sizes the wasm local-slot pool. A
+                // const-table gather is a leaf over its elems (they are never emitted as nodes and
+                // get no value slot), so only the index cone counts.
+                if gather_class(graph, elems) != Some(GatherClass::ConstTable) {
+                    for &e in elems.iter() {
+                        stack.push(e);
+                    }
                 }
+                stack.push(*index);
+            }
+            // Interpreter-only (the gate rejects these cones before any emitter sizes them), but
+            // the walk must stay total.
+            RvNode::ArrIndex { arr, index } => {
+                stack.push(*arr);
                 stack.push(*index);
             }
         }

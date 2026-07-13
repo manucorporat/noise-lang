@@ -803,7 +803,14 @@ fn ancestors(graph: &RvGraph, root: RvId) -> HashSet<RvId> {
                 stack.extend(elems.iter().copied());
                 stack.push(*index);
             }
-            RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+            RvNode::ArrIndex { arr, index } => {
+                stack.push(*arr);
+                stack.push(*index);
+            }
+            RvNode::Src(_)
+            | RvNode::ConstNum(_)
+            | RvNode::ConstBool(_)
+            | RvNode::Permutation { .. } => {}
         }
     }
     seen

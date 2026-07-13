@@ -20,9 +20,12 @@
 //! *in distribution* but not draw-for-draw under a shared seed; that's by design.
 //!
 //! Scope: `unif` / `unif_int` / `normal` / `exp` / `geometric` sources, `+ - * /`, integer-constant
-//! `^`, comparisons, `&& ||`, unary `- !` and the math ufuncs, and lifted `if` (`Select`).
-//! `Poisson` (Knuth's variable-length per-lane loop) stays interpreter-only; transcendental-bound
-//! graphs that the interpreter samples faster also stay there (see [`crate::kernel::profitable`]).
+//! `^`, comparisons, `&& ||`, unary `- !` and the math ufuncs, lifted `if` (`Select`), and `Gather`
+//! over a const table (an indexed load from a program-owned table — the `empirical`/bootstrap
+//! shape) or a small non-const one (a compare/select chain; see [`crate::kernel::gather_class`]).
+//! `Poisson` (Knuth's variable-length per-lane loop) and large non-const gathers stay
+//! interpreter-only; transcendental-bound graphs that the interpreter samples faster also stay
+//! there (see [`crate::kernel::profitable`]).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,7 +40,9 @@ use crate::ast::{BinOp, UnOp};
 use crate::backend::{Backend, InterpBackend, JointProgram, JointRunner, Program, Runner};
 use crate::bytecode::BATCH;
 use crate::dist::{RvGraph, RvId, RvNode, Source};
-use crate::kernel::{self, choose_streams, const_int_exponent, profitable, seed_state};
+use crate::kernel::{
+    self, choose_streams, const_int_exponent, gather_class, profitable, seed_state, GatherClass,
+};
 
 /// `extern "C"` signature of a generated kernel: `kernel(out_ptr, n, state_ptr)` fills `out[0..n]`
 /// with fresh root draws, reading and writing the xoshiro state (`4 * STREAMS` words) via
@@ -94,6 +99,43 @@ struct MathRefs {
     sin: cranelift::codegen::ir::FuncRef,
     cos: cranelift::codegen::ir::FuncRef,
     exp: cranelift::codegen::ir::FuncRef,
+}
+
+/// Const gather tables materialized during emission ([`GatherClass::ConstTable`]). Each table is a
+/// `Box<[f64]>` — a stable heap address the emitted code references as an `iconst` — deduped by
+/// `RvId` so a gather shared across streams/roots (per-stream memos don't cover it) is built once.
+/// The boxes land in [`JitProgramInner::_tables`], which pins their lifetime to the code's.
+struct GatherTables {
+    /// Native pointer type, for emitting the base-address `iconst`.
+    ptr_ty: Type,
+    boxes: Vec<Box<[f64]>>,
+    by_node: HashMap<RvId, usize>,
+}
+
+impl GatherTables {
+    fn new(ptr_ty: Type) -> Self {
+        GatherTables {
+            ptr_ty,
+            boxes: Vec::new(),
+            by_node: HashMap::new(),
+        }
+    }
+
+    /// Base pointer of node `id`'s table, materializing it from the `ConstNum` elems on first use.
+    fn base_ptr(&mut self, graph: &RvGraph, id: RvId, elems: &[RvId]) -> *const f64 {
+        let slot = *self.by_node.entry(id).or_insert_with(|| {
+            let table: Box<[f64]> = elems
+                .iter()
+                .map(|&e| match graph.node(e) {
+                    RvNode::ConstNum(x) => *x,
+                    _ => unreachable!("ConstTable gather has only ConstNum elems"),
+                })
+                .collect();
+            self.boxes.push(table);
+            self.boxes.len() - 1
+        });
+        self.boxes[slot].as_ptr()
+    }
 }
 
 /// The Cranelift JIT backend. Construction is cheap; the work happens in [`Self::compile`].
@@ -184,13 +226,19 @@ struct JitProgramInner {
     _module: JITModule,
     func: KernelFn,
     streams: usize,
+    /// Const gather tables the kernel loads from ([`GatherClass::ConstTable`]): each `Box<[f64]>`
+    /// is a stable heap allocation whose address was baked into the code as an `iconst`, so the
+    /// program must own them exactly as long as the code (moving the `Vec` moves only the box
+    /// pointers, never the table storage). Read-only after build — see the Send/Sync note below.
+    _tables: Vec<Box<[f64]>>,
 }
 
 // SAFETY: after `finalize_definitions`, the module's code is immutable and we never touch the
 // module again (only keep it mapped, then free it exactly once on `Drop`). The kernel has NO global
-// mutable state — its RNG state and output buffer are passed in per call — so concurrent calls from
-// multiple threads with distinct arguments are data-race-free. Hence the artifact is safe to send
-// and share between threads.
+// mutable state — its RNG state and output buffer are passed in per call, and the gather tables
+// (`_tables`) are only ever *read* by the code after build — so concurrent calls from multiple
+// threads with distinct arguments are data-race-free. Hence the artifact is safe to send and share
+// between threads.
 unsafe impl Send for JitProgramInner {}
 unsafe impl Sync for JitProgramInner {}
 
@@ -378,6 +426,9 @@ fn build_kernel(
     ctx.func.name = UserFuncName::user(0, func_id.as_u32());
 
     // --- function body ---
+    // Const gather tables are allocated as emission encounters them; the boxes move into the
+    // finished program below, which keeps every baked-in `iconst` base address alive.
+    let mut tables = GatherTables::new(ptr);
     let mut fb_ctx = FunctionBuilderContext::new();
     {
         let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
@@ -449,7 +500,7 @@ fn build_kernel(
             let off = fb.ins().imul_imm(idx, 8);
             let addr = fb.ins().iadd(out, off);
             for (r, &root) in roots.iter().enumerate() {
-                let result = emit_node(&mut fb, graph, root, st, &math, &mut memo);
+                let result = emit_node(&mut fb, graph, root, st, &math, &mut memo, &mut tables);
                 fb.ins()
                     .store(MemFlags::trusted(), result, addr, (r * BATCH * 8) as i32);
             }
@@ -487,6 +538,7 @@ fn build_kernel(
         _module: module,
         func,
         streams,
+        _tables: tables.boxes,
     })
 }
 
@@ -550,6 +602,7 @@ fn emit_node(
     s: &[Variable; 4],
     math: &MathRefs,
     memo: &mut HashMap<RvId, Value>,
+    tables: &mut GatherTables,
 ) -> Value {
     if let Some(v) = memo.get(&id) {
         return *v;
@@ -561,34 +614,53 @@ fn emit_node(
         RvNode::Src(Source::Exp { rate }) => emit_exp(fb, s, *rate),
         RvNode::Src(Source::Geometric { p }) => emit_geometric(fb, s, *p),
         RvNode::Src(Source::Poisson { .. }) => unreachable!("profitable() excludes Poisson"),
-        RvNode::Gather { .. } => unreachable!("profitable() excludes Gather"),
+        RvNode::Permutation { .. } | RvNode::ArrIndex { .. } => {
+            unreachable!("profitable() excludes the array-valued permutation nodes")
+        }
+        RvNode::Gather { elems, index } => {
+            let xv = emit_node(fb, graph, *index, s, math, memo, tables);
+            match gather_class(graph, elems) {
+                Some(GatherClass::ConstTable) => {
+                    let base = tables.base_ptr(graph, id, elems);
+                    emit_gather_table(fb, tables.ptr_ty, xv, base, elems.len())
+                }
+                Some(GatherClass::SelectChain) => {
+                    let evs: Vec<Value> = elems
+                        .iter()
+                        .map(|&e| emit_node(fb, graph, e, s, math, memo, tables))
+                        .collect();
+                    emit_gather_chain(fb, xv, &evs)
+                }
+                None => unreachable!("profitable() excludes large non-const Gather"),
+            }
+        }
         RvNode::ConstNum(x) => fb.ins().f64const(*x),
         RvNode::ConstBool(b) => fb.ins().f64const(if *b { 1.0 } else { 0.0 }),
         RvNode::Unary(op, a) => {
-            let av = emit_node(fb, graph, *a, s, math, memo);
+            let av = emit_node(fb, graph, *a, s, math, memo, tables);
             emit_unary(fb, math, *op, av)
         }
         RvNode::Binary(BinOp::Pow, a, b) => {
-            let av = emit_node(fb, graph, *a, s, math, memo);
+            let av = emit_node(fb, graph, *a, s, math, memo, tables);
             match const_int_exponent(graph, *b) {
                 // Small non-negative integer power → repeated multiply (no libcall).
                 Some(k) => emit_pow(fb, av, k),
                 // Any other exponent → a `pow` libcall over both operands.
                 None => {
-                    let bv = emit_node(fb, graph, *b, s, math, memo);
+                    let bv = emit_node(fb, graph, *b, s, math, memo, tables);
                     call2(fb, math.pow, av, bv)
                 }
             }
         }
         RvNode::Binary(op, a, b) => {
-            let av = emit_node(fb, graph, *a, s, math, memo);
-            let bv = emit_node(fb, graph, *b, s, math, memo);
+            let av = emit_node(fb, graph, *a, s, math, memo, tables);
+            let bv = emit_node(fb, graph, *b, s, math, memo, tables);
             emit_binary(fb, *op, av, bv)
         }
         RvNode::Select { cond, a, b } => {
-            let cv = emit_node(fb, graph, *cond, s, math, memo);
-            let av = emit_node(fb, graph, *a, s, math, memo);
-            let bv = emit_node(fb, graph, *b, s, math, memo);
+            let cv = emit_node(fb, graph, *cond, s, math, memo, tables);
+            let av = emit_node(fb, graph, *a, s, math, memo, tables);
+            let bv = emit_node(fb, graph, *b, s, math, memo, tables);
             let zero = fb.ins().f64const(0.0);
             let cb = fb.ins().fcmp(FloatCC::NotEqual, cv, zero);
             fb.ins().select(cb, av, bv)
@@ -596,6 +668,72 @@ fn emit_node(
     };
     memo.insert(id, v);
     v
+}
+
+/// Const-table gather ([`GatherClass::ConstTable`]): round the index ties-away, clamp to
+/// `[0, last]`, load the 8-byte element from the program-owned table at `base` — the exact
+/// semantics of the interpreter's `Inst::Gather` (bytecode.rs), bit-for-bit:
+///
+///   * ties-away rounding without a libcall: `r = nearest(x)` (ties-even) then `+1` exactly when
+///     `x - r == 0.5` — for positive `x` that corrects precisely the ties `nearest` sent down, so
+///     `r == f64::round(x)` there; a negative tie may land one off `f64::round` but every negative
+///     `r` clamps to index 0 anyway (the interpreter also clamps *after* rounding). `+inf` passes
+///     through (`d = NaN`, compare false) and clamps to `last`; `-inf` clamps to 0.
+///   * `fcvt_to_sint` would TRAP on NaN, so the saturating form converts (NaN → 0) and the final
+///     `select(x != x, NaN, loaded)` guard restores the interpreter's NaN-index → NaN result
+///     (never element 0). Cranelift `FloatCC::NotEqual` is unordered-or-unequal: true iff NaN.
+fn emit_gather_table(
+    fb: &mut FunctionBuilder,
+    ptr_ty: Type,
+    xv: Value,
+    base: *const f64,
+    len: usize,
+) -> Value {
+    debug_assert!(len > 0, "gather table is never empty (eval rejects [])");
+    let last = (len - 1) as f64; // exact: table lengths are far below 2^53
+    let r0 = fb.ins().nearest(xv);
+    let d = fb.ins().fsub(xv, r0);
+    let half = fb.ins().f64const(0.5);
+    let tie = fb.ins().fcmp(FloatCC::Equal, d, half);
+    let one = fb.ins().f64const(1.0);
+    let zero = fb.ins().f64const(0.0);
+    let corr = fb.ins().select(tie, one, zero);
+    let r = fb.ins().fadd(r0, corr);
+    // Clamp in the float domain (fmax/fmin propagate NaN; the sat-convert then maps NaN to 0,
+    // which the NaN guard below overrides).
+    let rlo = fb.ins().fmax(r, zero);
+    let lastc = fb.ins().f64const(last);
+    let rcl = fb.ins().fmin(rlo, lastc);
+    let idx = fb.ins().fcvt_to_sint_sat(types::I64, rcl);
+    let off = fb.ins().imul_imm(idx, 8);
+    let basec = fb.ins().iconst(ptr_ty, base as i64);
+    let addr = fb.ins().iadd(basec, off);
+    let loaded = fb
+        .ins()
+        .load(types::F64, MemFlags::trusted().with_readonly(), addr, 0);
+    let is_nan = fb.ins().fcmp(FloatCC::NotEqual, xv, xv);
+    let nan = fb.ins().f64const(f64::NAN);
+    fb.ins().select(is_nan, nan, loaded)
+}
+
+/// Small non-const gather ([`GatherClass::SelectChain`]): a branch-free compare/select chain that
+/// needs NO rounding — `acc = e[last]; for i in (0..last).rev() { acc = x < i+0.5 ? e[i] : acc }`
+/// picks `e[min i: x < i+0.5]`, which equals round-ties-away-then-clamp for every non-NaN `x`
+/// (a tie `x = i+0.5` fails the strict `<` and rounds away to `i+1`; anything below `0.5`,
+/// including `-inf`, takes `e[0]`; `+inf` falls through to `e[last]`). `i + 0.5` is exact in f64
+/// for any table within [`kernel::GATHER_SELECT_MAX`]. NaN fails every compare (falls through to
+/// `e[last]`) and the final guard replaces it with NaN, matching the interpreter.
+fn emit_gather_chain(fb: &mut FunctionBuilder, xv: Value, evs: &[Value]) -> Value {
+    let last = evs.len() - 1; // table never empty (eval rejects [])
+    let mut acc = evs[last];
+    for i in (0..last).rev() {
+        let t = fb.ins().f64const(i as f64 + 0.5);
+        let c = fb.ins().fcmp(FloatCC::LessThan, xv, t);
+        acc = fb.ins().select(c, evs[i], acc);
+    }
+    let is_nan = fb.ins().fcmp(FloatCC::NotEqual, xv, xv);
+    let nan = fb.ins().f64const(f64::NAN);
+    fb.ins().select(is_nan, nan, acc)
 }
 
 /// One xoshiro256++ step, mutating the state Variables; returns the raw `u64` output.
@@ -1340,6 +1478,62 @@ mod tests {
             drop(r);
             drop(program); // Drop → free_memory (must be UB-free)
         }
+    }
+
+    /// A const-table gather is a LEAF over its elems ([`kernel::gather_class`]): a 10k-point
+    /// `empirical`-shaped table neither counts toward `MAX_CODEGEN_NODES` nor blocks the gate —
+    /// `profitable` accepts it at high draws, the cone stays latency-bound (multi-stream), and the
+    /// compiled kernel's indexed load reproduces the uniform-over-the-data distribution.
+    #[test]
+    fn const_table_gather_is_profitable_and_matches() {
+        use crate::dist::RvKind;
+        let mut g = RvGraph::default();
+        let elems: Vec<RvId> = (0..10_000)
+            .map(|i| g.push(RvNode::ConstNum(i as f64), RvKind::Num))
+            .collect();
+        let idx = g.push(
+            RvNode::Src(Source::UniformInt {
+                lo: 0.0,
+                hi: 9999.0,
+            }),
+            RvKind::Num,
+        );
+        let root = g.push(
+            RvNode::Gather {
+                elems: elems.into_boxed_slice(),
+                index: idx,
+            },
+            RvKind::Num,
+        );
+        // The counted cone is just {gather, index}: the 10k elems are the emitted table, not nodes.
+        assert_eq!(crate::kernel::cone_size(&g, root), 2);
+        assert!(supported(&g, root));
+        assert!(profitable(
+            &g,
+            root,
+            true,
+            ENOUGH_DRAWS,
+            kernel::MIN_DRAWS_JIT
+        ));
+        let program = build(&g, root).expect("jit build failed");
+        assert_eq!(
+            program.streams(),
+            STREAMS,
+            "gather cone stays latency-bound"
+        );
+        let mut r = program.runner();
+        r.reseed(42);
+        let cap = r.batch_cap();
+        let (mut sum, mut count) = (0.0f64, 0u64);
+        for _ in 0..16 {
+            for &x in r.next_batch(cap) {
+                sum += x;
+                count += 1;
+            }
+        }
+        let mean = sum / count as f64;
+        // E over unif_int(0, 9999) of table[i] = i is 4999.5; fixed seed, generous tolerance.
+        assert!((mean - 4999.5).abs() < 100.0, "mean={mean}");
     }
 
     #[test]

@@ -96,7 +96,10 @@ impl Builder {
                         }
                     };
                     match g.node(id) {
-                        RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+                        RvNode::Src(_)
+                        | RvNode::ConstNum(_)
+                        | RvNode::ConstBool(_)
+                        | RvNode::Permutation { .. } => {}
                         RvNode::Unary(_, a) => push_child(*a),
                         RvNode::Binary(_, l, r) => {
                             push_child(*r);
@@ -113,6 +116,10 @@ impl Builder {
                                 push_child(e);
                             }
                         }
+                        RvNode::ArrIndex { arr, index } => {
+                            push_child(*index);
+                            push_child(*arr);
+                        }
                     }
                 }
                 Task::Emit(id) => {
@@ -123,6 +130,11 @@ impl Builder {
                     let new = match g.node(id) {
                         // A draw: copy as a fresh node. NEVER interned — draws stay independent.
                         RvNode::Src(s) => self.out.push(RvNode::Src(*s), kind),
+                        // A whole-array draw is a SOURCE too: copied 1:1, never interned, so two
+                        // `permutation(n)` draws stay independent permutations.
+                        RvNode::Permutation { n } => {
+                            self.out.push(RvNode::Permutation { n: *n }, kind)
+                        }
                         RvNode::ConstNum(x) => self.num(*x),
                         RvNode::ConstBool(b) => self.boolean(*b),
                         RvNode::Unary(op, a) => {
@@ -149,6 +161,12 @@ impl Builder {
                                 },
                                 kind,
                             )
+                        }
+                        // ArrIndex: rebuild over the simplified operands. Not interned, mirroring
+                        // Gather — reads rarely coincide and a wrong merge would corrupt selection.
+                        RvNode::ArrIndex { arr, index } => {
+                            let (arr, index) = (self.done[arr], self.done[index]);
+                            self.out.push(RvNode::ArrIndex { arr, index }, kind)
                         }
                     };
                     self.done.insert(id, new);
@@ -486,6 +504,32 @@ mod tests {
                 "    {name:12} {before:3} → {after:3}  (-{})",
                 before - after
             );
+        }
+    }
+
+    #[test]
+    fn permutation_draws_are_never_merged() {
+        // Two structurally-identical `Permutation` draws are independent random variables (like
+        // any Src) and must survive as TWO nodes; their element reads (`ArrIndex`, also identical
+        // in shape once the const indices intern to one node) must not be CSE'd either.
+        let mut g = RvGraph::default();
+        let p1 = g.push(RvNode::Permutation { n: 4 }, RvKind::Arr(4));
+        let p2 = g.push(RvNode::Permutation { n: 4 }, RvKind::Arr(4));
+        let c1 = num(&mut g, 0.0);
+        let c2 = num(&mut g, 0.0);
+        let e1 = g.push(RvNode::ArrIndex { arr: p1, index: c1 }, RvKind::Num);
+        let e2 = g.push(RvNode::ArrIndex { arr: p2, index: c2 }, RvKind::Num);
+        let root = bin(&mut g, BinOp::Eq, e1, e2);
+        let (out, r) = simplify(&g, root);
+        let n_perm = (0..out.len() as u32)
+            .filter(|i| matches!(out.node(RvId(*i)), RvNode::Permutation { .. }))
+            .count();
+        assert_eq!(n_perm, 2, "independent permutation draws must stay distinct");
+        match out.node(r) {
+            RvNode::Binary(BinOp::Eq, a, b) => {
+                assert_ne!(a, b, "element reads of distinct draws must not merge")
+            }
+            other => panic!("expected Eq(e1, e2), got {other:?}"),
         }
     }
 

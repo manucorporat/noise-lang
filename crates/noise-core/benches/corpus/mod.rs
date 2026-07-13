@@ -13,6 +13,10 @@
 //!     a regime `CASES` cannot see, and where a backend that wins on throughput can still lose
 //!     on wall clock. `examples.rs` times these.
 
+// Each bench binary (`sampling.rs` / `examples.rs`) includes this whole module but drives only its
+// own corpus, so the other const reads as dead in that binary.
+#![allow(dead_code)]
+
 /// Representative programs: `(label, source)`. Each ends in an RV expression so `run_rv` yields a
 /// `Value::Dist`. `use rand` brings the distribution constructors into scope.
 pub const CASES: &[(&str, &str)] = &[

@@ -197,17 +197,34 @@ two thresholds encode, and its browser win (1.24×) is the emitter earning its k
 under libtest and **Criterion never executed** — the bench "passed" while measuring nothing. Any
 number anyone believed came from it came from somewhere else. It measures now.
 
-### 2. `Gather` and `Poisson` hard-reject codegen (P1)
-`kernel::walk_cost` returns `false` for both, so the whole cone falls to the interpreter.
+### 2. ~~`Gather` hard-rejects codegen~~ (DONE — third pass, 2026-07-13; `Poisson` deliberately kept interpreted)
+`kernel::walk_cost` returned `false` for both, so the whole cone fell to the interpreter.
 
-* `prisoners` — **the slowest example in the browser (3.6 s)** [measured] — is ~5,000 `Gather` nodes
-  from the random-index `boxes[box]`. It gets *nothing*: no emitter, no threads.
-* `bootstrap` too (`rand::empirical` and `rand::block_bootstrap` both lower to `Gather`).
-* A gather is a bounded, clamped indexed load over a known table. Both Cranelift and wasm can emit it
-  (a select chain for small tables, an indirect load for large). Both emitters currently have
-  `unreachable!("profitable() excludes Gather")`.
+**What was built.** Gathers are classified (`kernel::gather_class`) into three lowerings:
+* **Const table** (every element `ConstNum` — the `rand::empirical` / `rand::block_bootstrap` /
+  `xs[rv]`-over-literals case): a *leaf*. The table is materialized at compile time — a `Box<[f64]>`
+  owned by the JIT program (address baked into the kernel), an active data segment placed after the
+  output columns in wasm (host untouched: it still only reads state@0 / columns@4096) — and the node
+  emits as round → clamp → indexed 8-byte load. Element nodes are never walked, so a 10k-point
+  empirical table no longer trips `MAX_CODEGEN_NODES`.
+* **Small non-const table** (≤ `GATHER_SELECT_MAX = 8`): a select chain with thresholds at
+  `i + 0.5`, strict `<` — which reproduces `f64::round`'s ties-away-from-zero exactly with no
+  rounding instruction at all (Cranelift `nearest`/wasm `f64.nearest` are ties-to-even, a real trap).
+* **Large non-const table**: still declined → interpreter. That is `prisoners` (gathers over a
+  random permutation) — its fix is item 3, not this one.
+
+Semantics pinned bit-for-bit against the interpreter (NaN index → NaN, −inf → first, +inf → last,
+tie cases, the `0.49999999999999994` naive-round killer) by new conformance CONST_CASES/RNG_CASES
+run on both codegen backends. Gather cones stay latency-bound → 4-stream kernels.
+
+**Results** (V8, back-to-back min-of-7): `bootstrap` **7.7×** (1583 ms → 206 ms); controls
+(`pi`/`birthday`/`kelly`/`dithering`) 1.006–1.013 (noise floor); `prisoners` 0.997 (unchanged, as
+designed). Corpus total 62,452 → **60,988 ms**. Known cheap follow-up: `block_bootstrap` emits one
+data-segment copy of the table *per gather node* (dedup is by `RvId`, not content) — n² × 8 bytes
+for a length-n series; fine at example sizes, dedup by content if anyone benchmarks 1k-point series.
+
 * `Poisson` (a variable-length per-lane loop) is a genuinely poor codegen fit and **no example uses
-  it** — leave it interpreted; the reject is currently dead weight w.r.t. the corpus.
+  it** — left interpreted, as planned.
 
 ### 3. Eval-time graph blowup (P1 — a language problem, not a backend one)
 `turboquant` is **6.5 s in the browser** [measured] and the sampler is not the bottleneck.
@@ -265,9 +282,9 @@ Two cheap things that would re-rank the list above:
 2. ~~The joint/introspection path has never been timed.~~ **Closed** — see item 1: 5% of corpus
    total on the native interpreter (concentrated: `nyquist` 100%, `dithering` 73%, `am_vs_fm` 47%),
    and its dominant cost was deterministic vectors being re-sampled, not missing codegen. Both
-   fixed. With the joint path off the table, the corpus is now overwhelmingly items 2 and 3:
-   `turboquant` (26.5 s in V8) + `prisoners` (15.8 s) are **two-thirds of the corpus total** by
-   themselves.
+   fixed. With the joint path off the table and item 2 landed (corpus now 61.0 s), the corpus is
+   overwhelmingly item 3: `turboquant` (26.5 s in V8) + `prisoners` (15.5 s) are **two-thirds of
+   the corpus total** by themselves.
 
 Also worth fixing: `packages/core/bench/examples.mjs` takes >10 min over the full corpus (5 reps ×
 31 programs). Trim reps or subset it, or nobody will run it. (A quick per-example wall-time
