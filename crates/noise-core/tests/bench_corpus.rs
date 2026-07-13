@@ -24,3 +24,47 @@ fn every_bench_program_still_builds_and_samples() {
         );
     }
 }
+
+/// Every real example must still run end-to-end (the `examples.rs` bench corpus). Cheap insurance
+/// that a language change doesn't silently break a benchmarked program.
+#[test]
+fn every_example_still_runs_end_to_end() {
+    for (label, src) in corpus::EXAMPLES {
+        let mut eng = Engine::new();
+        let doc = eng.run_to_document(src);
+        assert!(
+            doc.result.error.is_none(),
+            "example {label:?} failed to run: {:?}",
+            doc.result.error
+        );
+    }
+}
+
+/// Diagnostic (not an assertion): the *shape* of each real program — how many queries it forces and
+/// how many samples each one draws. This is the number that decides whether a codegen backend can
+/// ever pay for itself: a program that forces 10 queries at 3k samples each compiles 10 kernels to
+/// draw 30k samples total, and no per-draw speedup can refund that.
+///
+/// `cargo test -p noise-core --release -- --ignored --nocapture example_shapes`
+#[test]
+#[ignore = "diagnostic: prints a table, asserts nothing"]
+fn example_shapes() {
+    println!(
+        "\n{:<20}{:>10}{:>12}{:>16}{:>14}",
+        "EXAMPLE", "FORCINGS", "SAMPLES", "SAMPLES/FORCING", "OPS"
+    );
+    for (label, src) in corpus::EXAMPLES {
+        let mut eng = Engine::new();
+        let _ = eng.run_to_document(src);
+        let s = eng.stats();
+        let per = if s.forcings > 0 {
+            s.samples / s.forcings
+        } else {
+            0
+        };
+        println!(
+            "{label:<20}{:>10}{:>12}{:>16}{:>14}",
+            s.forcings, s.samples, per, s.ops
+        );
+    }
+}

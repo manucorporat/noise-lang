@@ -29,7 +29,7 @@ pub fn for_each_batch(
     if n == 0 {
         return;
     }
-    let (program, cost) = compile_root(graph, root);
+    let (program, cost) = compile_root(graph, root, n);
     crate::stats::record(n, cost.ops, cost.sources);
     let mut runner = program.runner();
     runner.reseed(seed);

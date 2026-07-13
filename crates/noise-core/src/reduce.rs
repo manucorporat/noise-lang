@@ -9,13 +9,19 @@
 //! never on thread scheduling, and per-chunk accumulators are merged in **chunk-index order**. So
 //! the result is identical for any thread count — bit for bit. Threads change only wall-clock.
 //!
-//! Executor: native uses `std::thread::scope` (zero-dependency work-stealing); wasm32 always runs
-//! the same chunks sequentially (browser parallelism is web-workers, handled above this layer).
-//! The [`Reducer`] monoid is executor-agnostic, so a rayon backend could drop in unchanged.
+//! Executor — two of them, one monoid. Native uses `std::thread::scope` (zero-dependency
+//! work-stealing). In the browser, the `wasm-threads` feature fans the same chunks out over rayon,
+//! whose pool is Web Workers sharing one linear memory (bootstrapped by the JS host; see
+//! `wasm_bindgen_rayon`). Without that feature wasm32 runs the chunks sequentially.
+//!
+//! The [`Reducer`] monoid is what makes this safe to have two of: because the chunk set, each
+//! chunk's seed, and the merge order are all fixed by `(seed, n)` alone, **every executor produces
+//! bit-identical results** — including a single thread. The executor is free to be whatever is
+//! fastest on the target; it can never be the reason an answer changed.
 
 use crate::backend::{compile_root, Runner};
-// `Program` (the `&dyn` seam threads hand around) only exists on the threaded native executor.
-#[cfg(not(target_arch = "wasm32"))]
+// `Program` (the `&dyn` seam threads hand around) only exists on a threaded executor.
+#[cfg(threaded)]
 use crate::backend::Program;
 use crate::dist::{RvGraph, RvId};
 use crate::sampler::Moments;
@@ -28,7 +34,7 @@ const CHUNK_SAMPLES: usize = 16 * crate::bytecode::BATCH; // 16_384
 
 /// Below this many draws, thread-spawn + per-thread compile overhead outweighs the win, so we run
 /// the (identical) sequential path. Determinism is unaffected — same chunks either way.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(threaded)]
 const PAR_MIN_SAMPLES: usize = 1 << 18; // 262_144
 
 /// A commutative monoid over sample columns. Parallel soundness reduces to a single local property:
@@ -102,10 +108,10 @@ pub fn run_reduction<R: Reducer>(
 
     // Compile ONCE; the resulting program is shared (by reference) across all workers. Record the
     // run-time counters here on the driver thread (before fan-out) so workers stay lock-free.
-    let (program, cost) = compile_root(graph, root);
+    let (program, cost) = compile_root(graph, root, n);
     crate::stats::record(n, cost.ops, cost.sources);
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(threaded)]
     {
         let threads = chosen_threads(n, n_chunks);
         if threads > 1 {
@@ -123,14 +129,19 @@ pub fn run_reduction<R: Reducer>(
 
 /// Worker count: clamp available cores to the chunk count, and stay single-threaded below the
 /// parallel threshold. Only the *speed* depends on this — never the result.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(threaded)]
 fn chosen_threads(n: usize, n_chunks: usize) -> usize {
     if n < PAR_MIN_SAMPLES || n_chunks < 2 {
         return 1;
     }
+    #[cfg(not(target_arch = "wasm32"))]
     let cores = std::thread::available_parallelism()
         .map(|c| c.get())
         .unwrap_or(1);
+    // In the browser the pool size is whatever the JS host passed to `initThreadPool` — asking rayon
+    // is the only way to know, since `available_parallelism` is meaningless inside a worker.
+    #[cfg(target_arch = "wasm32")]
+    let cores = rayon::current_num_threads().max(1);
     cores.min(n_chunks)
 }
 
@@ -172,6 +183,55 @@ fn run_parallel<R: Reducer>(
             .collect()
     });
     combine_in_order(r, per_thread.into_iter().flatten().collect())
+}
+
+/// Browser parallel driver (`wasm-threads`): the same work-stealing shape as the native one, run on
+/// rayon's pool — which, on wasm32, *is* a set of Web Workers sharing this module's linear memory
+/// (the JS host bootstraps it via `wasm_bindgen_rayon`'s `initThreadPool`; wasm itself cannot spawn a
+/// thread, so the pool must come from the host).
+///
+/// `rayon::scope` rather than a parallel iterator, so each worker builds its [`Runner`] *once* and
+/// reuses it across chunks — matching the native driver. That matters more here than natively: a
+/// wasm `Runner` instantiates the emitted kernel in its own worker's JS registry
+/// (see [`crate::wasm_host`]), so a per-chunk runner would re-instantiate per chunk.
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+fn run_parallel<R: Reducer>(
+    program: &dyn Program,
+    n: usize,
+    seed: u64,
+    r: &R,
+    n_chunks: usize,
+    threads: usize,
+) -> R::Acc {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    let next = AtomicUsize::new(0);
+    // `rayon::scope`'s spawns return `()`, so workers deposit their local runs here. Contended only
+    // once per worker (at the end), not per chunk.
+    let collected: Mutex<Vec<(usize, R::Acc)>> = Mutex::new(Vec::with_capacity(n_chunks));
+
+    rayon::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|_| {
+                // Cheap per-worker runner (scratch + RNG) over the SHARED compiled program.
+                let mut runner = program.runner();
+                let mut local: Vec<(usize, R::Acc)> = Vec::new();
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= n_chunks {
+                        break;
+                    }
+                    local.push((i, reduce_chunk(&mut *runner, r, n, i, seed)));
+                }
+                collected.lock().expect("reduction mutex poisoned").append(&mut local);
+            });
+        }
+    });
+
+    // Chunks come back in completion order; `combine_in_order` sorts by index, which is what makes
+    // the answer identical to the sequential run bit for bit.
+    combine_in_order(r, collected.into_inner().expect("reduction mutex poisoned"))
 }
 
 // --- the moments reducer (mean + population variance), powering P / E / Var ---
@@ -351,7 +411,7 @@ mod tests {
         let r = MomentsReducer;
 
         // Compile once, share the program across all the thread-count variations.
-        let (program, _cost) = compile_root(g, id);
+        let (program, _cost) = compile_root(g, id, n);
         let base = run_parallel(&*program, n, seed, &r, n_chunks, 1).into_moments();
         for t in [2usize, 3, 5, 8] {
             let m = run_parallel(&*program, n, seed, &r, n_chunks, t).into_moments();
@@ -454,7 +514,7 @@ mod tests {
         let seed = 0xC0FFEE;
         let n_chunks = n.div_ceil(CHUNK_SAMPLES);
         let r = MomentsReducer;
-        let (program, _cost) = compile_root(g, id); // compile ONCE, shared across thread counts
+        let (program, _cost) = compile_root(g, id, n); // compile ONCE, shared across thread counts
 
         let drive = |threads: usize| {
             run_parallel(&*program, n, seed, &r, n_chunks, threads); // warm up

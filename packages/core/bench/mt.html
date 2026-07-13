@@ -1,0 +1,100 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Noise — threaded vs single-threaded</title>
+<style>
+  body { font: 14px/1.5 ui-monospace, monospace; margin: 2rem; }
+  td, th { padding: 0.2rem 1rem 0.2rem 0; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  .win { color: #0a0; font-weight: bold; }
+</style>
+<h1>Noise: single-threaded vs wasm threads</h1>
+<p id="env"></p>
+<table id="out">
+  <tr><th>program</th><th>1 thread</th><th>N threads</th><th>speedup</th></tr>
+</table>
+<script>
+  // Headless gives us no console, so surface any failure through the same report channel.
+  const report = (t) => fetch('/report', { method: 'POST', body: t });
+  window.onerror = (m, f, l) => report(`PAGE ERROR: ${m} @${f}:${l}`);
+  window.onunhandledrejection = (e) => report(`UNHANDLED REJECTION: ${e.reason?.stack ?? e.reason}`);
+</script>
+<script type="module">
+  // The same engine, built twice. `wasm/` is the stable, universal single-threaded build; `wasm-mt/`
+  // is the same Rust with rayon over a Web Worker pool. Both must produce identical answers — the
+  // reducer merges chunks in index order, so the thread count changes wall clock and nothing else.
+  // This page asserts that, then times them.
+  import initST, { run as runST } from '../wasm/noise.js';
+  import initMT, { run as runMT, initThreadPool } from '../wasm-mt/noise.js';
+
+  const env = document.getElementById('env');
+  const threads = navigator.hardwareConcurrency;
+  env.textContent = `crossOriginIsolated=${crossOriginIsolated}  SharedArrayBuffer=${typeof SharedArrayBuffer !== 'undefined'}  hardwareConcurrency=${threads}`;
+  if (!crossOriginIsolated) {
+    env.textContent += '  — NOT ISOLATED: threads unavailable (serve with COOP/COEP)';
+  }
+
+  try {
+    await report(`step: initST`);
+    await initST();
+    await report(`step: initMT`);
+    await initMT();
+    await report(`step: initThreadPool(${threads})`);
+    await Promise.race([
+      initThreadPool(threads),
+      new Promise((_, rj) => setTimeout(() => rj(new Error('initThreadPool never resolved')), 60000)),
+    ]);
+    await report(`step: pool ready`);
+  } catch (e) {
+    await report(`INIT FAILED: ${e?.stack ?? e}`);
+    throw e;
+  }
+
+  // Heavy enough that the reduction dominates: the parallel path only engages above
+  // PAR_MIN_SAMPLES (262,144 draws), which is the point — small runs shouldn't pay for a fan-out.
+  const CASES = {
+    pi: 'use rand; engine::set_max_samples(20000000); X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1)',
+    normal_poly:
+      'use rand; engine::set_max_samples(5000000); Z ~ normal(0,1); E(Z*Z*Z*Z*Z + 2*Z*Z*Z*Z - 3*Z*Z*Z + 4*Z*Z - 5*Z + 6)',
+    birthday: 'use rand; engine::set_max_samples(2000000); days ~[23] unif_int(1,365); P(has_duplicates(days))',
+  };
+
+  const median = (f, reps = 3) => {
+    const ts = [];
+    let last;
+    for (let i = 0; i < reps; i++) {
+      const t = performance.now();
+      last = f();
+      ts.push(performance.now() - t);
+    }
+    return [ts.sort((a, b) => a - b)[Math.floor(reps / 2)], last];
+  };
+
+  const table = document.getElementById('out');
+  const lines = [`isolated=${crossOriginIsolated} threads=${threads}`];
+  for (const [name, src] of Object.entries(CASES)) {
+    const [st, rawST] = median(() => runST(src, undefined));
+    const [mt, rawMT] = median(() => runMT(src, undefined));
+
+    // Determinism check: the two builds must agree exactly. If threads changed the answer, the
+    // speedup is worthless and this is the bug that matters.
+    const valOf = (raw) => JSON.parse(raw)?.result?.value?.text ?? '?';
+    const [a, b] = [valOf(rawST), valOf(rawMT)];
+    const agree = a === b;
+
+    const row = table.insertRow();
+    row.innerHTML =
+      `<td>${name}</td><td>${st.toFixed(0)} ms</td><td>${mt.toFixed(0)} ms</td>` +
+      `<td class="${mt < st ? 'win' : ''}">${(st / mt).toFixed(2)}×</td>`;
+    if (!agree) {
+      row.insertCell().innerHTML = `<b style="color:#c00">MISMATCH ${a} vs ${b}</b>`;
+    } else {
+      row.insertCell().textContent = `= ${a}`;
+    }
+    lines.push(
+      `${name.padEnd(12)} st=${st.toFixed(0)}ms mt=${mt.toFixed(0)}ms speedup=${(st / mt).toFixed(2)}x ` +
+        `${agree ? `agree(${a})` : `MISMATCH ${a} vs ${b}`}`,
+    );
+  }
+  document.title = 'done';
+  await report(lines.join('\n'));
+</script>

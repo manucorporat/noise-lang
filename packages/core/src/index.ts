@@ -4,29 +4,31 @@
 // generated glue instantiates it via `new URL('noise_bg.wasm', import.meta.url)`, so any bundler
 // that understands that pattern (Vite, Rollup, webpack 5, esbuild) fingerprints the .wasm and
 // emits it as an asset of the *consuming* app's build — no copying, no CDN, no runtime config.
-import init, {
-  run as wasmRun,
-  run_with_introspection as wasmRunIntrospect,
-  meta as wasmMeta,
-  version as wasmVersion,
-} from '../wasm/noise.js';
-
-let ready: Promise<void> | null = null;
+import { call, start, stop } from './pool.js';
 
 /**
- * Initialize the WASM module exactly once; subsequent calls await the same promise.
+ * Warm the engine: spawn the worker pool and instantiate the wasm in each worker.
  *
- * Called implicitly by `run` / `runWithIntrospection` / `version`, so most callers never need it.
- * Call it directly to warm the engine (e.g. on app mount) so the first real run doesn't pay the
- * ~one-off instantiation cost.
+ * Called implicitly by `run` / `runWithIntrospection` / `meta` / `version`, so most callers never
+ * need it. Call it directly on app mount so the first real run doesn't pay the spawn + instantiate
+ * cost (tens of milliseconds per worker).
+ *
+ * **The engine never runs on the main thread.** A Monte-Carlo run is millions of draws in a tight
+ * loop; on the main thread that is a frozen tab. Every entry point below dispatches into a worker.
  */
 export function load(): Promise<void> {
-  if (!ready) {
-    // No argument → the glue resolves the .wasm via `new URL('noise_bg.wasm', import.meta.url)`,
-    // i.e. the asset the consumer's bundler emitted next to this module.
-    ready = init().then(() => undefined);
+  return start();
+}
+
+/** Shut the worker pool down (tests, hot-reload, or a Node script that wants to exit). */
+export { stop };
+
+/** Unwrap a worker reply, turning a dead-instance failure into a thrown error. */
+function unwrap(res: { ok: boolean; raw?: string; error?: string }): string {
+  if (!res.ok || res.raw === undefined) {
+    throw new Error(res.error ?? 'the Noise engine worker failed');
   }
-  return ready;
+  return res.raw;
 }
 
 /** Run-time counters from the engine — what the program actually computed (see Rust `stats`). */
@@ -230,13 +232,10 @@ function optsToJson(opts?: RunOpts): string | undefined {
 /** Parse + evaluate a Noise program. `opts.inputs` tunes inline `input::…` parameters. Never throws
  * — failures come back in `error`. */
 export async function run(src: string, opts?: RunOpts): Promise<NoiseResult> {
-  await load();
-  // Time only the engine call (module load is excluded — it's a one-off, not per-run cost).
-  const t0 = performance.now();
-  const raw = wasmRun(src, optsToJson(opts));
-  const elapsedMs = performance.now() - t0;
-  const doc = JSON.parse(raw) as NoiseDocument;
-  return enrich(doc, elapsedMs);
+  // `elapsedMs` is measured inside the worker: it's engine time, not queueing + postMessage latency.
+  const res = await call({ op: 'run', src, optsJson: optsToJson(opts) });
+  const doc = JSON.parse(unwrap(res)) as NoiseDocument;
+  return enrich(doc, res.elapsedMs ?? 0);
 }
 
 // --- frontmatter (the "read metadata without running" path) ----------------------------------
@@ -263,8 +262,8 @@ export interface NoiseMeta {
  * returns `{ ok: false, error }`.
  */
 export async function meta(src: string): Promise<NoiseMeta> {
-  await load();
-  const parsed = JSON.parse(wasmMeta(src)) as Partial<NoiseMeta>;
+  const res = await call({ op: 'meta', src });
+  const parsed = JSON.parse(unwrap(res)) as Partial<NoiseMeta>;
   return {
     ok: parsed.ok ?? false,
     title: parsed.title,
@@ -277,8 +276,7 @@ export async function meta(src: string): Promise<NoiseMeta> {
 
 /** The engine (crate) version, e.g. `"0.1.1"`. */
 export async function version(): Promise<string> {
-  await load();
-  return wasmVersion();
+  return unwrap(await call({ op: 'version' }));
 }
 
 // --- variable introspection (the "inspect without editing the code" path) --------------------
@@ -353,11 +351,14 @@ export async function runWithIntrospection(
   requests: IntrospectRequest[],
   opts?: RunOpts,
 ): Promise<NoiseIntrospectResult> {
-  await load();
-  const t0 = performance.now();
-  const raw = wasmRunIntrospect(src, JSON.stringify(requests), optsToJson(opts));
-  const elapsedMs = performance.now() - t0;
-  const parsed = JSON.parse(raw) as {
+  const res = await call({
+    op: 'runWithIntrospection',
+    src,
+    requestsJson: JSON.stringify(requests),
+    optsJson: optsToJson(opts),
+  });
+  const elapsedMs = res.elapsedMs ?? 0;
+  const parsed = JSON.parse(unwrap(res)) as {
     document: NoiseDocument;
     bindings?: Binding[];
     introspections?: Plot[];

@@ -1,0 +1,30 @@
+<!doctype html><meta charset="utf-8"><title>noise public API</title>
+<script>
+const report = (t) => fetch('/report', {method:'POST', body: t});
+window.onerror = (m,f,l) => report(`PAGE ERROR: ${m} @${f}:${l}`);
+window.onunhandledrejection = (e) => report(`REJECT: ${e.reason?.stack ?? e.reason}`);
+</script>
+<script type="module">
+// Drives the SHIPPED public API — pool -> worker -> (threaded engine, if the page is isolated).
+// Proves the main thread never blocks, and that the wiring actually selects the threaded build.
+import { run, load } from '../dist/index.js';
+try {
+  await report(`isolated=${crossOriginIsolated} cores=${navigator.hardwareConcurrency}`);
+  await load();
+
+  // Main-thread liveness: tick a counter while a heavy program runs. If the engine were on the main
+  // thread this would stay at 0 — a frozen tab. Off-thread, it keeps counting.
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 4);
+
+  const t0 = performance.now();
+  const r = await run('use rand; engine::set_max_samples(20000000); X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1)');
+  const wall = performance.now() - t0;
+  clearInterval(timer);
+
+  await report(
+    `pi=${r.result?.value?.text} engineMs=${r.elapsedMs?.toFixed(0)} wallMs=${wall.toFixed(0)} ` +
+    `mainThreadTicksDuringRun=${ticks} (0 would mean the tab froze)`
+  );
+} catch (e) { await report(`FAILED: ${e?.stack ?? e}`); }
+</script>

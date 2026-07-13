@@ -20,8 +20,13 @@ use crate::kernel::NodeCost;
 use crate::rng::Rng;
 
 /// Compiles the transitive cone of a root RV into an immutable, shareable [`Program`].
+///
+/// `draws` is how many samples the caller is about to take from this program. Codegen backends need
+/// it: compiling is a fixed cost paid once, fusion is a saving earned per draw, so a query that
+/// draws too few samples is faster interpreted no matter how good the kernel would be (see
+/// [`crate::kernel::break_even_draws`]). The interpreter ignores it.
 pub trait Backend {
-    fn compile(&self, graph: &RvGraph, root: RvId) -> Box<dyn Program>;
+    fn compile(&self, graph: &RvGraph, root: RvId, draws: usize) -> Box<dyn Program>;
 }
 
 /// The default forcing path: compile `root` with the best available backend. Three mutually
@@ -36,7 +41,7 @@ pub trait Backend {
 /// Returns the compiled program alongside the simplified cone's [`NodeCost`] — the per-draw
 /// operation/source counts the playground multiplies by the draw count for its run-time readout.
 /// Computing it here (on the post-simplify graph, once) keeps it backend-independent and exact.
-pub fn compile_root(graph: &RvGraph, root: RvId) -> (Box<dyn Program>, NodeCost) {
+pub fn compile_root(graph: &RvGraph, root: RvId, draws: usize) -> (Box<dyn Program>, NodeCost) {
     // Simplify once (fold constants, apply identities, CSE) so the backend lowers a smaller DAG.
     // The rewritten graph is local — backends copy what they need, retaining no reference to it.
     let (graph, root) = crate::simplify::simplify(graph, root);
@@ -47,11 +52,11 @@ pub fn compile_root(graph: &RvGraph, root: RvId) -> (Box<dyn Program>, NodeCost)
     // there); the interpreter is the remaining native, non-`jit` case. The three cfgs are mutually
     // exclusive and exhaustive over the {wasm32?} × {jit?} matrix.
     #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
-    let program = crate::jit::JitBackend::new().compile(&graph, root);
+    let program = crate::jit::JitBackend::new().compile(&graph, root, draws);
     #[cfg(target_arch = "wasm32")]
-    let program = crate::wasm_host::WasmHostBackend::new().compile(&graph, root);
+    let program = crate::wasm_host::WasmHostBackend::new().compile(&graph, root, draws);
     #[cfg(all(not(feature = "jit"), not(target_arch = "wasm32")))]
-    let program = InterpBackend.compile(&graph, root);
+    let program = InterpBackend.compile(&graph, root, draws);
     (program, cost)
 }
 
@@ -81,7 +86,8 @@ pub trait Runner {
 pub struct InterpBackend;
 
 impl Backend for InterpBackend {
-    fn compile(&self, graph: &RvGraph, root: RvId) -> Box<dyn Program> {
+    /// The interpreter has no meaningful compile cost, so it never declines: `draws` is unused.
+    fn compile(&self, graph: &RvGraph, root: RvId, _draws: usize) -> Box<dyn Program> {
         Box::new(InterpProgram {
             inner: Arc::new(compile(graph, root)),
         })

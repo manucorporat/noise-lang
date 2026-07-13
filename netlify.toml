@@ -14,4 +14,22 @@
 [build.environment]
   # Toolchain for the install script. Use "stable" (some deps require a recent
   # Cargo, e.g. edition2024 needs Rust >= 1.85), or pin a specific version.
+  # NOTE: the multi-threaded wasm build additionally needs nightly (it rebuilds std with atomics —
+  # see packages/core/scripts/build-wasm.sh), which the install script provisions.
   RUST_VERSION = "stable"
+
+# Cross-origin isolation. These two headers are what make the browser hand the page a
+# SharedArrayBuffer, which is the foundation wasm threads are built on — without them the engine
+# silently falls back to its single-threaded build (correct, ~6.8x slower on a big run).
+#
+# The cost is real and worth stating: `require-corp` means every subresource must opt in to being
+# embedded (via CORP or CORS). The site has no cross-origin subresources today — Monaco, KaTeX,
+# vega and flint-chart all bundle through Astro/Vite, images are local — so nothing breaks. But
+# adding a third-party script, font, or iframe later (analytics, YouTube, Google Fonts) will be
+# BLOCKED unless it serves CORP. If that day comes, `credentialless` relaxes the rule for no-cors
+# subresources while keeping isolation (Chrome/Firefox; not Safari).
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Cross-Origin-Opener-Policy = "same-origin"
+    Cross-Origin-Embedder-Policy = "require-corp"

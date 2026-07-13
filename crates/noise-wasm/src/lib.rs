@@ -13,6 +13,17 @@ use noise_core::{Engine, InputValue, Value};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
+/// Re-exported as `initThreadPool(n)` — the JS host **must** call and await it before running a
+/// program, or rayon has no workers and the reduction stays sequential (correct, just single-core).
+///
+/// This is the whole reason a JS host is involved: WebAssembly has no instruction that spawns a
+/// thread. The threads proposal gives wasm shared memory and atomics and explicitly leaves thread
+/// *creation* to the embedder, so the workers can only come from `new Worker()` on the JS side.
+/// `wasm-bindgen-rayon` generates that glue: it spawns N workers, has each instantiate *this same
+/// module* against *this same* `SharedArrayBuffer` memory, and hands the set to rayon as its pool.
+#[cfg(feature = "wasm-threads")]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
 /// Run options a host may pass: input overrides (`{ "inputs": { name: value, … } }`), sample
 /// budget/seed later. Absent or empty → each input uses its declared default.
 #[derive(Deserialize, Default)]

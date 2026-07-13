@@ -1,0 +1,24 @@
+<!doctype html><meta charset="utf-8">
+<script>
+const report = (t) => fetch('/report', {method:'POST', body: t});
+window.onerror = (m,f,l) => report(`PAGE ERROR: ${m} @${f}:${l}`);
+window.onunhandledrejection = (e) => report(`REJECT: ${e.reason?.stack ?? e.reason}`);
+</script>
+<script type="module">
+const timeout = (p, ms, what) => Promise.race([p, new Promise((_,rj)=>setTimeout(()=>rj(new Error(`${what} timed out after ${ms}ms`)), ms))]);
+try {
+  await report('A: fetching wasm-mt bytes directly');
+  const r = await fetch('../wasm-mt/noise_bg.wasm');
+  await report(`B: fetch ok status=${r.status} type=${r.headers.get('content-type')} bytes=${(await r.clone().arrayBuffer()).byteLength}`);
+  await report('C: importing mt glue');
+  const mod = await import('../wasm-mt/noise.js');
+  await report(`D: imported, exports=${Object.keys(mod).slice(0,8).join(',')}`);
+  await report('E: calling init');
+  await timeout(mod.default(), 20000, 'initMT');
+  await report('F: init OK');
+  await timeout(mod.initThreadPool(4), 20000, 'initThreadPool');
+  await report('G: pool ready, threads=4');
+  const out = mod.run('use rand; X ~ unif(0,1); E(X)', undefined);
+  await report(`H: ran -> ${JSON.parse(out)?.result?.value?.text}`);
+} catch (e) { await report(`FAILED: ${e?.stack ?? e}`); }
+</script>

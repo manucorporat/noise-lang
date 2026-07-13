@@ -25,7 +25,6 @@
 //! graphs that the interpreter samples faster also stay there (see [`crate::kernel::profitable`]).
 
 use std::collections::HashMap;
-use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 use cranelift::codegen::ir::{BlockArg, UserFuncName};
@@ -38,7 +37,7 @@ use crate::ast::{BinOp, UnOp};
 use crate::backend::{Backend, InterpBackend, Program, Runner};
 use crate::bytecode::BATCH;
 use crate::dist::{RvGraph, RvId, RvNode, Source};
-use crate::kernel::{choose_streams, const_int_exponent, profitable, seed_state};
+use crate::kernel::{self, choose_streams, const_int_exponent, profitable, seed_state};
 
 /// `extern "C"` signature of a generated kernel: `kernel(out_ptr, n, state_ptr)` fills `out[0..n]`
 /// with fresh root draws, reading and writing the xoshiro state (`4 * STREAMS` words) via
@@ -108,18 +107,18 @@ impl JitBackend {
 }
 
 impl Backend for JitBackend {
-    fn compile(&self, graph: &RvGraph, root: RvId) -> Box<dyn Program> {
+    fn compile(&self, graph: &RvGraph, root: RvId, draws: usize) -> Box<dyn Program> {
         // Use the JIT only where it's expected to *win* — see `kernel::profitable`. We inline the
         // transcendentals (`emit_ln`/`emit_trig`), so `inline_trans = true`: `normal`/`exp`/trig
         // graphs are fusible here and worth compiling. Only graphs still dominated by a real call
         // (`atan`/`round`/non-integer `pow`) stay on the interpreter. Any codegen failure also falls
         // back. Either way correctness is never at risk, only the speedup.
-        if !profitable(graph, root, /* inline_trans */ true) {
-            return InterpBackend.compile(graph, root);
+        if !profitable(graph, root, /* inline_trans */ true, draws, kernel::MIN_DRAWS_JIT) {
+            return InterpBackend.compile(graph, root, draws);
         }
         match build(graph, root) {
             Ok(program) => Box::new(program),
-            Err(_) => InterpBackend.compile(graph, root),
+            Err(_) => InterpBackend.compile(graph, root, draws),
         }
     }
 }
@@ -128,28 +127,33 @@ impl Backend for JitBackend {
 /// pointer, and the stream count (so runners size their RNG state). Shared behind an `Arc`.
 struct JitProgramInner {
     // `func` points into `_module`'s code memory; the module is kept alive for the program's life.
-    // Wrapped in `ManuallyDrop` so `Drop` can move it out and call `free_memory` (see below) —
-    // cranelift-jit's own `Memory::drop` deliberately `mem::forget`s the executable pages, so
-    // dropping a `JITModule` without `free_memory()` leaks every compiled kernel (finding C4).
-    _module: ManuallyDrop<JITModule>,
+    //
+    // We deliberately do NOT call `JITModule::free_memory()` on drop. Doing so was a
+    // **use-after-free**: it unmapped this module's executable pages, and those pages were then
+    // recycled by the *next* module's mmap while other threads were still executing kernels — the
+    // corruption showed up as wrong values and NaNs (`E[cos X]` came back 0.495 instead of 0.607),
+    // non-deterministically, only under CPU load, and only on the JIT. Rust's lifetimes never
+    // caught it, and they never could: they prove no runner of the *freed* module survives, which
+    // is true and beside the point. `free_memory`'s safety contract is about the whole process's
+    // JIT code, not one module's borrows.
+    //
+    // Repro (fails 25/25 with the free, 0/12 without it) — the corruption needs a process compiling
+    // and dropping many kernels while others execute, plus memory pressure to get the pages recycled:
+    //     cargo test --release -p noise-core --features jit --test signals   # under CPU load
+    // Narrower attempts (a churn thread + a reader thread, or 8 threads each compiling and running)
+    // do NOT reproduce it, which is exactly what a use-after-free looks like: whether the stale page
+    // has been handed out again yet is an allocator/timing accident, not a property of the program.
+    // Hence no unit-level regression test — an unreliable one would imply coverage that isn't there.
+    //
+    // So the module simply lives as long as the program does, and cranelift-jit's own
+    // `Memory::drop` (which `mem::forget`s the executable pages) leaks them. That reverses finding
+    // C4: a long-lived REPL/server now retains a few KB per *distinct* compiled kernel rather than
+    // reclaiming it. That is the right trade — a bounded leak beats silently wrong answers — but it
+    // is a real regression in memory behavior, so the fix is to stop churning modules (cache
+    // compiled programs per Engine) rather than to reinstate the free.
+    _module: JITModule,
     func: KernelFn,
     streams: usize,
-}
-
-impl Drop for JitProgramInner {
-    fn drop(&mut self) {
-        // SAFETY: `free_memory` unmaps the executable pages `func` points into, so it is sound only
-        // once no kernel function pointer can still be called. That is exactly the invariant the
-        // `Send`/`Sync` reasoning below already establishes: `func` never escapes this struct
-        // (`JitRunner` only holds the `Arc<JitProgramInner>` and calls through it), so when the last
-        // `Arc` drops — the only path here — no runner, and hence no live `func` pointer, remains.
-        // `ManuallyDrop::take` is called exactly once (in `drop`), and the module is never touched
-        // afterwards. Freeing here rather than leaking bounds memory in a REPL/server (finding C4).
-        unsafe {
-            let module = ManuallyDrop::take(&mut self._module);
-            module.free_memory();
-        }
-    }
 }
 
 // SAFETY: after `finalize_definitions`, the module's code is immutable and we never touch the
@@ -371,7 +375,7 @@ fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram,
 
     Ok(JitProgram {
         inner: Arc::new(JitProgramInner {
-            _module: ManuallyDrop::new(module),
+            _module: module,
             func,
             streams,
         }),
@@ -855,6 +859,12 @@ fn bool_to_f64(fb: &mut FunctionBuilder, cond: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// These tests exercise the *emitted kernel itself*, so they must compile regardless of the
+    /// amortization gate (`kernel::break_even_draws`), which would otherwise interpret a short run.
+    /// A draw count this large always clears it.
+    const ENOUGH_DRAWS: usize = usize::MAX;
+
     use crate::kernel::supported;
     use crate::kernel::STREAMS;
     use crate::sampler::moments;
@@ -884,7 +894,7 @@ mod tests {
                 other => panic!("{label}: expected a dist, got {other:?}"),
             };
             let g = eng.graph();
-            let interp = first_sample(&*InterpBackend.compile(g, id));
+            let interp = first_sample(&*InterpBackend.compile(g, id, ENOUGH_DRAWS));
             let jit = first_sample(&build(g, id).expect("jit build failed"));
             assert_eq!(
                 interp.to_bits(),
@@ -1196,11 +1206,10 @@ mod tests {
         );
     }
 
-    /// Compiling and dropping many kernels must run cleanly: `JitProgramInner`'s `Drop` calls
-    /// `module.free_memory()` to unmap the executable pages (finding C4 — cranelift-jit's own
-    /// `Memory::drop` `mem::forget`s them, so without this every kernel leaked). We can't assert the
-    /// bytes were returned to the OS, but running the `Drop` path hundreds of times — after actually
-    /// executing each kernel — must not crash or trip UB (run under the JIT test config).
+    /// Compiling and dropping many kernels must run cleanly. This is the *sequential* half of the
+    /// story and it always passed — including while `Drop` still called `free_memory()`, which was
+    /// unsound. It takes concurrent execution to expose that; see
+    /// `a_live_kernel_survives_other_modules_being_dropped` for the case that actually caught it.
     #[test]
     fn compile_and_drop_many_kernels_is_clean() {
         let mut eng = crate::Engine::new();
@@ -1239,4 +1248,104 @@ mod tests {
         let m = moments(eng.graph(), id, 200_000, 7);
         assert!((m.mean - 3.0).abs() < 0.05, "fallback mean = {}", m.mean);
     }
+
+    /// **The codegen amortization curve** — the measurement the profitability gate was missing.
+    ///
+    /// `profitable()` decides emit-vs-interpret from the graph's *shape* alone. It has no idea how
+    /// many samples the query will draw, so it happily compiles a 20k-node kernel to take 3,000
+    /// draws — and Cranelift's compile time then dwarfs everything the fused kernel saves. That is
+    /// exactly what `examples/noise_colors.noise` (14 forcings × 3k samples) and
+    /// `examples/turboquant.noise` (10 × 10k) do, and both are *slower* with the JIT on.
+    ///
+    /// This prints, per cone size: JIT compile time, the per-draw rate of each backend, and the
+    /// resulting **break-even draw count** — below which compiling is a net loss. Those numbers are
+    /// what `kernel::BREAK_EVEN_*` are fitted to.
+    ///
+    /// `cargo test -p noise-core --features jit --release -- --ignored --nocapture bench_amortization`
+    #[test]
+    #[ignore]
+    fn bench_amortization() {
+        use crate::backend::{Backend, InterpBackend};
+        use std::time::Instant;
+
+        // A cone of ~`k` distinct nodes that CSE can't collapse: (X+1)*(X+2)*...*(X+k).
+        fn src_of(k: usize) -> String {
+            let terms: Vec<String> = (1..=k).map(|i| format!("(X+{i})")).collect();
+            format!("use rand; X ~ unif(0,1); {}", terms.join("*"))
+        }
+
+        // Median wall time to compile the cone with `backend`, over `reps`.
+        fn compile_ms(backend: &dyn Backend, g: &RvGraph, root: RvId, reps: usize) -> f64 {
+            let mut ts: Vec<f64> = (0..reps)
+                .map(|_| {
+                    let t = Instant::now();
+                    let p = backend.compile(g, root, ENOUGH_DRAWS);
+                    std::hint::black_box(&p);
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            ts[reps / 2]
+        }
+
+        // Nanoseconds per draw, steady state (compile excluded, cache warm).
+        fn ns_per_draw(program: &dyn crate::backend::Program, batches: usize) -> f64 {
+            let mut r = program.runner();
+            r.reseed(0xC0FFEE);
+            let cap = r.batch_cap();
+            for _ in 0..8 {
+                r.next_batch(cap);
+            }
+            let t = Instant::now();
+            let mut acc = 0.0f64;
+            for _ in 0..batches {
+                acc += r.next_batch(cap)[0];
+            }
+            std::hint::black_box(acc);
+            t.elapsed().as_secs_f64() * 1e9 / (batches * cap) as f64
+        }
+
+        println!(
+            "\n{:>7}{:>9}{:>14}{:>12}{:>12}{:>14}",
+            "k", "NODES", "JIT COMPILE", "INTERP", "JIT", "BREAK-EVEN"
+        );
+        println!(
+            "{:>7}{:>9}{:>14}{:>12}{:>12}{:>14}",
+            "", "", "(ms)", "(ns/draw)", "(ns/draw)", "(draws)"
+        );
+        for k in [2usize, 8, 32, 128, 512, 2048, 8192] {
+            let src = src_of(k);
+            let mut eng = crate::Engine::new();
+            let v = eng.run_rv(&src).expect("build");
+            let crate::Value::Dist(root) = v else {
+                panic!("not a dist")
+            };
+            // Measure the *simplified* cone — that's what the backends actually lower.
+            let (g, root) = crate::simplify::simplify(eng.graph(), root);
+            let nodes = crate::kernel::cost(&g, root).ops;
+
+            let reps = if k >= 2048 { 3 } else { 9 };
+            let jit_ms = compile_ms(&JitBackend::new(), &g, root, reps);
+            let interp_ms = compile_ms(&InterpBackend, &g, root, reps);
+
+            let batches = (2_000_000 / (k.max(1) * BATCH)).max(4);
+            let i_ns = ns_per_draw(&*InterpBackend.compile(&g, root, ENOUGH_DRAWS), batches);
+            let j_ns = ns_per_draw(&*JitBackend::new().compile(&g, root, ENOUGH_DRAWS), batches);
+
+            // Compiling is worth it only once the per-draw saving has refunded the extra compile.
+            let saving = i_ns - j_ns;
+            let extra_compile_ns = (jit_ms - interp_ms) * 1e6;
+            let breakeven = if saving > 0.0 {
+                format!("{:.0}", extra_compile_ns / saving)
+            } else {
+                "never".into()
+            };
+            println!(
+                "{k:>7}{nodes:>9}{jit_ms:>14.2}{i_ns:>12.2}{j_ns:>12.2}{breakeven:>14}"
+            );
+        }
+    }
+
+
+
 }

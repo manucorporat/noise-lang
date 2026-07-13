@@ -1,6 +1,17 @@
-//! The benchmark corpus, shared between the Criterion bench (`benches/sampling.rs`) and the
-//! smoke test (`tests/bench_corpus.rs`) so plain `cargo test` catches bench-corpus rot — a
-//! program that stops parsing/running fails CI without anyone remembering to run `cargo bench`.
+//! The benchmark corpus, shared between the Criterion benches (`benches/sampling.rs`,
+//! `benches/examples.rs`) and the smoke test (`tests/bench_corpus.rs`) so plain `cargo test`
+//! catches bench-corpus rot — a program that stops parsing/running fails CI without anyone
+//! remembering to run `cargo bench`.
+//!
+//! Two corpora, measuring two different things:
+//!   * [`CASES`] — hand-written *micro-kernels*, each a single RV expression. They isolate the
+//!     sampling hot loop: one compile, then `N` draws. This is what `sampling.rs` times.
+//!   * [`EXAMPLES`] — the **real programs** in `examples/`, run end-to-end through the same
+//!     `run_to_document` path the CLI uses. These include everything the micro-kernels leave out:
+//!     parse, eval, *codegen*, every forcing the program performs, plots, and formatting. A
+//!     program that forces 10 small queries pays codegen 10 times and draws few samples each —
+//!     a regime `CASES` cannot see, and where a backend that wins on throughput can still lose
+//!     on wall clock. `examples.rs` times these.
 
 /// Representative programs: `(label, source)`. Each ends in an RV expression so `run_rv` yields a
 /// `Value::Dist`. `use rand` brings the distribution constructors into scope.
@@ -42,4 +53,44 @@ pub const CASES: &[(&str, &str)] = &[
         "use rand; Z ~ normal(0,1); \
          Z*Z*Z*Z*Z + 2*Z*Z*Z*Z - 3*Z*Z*Z + 4*Z*Z - 5*Z + 6",
     ),
+];
+
+/// The real-program corpus: every file in `examples/`, embedded at build time so the bench is
+/// independent of the working directory. `(label, source)`, run end-to-end.
+///
+/// These are the programs users actually write, so they are the honest regression gate: they
+/// exercise codegen cost, multi-forcing programs, joint/introspection passes, and plots — none of
+/// which [`CASES`] touches.
+pub const EXAMPLES: &[(&str, &str)] = &[
+    ("advantage", include_str!("../../../../examples/advantage.noise")),
+    ("am_vs_fm", include_str!("../../../../examples/am_vs_fm.noise")),
+    ("barrier_option", include_str!("../../../../examples/barrier_option.noise")),
+    ("beta_bernoulli", include_str!("../../../../examples/beta_bernoulli.noise")),
+    ("birthday", include_str!("../../../../examples/birthday.noise")),
+    ("bootstrap", include_str!("../../../../examples/bootstrap.noise")),
+    ("buffon", include_str!("../../../../examples/buffon.noise")),
+    ("clt_normal", include_str!("../../../../examples/clt_normal.noise")),
+    ("coin_streak", include_str!("../../../../examples/coin_streak.noise")),
+    ("conditional_bayes", include_str!("../../../../examples/conditional_bayes.noise")),
+    ("dice", include_str!("../../../../examples/dice.noise")),
+    ("dice_bet", include_str!("../../../../examples/dice_bet.noise")),
+    ("dice_sum", include_str!("../../../../examples/dice_sum.noise")),
+    ("dithering", include_str!("../../../../examples/dithering.noise")),
+    ("exactly_two_heads", include_str!("../../../../examples/exactly_two_heads.noise")),
+    ("functions", include_str!("../../../../examples/functions.noise")),
+    ("insurance", include_str!("../../../../examples/insurance.noise")),
+    ("irwin_hall", include_str!("../../../../examples/irwin_hall.noise")),
+    ("kelly", include_str!("../../../../examples/kelly.noise")),
+    ("max_of_dice", include_str!("../../../../examples/max_of_dice.noise")),
+    ("monty_hall", include_str!("../../../../examples/monty_hall.noise")),
+    ("noise_colors", include_str!("../../../../examples/noise_colors.noise")),
+    ("nyquist", include_str!("../../../../examples/nyquist.noise")),
+    ("pi", include_str!("../../../../examples/pi.noise")),
+    ("prisoners", include_str!("../../../../examples/prisoners.noise")),
+    ("qjl_scalar", include_str!("../../../../examples/qjl_scalar.noise")),
+    ("reliability", include_str!("../../../../examples/reliability.noise")),
+    ("secretary", include_str!("../../../../examples/secretary.noise")),
+    ("shor_period", include_str!("../../../../examples/shor_period.noise")),
+    ("st_petersburg", include_str!("../../../../examples/st_petersburg.noise")),
+    ("turboquant", include_str!("../../../../examples/turboquant.noise")),
 ];

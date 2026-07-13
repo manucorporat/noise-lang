@@ -21,6 +21,17 @@ wasm-bindgen.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 
+# Bootstraps rayon's pool out of Web Workers (wasm cannot create a thread itself — the host must).
+# Exposes `initThreadPool(n)` to JS; until that resolves, rayon has no workers and `reduce` runs
+# sequentially, which is correct, just slower.
+wasm-bindgen-rayon = { version = "1.2", optional = true }
+
+[features]
+# Multi-threaded Monte-Carlo reduction in the browser. Needs a threads-enabled build
+# (`-C target-feature=+atomics,+bulk-memory` + `-Z build-std`) and a cross-origin-isolated page
+# (COOP/COEP) for SharedArrayBuffer. See `packages/core/scripts/build-wasm.sh`.
+wasm-threads = ["dep:wasm-bindgen-rayon", "noise-core/wasm-threads"]
+
 [package.metadata.wasm-pack.profile.release]
 # Smaller, faster-to-load artifact for the browser playground.
 wasm-opt = ["-O3"]

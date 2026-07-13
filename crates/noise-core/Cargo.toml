@@ -31,10 +31,16 @@ serde_norway = "0.9.42"
 # dependency is wasm32-gated and keeps the native crate wasm-bindgen-free.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen.workspace = true
+# Browser executor for `reduce` (the `wasm-threads` feature). rayon's pool on wasm32 is a set of Web
+# Workers over one shared linear memory — the JS host bootstraps it (see `noise-wasm`), because wasm
+# has no instruction that creates a thread.
+rayon = { version = "1.10", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 wasmi = "1.1"
+# Assembles the hand-written SIMD probe kernel (tests/simd_probe.wat) — see tests/simd_probe.rs.
+wat = "1"
 
 # Sampler throughput benchmarks (Phase 4 baseline). `harness = false` hands the binary to
 # Criterion. Run with `cargo bench -p noise-core`.
@@ -47,3 +53,11 @@ harness = false
 # dependency-light; enable with `--features jit` on a native target. Falls back to the columnar
 # interpreter for any graph it can't yet emit, so it never changes results.
 jit = ["dep:cranelift", "dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-native"]
+
+# Parallel Monte-Carlo reduction in the browser: fans `reduce`'s chunks out over rayon (a Web Worker
+# pool sharing one linear memory). Requires the wasm threads proposal — atomics + shared memory — so
+# the crate must be built with `-C target-feature=+atomics,+bulk-memory` and a std rebuilt for it
+# (`-Z build-std`), and the page must be cross-origin isolated (COOP/COEP) to get SharedArrayBuffer.
+# Off by default: without it wasm32 reduces sequentially, which is correct, just single-threaded.
+# Results are bit-identical either way — the executor never changes the answer (see `reduce`).
+wasm-threads = ["dep:rayon"]

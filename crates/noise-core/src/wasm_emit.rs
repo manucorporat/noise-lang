@@ -218,8 +218,20 @@ pub(crate) fn emit(graph: &RvGraph, root: RvId, streams: usize) -> Vec<u8> {
 /// `inline_trans = true`: this emitter inlines `ln`/`sin`/`cos` as polynomials (`emit_ln`/`emit_trig`,
 /// same `crate::approx` reference as the JIT), so `normal`/`exp`/trig graphs are fusible here too and
 /// the 2× transcendental win reaches the browser — the gate decision now matches the native JIT.
-pub fn emit_for(graph: &RvGraph, root: RvId) -> Option<(Vec<u8>, usize)> {
-    if !crate::kernel::profitable(graph, root, /* inline_trans */ true) {
+pub fn emit_for(graph: &RvGraph, root: RvId, draws: usize) -> Option<(Vec<u8>, usize)> {
+    // `draws` gates emit-vs-interpret the same way it does natively: emitting + instantiating a
+    // module is a fixed cost, fusion is a per-draw saving, so a short query is faster interpreted.
+    //
+    // The threshold is the browser's own (`MIN_DRAWS_WASM`), an order of magnitude below the JIT's:
+    // instantiating a ~1 KB kernel is far cheaper than a Cranelift compile, so emission pays back
+    // sooner here. Same rule, each backend's measured constant.
+    if !crate::kernel::profitable(
+        graph,
+        root,
+        /* inline_trans */ true,
+        draws,
+        crate::kernel::MIN_DRAWS_WASM,
+    ) {
         return None;
     }
     let streams = choose_streams(graph, root);
@@ -777,6 +789,12 @@ fn emit_binary(s: &mut InstructionSink, op: BinOp, a: u32, b: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// These tests exercise the *emitted kernel itself*, so they must compile regardless of the
+    /// amortization gate (`kernel::break_even_draws`), which would otherwise interpret a short run.
+    /// A draw count this large always clears it.
+    const ENOUGH_DRAWS: usize = usize::MAX;
+
     use crate::backend::{Backend, InterpBackend};
     use crate::kernel::{supported, STREAMS};
     use crate::sampler::moments;
@@ -832,7 +850,7 @@ mod tests {
         for (label, src) in conformance::CONST_CASES {
             let (eng, id) = graph_of(src);
             let g = eng.graph();
-            let mut ir = InterpBackend.compile(g, id).runner();
+            let mut ir = InterpBackend.compile(g, id, ENOUGH_DRAWS).runner();
             ir.reseed(0);
             let cap = ir.batch_cap();
             let interp = ir.next_batch(cap)[0];
@@ -1030,7 +1048,7 @@ mod tests {
     fn stream_choice_and_distribution() {
         // RNG-bound, all inline → multi-stream.
         let (eng, id) = graph_of("use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B");
-        let (bytes, streams) = emit_for(eng.graph(), id).expect("inline graph should emit");
+        let (bytes, streams) = emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("inline graph should emit");
         assert_eq!(streams, STREAMS, "inline graph should be multi-stream");
         let (wasm_mean, count) = run_emitted(&bytes, streams, 0xABCDEF, 64);
         let interp = moments(eng.graph(), id, count as usize, 0xABCDEF).mean;
@@ -1041,7 +1059,7 @@ mod tests {
 
         // `normal` now emits (inlined `ln`/`cos`), but is throughput-bound → single-stream.
         let (eng, id) = graph_of("use rand; X ~ normal(0,1); Y ~ normal(0,1); X + Y");
-        let (bytes, streams) = emit_for(eng.graph(), id).expect("normal graph should now emit");
+        let (bytes, streams) = emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("normal graph should now emit");
         assert_eq!(streams, 1, "transcendental graph should be single-stream");
         let (wasm_mean, count) = run_emitted(&bytes, streams, 0xABCDEF, 64);
         let interp = moments(eng.graph(), id, count as usize, 0xABCDEF).mean;
@@ -1053,7 +1071,7 @@ mod tests {
         // Arithmetic-dominated but carries a `pow` call (non-const exponent) → still profitable
         // (fusible > libcalls), but choose_streams keeps it single-stream (the call won't overlap).
         let (eng, id) = graph_of("use rand; A ~ unif(1,2); B ~ unif(1,2); A ^ B");
-        let (bytes, streams) = emit_for(eng.graph(), id).expect("pow graph should emit");
+        let (bytes, streams) = emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("pow graph should emit");
         assert_eq!(streams, 1, "call-bearing graph should be single-stream");
         let (wasm_mean, count) = run_emitted(&bytes, streams, 0xABCDEF, 64);
         let interp = moments(eng.graph(), id, count as usize, 0xABCDEF).mean;
@@ -1069,7 +1087,7 @@ mod tests {
         let (eng, id) = graph_of("use rand; K ~ poisson(3); K");
         assert!(!supported(eng.graph(), id));
         assert!(
-            emit_for(eng.graph(), id).is_none(),
+            emit_for(eng.graph(), id, ENOUGH_DRAWS).is_none(),
             "Poisson must not be emitted"
         );
     }
@@ -1084,7 +1102,7 @@ mod tests {
         let src = std::env::var("NOISE_KERNEL_SRC")
             .unwrap_or_else(|_| "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B".into());
         let (eng, id) = graph_of(&src);
-        let (bytes, streams) = emit_for(eng.graph(), id).expect("should emit");
+        let (bytes, streams) = emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("should emit");
         std::fs::write(&path, &bytes).unwrap();
         // streams alongside, so the JS side can seed the right state width.
         std::fs::write(format!("{path}.streams"), streams.to_string()).unwrap();

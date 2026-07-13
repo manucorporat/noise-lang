@@ -82,7 +82,13 @@ pub fn const_int_exponent(graph: &RvGraph, id: RvId) -> Option<u32> {
 /// transcendental would pass `false` and the gate would correctly leave those graphs to the
 /// interpreter rather than emit a per-draw call. `atan`/`round`/`exp`/non-integer `pow` (and the
 /// rare large-|x| trig fallback, finding C3) are real calls on both backends regardless.
-pub fn profitable(graph: &RvGraph, root: RvId, inline_trans: bool) -> bool {
+pub fn profitable(
+    graph: &RvGraph,
+    root: RvId,
+    inline_trans: bool,
+    draws: usize,
+    min_draws: usize,
+) -> bool {
     let mut seen = HashSet::new();
     let (mut fusible, mut libcalls) = (0u32, 0u32);
     if !walk_cost(
@@ -104,8 +110,41 @@ pub fn profitable(graph: &RvGraph, root: RvId, inline_trans: bool) -> bool {
     if seen.len() > MAX_CODEGEN_NODES {
         return false;
     }
-    fusible > libcalls
+    if fusible <= libcalls {
+        return false;
+    }
+    // Codegen has to *pay for itself*. Everything above asks whether the fused kernel is faster per
+    // draw; this asks whether the query takes enough draws to refund *compiling* it.
+    draws >= min_draws
 }
+
+/// Minimum draws before the **Cranelift JIT** is worth compiling (see [`profitable`]'s `min_draws`).
+///
+/// Compiling is a fixed cost paid once per forcing; fusion is a saving earned per draw, so a query
+/// that draws few samples never earns its compile back. That is not a corner case — real programs
+/// force many small queries: `examples/noise_colors.noise` forces 14 at 3,000 draws each,
+/// `examples/turboquant.noise` forces 10 at 10,000. Without this, both ran *slower* with the JIT on
+/// (0.22× and 0.79× — on `noise_colors` the JIT was a 4.5× pessimization).
+///
+/// **One constant, not a cost curve.** `jit::tests::bench_amortization` measures the true break-even
+/// per cone size (13k–75k draws over a 6→1,536-node sweep) and a fitted `f(nodes)` was tried, but it
+/// decides every program in `examples/` exactly as this single threshold does — complexity with no
+/// behavior to show for it. The corpus separates cleanly: losers draw ≤40k per forcing, winners
+/// ≥175k. If a graph class ever lands in that gap, the bench is there to justify a curve then.
+pub const MIN_DRAWS_JIT: usize = 100_000;
+
+/// Minimum draws before the **WASM emitter** is worth emitting (see [`profitable`]'s `min_draws`).
+///
+/// An order of magnitude below [`MIN_DRAWS_JIT`], because the costs it amortizes are an order of
+/// magnitude apart: `WebAssembly.instantiate` on a ~1 KB kernel is far cheaper than a Cranelift
+/// compile. The two thresholds are the *same rule* with each backend's own measured constant — not
+/// two heuristics.
+///
+/// Measured with `packages/core/bench/examples.mjs` (V8, real programs): reusing the native 100k here
+/// left real wins on the table — `am_vs_fm` (40k draws/forcing) ran 1.20× emitted but 0.94× gated,
+/// and `turboquant` (10k) 1.06× vs 0.90×. Dropping to 10k keeps both emitting while still declining
+/// `noise_colors` (3k draws/forcing), which is 0.31× — a 3× pessimization — when always emitted.
+pub const MIN_DRAWS_WASM: usize = 10_000;
 
 /// Cone-node ceiling above which codegen is declined in favor of the interpreter (see
 /// [`profitable`]). The recursive emitters would otherwise risk a stack overflow on a very deep

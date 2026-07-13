@@ -11,10 +11,16 @@
 //! here (and falls back to the interpreter for everything the gate rejects, or if instantiation
 //! fails — e.g. the main-thread sync-compile size limit). Correctness is never at stake, only speed.
 //!
-//! Single-runner assumption: `reduce::run_reduction` is sequential on `wasm32` (its threaded path is
-//! `#[cfg(not(target_arch = "wasm32"))]`), so exactly one [`Runner`] drives a program at a time. The
-//! xoshiro state therefore lives in the child instance's memory across batches — only `reseed`
-//! writes it — which keeps the per-batch boundary crossing to a single output copy.
+//! One instance per runner, not per program. With the `wasm-threads` feature, `reduce::run_reduction`
+//! fans out across Web Workers, so several [`Runner`]s drive one program concurrently — and each must
+//! own its own child instance, because the xoshiro state lives *in that instance's memory* across
+//! batches (only `reseed` writes it, which is what keeps the per-batch crossing to a single output
+//! copy). Sharing one instance between workers would have them stomping on each other's RNG state.
+//!
+//! That is why [`Program`] holds the kernel *bytes* and instantiates in [`Program::runner`], on the
+//! thread that will drive it: a JS host handle is not portable across workers (each worker is a
+//! separate JS agent with its own `nz_kernel_*` registry — linear memory is shared, JS globals are
+//! not). See [`WasmProgram`].
 
 use std::sync::Arc;
 
@@ -128,53 +134,66 @@ impl WasmHostBackend {
 }
 
 impl Backend for WasmHostBackend {
-    fn compile(&self, graph: &RvGraph, root: RvId) -> Box<dyn Program> {
-        let Some((bytes, streams)) = emit_for(graph, root) else {
-            return InterpBackend.compile(graph, root); // gate rejected it (e.g. Poisson)
+    fn compile(&self, graph: &RvGraph, root: RvId, draws: usize) -> Box<dyn Program> {
+        let Some((bytes, streams)) = emit_for(graph, root, draws) else {
+            // Gate rejected it: unsupported (Poisson / Gather), libcall-bound, or too few draws to
+            // pay back the emit + instantiate (`kernel::break_even_draws`).
+            return InterpBackend.compile(graph, root, draws);
         };
-        let handle = nz_kernel_new(&bytes);
-        if handle < 0 {
-            return InterpBackend.compile(graph, root); // instantiation failed; stay correct
-        }
-        // Interpreter program for the *same* graph, kept as a fallback: used if the host instance is
-        // ever evicted mid-run (a status -1 from `nz_kernel_seed`/`nz_kernel_run`) so an evicted live
-        // handle degrades to correct-slow instead of throwing (finding C5). Cheap to compile.
-        let fallback: Arc<dyn Program> = Arc::from(InterpBackend.compile(graph, root));
+        // Interpreter program for the *same* graph, kept as a fallback: used if this thread can't
+        // instantiate the kernel, or if its instance is evicted mid-run (a status -1 from
+        // `nz_kernel_seed`/`nz_kernel_run`), so either degrades to correct-slow rather than throwing
+        // (finding C5). Cheap to compile.
+        let fallback: Arc<dyn Program> = Arc::from(InterpBackend.compile(graph, root, draws));
         Box::new(WasmProgram {
-            inner: Arc::new(KernelHandle { handle, streams }),
+            bytes: Arc::new(bytes),
+            streams,
             fallback,
         })
     }
 }
 
-/// A handle to a JS-host instance (kept alive by the host's content-addressed LRU, not by this
-/// struct). Shared behind an `Arc` so runners can clone it cheaply. Plain values → `Send + Sync`.
-struct KernelHandle {
-    handle: i32,
-    streams: usize,
-}
-
-/// A compiled browser program: the shared kernel handle plus an interpreter fallback program for the
-/// same graph. (Spun into a single runner on wasm32.)
+/// A compiled browser program: the emitted kernel's **bytes** plus an interpreter fallback program
+/// for the same graph.
+///
+/// We keep the bytes, not a host handle, because the handle is not portable across threads. Under
+/// wasm threads every thread is a separate JS agent (a Web Worker) with its **own** module-level
+/// `nz_kernel_*` registry — linear memory is shared, JS globals are not. A handle minted while
+/// compiling on the driver thread would simply not exist in a worker's registry, `nz_kernel_run`
+/// would return -1, and every worker would silently degrade to the interpreter — losing exactly the
+/// emitter win that threads were added to multiply.
+///
+/// So instantiation moves to [`Program::runner`], which runs *on* the thread that will drive it. The
+/// bytes live in shared linear memory, so each worker instantiates from the same kernel, and the
+/// host's content-addressing makes the second and later calls for a given kernel a cache hit.
 struct WasmProgram {
-    inner: Arc<KernelHandle>,
+    bytes: Arc<Vec<u8>>,
+    streams: usize,
     fallback: Arc<dyn Program>,
 }
 
 impl Program for WasmProgram {
     fn runner(&self) -> Box<dyn Runner> {
+        // Instantiate in *this* thread's host registry (see the type docs). A negative handle means
+        // this thread can't run the kernel (e.g. the main-thread sync-compile size limit) — the
+        // interpreter fallback keeps it correct.
+        let handle = nz_kernel_new(&self.bytes);
+        if handle < 0 {
+            return self.fallback.runner();
+        }
         // Seed a placeholder state into the (possibly reused, content-addressed) instance now —
         // matching the JIT path (`jit::JitProgram::runner`) — so a reused instance never carries a
         // previous program's xoshiro state into a batch, even before the driver's first `reseed`
         // (finding C5). If the instance is already gone, start on the interpreter fallback.
-        let state = seed_state(0, self.inner.streams);
-        let fell_back = if nz_kernel_seed(self.inner.handle, &state) < 0 {
+        let state = seed_state(0, self.streams);
+        let fell_back = if nz_kernel_seed(handle, &state) < 0 {
             Some(self.fallback.runner())
         } else {
             None
         };
         Box::new(WasmRunner {
-            inner: self.inner.clone(),
+            handle,
+            streams: self.streams,
             buf: vec![0.0; BATCH],
             fallback: self.fallback.clone(),
             fell_back,
@@ -188,7 +207,8 @@ impl Program for WasmProgram {
 /// host instance is lost (evicted), `fell_back` holds an interpreter runner that drives the rest of
 /// the run (finding C5); `last_seed` lets that fallback resume from the right seed.
 struct WasmRunner {
-    inner: Arc<KernelHandle>,
+    handle: i32,
+    streams: usize,
     buf: Vec<f64>,
     fallback: Arc<dyn Program>,
     fell_back: Option<Box<dyn Runner>>,
@@ -211,8 +231,8 @@ impl Runner for WasmRunner {
             fb.reseed(seed);
             return;
         }
-        let state = seed_state(seed, self.inner.streams);
-        if nz_kernel_seed(self.inner.handle, &state) < 0 {
+        let state = seed_state(seed, self.streams);
+        if nz_kernel_seed(self.handle, &state) < 0 {
             self.switch_to_fallback(seed); // instance evicted; degrade to the interpreter
         }
     }
@@ -220,7 +240,7 @@ impl Runner for WasmRunner {
     fn next_batch(&mut self, len: usize) -> &[f64] {
         // Fill the full BATCH (constant RNG consumption per call), then slice to `len`.
         if self.fell_back.is_none() {
-            if nz_kernel_run(self.inner.handle, &mut self.buf, BATCH as u32) >= 0 {
+            if nz_kernel_run(self.handle, &mut self.buf, BATCH as u32) >= 0 {
                 return &self.buf[..len];
             }
             // Instance evicted mid-run: fall back for this and all future batches (finding C5).
