@@ -11,7 +11,7 @@ Dependency status (PREGPU is otherwise complete):
 | f32 lanes in all modes | ✅ LANDED (Track B) | G1 — the GPU's numeric contract, unbent |
 | **squares64** counter RNG in all modes (not pcg4d-3r — C0's criterion 8 killed that family) | ✅ LANDED (Track C) | G1 — identical draw streams, bit for bit |
 | cancellation (native `CancelToken`, browser `AbortSignal`) | ✅ LANDED (Track A) | G3 — abort in-flight dispatches |
-| **async evaluator** (`run_async`, `sampler::*_async`) | ⏸ DEFERRED — *this plan is now its only consumer* | **G3 only** |
+| **async evaluator** (`run_async`, `sampler::*_async`) | ⏸ DEFERRED — *this plan is now its only consumer, and may not need it either* | **G3 only, and only under bridge option (a)** |
 
 **G0/G1/G2 need no async at all** — native `wgpu` polls synchronously, and that is the harness for
 all three. Async is a **G3** (browser host) requirement, which is exactly why PREGPU stopped short
@@ -109,17 +109,36 @@ two arguments that originally settled it is now void:
 - **(b) `Atomics.wait`**: the engine worker blocks while a device-owning agent runs the async
   dispatch. Needs no evaluator changes at all.
 
-~~"async-first also buys cancellation and progress for free"~~ — **this argument is spent.**
-Cancellation shipped in PREGPU Track A *without* any async (native token; browser = terminate the
-worker), so it can no longer be put on async's side of the ledger.
+**Both of the original arguments for (a) have to be re-checked, and neither survives intact.**
 
-What survives, and now carries the decision on its own: **(b) needs `SharedArrayBuffer`, hence
-cross-origin isolation (COOP/COEP)** — which `packages/core/src/pool.ts` deliberately refuses
-because the requirement is *viral for every app that installs `@noiselang/core`*. It exists today
-only in the opt-in `wasm-mt` build. So (b) would mean **two different browser GPU bridges** (one for
-isolated pages, one for everyone else) plus a second agent, a SAB protocol, and a permanent deadlock
-surface. (a) is one bridge that works everywhere. **(a) still wins — for that reason, not the old
-one.** (Native: `wgpu` + blocking poll, trivially sync — which is also our test harness either way.)
+1. ~~"async-first also buys cancellation and progress for free"~~ — **spent.** Cancellation shipped
+   in PREGPU Track A *without* any async (native token; browser = terminate the worker). It can no
+   longer be counted on async's side of the ledger.
+2. ~~"(b) needs cross-origin isolation, which we can't have"~~ — **false, and it was my error.**
+   `netlify.toml` sets `Cross-Origin-Opener-Policy: same-origin` +
+   `Cross-Origin-Embedder-Policy: require-corp` **site-wide**, so the playground *is* cross-origin
+   isolated and `SharedArrayBuffer`/`Atomics.wait` are available on it today. What `pool.ts` refuses
+   is *requiring* isolation of everyone who installs `@noiselang/core` — so it feature-detects
+   `crossOriginIsolated` and ships two builds (`wasm/` single-threaded, `wasm-mt/` threaded). **The
+   package already tiers capability on isolation.** A GPU path that needs isolation would be a third
+   item in an existing tier, not a new bridge: isolated pages get it, everyone else falls back to
+   today's wasm path — which is exactly the fallback G3 needs anyway.
+
+So the honest trade at G3 is a straight one, with no free lunch on either side:
+
+| | (a) async evaluator | (b) `Atomics.wait` |
+|---|---|---|
+| core surgery | **400–800-line eval-spine refactor** | **none** |
+| GPU on non-isolated hosts | yes | no (falls back to wasm — same tier as threads today) |
+| agents | 1 | 2 (the engine worker blocks, so a *second* agent must own the device and run the async dispatch — a blocked worker cannot run its own `mapAsync`) |
+| permanent hazards | none | SAB protocol + a deadlock surface |
+| also enables | progress reporting; a GPU backend that can simply be `await`ed | — |
+
+**Undecided, deliberately.** (b) is a real contender now — it needs *zero* changes to the
+evaluator, and the flagship deployment already has the isolation it wants. (a) buys a cleaner
+long-term architecture and GPU for embedders who never set COOP/COEP. Decide at G3 with G0's cost
+data in hand, not here. (Native: `wgpu` + blocking poll, trivially sync — which is also our test
+harness either way, under both options.)
 
 **A cost of the terminate-based cancel, to price at G3.** Browser cancellation kills the worker. If
 the worker owns the GPU device and the pipeline cache, an abort throws both away, and the
