@@ -161,6 +161,42 @@ cheaper option; WGSL has real loops, and the demos that motivate this plan (`bar
 `turboquant`, `am_vs_fm`) are all array-draw-and-fold shapes, which are loops by construction. The
 emitter has to preserve that structure rather than unroll it.
 
+### 6. The array does not spill — so the IR change stays small
+
+Finding 5 says the emitter must produce loops. There are two ways to get there, and they differ by an
+order of magnitude in how much of the engine they touch:
+
+* **Materialized array** — draw all `n` elements into a per-thread `array<f32, n>` in one loop, then
+  consume them with the ordinary (unrolled) arithmetic. Needs *one* new IR node: an array-valued
+  source, exactly like the `Rotation`/`Permutation` nodes that already exist.
+* **Fused loop** — the draw fuses into the consuming loop; no array is ever materialized. Needs
+  map/scan/reduce *region* nodes in the IR (a body subgraph with a loop variable) — a much larger
+  change.
+
+The materialized form is only viable if a per-thread array of `n` floats stays in registers. A spill
+to thread-local memory would trade the compile win for a throughput collapse. Measured (1M lanes):
+
+| n | | cold compile | dispatch | samples/s |
+|---|---|---|---|---|
+| 52 (`barrier`) | unrolled | 284 ms | 3.44 ms | 304 M/s |
+| | **array (loop draw)** | **41 ms** | **3.43 ms** | **306 M/s** |
+| | fused loop | 30 ms | 3.45 ms | 304 M/s |
+| 100 | unrolled | 566 ms | 3.44 ms | 305 M/s |
+| | **array** | **43 ms** | 4.96 ms | 211 M/s |
+| | fused loop | 30 ms | 4.96 ms | 211 M/s |
+| 256 | unrolled | 1862 ms | 9.54 ms | 110 M/s |
+| | **array** | **65 ms** | **9.51 ms** | **110 M/s** |
+| | fused loop | 30 ms | 9.36 ms | 112 M/s |
+
+**It does not spill.** The materialized array matches the fully fused loop at dispatch *at every
+size* — the Metal compiler keeps it in registers and re-fuses the consuming arithmetic back into the
+draw loop itself. Compile collapses 7–29×.
+
+So the region-node surgery is unnecessary: **one array-valued source node buys essentially the whole
+win.** (One caveat worth a knob: at `n = 100` both loop forms are 1.44× slower at dispatch than the
+unrolled one, which exposes more instruction-level parallelism across independent hashes. A partial
+unroll — 4 draws per loop iteration — should recover the ILP while keeping the compile small.)
+
 ---
 
 ## Secondary numbers

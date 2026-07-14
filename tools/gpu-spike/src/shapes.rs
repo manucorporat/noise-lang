@@ -140,6 +140,32 @@ pub fn sum_normals_looped(n: usize) -> Shape {
     Shape { name: "sum_normals_loop", body, root: "acc".into(), stmts: 4, sources: n }
 }
 
+/// The **materialized-array** form: draw all `n` elements into a per-thread `array<f32, n>` in one
+/// loop, then consume them with unrolled arithmetic.
+///
+/// This is the shape a *small* IR change produces — one new array-valued source node (`ArrDraw`,
+/// exactly like the `Rotation`/`Permutation` nodes that already exist), with every downstream vector
+/// op left as the scalar node chain it is today. It collapses the expensive part (n inlined hashes ->
+/// one loop) without needing map/scan/reduce region nodes in the IR.
+///
+/// The question it answers: does a per-thread `array<f32, n>` **spill**? GPUs have a finite register
+/// file, and a spill to thread-local memory would trade the compile win for a throughput collapse.
+/// If it holds, the IR change stays small. If it spills, the draw must FUSE into the consuming loop
+/// (see [`sum_normals_looped`]) and the IR needs the bigger surgery.
+pub fn sum_normals_array(n: usize) -> Shape {
+    let mut body = format!(
+        "    var zs: array<f32, {n}>;
+    for (var j = 0u; j < {n}u; j = j + 1u) {{
+        zs[j] = src_normal(key, j, lane, 0.0, 1.0);
+    }}
+    var acc = 0.0;\n"
+    );
+    for i in 0..n {
+        body.push_str(&format!("    acc = acc + zs[{i}];\n"));
+    }
+    Shape { name: "sum_normals_array", body, root: "acc".into(), stmts: n + 5, sources: n }
+}
+
 /// The FMA probe — the single most consequential shape in the spike.
 ///
 /// `a*b + c` may be *contracted* into a fused multiply-add (one rounding instead of two). WGSL

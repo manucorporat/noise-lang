@@ -617,6 +617,32 @@ fn main() {
     }
     println!();
 
+    // Does a per-thread array<f32,n> spill? This decides how big the IR change has to be:
+    // materialized-array (small change: one ArrDraw node) vs fused loop (big change: map/scan/reduce
+    // region nodes). Compile AND dispatch both matter — a spill shows up as a throughput collapse.
+    println!("== 4d. materialized array vs fused loop (decides the IR change size) ==");
+    println!("  {:<26} {:>13} {:>12} {:>12}", "form", "cold compile", "dispatch", "samples/s");
+    for n in [52usize, 100, 256] {
+        for (label, s) in [
+            (format!("unrolled     n={n}"), shapes::sum_normals(n)),
+            (format!("ARRAY (loop draw) n={n}"), shapes::sum_normals_array(n)),
+            (format!("FUSED loop   n={n}"), shapes::sum_normals_looped(n)),
+        ] {
+            let cold = gpu
+                .compile(&wgsl::shader_salted(Rng::Squares, Trans::Native, &s.body, &s.root, fresh_salt()))
+                .map(|(_, c)| (c.naga + c.backend).as_secs_f64())
+                .unwrap_or(f64::NAN);
+            let lanes = 1u32 << 20;
+            let Some((_, t)) = time_shape(&gpu, &s, Rng::Squares, Trans::Native, lanes, 8) else { continue };
+            let secs = t.as_secs_f64();
+            println!(
+                "  {:<26} {:>10.0} ms {:>9.2} ms {:>9.0} M/s",
+                label, cold * 1e3, secs * 1e3, f64::from(lanes) / secs / 1e6
+            );
+        }
+    }
+    println!();
+
     println!("== 6. HEAD TO HEAD: same kernel, same draws, CPU vs GPU ==");
     head_to_head(&gpu);
     println!();

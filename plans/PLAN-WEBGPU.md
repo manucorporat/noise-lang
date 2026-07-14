@@ -193,20 +193,60 @@ decision, not a surprise.
 
 - **G0 — spike. ✅ DONE (2026-07-14).** `tools/gpu-spike`; results above and in
   `tools/gpu-spike/RESULTS.md`. Verdict **GO**; three plan assumptions corrected.
+- **G½ — `ArrDraw`: keep the array in the IR.** *(New, and it comes first — G1 depends on it.)*
+
+  G0 says the emitter must loop. But it *can't*: `~[n] normal(0,1)` currently builds **n independent
+  scalar `Src` nodes** (`eval::draw_lift::draw_shaped` calls `draw_if_recipe` n times), and the array
+  exists only as a `Value::Array` at evaluation time. By the time any emitter sees the cone, the
+  structure is gone. Recovering it in `wgsl_emit` would mean loop *re-rolling* — proving n scalar
+  cones isomorphic — which is a real analysis pass, fragile (a miss silently falls back to the slow
+  path), and benefits nobody else.
+
+  So keep it instead. **One new node**, in the shape of the two array-valued sources the IR already
+  has (`Permutation { n }`, `Rotation { d }`, both `RvKind::Arr`):
+
+  ```
+  RvNode::ArrDraw { n: u32, src: Source }     // RvKind::Arr(n) — n iid draws from one recipe
+  RvNode::ArrElem { arr: RvId, k: u32 }       // static element read (NOT the random-index Gather)
+  ```
+
+  `~[n] recipe` pushes one `ArrDraw` plus n `ArrElem`s; every downstream vector op keeps building the
+  scalar node chain it builds today. The cone goes from *n sources* to **one**, which is the whole
+  ballgame — G0 finding 4 says compile tracks `nodes + ~150 × sources`.
+
+  **Each backend picks its own lowering, so nothing regresses:**
+    * *interpreter* — pattern-match `ArrElem(ArrDraw, k)` back into a direct scalar fill at
+      lowering. Byte-for-byte what it does now; zero change in the hot loop.
+    * *jit / wasm* — same: keep unrolling. Their compile costs are 3 orders of magnitude below
+      Metal's, so they have nothing to gain and a working fast path to lose.
+    * *wgsl* — emit the draw loop into a per-thread `array<f32, n>`. G0 finding 6 measured that this
+      does **not** spill: identical dispatch to a fully fused loop at n = 52/100/256, with compile
+      down 7–29×.
+
+  **This is also the fix for `turboquant` and `prisoners` on the CPU**, and that is the part worth
+  noticing: both are slow today (22.2 s / 12.9 s) *because* their cones are 17.6k / 45k nodes, which
+  puts them over `MAX_CODEGEN_NODES` and drops them to the interpreter. Collapsing the source count
+  is what lets them reach a code generator at all. The GPU is the reason to do this; it is not the
+  only beneficiary.
+
+  ⚠️ **It breaks the seed, and that has release timing attached.** Source ordinals are currently the
+  `RvId` itself (`bytecode.rs`: `Inst::Normal { src: id.0, .. }`). An `ArrDraw` is *one* node but
+  needs *n* ordinals for its elements, so ordinals must move to a dedicated sequential assignment —
+  which renumbers every source and changes every draw stream. Two consequences:
+    * It should land **before the numerics-v2 release cut**, so the new RNG, the f32 lanes and this
+      fold into one seed break rather than three.
+    * It is an improvement on its own: keying draws on `RvId` means *any* change to `simplify`
+      (a new CSE, a new fold) silently changes results. A dedicated ordinal is stable against that.
+
 - **G1 — emitter + conformance (native).** `wgsl_emit.rs`: post-order walk of the simplified cone,
   memoized `let vN: f32` per node, the shared **squares64** sources spelled in WGSL (the exact
-  `vec2<u32>` emulation the spike validated), **WGSL built-in** `log`/`sin`/`cos`, scope = the
-  CPU-codegen subset (no `Poisson`, no `Gather`). `wgpu` as a dev-dependency.
-  **Not a port of `wasm_emit`.** Two G0-driven departures, and they are the substance of G1:
-    * **Loop-form emission for array draws.** The emitter must recognize "n sources with
-      consecutive ids under one body" (which is exactly what `~[n] dist` lowers to) and emit a
-      loop rather than n inlined hashes. 19× on compile; the difference between losing to the CPU
-      and beating it on a cold forcing. This is the piece with no precedent in the other backends,
-      so it is where the design risk lives — if the simplified `RvGraph` has already dissolved the
-      array structure into anonymous scalar nodes, G1's first job is to *recover* it (a pattern
-      match over consecutive `Src` ids sharing a cone shape), or to keep it from being dissolved.
-    * **Emitted-instruction budget, not a node budget.** The cap must count `nodes + ~150 ×
-      sources`, because the emulated hash is what actually feeds the compiler.
+  `vec2<u32>` emulation the spike validated), **WGSL built-in** `log`/`sin`/`cos`, `ArrDraw` as a
+  draw loop, scope = the CPU-codegen subset (no `Poisson`, no `Gather`). `wgpu` as a dev-dependency.
+  Departures from `wasm_emit`, both G0-driven:
+    * **`ArrDraw` lowers to a loop, not n inlined hashes** (see G½). Optionally unrolled ×4 to
+      recover the instruction-level parallelism the fully-rolled loop gives up (G0 finding 6).
+    * **Emitted-instruction budget, not a node budget.** The cap counts `nodes + ~150 × sources`,
+      because the emulated hash is what actually feeds the compiler.
   Conformance, in the two tiers G0 established: **bitwise** for the draws (assert equality with
   `noise_core::rng`, exactly as the spike does), **ULP-bounded** (≤1e-6 abs) for lane arithmetic,
   asserted per device rather than trusting WGSL's loose spec floor on `sin`/`cos`.
