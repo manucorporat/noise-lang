@@ -61,6 +61,13 @@ pub enum ErrorKind {
     /// Evaluation-time failure that hasn't (yet) been given a dedicated variant — the catch-all that
     /// keeps the [`ErrorKind`] migration incremental (finding D2).
     Runtime(String),
+    /// The run was **cancelled** by its caller (PLAN-PREGPU Track A): a [`CancelToken`] was tripped
+    /// mid-forcing. Not a program error — the program is fine, someone asked it to stop — so it
+    /// carries no diagnostic and no span worth showing, and [`ErrorKind::is_runtime`] is `false`.
+    /// Hosts branch on the `"cancelled"` code (the JS layer turns it into an `AbortError`).
+    ///
+    /// [`CancelToken`]: crate::exec::CancelToken
+    Cancelled,
 }
 
 impl ErrorKind {
@@ -76,17 +83,29 @@ impl ErrorKind {
             ErrorKind::NotDrawn { .. } => "not_drawn",
             ErrorKind::ArityMismatch { .. } => "arity_mismatch",
             ErrorKind::Runtime(_) => "runtime_error",
+            ErrorKind::Cancelled => "cancelled",
         }
     }
 
     /// True for the evaluation-time error families (everything except lexer/parser errors). Handy in
     /// tests and hosts that want "a spanned semantic error" regardless of which structured variant it
     /// landed in after the D2 migration.
+    ///
+    /// [`ErrorKind::Cancelled`] is **not** one of them: the program didn't do anything wrong, its
+    /// caller stopped it.
     pub fn is_runtime(&self) -> bool {
         !matches!(
             self,
-            ErrorKind::UnexpectedChar(_) | ErrorKind::UnterminatedString | ErrorKind::Parse(_)
+            ErrorKind::UnexpectedChar(_)
+                | ErrorKind::UnterminatedString
+                | ErrorKind::Parse(_)
+                | ErrorKind::Cancelled
         )
+    }
+
+    /// True iff this is a cancellation rather than a program failure.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, ErrorKind::Cancelled)
     }
 }
 
@@ -97,6 +116,15 @@ pub struct NoiseError {
 }
 
 impl NoiseError {
+    /// The run was cancelled by its caller (PLAN-PREGPU Track A). Span is empty — a cancellation
+    /// is not attributable to a piece of source.
+    pub fn cancelled() -> Self {
+        NoiseError {
+            kind: ErrorKind::Cancelled,
+            span: Span { start: 0, end: 0 },
+        }
+    }
+
     pub fn parse(msg: impl Into<String>, span: Span) -> Self {
         NoiseError {
             kind: ErrorKind::Parse(msg.into()),
@@ -167,6 +195,9 @@ impl fmt::Display for NoiseError {
             | ErrorKind::NotDrawn { message }
             | ErrorKind::ArityMismatch { message } => format!("runtime error: {message}"),
             ErrorKind::Runtime(m) => format!("runtime error: {m}"),
+            // Not a program error: no "runtime error" prefix, and no span to point at (a
+            // cancellation happens *between* the program's steps, not at one of them).
+            ErrorKind::Cancelled => return write!(f, "cancelled"),
         };
         write!(f, "{what} (at {}..{})", self.span.start, self.span.end)
     }

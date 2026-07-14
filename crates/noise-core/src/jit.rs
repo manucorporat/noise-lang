@@ -1453,7 +1453,7 @@ mod tests {
             }
         }
         let jit_mean = sum / count as f64;
-        let interp_mean = moments(graph, id, count as usize, seed).mean;
+        let interp_mean = moments(graph, id, count as usize, seed).unwrap().mean;
         assert!(
             (jit_mean - interp_mean).abs() < 0.05 + 0.05 * interp_mean.abs(),
             "{src}: jit_mean={jit_mean} interp_mean={interp_mean}"
@@ -1676,7 +1676,7 @@ mod tests {
             _ => unreachable!(),
         };
         assert!(!supported(eng.graph(), id));
-        let m = moments(eng.graph(), id, 200_000, 7);
+        let m = moments(eng.graph(), id, 200_000, 7).unwrap();
         assert!((m.mean - 3.0).abs() < 0.05, "fallback mean = {}", m.mean);
     }
 

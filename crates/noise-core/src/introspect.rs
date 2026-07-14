@@ -312,18 +312,24 @@ pub fn dist1(
     n: usize,
     seed: u64,
     head_k: usize,
-) -> Option<Dist1> {
-    let draws = draws(graph, root, conditional, n, seed);
+) -> crate::error::Result<Option<Dist1>> {
+    let draws = draws(graph, root, conditional, n, seed)?;
     if draws.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(Dist1::from_draws(&draws, boolean, head_k))
+    Ok(Some(Dist1::from_draws(&draws, boolean, head_k)))
 }
 
 /// The raw draws behind a one-variable summary — the sampling half of [`dist1`], split out so the
 /// `stats::` builtins can bin or rank the very same numbers a `plot::` chart shows. `conditional`
 /// selects the forcing path (see [`dist1`]); an empty result means the condition never held.
-pub fn draws(graph: &RvGraph, root: RvId, conditional: bool, n: usize, seed: u64) -> Vec<f64> {
+pub fn draws(
+    graph: &RvGraph,
+    root: RvId,
+    conditional: bool,
+    n: usize,
+    seed: u64,
+) -> crate::error::Result<Vec<f64>> {
     if conditional {
         sampler::cond_sample_n(graph, root, n, seed)
     } else {
@@ -340,12 +346,12 @@ pub fn dist2(
     cond: Option<RvId>,
     n: usize,
     seed: u64,
-) -> Option<Dist2> {
-    let pairs = sampler::sample_pairs(graph, a, b, cond, n, seed);
+) -> crate::error::Result<Option<Dist2>> {
+    let pairs = sampler::sample_pairs(graph, a, b, cond, n, seed)?;
     if pairs.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(Dist2::from_pairs(&pairs, SCATTER_POINTS))
+    Ok(Some(Dist2::from_pairs(&pairs, SCATTER_POINTS)))
 }
 
 /// Per-cell moments of an array of `roots` (row-major, `rows×cols`) in one joint pass — the data
@@ -357,22 +363,27 @@ pub fn grid(
     cols: usize,
     n: usize,
     seed: u64,
-) -> DistGrid {
-    let moments = sampler::grid_moments(graph, roots, n, seed);
-    DistGrid {
+) -> crate::error::Result<DistGrid> {
+    let moments = sampler::grid_moments(graph, roots, n, seed)?;
+    Ok(DistGrid {
         rows,
         cols,
         mean: moments.iter().map(|m| m.mean).collect(),
         sd: moments.iter().map(|m| m.variance.sqrt()).collect(),
-    }
+    })
 }
 
 /// The element×element correlation matrix of a vector of `roots` (one joint pass).
-pub fn corr_grid(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> CorrMatrix {
-    CorrMatrix {
+pub fn corr_grid(
+    graph: &RvGraph,
+    roots: &[RvId],
+    n: usize,
+    seed: u64,
+) -> crate::error::Result<CorrMatrix> {
+    Ok(CorrMatrix {
         n: roots.len(),
-        corr: sampler::corr_matrix(graph, roots, n, seed),
-    }
+        corr: sampler::corr_matrix(graph, roots, n, seed)?,
+    })
 }
 
 /// Memory budget for a fan chart's joint draw matrix, in `f64` cells (`cols × n` ≈ 32 MB at the
@@ -386,10 +397,10 @@ const FAN_CELLS: usize = 4_000_000;
 /// column is sorted and read at the same five quantiles a scalar [`Dist1`] reports
 /// (q05/q25/q50/q75/q95, [`quantile_sorted`]). `n` is a *request*; it is clamped to the
 /// [`FAN_CELLS`] budget (see there) and the effective count is returned in the chart.
-pub fn fan(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> FanChart {
+pub fn fan(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> crate::error::Result<FanChart> {
     let cols = roots.len();
     let n = n.min(FAN_CELLS / cols.max(1)).max(1);
-    let draws = sampler::grid_draws(graph, roots, n, seed);
+    let draws = sampler::grid_draws(graph, roots, n, seed)?;
     let mut fc = FanChart {
         cols,
         n: n as u64,
@@ -410,7 +421,7 @@ pub fn fan(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> FanChart {
         fc.q75.push(quantile_sorted(&col, 0.75));
         fc.q95.push(quantile_sorted(&col, 0.95));
     }
-    fc
+    Ok(fc)
 }
 
 /// Linear-interpolated empirical quantile of a **sorted, non-empty** sample (numpy's type-7 rule —
@@ -609,7 +620,7 @@ mod tests {
         let sd_of = |mu: f64, sigma: f64| {
             let mut g = RvGraph::default();
             let id = g.push(RvNode::Src(Source::Normal { mu, sigma }), RvKind::Num);
-            let draws = crate::sampler::sample_n(&g, id, 100_000, 0);
+            let draws = crate::sampler::sample_n(&g, id, 100_000, 0).unwrap();
             Dist1::from_draws(&draws, false, 5).sd
         };
         // Resolvable: location/spread = 1e4, well inside f32's ~1e7 headroom.
@@ -637,10 +648,11 @@ mod tests {
             }),
             RvKind::Num,
         );
-        let draws = crate::sampler::sample_n(&g, id, 200_000, 0);
+        let draws = crate::sampler::sample_n(&g, id, 200_000, 0).unwrap();
         let d = Dist1::from_draws(&draws, false, 5);
-        let m = crate::sampler::moments(&g, id, 200_000, 0);
-        // Different sampling streams (single-stream vs per-chunk), so compare within MC error.
+        let m = crate::sampler::moments(&g, id, 200_000, 0).unwrap();
+        // Same draws now (counter keying — a chunk is a lane range), but different variance
+        // formulas (two-pass here vs Σx²-based there), so allow a numerical, not statistical, gap.
         assert!(
             (d.sd - m.variance.sqrt()).abs() < 0.05,
             "dist1 sd {} vs moments sd {}",

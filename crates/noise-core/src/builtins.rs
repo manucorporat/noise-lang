@@ -405,7 +405,7 @@ fn prob(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
                 return Ok(Value::Est { val: 0.5, se: 0.0 });
             }
             let n = clamp_to_op_budget(n, graph, *id, max_opts);
-            let p_hat = sampler::moments(graph, *id, n, P_DEFAULT_SEED).mean;
+            let p_hat = sampler::moments(graph, *id, n, P_DEFAULT_SEED)?.mean;
             // Standard error of a Monte Carlo probability estimate; rule-of-three floor keeps
             // it finite when p_hat is 0 or 1. Display rounds to the digits this justifies.
             let nf = n as f64;
@@ -476,7 +476,7 @@ fn moment(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
                 return Ok(Value::Est { val: 0.0, se: 0.0 });
             }
             let n = clamp_to_op_budget(n, graph, *id, max_opts);
-            let m = sampler::moments(graph, *id, n, P_DEFAULT_SEED);
+            let m = sampler::moments(graph, *id, n, P_DEFAULT_SEED)?;
             let nf = n as f64;
             if want_var {
                 // Asymptotic SE of a variance estimate ≈ var·sqrt(2/n) (exact for Gaussian).
@@ -562,7 +562,7 @@ fn quantile(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
                 return Ok(Value::Num(0.0));
             }
             let n = clamp_to_op_budget(n, graph, *id, max_opts);
-            let mut draws = sampler::sample_n_par(graph, *id, n, P_DEFAULT_SEED);
+            let mut draws = sampler::sample_n_par(graph, *id, n, P_DEFAULT_SEED)?;
             draws.sort_by(f64::total_cmp);
             Ok(Value::Num(crate::num::quantile_sorted(&draws, q)))
         }
@@ -638,7 +638,7 @@ pub fn prob_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value> {
     }
     let n = opt_count("P", tail.first(), default_n, span)?;
     let n = clamp_to_op_budget(n, graph, root, max_opts);
-    let (m, count) = sampler::cond_moments(graph, root, n, P_DEFAULT_SEED);
+    let (m, count) = sampler::cond_moments(graph, root, n, P_DEFAULT_SEED)?;
     if count == 0 {
         return Err(cond_never(n, span));
     }
@@ -673,7 +673,7 @@ pub fn moment_cond(name: &str, root: RvId, tail: &[Value], ctx: &QueryCtx) -> Re
     }
     let n = opt_count(name, tail.first(), default_n, span)?;
     let n = clamp_to_op_budget(n, graph, root, max_opts);
-    let (m, count) = sampler::cond_moments(graph, root, n, P_DEFAULT_SEED);
+    let (m, count) = sampler::cond_moments(graph, root, n, P_DEFAULT_SEED)?;
     if count == 0 {
         return Err(cond_never(n, span));
     }
@@ -724,7 +724,7 @@ pub fn quantile_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value
     }
     let n = opt_count("Q", tail.get(1), default_n, span)?;
     let n = clamp_to_op_budget(n, graph, root, max_opts);
-    let mut draws = sampler::cond_sample_n_par(graph, root, n, P_DEFAULT_SEED);
+    let mut draws = sampler::cond_sample_n_par(graph, root, n, P_DEFAULT_SEED)?;
     if draws.is_empty() {
         return Err(cond_never(n, span));
     }

@@ -1474,7 +1474,7 @@ mod tests {
         }
 
         let (wasm_mean, count) = run_emitted(&bytes, seed, 16);
-        let interp_mean = moments(graph, id, count as usize, seed).mean;
+        let interp_mean = moments(graph, id, count as usize, seed).unwrap().mean;
         assert!(
             (wasm_mean - interp_mean).abs() < 0.05 + 0.05 * interp_mean.abs(),
             "{src}: wasm_mean={wasm_mean} interp_mean={interp_mean}"
@@ -1571,7 +1571,7 @@ mod tests {
             let (eng, id) = graph_of(src);
             let bytes = emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("graph should emit");
             let (wasm_mean, count) = run_emitted(&bytes, 0xABCDEF, 64);
-            let interp = moments(eng.graph(), id, count as usize, 0xABCDEF).mean;
+            let interp = moments(eng.graph(), id, count as usize, 0xABCDEF).unwrap().mean;
             assert!(
                 (wasm_mean - interp).abs() < 0.05,
                 "{label}: wasm={wasm_mean} interp={interp}"

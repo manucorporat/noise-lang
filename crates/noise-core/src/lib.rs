@@ -44,6 +44,7 @@ pub(crate) mod dist;
 pub mod doc;
 pub mod error;
 pub mod eval;
+pub mod exec;
 pub(crate) mod flint;
 pub mod frontmatter;
 pub mod input;
@@ -170,7 +171,7 @@ mod bench {
             // Warm up (this compiles + JITs the kernel), then time sampling only.
             let _ = crate::sampler::moments(g, id, 4096, 1);
             let t = Instant::now();
-            let m = crate::sampler::moments(g, id, n, 0xC0FFEE);
+            let m = crate::sampler::moments(g, id, n, 0xC0FFEE).unwrap();
             let secs = t.elapsed().as_secs_f64();
             let mps = n as f64 / secs / 1e6;
             println!(

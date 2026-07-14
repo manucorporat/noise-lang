@@ -7,6 +7,7 @@
 
 use crate::backend::{compile_root, compile_roots};
 use crate::dist::{RvGraph, RvId};
+use crate::error::{NoiseError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[must_use = "Moments carries the sampled mean/variance; computing them without using them wastes the sampling pass (finding F10)"]
@@ -20,15 +21,18 @@ pub struct Moments {
 ///
 /// Columns are **f32** (the lane type — PLAN-PREGPU Track B); every caller here widens to f64 as
 /// it copies out, so the public draw vectors stay f64.
+/// Cancellable (PLAN-PREGPU Track A): the thread's installed token is checked once per batch, so a
+/// long single-stream collect aborts promptly. Like [`crate::reduce::run_reduction`], it returns
+/// `Err` rather than a short vector — a truncated sample is not a smaller sample, it's a wrong one.
 pub fn for_each_batch(
     graph: &RvGraph,
     root: RvId,
     n: usize,
     seed: u64,
     mut sink: impl FnMut(&[f32]),
-) {
+) -> Result<()> {
     if n == 0 {
-        return;
+        return Ok(());
     }
     let (program, cost) = compile_root(graph, root, n);
     crate::stats::record(n, cost.ops, cost.sources);
@@ -38,19 +42,23 @@ pub fn for_each_batch(
 
     let mut remaining = n;
     while remaining > 0 {
+        if crate::exec::cancelled() {
+            return Err(NoiseError::cancelled());
+        }
         let take = remaining.min(cap);
         sink(runner.next_batch(take));
         remaining -= take;
     }
+    Ok(())
 }
 
 /// Collect raw draws (small N / tests that need the full vector).
-pub fn sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
+pub fn sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Result<Vec<f64>> {
     let mut out = Vec::with_capacity(n);
     for_each_batch(graph, root, n, seed, |col| {
         out.extend(col.iter().map(|&x| x as f64))
-    });
-    out
+    })?;
+    Ok(out)
 }
 
 /// Collect `n` raw draws **in parallel** — the forcing path behind `Q` (quantiles, PLAN-PERF-2
@@ -68,7 +76,7 @@ pub fn sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
 /// diverge. (Before Track C this was a documented trade-off: same distribution, different draws.
 /// The guarantee got strictly stronger and the caveat is gone.) Pinned by
 /// `par_and_seq_collect_the_identical_stream`.
-pub fn sample_n_par(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
+pub fn sample_n_par(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Result<Vec<f64>> {
     crate::reduce::run_reduction(
         graph,
         root,
@@ -85,9 +93,11 @@ pub fn sample_n_par(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64
 /// identical for any thread count (native multicore for large `n`, sequential otherwise and on
 /// wasm) — and, since counter keying made a chunk a pure lane range, it folds over exactly the
 /// draws [`sample_n`] would produce, in the same order. One stream, one seeding story.
-pub fn moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Moments {
-    crate::reduce::run_reduction(graph, root, n, seed, &crate::reduce::MomentsReducer)
-        .into_moments()
+pub fn moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Result<Moments> {
+    Ok(
+        crate::reduce::run_reduction(graph, root, n, seed, &crate::reduce::MomentsReducer)?
+            .into_moments(),
+    )
 }
 
 /// Conditional moments — the forcing path behind `P(· | C)` / `E(· | C)` / `Var(· | C)`. `root`
@@ -102,10 +112,10 @@ pub fn moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Moments {
 /// the condition (e.g. `E(math::log(X) | X > -1)` with `X ~ unif(-1, 1)`) is silently biased and
 /// reports a *tighter* SE than the honest one. The fix is a dedicated condition column (see
 /// `Engine::query_cond`); deferred for the interface-ripple reason noted on `cond_sample_n`.
-pub fn cond_moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> (Moments, u64) {
+pub fn cond_moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Result<(Moments, u64)> {
     let acc =
-        crate::reduce::run_reduction(graph, root, n, seed, &crate::reduce::CondMomentsReducer);
-    (acc.into_moments(), acc.count())
+        crate::reduce::run_reduction(graph, root, n, seed, &crate::reduce::CondMomentsReducer)?;
+    Ok((acc.into_moments(), acc.count()))
 }
 
 /// Collect the in-condition draws of a conditioning root `select(C, quantity, NaN)` — every
@@ -117,12 +127,12 @@ pub fn cond_moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> (Moment
 /// "the quantity is NaN on an in-condition lane" — an in-condition NaN quantity is dropped rather
 /// than propagated, biasing the conditional quantile sample. The fix is a dedicated condition column
 /// (see `Engine::query_cond`); deferred for the same interface-ripple reason.
-pub fn cond_sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
+pub fn cond_sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Result<Vec<f64>> {
     let mut out = Vec::new();
     for_each_batch(graph, root, n, seed, |col| {
         out.extend(col.iter().filter(|x| !x.is_nan()).map(|&x| x as f64));
-    });
-    out
+    })?;
+    Ok(out)
 }
 
 /// Parallel twin of [`cond_sample_n`] — the forcing path behind `Q(x | C, q)`. Same chunked
@@ -130,7 +140,7 @@ pub fn cond_sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f6
 /// the index-ordered concatenation — the kept draws per chunk are fixed by `(seed, n)` alone, so
 /// the result stays bit-identical for any thread count. Same KNOWN HOLE (finding B2) as
 /// [`cond_sample_n`]: an in-condition NaN quantity is dropped rather than propagated.
-pub fn cond_sample_n_par(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
+pub fn cond_sample_n_par(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Result<Vec<f64>> {
     crate::reduce::run_reduction(
         graph,
         root,
@@ -157,9 +167,9 @@ fn for_each_joint_batch(
     n: usize,
     seed: u64,
     mut sink: impl FnMut(&[&[f32]], usize),
-) {
+) -> Result<()> {
     if n == 0 {
-        return;
+        return Ok(());
     }
     let (prog, cost) = compile_roots(graph, roots, n);
     // A union cone with zero RNG sources is *deterministic*: every lane of every batch is the same
@@ -175,12 +185,16 @@ fn for_each_joint_batch(
     crate::stats::record(n, cost.ops, cost.sources);
     let mut remaining = n;
     while remaining > 0 {
+        if crate::exec::cancelled() {
+            return Err(NoiseError::cancelled());
+        }
         runner.next_batch();
         let take = remaining.min(cap);
         let cols: Vec<&[f32]> = (0..roots.len()).map(|j| runner.col(j)).collect();
         sink(&cols, take);
         remaining -= take;
     }
+    Ok(())
 }
 
 /// Joint draws of two roots — the forcing path behind `corr`/`scatter` (relationship
@@ -196,9 +210,9 @@ pub fn sample_pairs(
     cond: Option<RvId>,
     n: usize,
     seed: u64,
-) -> Vec<(f64, f64)> {
+) -> Result<Vec<(f64, f64)>> {
     if n == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut roots = vec![a, b];
     if let Some(c) = cond {
@@ -214,8 +228,8 @@ pub fn sample_pairs(
                 out.push((ca[k] as f64, cb[k] as f64));
             }
         }
-    });
-    out
+    })?;
+    Ok(out)
 }
 
 /// Per-element moments of a whole set of roots in ONE joint pass — the forcing path behind a
@@ -223,16 +237,16 @@ pub fn sample_pairs(
 /// matrix); every lane draws them jointly ([`compile_roots`]), and we accumulate `Σx`/`Σx²` per
 /// element. Returns one [`Moments`] per root, in input order. Marginal moments don't *need* the
 /// joint pass, but sampling once for all elements is far cheaper than one pass each.
-pub fn grid_moments(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<Moments> {
+pub fn grid_moments(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Result<Vec<Moments>> {
     let k = roots.len();
     if k == 0 || n == 0 {
-        return vec![
+        return Ok(vec![
             Moments {
                 mean: 0.0,
                 variance: 0.0
             };
             k
-        ];
+        ]);
     }
     let (mut sum, mut sum_sq) = (vec![0.0f64; k], vec![0.0f64; k]);
     let mut count = 0u64;
@@ -249,9 +263,9 @@ pub fn grid_moments(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec
             sum_sq[j] += sq;
         }
         count += take as u64;
-    });
+    })?;
     let nf = count as f64;
-    (0..k)
+    Ok((0..k)
         .map(|j| {
             let mean = sum[j] / nf;
             Moments {
@@ -259,7 +273,7 @@ pub fn grid_moments(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec
                 variance: (sum_sq[j] / nf - mean * mean).max(0.0),
             }
         })
-        .collect()
+        .collect())
 }
 
 /// Raw per-element draws of a whole set of roots in ONE joint pass — the forcing path behind a fan
@@ -267,28 +281,28 @@ pub fn grid_moments(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec
 /// element RVs of a path; every lane draws them jointly ([`compile_roots`]), so column `j` holds the
 /// `n` lane-aligned draws of `roots[j]` — the bands a caller derives are consistent across the
 /// index. Memory is `k×n` f64s; the caller budgets `n` accordingly.
-pub fn grid_draws(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<Vec<f64>> {
+pub fn grid_draws(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Result<Vec<Vec<f64>>> {
     let k = roots.len();
     if k == 0 || n == 0 {
-        return vec![Vec::new(); k];
+        return Ok(vec![Vec::new(); k]);
     }
     let mut out: Vec<Vec<f64>> = (0..k).map(|_| Vec::with_capacity(n)).collect();
     for_each_joint_batch(graph, roots, n, seed, |cols, take| {
         for j in 0..k {
             out[j].extend(cols[j][..take].iter().map(|&x| x as f64));
         }
-    });
-    out
+    })?;
+    Ok(out)
 }
 
 /// The full `k×k` correlation matrix over a set of roots in ONE joint pass — the forcing path behind
 /// the element-vs-element heatmap (`corr` of a vector). Accumulates per-element `Σx`/`Σx²` and the
 /// pairwise `Σxᵢxⱼ`, then forms Pearson correlations. Row-major `k*k`; the diagonal is 1 (a constant
 /// element, zero variance, correlates 0 with everything). `O(k²)` per lane, so the caller caps `k`.
-pub fn corr_matrix(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<f64> {
+pub fn corr_matrix(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Result<Vec<f64>> {
     let k = roots.len();
     if k == 0 || n == 0 {
-        return vec![0.0; k * k];
+        return Ok(vec![0.0; k * k]);
     }
     let mut sum = vec![0.0f64; k];
     let mut cross = vec![0.0f64; k * k]; // upper triangle filled; symmetrized at the end
@@ -308,7 +322,7 @@ pub fn corr_matrix(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<
             }
         }
         count += take as u64;
-    });
+    })?;
     let nf = count as f64;
     let mean: Vec<f64> = sum.iter().map(|s| s / nf).collect();
     let var: Vec<f64> = (0..k)
@@ -328,7 +342,7 @@ pub fn corr_matrix(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<
             corr[j * k + i] = c; // symmetric
         }
     }
-    corr
+    Ok(corr)
 }
 
 #[cfg(test)]
@@ -361,8 +375,8 @@ mod tests {
         let sum = g.push(RvNode::Binary(BinOp::Add, x, z), RvKind::Num);
         // Above the parallel threshold, so the par path really does fan out over threads.
         let n = 500_000;
-        let seq = sample_n(&g, sum, n, 7);
-        let par = sample_n_par(&g, sum, n, 7);
+        let seq = sample_n(&g, sum, n, 7).unwrap();
+        let par = sample_n_par(&g, sum, n, 7).unwrap();
         assert_eq!(seq.len(), par.len());
         assert_eq!(
             seq.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
@@ -385,7 +399,7 @@ mod tests {
         let two = g.push(RvNode::ConstNum(2.0), RvKind::Num);
         let x2 = g.push(RvNode::Binary(BinOp::Mul, x, two), RvKind::Num);
         let n = 150_000; // ≥ MIN_DRAWS_JIT: exercises the codegen joint path where available
-        let pairs = sample_pairs(&g, x, x2, None, n, 42);
+        let pairs = sample_pairs(&g, x, x2, None, n, 42).unwrap();
         assert_eq!(pairs.len(), n);
         for &(a, b) in &pairs {
             assert!((0.0..1.0).contains(&a), "unif(0,1) draw out of range: {a}");
@@ -410,7 +424,7 @@ mod tests {
         let one = g.push(RvNode::ConstNum(1.0), RvKind::Num);
         let z1 = g.push(RvNode::Binary(BinOp::Add, z, one), RvKind::Num);
         let n = 150_000;
-        let pairs = sample_pairs(&g, z, z1, None, n, 43);
+        let pairs = sample_pairs(&g, z, z1, None, n, 43).unwrap();
         assert_eq!(pairs.len(), n);
         for &(a, b) in &pairs {
             // The lane arithmetic is f32 (Track B), so the pairing identity must be checked in the
@@ -439,7 +453,7 @@ mod tests {
             RvKind::Num,
         );
         let s = g.push(RvNode::Binary(BinOp::Add, x, y), RvKind::Num);
-        let ms = grid_moments(&g, &[x, y, s], 200_000, 7);
+        let ms = grid_moments(&g, &[x, y, s], 200_000, 7).unwrap();
         assert!(
             (ms[0].mean - 0.5).abs() < 0.01,
             "E[X]≈0.5, got {}",
@@ -465,10 +479,10 @@ mod tests {
     #[test]
     fn sample_n_zero_is_empty() {
         let (g, id) = const_graph(1.0);
-        assert!(sample_n(&g, id, 0, 0).is_empty());
+        assert!(sample_n(&g, id, 0, 0).unwrap().is_empty());
         // moments over zero draws is well-defined (no NaN), not a panic.
         assert_eq!(
-            moments(&g, id, 0, 0),
+            moments(&g, id, 0, 0).unwrap(),
             Moments {
                 mean: 0.0,
                 variance: 0.0
@@ -480,7 +494,7 @@ mod tests {
     fn sample_n_returns_exactly_n_across_a_partial_final_batch() {
         let (g, id) = const_graph(7.0);
         // 1500 is not a multiple of BATCH (1024) — exercises the sliced final batch.
-        let draws = sample_n(&g, id, 1500, 0);
+        let draws = sample_n(&g, id, 1500, 0).unwrap();
         assert_eq!(draws.len(), 1500);
         assert!(
             draws.iter().all(|&x| x == 7.0),
@@ -491,7 +505,7 @@ mod tests {
     #[test]
     fn moments_of_a_constant_have_zero_variance() {
         let (g, id) = const_graph(3.5);
-        let m = moments(&g, id, 10_000, 1);
+        let m = moments(&g, id, 10_000, 1).unwrap();
         assert_eq!(m.mean, 3.5);
         assert_eq!(m.variance, 0.0);
     }
@@ -504,7 +518,7 @@ mod tests {
             RvNode::Src(Source::UniformInt { lo: 5.0, hi: 5.0 }),
             RvKind::Num,
         );
-        let draws = sample_n(&g, id, 4096, 123);
+        let draws = sample_n(&g, id, 4096, 123).unwrap();
         assert!(
             draws.iter().all(|&x| x == 5.0),
             "unif_int(5,5) must be exactly 5"

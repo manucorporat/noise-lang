@@ -156,6 +156,19 @@ pub struct Engine {
     /// [`crate::compile_cache`]). Purely an optimization: results are bit-identical with or
     /// without a hit.
     compile_cache: crate::compile_cache::Cache,
+    /// This engine's cancellation token (PLAN-PREGPU Track A), installed as the thread's active
+    /// token for the duration of every run so the reducer's per-chunk check can see it. A host
+    /// clones it ([`Engine::cancel_token`]) and trips it from anywhere — another thread natively,
+    /// or an `AbortSignal` listener in the browser — and the in-flight forcing aborts with
+    /// `ErrorKind::Cancelled`.
+    ///
+    /// **Not** reset per run: a host must be able to grab the token *before* starting a run (that
+    /// is the whole point — you cancel a run that is already going), so resetting it at the top of
+    /// `run` would orphan the clone the host is holding. A cancelled engine therefore stays
+    /// cancelled until [`Engine::reset_cancel`] — which is the honest default, since a cancelled
+    /// run leaves the scope half-updated and the documented advice is to rebuild from a fresh
+    /// engine anyway.
+    cancel: crate::exec::CancelToken,
 }
 
 /// One item in a program's output stream — the unit `take_output` returns, in source order. `Print`
@@ -227,6 +240,7 @@ impl Engine {
             input_manifest: Vec::new(),
             stats: crate::stats::new_counters(),
             compile_cache: crate::compile_cache::new_cache(),
+            cancel: crate::exec::CancelToken::new(),
         }
     }
 
@@ -311,6 +325,45 @@ impl Engine {
         self.stats.get()
     }
 
+    /// A clone of this engine's [`CancelToken`](crate::exec::CancelToken) — the handle a host uses
+    /// to **stop a run that is already going** (PLAN-PREGPU Track A).
+    ///
+    /// Grab it *before* starting the run (that is the only order that makes sense), then trip it
+    /// from wherever the stop signal comes from: another thread natively (a CLI `Ctrl-C` handler, a
+    /// watchdog, a request timeout), or — once Track A's async spine lands — an `AbortSignal`
+    /// listener in the browser. The in-flight run aborts with `ErrorKind::Cancelled`: the reducer
+    /// notices within one 16,384-sample chunk, so even a 10⁷-draw `P(...)` stops in milliseconds
+    /// rather than running to completion.
+    ///
+    /// ```
+    /// # use noise_core::Engine;
+    /// let mut eng = Engine::new();
+    /// let token = eng.cancel_token();
+    /// std::thread::spawn(move || token.cancel()); // e.g. a Ctrl-C handler
+    /// # let _ = eng.run("1 + 1");
+    /// ```
+    ///
+    /// **A cancelled engine is stale.** Bindings that completed before the abort persist, so the
+    /// scope is half-updated; rebuild from a fresh [`Engine`] rather than trusting it. (The
+    /// playground's introspection sidecar, which relies on scope surviving across runs, must do
+    /// exactly this after a cancel.)
+    pub fn cancel_token(&self) -> crate::exec::CancelToken {
+        self.cancel.clone()
+    }
+
+    /// Trip this engine's token directly — the same thing [`cancel_token`](Engine::cancel_token)
+    /// enables, for a host that already holds the `&Engine` (a nested/embedding case).
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Give this engine a *fresh*, un-cancelled token, orphaning any clone a host still holds.
+    /// Only meaningful when deliberately reusing an engine after a cancel — see the staleness
+    /// caveat on [`cancel_token`](Engine::cancel_token).
+    pub fn reset_cancel(&mut self) {
+        self.cancel = crate::exec::CancelToken::new();
+    }
+
     /// The live top-level bindings after a [`run`](Engine::run), as `(name, kind)` pairs sorted by
     /// name. `kind` is the value's type tag — `"dist<number>"` / `"dist<bool>"` for random variables,
     /// else `"number"` / `"bool"` / `"array"` / … — so a UI (the playground variable picker) can list
@@ -358,6 +411,7 @@ impl Engine {
         // thread's active cache — for the whole run (finding B8 / PLAN-PERF-2 §4).
         let _rec = crate::stats::install(&self.stats);
         let _cache = crate::compile_cache::install(&self.compile_cache);
+        let _cancel = crate::exec::install(&self.cancel);
         self.stats.set(crate::stats::RunStats::default());
         self.dropped = 0;
         self.first_dropped_span = None;
@@ -365,6 +419,12 @@ impl Engine {
         let program = parse(src)?;
         let mut last = Value::Unit;
         for stmt in &program.stmts {
+            // Statement boundary: the coarse cancellation tier (the fine one is per reducer chunk,
+            // inside `reduce::run_reduction`). Catches a token tripped between forcings — e.g.
+            // during a long deterministic loop — without waiting for the next sampling pass.
+            if self.cancel.is_cancelled() {
+                return Err(NoiseError::cancelled());
+            }
             last = self.eval_top(stmt)?;
         }
         self.check_input_overrides()?;
@@ -426,6 +486,7 @@ impl Engine {
         use crate::doc::Document;
         let _rec = crate::stats::install(&self.stats);
         let _cache = crate::compile_cache::install(&self.compile_cache);
+        let _cancel = crate::exec::install(&self.cancel);
         self.stats.set(crate::stats::RunStats::default());
         self.dropped = 0;
         self.first_dropped_span = None;
@@ -659,7 +720,8 @@ impl Engine {
         // Account this forcing into the engine's own counters (finding B8), through its cache.
         let _rec = crate::stats::install(&self.stats);
         let _cache = crate::compile_cache::install(&self.compile_cache);
-        Ok(sampler::sample_n(&self.graph, id, n, seed))
+        let _cancel = crate::exec::install(&self.cancel);
+        sampler::sample_n(&self.graph, id, n, seed)
     }
 
     /// Rust sampling API (for tests): empirical mean + population variance of the RV `v`.
@@ -667,7 +729,8 @@ impl Engine {
         let id = self.expect_dist(v)?;
         let _rec = crate::stats::install(&self.stats);
         let _cache = crate::compile_cache::install(&self.compile_cache);
-        Ok(sampler::moments(&self.graph, id, n, seed))
+        let _cancel = crate::exec::install(&self.cancel);
+        sampler::moments(&self.graph, id, n, seed)
     }
 }
 

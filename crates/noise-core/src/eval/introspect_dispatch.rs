@@ -198,7 +198,7 @@ impl Engine {
                         Payload::One(Dist1::from_draws(&[0.0], boolean, 0)),
                     );
                 }
-                match dist1(&self.graph, root, boolean, conditional, n, seed, head_k) {
+                match dist1(&self.graph, root, boolean, conditional, n, seed, head_k)? {
                     Some(d) => summary(view, label, None, Payload::One(d)),
                     None => Err(condition_never(n, span)),
                 }
@@ -243,7 +243,7 @@ impl Engine {
                         Payload::Two(Dist2::from_pairs(&[(0.0, 0.0)], 1)),
                     );
                 }
-                match dist2(&self.graph, a, b, None, n, seed) {
+                match dist2(&self.graph, a, b, None, n, seed)? {
                     Some(d) => summary(view, la, Some(lb), Payload::Two(d)),
                     None => Err(condition_never(n, span)),
                 }
@@ -305,11 +305,11 @@ impl Engine {
                     }
                     None => target,
                 };
-                let sd = dist1(&self.graph, target_root, false, cond.is_some(), n, seed, 0)
+                let sd = dist1(&self.graph, target_root, false, cond.is_some(), n, seed, 0)?
                     .map_or(f64::NAN, |d| d.sd);
                 let mut corrs = Vec::with_capacity(cands.len());
                 for (cname, cid) in &cands {
-                    if let Some(d) = dist2(&self.graph, target, *cid, cond, n, seed) {
+                    if let Some(d) = dist2(&self.graph, target, *cid, cond, n, seed)? {
                         corrs.push((cname.clone(), d.corr));
                     }
                 }
@@ -419,7 +419,7 @@ impl Engine {
             cols,
             n,
             INTROSPECT_SEED,
-        )))
+        )?))
     }
 
     /// `corr(vec)` → the element×element correlation heatmap, sampled in one joint pass.
@@ -462,7 +462,7 @@ impl Engine {
         }
         // The pairwise matrix needs fewer draws than a single estimate; cap it to stay snappy.
         let n = self.max_samples.min(100_000);
-        Ok(corr_grid(&self.graph, &roots, n, INTROSPECT_SEED))
+        corr_grid(&self.graph, &roots, n, INTROSPECT_SEED)
     }
 
     /// Lower a vector of scalar RVs/constants to element roots (a nested array — a matrix — is a
@@ -780,7 +780,7 @@ impl Engine {
             return Ok(Value::Num(0.0));
         }
         let n = self.max_samples.min(INTROSPECT_N);
-        match dist2(&self.graph, a, b, None, n, INTROSPECT_SEED) {
+        match dist2(&self.graph, a, b, None, n, INTROSPECT_SEED)? {
             Some(d) => Ok(Value::Num(d.corr)),
             None => Err(condition_never(n, span)),
         }
@@ -801,7 +801,7 @@ impl Engine {
             return Ok(None);
         }
         let n = self.max_samples.min(INTROSPECT_N);
-        let d = draws(&self.graph, root, conditional, n, INTROSPECT_SEED);
+        let d = draws(&self.graph, root, conditional, n, INTROSPECT_SEED)?;
         if d.is_empty() {
             return Err(condition_never(n, span));
         }
@@ -886,6 +886,6 @@ impl Engine {
         }
         // The introspection budget, further clamped inside `fan` to its cols×n memory cap.
         let n = self.max_samples.min(INTROSPECT_N);
-        Ok(fan(&self.graph, &roots, n, INTROSPECT_SEED))
+        fan(&self.graph, &roots, n, INTROSPECT_SEED)
     }
 }

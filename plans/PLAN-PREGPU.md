@@ -55,6 +55,37 @@ What this buys:
 
 ## Track A — async engine
 
+**Status (2026-07-14): the cancellation core is LANDED; the async spine is not.**
+
+Cancellation turned out to be separable from async, and worth separating: on native, *nothing*
+about stopping a run needs a future. A shared flag checked in the reducer's chunk loop is the whole
+mechanism. So it shipped first, as its own low-risk cut:
+
+- ✅ `exec::CancelToken` (`Arc<AtomicBool>`, `Send + Sync`), installed as the thread's active token
+  around a run — the same install idiom `stats`/`compile_cache` already use, so the ~30 forcing call
+  sites didn't each grow a parameter.
+- ✅ `ErrorKind::Cancelled` — a **non-program** error: no span, no diagnostic, `is_runtime()` is
+  false, code `"cancelled"`. A host can tell "the user hit stop" from "the program is broken".
+- ✅ Two check tiers, exactly as designed: **per reducer chunk** (one relaxed load per 16,384
+  samples) and **per top-level statement** (catches a token tripped during a long deterministic
+  stretch). Measured cost: corpus 3953 ms vs 3938 — inside noise.
+- ✅ **The forcing paths now return `Result`** (`reduce::run_reduction`, all of `sampler`, the
+  `introspect` drivers). This is the load-bearing part, not bookkeeping: a cancelled reduction has
+  folded only *some* of its chunks, and that partial answer must never escape looking like a real
+  estimate. `Err` makes that structural instead of a rule every caller has to remember — pinned by
+  `a_cancelled_forcing_never_yields_a_partial_estimate`.
+- ✅ Host API: `Engine::cancel_token()` / `cancel()` / `reset_cancel()`. Tests in
+  `tests/cancel.rs` prove a genuinely long forcing (**8.2 s uncancelled, measured**) aborts inside
+  1.5 s — the margin is what makes the claim falsifiable. (An earlier version of that test was
+  vacuous: the default op budget silently clamped the query to 0.3 s, so "prompt cancellation" would
+  have passed even if cancellation did nothing. The test now raises `max_opts` on purpose.)
+
+**Still open — the async spine (A1b/A2/A3).** Everything below. What it adds that the token alone
+can't: (1) the *browser* can't set the flag while Rust is running — `abort()` is JS, and JS only
+runs when the engine returns to the event loop — so the web path needs a real cooperative yield;
+(2) a forcing can `await` an async backend, which is what PLAN-WEBGPU G3 routes through. The
+`CancelToken` plumbing A3 needs is already in place; A3 wires it to `AbortSignal`.
+
 Scope and design are unchanged from the former PLAN-ASYNC (full call-graph walk,
 2026-07-13). Summary; the detail that matters is the inventory and the traps.
 
@@ -130,11 +161,12 @@ stale — the playground's introspection sidecar, which relies on scope persisti
 `run()`, must rebuild from a fresh `Engine` after a cancel rather than trust partial
 state.
 
-**Steps:** A1 spine (~400–800 mechanical lines; proof: an `exec` test drives a
-pending-once future through `block_on`) · A2 `run_async` wasm export + playground `await`
-· A3 cooperative event-loop yield (statement boundaries + the ~50 ms timer in the async
-chunk driver) + `CancelToken` → `AbortSignal` wiring — real suspension *and* abort
-exercised end-to-end before any GPU code exists.
+**Steps:** ~~A0 cancellation core~~ (LANDED 2026-07-14 — token, `Cancelled` error, both check
+tiers, `Result`-threaded forcing paths, native end-to-end tests) · A1 spine (~400–800 mechanical
+lines; proof: an `exec` test drives a pending-once future through `block_on`) · A2 `run_async` wasm
+export + playground `await` · A3 cooperative event-loop yield (statement boundaries + the ~50 ms
+timer in the async chunk driver) + wire the existing `CancelToken` to `AbortSignal` — real
+suspension *and* browser abort exercised end-to-end before any GPU code exists.
 
 ## Track B — f32 lanes, f64 aggregation, everywhere — **LANDED 2026-07-14**
 
@@ -386,10 +418,10 @@ Order (owner's call, 2026-07-13): **C → B → A**, releasing after B.
    spread-vs-location limit, the exp/geometric tail cap).
    **→ NEXT: cut the numerics-v2 release here.** Both internal seed-breaks (new RNG, new lane
    type) publish as one. Nothing else is queued in front of it.
-3. **A (async)** — last (or in parallel: it touches the eval spine while B/C touch the
-   backends, overlapping only in `sampler.rs`/`builtins.rs`). It gates nothing until
-   PLAN-WEBGPU G3; A3's playground payoff (cancellation, responsive tab) just arrives
-   correspondingly later.
+3. **A (async)** — cancellation core ✅ LANDED (native abort works today); the async spine
+   remains. It touches the eval spine while B/C touched the backends, overlapping only in
+   `sampler.rs`/`builtins.rs`. It gates nothing until PLAN-WEBGPU G3; the *browser's* half of the
+   cancellation payoff (a Stop button, a responsive tab) needs A3's cooperative yield.
 4. **Then PLAN-WEBGPU** G0–G4, now inheriting: identical draw streams, an already-async
    engine, and a numeric contract the GPU doesn't bend. (G0, being dependency-free, can
    run any time earlier for its compile-time answers.)

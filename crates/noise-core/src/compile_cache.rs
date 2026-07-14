@@ -346,15 +346,15 @@ mod tests {
         let two = g.push(RvNode::ConstNum(2.0), RvKind::Num);
         let y = g.push(RvNode::Binary(BinOp::Mul, x, two), RvKind::Num);
         let n = 150_000;
-        let uncached = crate::sampler::grid_moments(&g, &[x, y], n, 7); // no cache installed
+        let uncached = crate::sampler::grid_moments(&g, &[x, y], n, 7).unwrap(); // no cache installed
 
         let cache = new_cache();
         let _i = install(&cache);
         let c0 = probe::compiles();
-        let first = crate::sampler::grid_moments(&g, &[x, y], n, 7);
+        let first = crate::sampler::grid_moments(&g, &[x, y], n, 7).unwrap();
         let c1 = probe::compiles();
         assert_eq!(c1 - c0, 1, "one joint compile");
-        let second = crate::sampler::grid_moments(&g, &[x, y], n, 7);
+        let second = crate::sampler::grid_moments(&g, &[x, y], n, 7).unwrap();
         assert_eq!(probe::compiles(), c1, "repeat joint pass must hit");
         for ((a, b), u) in first.iter().zip(&second).zip(&uncached) {
             assert_eq!(a.mean.to_bits(), b.mean.to_bits());

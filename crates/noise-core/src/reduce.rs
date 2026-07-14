@@ -21,6 +21,8 @@
 //! fastest on the target; it can never be the reason an answer changed.
 
 use crate::backend::{compile_root, Runner};
+use crate::error::{NoiseError, Result};
+use crate::exec::CancelToken;
 // `Program` (the `&dyn` seam threads hand around) only exists on a threaded executor.
 #[cfg(threaded)]
 use crate::backend::Program;
@@ -98,17 +100,31 @@ fn combine_in_order<R: Reducer>(r: &R, mut indexed: Vec<(usize, R::Acc)>) -> R::
 /// Drive a reduction over `n` draws of `root`. Parallel on native for large `n`, otherwise
 /// sequential — always over the same deterministic chunks, so the result never depends on the
 /// thread count.
+/// **Cancellable** (PLAN-PREGPU Track A): the thread's installed [`CancelToken`]
+/// ([`crate::exec`]) is checked once per chunk — one relaxed load per 16,384 samples, free against
+/// the sampling it guards — and a tripped token aborts with [`NoiseError::cancelled`]. The `Result`
+/// is the load-bearing part: a cancelled reduction has folded only *some* of its chunks, and that
+/// partial answer must never escape as though it were a real estimate. Returning `Err` makes that
+/// structural instead of a rule every caller has to remember.
 pub fn run_reduction<R: Reducer>(
     graph: &RvGraph,
     root: RvId,
     n: usize,
     seed: u64,
     r: &R,
-) -> R::Acc {
+) -> Result<R::Acc> {
     if n == 0 {
-        return r.identity();
+        return Ok(r.identity());
     }
     let n_chunks = n.div_ceil(CHUNK_SAMPLES);
+
+    // Read the token ONCE here, on the driver thread: `exec`'s thread-local is invisible inside
+    // `thread::scope`/`rayon::scope`, so the `Arc` has to travel to the workers explicitly.
+    let token = crate::exec::current();
+    // Cancelled before we even start (a host that aborted during parse/eval): don't compile.
+    if is_cancelled(&token) {
+        return Err(NoiseError::cancelled());
+    }
 
     // Compile ONCE; the resulting program is shared (by reference) across all workers. Record the
     // run-time counters here on the driver thread (before fan-out) so workers stay lock-free.
@@ -119,16 +135,26 @@ pub fn run_reduction<R: Reducer>(
     {
         let threads = chosen_threads(n, n_chunks);
         if threads > 1 {
-            return run_parallel(&*program, n, seed, r, n_chunks, threads);
+            return run_parallel(&*program, n, seed, r, n_chunks, threads, token.as_ref());
         }
     }
 
     // Sequential: one runner, every chunk in order.
     let mut runner = program.runner();
-    let indexed: Vec<(usize, R::Acc)> = (0..n_chunks)
-        .map(|i| (i, reduce_chunk(&mut *runner, r, n, i, seed)))
-        .collect();
-    combine_in_order(r, indexed)
+    let mut indexed: Vec<(usize, R::Acc)> = Vec::with_capacity(n_chunks);
+    for i in 0..n_chunks {
+        if is_cancelled(&token) {
+            return Err(NoiseError::cancelled());
+        }
+        indexed.push((i, reduce_chunk(&mut *runner, r, n, i, seed)));
+    }
+    Ok(combine_in_order(r, indexed))
+}
+
+/// One relaxed load — the whole per-chunk cancellation cost.
+#[inline]
+fn is_cancelled(token: &Option<CancelToken>) -> bool {
+    token.as_ref().is_some_and(CancelToken::is_cancelled)
 }
 
 /// Worker count: clamp available cores to the chunk count, and stay single-threaded below the
@@ -160,7 +186,8 @@ fn run_parallel<R: Reducer>(
     r: &R,
     n_chunks: usize,
     threads: usize,
-) -> R::Acc {
+    token: Option<&CancelToken>,
+) -> Result<R::Acc> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let next = AtomicUsize::new(0);
     let per_thread: Vec<Vec<(usize, R::Acc)>> = std::thread::scope(|scope| {
@@ -171,6 +198,12 @@ fn run_parallel<R: Reducer>(
                     let mut runner = program.runner();
                     let mut local: Vec<(usize, R::Acc)> = Vec::new();
                     loop {
+                        // Every worker drops out on cancel, so the scope joins promptly instead of
+                        // finishing the whole chunk list. The claimed-but-unrun chunks simply never
+                        // land — the caller is about to discard the lot anyway.
+                        if token.is_some_and(CancelToken::is_cancelled) {
+                            break;
+                        }
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         if i >= n_chunks {
                             break;
@@ -186,7 +219,12 @@ fn run_parallel<R: Reducer>(
             .map(|h| h.join().expect("reduction worker panicked"))
             .collect()
     });
-    combine_in_order(r, per_thread.into_iter().flatten().collect())
+    // Checked AFTER the join, not inside it: a worker that saw the flag left its chunks unfolded,
+    // so the collected set is partial and must not be combined into an answer.
+    if token.is_some_and(CancelToken::is_cancelled) {
+        return Err(NoiseError::cancelled());
+    }
+    Ok(combine_in_order(r, per_thread.into_iter().flatten().collect()))
 }
 
 /// Browser parallel driver (`wasm-threads`): the same work-stealing shape as the native one, run on
@@ -206,7 +244,8 @@ fn run_parallel<R: Reducer>(
     r: &R,
     n_chunks: usize,
     threads: usize,
-) -> R::Acc {
+    token: Option<&CancelToken>,
+) -> Result<R::Acc> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
@@ -222,6 +261,9 @@ fn run_parallel<R: Reducer>(
                 let mut runner = program.runner();
                 let mut local: Vec<(usize, R::Acc)> = Vec::new();
                 loop {
+                    if token.is_some_and(CancelToken::is_cancelled) {
+                        break;
+                    }
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     if i >= n_chunks {
                         break;
@@ -233,9 +275,15 @@ fn run_parallel<R: Reducer>(
         }
     });
 
+    if token.is_some_and(CancelToken::is_cancelled) {
+        return Err(NoiseError::cancelled());
+    }
     // Chunks come back in completion order; `combine_in_order` sorts by index, which is what makes
     // the answer identical to the sequential run bit for bit.
-    combine_in_order(r, collected.into_inner().expect("reduction mutex poisoned"))
+    Ok(combine_in_order(
+        r,
+        collected.into_inner().expect("reduction mutex poisoned"),
+    ))
 }
 
 // --- the moments reducer (mean + population variance), powering P / E / Var ---
@@ -472,9 +520,13 @@ mod tests {
 
         // Compile once, share the program across all the thread-count variations.
         let (program, _cost) = compile_root(g, id, n);
-        let base = run_parallel(&*program, n, seed, &r, n_chunks, 1).into_moments();
+        let base = run_parallel(&*program, n, seed, &r, n_chunks, 1, None)
+            .unwrap()
+            .into_moments();
         for t in [2usize, 3, 5, 8] {
-            let m = run_parallel(&*program, n, seed, &r, n_chunks, t).into_moments();
+            let m = run_parallel(&*program, n, seed, &r, n_chunks, t, None)
+                .unwrap()
+                .into_moments();
             assert_eq!(
                 m.mean.to_bits(),
                 base.mean.to_bits(),
@@ -564,17 +616,17 @@ mod tests {
         let r = CollectReducer { skip_nan: false };
 
         let (program, _cost) = compile_root(g, id, n);
-        let base = run_parallel(&*program, n, seed, &r, n_chunks, 1);
+        let base = run_parallel(&*program, n, seed, &r, n_chunks, 1, None).unwrap();
         assert_eq!(base.len(), n);
         for t in [2usize, 3, 5, 8] {
-            let v = run_parallel(&*program, n, seed, &r, n_chunks, t);
+            let v = run_parallel(&*program, n, seed, &r, n_chunks, t, None).unwrap();
             assert!(
                 v.len() == n && v.iter().zip(&base).all(|(a, b)| a.to_bits() == b.to_bits()),
                 "collected draws differ at {t} threads"
             );
         }
         // The public entry (its own compile + threshold + thread choice) agrees bit for bit.
-        let public = run_reduction(g, id, n, seed, &r);
+        let public = run_reduction(g, id, n, seed, &r).unwrap();
         assert!(
             public.iter().zip(&base).all(|(a, b)| a.to_bits() == b.to_bits()),
             "run_reduction disagrees with the pinned 1-thread collection"
@@ -608,8 +660,8 @@ mod tests {
             std::hint::black_box(crate::num::quantile_sorted(&draws, 0.9));
             t.elapsed().as_secs_f64() * 1e3
         };
-        let old_ms = time(&|| crate::sampler::sample_n(g, id, n, seed));
-        let new_ms = time(&|| crate::sampler::sample_n_par(g, id, n, seed));
+        let old_ms = time(&|| crate::sampler::sample_n(g, id, n, seed).unwrap());
+        let new_ms = time(&|| crate::sampler::sample_n_par(g, id, n, seed).unwrap());
         println!("\n  Q collection + sort, 5M draws of a normal cone (ms):");
         println!(
             "    sequential(old) {old_ms:8.1}   parallel(new) {new_ms:8.1}   speedup {:.2}x",
@@ -621,8 +673,8 @@ mod tests {
     #[test]
     fn moments_is_bit_reproducible_across_runs() {
         let (eng, id) = pi_graph();
-        let a = crate::sampler::moments(eng.graph(), id, 600_000, 7);
-        let b = crate::sampler::moments(eng.graph(), id, 600_000, 7);
+        let a = crate::sampler::moments(eng.graph(), id, 600_000, 7).unwrap();
+        let b = crate::sampler::moments(eng.graph(), id, 600_000, 7).unwrap();
         assert_eq!(a.mean.to_bits(), b.mean.to_bits());
         assert_eq!(a.variance.to_bits(), b.variance.to_bits());
     }
@@ -645,9 +697,9 @@ mod tests {
         let (program, _cost) = compile_root(g, id, n); // compile ONCE, shared across thread counts
 
         let drive = |threads: usize| {
-            run_parallel(&*program, n, seed, &r, n_chunks, threads); // warm up
+            let _ = run_parallel(&*program, n, seed, &r, n_chunks, threads, None); // warm up
             let t = Instant::now();
-            let m = run_parallel(&*program, n, seed, &r, n_chunks, threads);
+            let m = run_parallel(&*program, n, seed, &r, n_chunks, threads, None).unwrap();
             std::hint::black_box(m);
             n as f64 / t.elapsed().as_secs_f64() / 1e6
         };
