@@ -268,7 +268,7 @@ impl Engine {
     /// octave-spaced OU processes.
     pub(super) fn materialize_noise(&mut self, spec: NoiseSpec, n: usize) -> Vec<Value> {
         let ids = match spec.kind {
-            NoiseKind::White => (0..n).map(|_| self.normal_src(spec.sigma)).collect(),
+            NoiseKind::White => self.normal_block(spec.sigma, n),
             NoiseKind::Brown => self.brown_ids(spec.sigma, n),
             NoiseKind::Ou { tau } => self.ou_ids(spec.sigma, tau, n),
             NoiseKind::Pink => self.pink_ids(spec.sigma, n),
@@ -281,22 +281,48 @@ impl Engine {
         ids.into_iter().map(Value::Dist).collect()
     }
 
-    /// A fresh `normal(0, sigma)` source node.
-    fn normal_src(&mut self, sigma: f64) -> RvId {
-        self.graph
-            .push(RvNode::Src(Source::Normal { mu: 0.0, sigma }), RvKind::Num)
+    /// `n` iid `normal(0, sigma)` draws as **one** [`RvNode::ArrDraw`] block (PLAN-WEBGPU G½),
+    /// returning the element handles.
+    ///
+    /// The noise generators below are `n`-sample realizations built from `n` white draws, so before
+    /// this they pushed `n` independent `Src` nodes — and a shaped `~[n] recipe` draw does not reach
+    /// them (they have their own `draw_noise_shaped` path). That cost the GPU dearly and *silently*:
+    /// `noise_colors`' cone measured **256 sources → 39,680 emitted instructions**, because WGSL has
+    /// no `u64` and every source inlines ~150 ALU ops of emulated `squares64`. The gate correctly
+    /// declined it, so the demo simply never reached the GPU. Through a block it is ~1,400
+    /// instructions and one draw loop.
+    ///
+    /// Each generator needs only a *bounded* number of blocks — white one, brown one, OU two (its
+    /// first sample carries the stationary marginal `sigma`, the rest the innovation `sigma`), pink a
+    /// pair per octave — so the source count stops scaling with the realization length.
+    fn normal_block(&mut self, sigma: f64, n: usize) -> Vec<RvId> {
+        if n == 0 {
+            return Vec::new();
+        }
+        let n32 = n as u32;
+        let arr = self.graph.push(
+            RvNode::ArrDraw {
+                n: n32,
+                src: Source::Normal { mu: 0.0, sigma },
+            },
+            RvKind::Arr(n32),
+        );
+        (0..n32)
+            .map(|k| self.graph.push(RvNode::ArrElem { arr, k }, RvKind::Num))
+            .collect()
     }
 
     /// Brownian / red noise: `x_k = x_{k-1} + ε_k` with `ε ~ normal(0, sigma)` — a random walk
     /// (cumulative sum of white). Non-stationary; its variance grows with `k`.
     fn brown_ids(&mut self, sigma: f64, n: usize) -> Vec<RvId> {
+        let eps = self.normal_block(sigma, n); // ONE source block, not n sources
         let mut out = Vec::with_capacity(n);
-        let mut prev = self.normal_src(sigma);
-        if n > 0 {
-            out.push(prev);
-        }
-        for _ in 1..n {
-            let step = self.normal_src(sigma);
+        let mut prev = match eps.first() {
+            Some(&e) => e,
+            None => return out,
+        };
+        out.push(prev);
+        for &step in &eps[1..] {
             prev = self
                 .graph
                 .push(RvNode::Binary(BinOp::Add, prev, step), RvKind::Num);
@@ -312,19 +338,23 @@ impl Engine {
         let phi = (-1.0 / tau).exp();
         let innov = sigma * (1.0 - phi * phi).sqrt();
         let phi_c = self.graph.push(RvNode::ConstNum(phi), RvKind::Num);
-        let mut out = Vec::with_capacity(n);
-        let mut prev = self.normal_src(sigma); // stationary marginal
-        if n > 0 {
-            out.push(prev);
+        if n == 0 {
+            return Vec::new();
         }
-        for _ in 1..n {
-            let eps = self.normal_src(innov);
+        // Two blocks, because the two sigmas differ: the first sample carries the stationary
+        // marginal, every later one an innovation.
+        let first = self.normal_block(sigma, 1);
+        let eps = self.normal_block(innov, n - 1);
+        let mut out = Vec::with_capacity(n);
+        let mut prev = first[0];
+        out.push(prev);
+        for &e in &eps {
             let scaled = self
                 .graph
                 .push(RvNode::Binary(BinOp::Mul, phi_c, prev), RvKind::Num);
             prev = self
                 .graph
-                .push(RvNode::Binary(BinOp::Add, scaled, eps), RvKind::Num);
+                .push(RvNode::Binary(BinOp::Add, scaled, e), RvKind::Num);
             out.push(prev);
         }
         out

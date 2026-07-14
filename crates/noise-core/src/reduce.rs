@@ -126,6 +126,15 @@ pub fn run_reduction<R: Reducer>(
         return Err(NoiseError::cancelled());
     }
 
+    // The GPU takes the WHOLE forcing or none of it (PLAN-WEBGPU G2). It hooks here rather than at
+    // `Runner` because a dispatch wants >=256k lanes to be worth its ~1.2ms fixed cost, where a
+    // `Runner` pulls 1024 at a time. A decline (no adapter, a cone it can't lower, or a gate saying
+    // the CPU finishes first) simply falls through to the code below, so this can only change speed.
+    #[cfg(feature = "gpu")]
+    if let Some(acc) = crate::gpu::try_reduce(graph, root, n, seed, r, token.as_ref())? {
+        return Ok(acc); // `try_reduce` records the run stats itself, off the SIMPLIFIED cone
+    }
+
     // Compile ONCE; the resulting program is shared (by reference) across all workers. Record the
     // run-time counters here on the driver thread (before fan-out) so workers stay lock-free.
     let (program, cost) = compile_root(graph, root, n);

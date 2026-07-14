@@ -296,13 +296,47 @@ decision, not a surprise.
   which needs no f64 and is exact for every f32 argument. That restores one numeric contract across
   all four backends and hands `am_vs_fm` — the trig-heavy demo, and one of the four the plan's win is
   built on — to the GPU.
-- **G2 — reduce-driver integration + gate (native, `gpu` feature).** Chunk-range
-  dispatch, chunk-ordered fold, `MIN_WORK_GPU` measured the way `MIN_DRAWS_WASM` was
-  (bench the corpus, find where the fixed costs pay back). The gate now has **two** fixed costs to
-  amortize, and G0 says the compile is the bigger one: ~1.2 ms dispatch floor, but 0.3–1.9 s of
-  cold pipeline compile at demo scale. Pipelining (submit chunk *k+1* while folding chunk *k* —
-  free, since lanes are stateless and chunks are just ranges) hides the dispatch floor; only the
-  compile cache and the loop-form emitter can touch the other.
+- **G2 — reduce-driver integration + gate. ✅ LANDED (2026-07-14).** `src/gpu.rs`, behind
+  `--features gpu` (native, off by default). Hooks into `reduce::run_reduction`, *not* `Runner`: a
+  dispatch wants ≥256k lanes to be worth its ~1.2 ms floor where a `Runner` pulls 1024, so the GPU
+  takes the **whole forcing or none of it** — dispatching 1M-lane ranges, folding on the reducer's own
+  16,384-sample chunk boundaries in order, and handing back the accumulator. `Program`/`Runner`/
+  `Reducer` are untouched. Counter keying is what makes it legal: a chunk is just a lane range.
+  Process-wide device + content-addressed pipeline cache (keyed on the shader text). Every failure
+  path — no adapter, an unsupported cone, a rejected shader — **declines to the CPU**, so the GPU can
+  only ever change speed.
+
+  **The gate's discriminator is the cone size per draw, and that was a surprise.** I expected total
+  work; the corpus separates on `ops/draw` with a completely empty band:
+
+  | | ops/draw | GPU vs multicore JIT |
+  |---|---|---|
+  | `secretary` | 124 | **12.2×** |
+  | `barrier_option` | 401 | **4.3×** |
+  | `birthday` | 784 | **2.1×** |
+  | `am_vs_fm` | 845 | **2.0×** |
+  | `noise_colors` | 1,020 | **1.15×** |
+  | `st_petersburg` | 58 | 0.99× |
+  | `beta_bernoulli` | 37 | 0.99× |
+  | `kelly` | 6 | 0.99× |
+
+  Which is the plan's own thesis reached from the other end: a fat cone is a lane's worth of
+  independent ALU work — what a GPU is *for* — and it amortizes dispatch + compile over the *cone*
+  rather than over the draw count. A thin cone is RNG-and-memory, where a warmed multicore JIT is hard
+  to beat and the pipeline compile can never be earned back. `MIN_CONE_OPS = 100` sits inside the
+  empty band; `MAX_WGSL_INSTRS = 8000` caps the compile.
+
+  **Corpus: 3935.6 ms → 2999.2 ms (1.31×), no regressions.** `turboquant` and `prisoners` — still the
+  two heaviest — remain on the CPU because `rotation`/`permutation` are interpreter-only. They are
+  **G4's** prize, and they are now most of the remaining headroom.
+
+  A second-order find, and a load-bearing one: the noise/signal generators (`library.rs`) build an
+  `n`-sample realization from `n` white draws and have their *own* draw path, so `ArrDraw` did not
+  reach them. `noise_colors`' cone was **256 sources → 39,680 emitted instructions**; the gate
+  correctly declined it, so the demo silently never reached the GPU at all. Routing them through
+  source *blocks* (white one, brown one, OU two, pink a pair per octave) took it to **1,177
+  instructions**, and it — plus `am_vs_fm`, which shares the path — now lower. That is the second time
+  the source count, not the node count, turned out to be what mattered.
 - **G3 — browser host.** `nz_gpu_*` inline-JS shim (device ownership, content-addressed
   pipeline cache with the same LRU/liveness story as `nz_kernel_*`), the async engine's
   `run_async` path (**this is where PREGPU A1–A2 gets built — G3 is their only consumer**),

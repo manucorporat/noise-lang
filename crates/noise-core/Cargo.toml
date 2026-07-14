@@ -36,6 +36,12 @@ wasm-bindgen.workspace = true
 # has no instruction that creates a thread.
 rayon = { version = "1.10", optional = true }
 
+# The native WebGPU backend (PLAN-WEBGPU G2), behind `--features gpu`. Optional and native-only, so
+# the default build stays wasm-clean and dependency-light exactly as it was.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = { version = "26", optional = true }
+pollster = { version = "0.4", optional = true }
+
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 wasmi = "1.1"
@@ -80,3 +86,9 @@ internals = []
 # Off by default: without it wasm32 reduces sequentially, which is correct, just single-threaded.
 # Results are bit-identical either way — the executor never changes the answer (see `reduce`).
 wasm-threads = ["dep:rayon"]
+
+# Native WebGPU backend: the WGSL emitter plus a reduce-driver seam that dispatches whole lane ranges
+# to the GPU (see `gpu.rs`). Off by default; native only. Declines any cone it can't lower and any
+# forcing whose compile wouldn't pay for itself, falling back to the JIT/interpreter — so, like every
+# other backend, it can only ever change speed, never results.
+gpu = ["dep:wgpu", "dep:pollster"]

@@ -55,6 +55,8 @@ pub mod error;
 pub mod eval;
 pub mod exec;
 pub(crate) mod flint;
+#[cfg(feature = "gpu")]
+pub(crate) mod gpu;
 pub mod frontmatter;
 pub mod input;
 pub mod introspect;
@@ -121,6 +123,17 @@ pub use value::Value;
 ///   default `builtin` module (`P` / `E` / `var` / `print` / `range` / …) is active without a `use`.
 pub fn run(src: &str) -> Result<Value> {
     Engine::new().run(src)
+}
+
+/// Force every gated forcing onto the WebGPU backend, bypassing its profitability gate.
+///
+/// For the GPU test suite and the benchmark harness only. Without it those tests would pass
+/// *vacuously*: the native multicore JIT is already fast enough that the gate correctly declines most
+/// of the corpus, so the tests would be measuring the JIT while claiming to test the GPU.
+#[cfg(feature = "gpu")]
+#[doc(hidden)]
+pub fn gpu_force_for_tests() {
+    gpu::force_gpu();
 }
 
 /// The one benchmark that stays in-crate after the E3 test relocation: it reaches into
