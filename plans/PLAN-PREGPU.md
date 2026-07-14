@@ -136,7 +136,44 @@ pending-once future through `block_on`) · A2 `run_async` wasm export + playgrou
 chunk driver) + `CancelToken` → `AbortSignal` wiring — real suspension *and* abort
 exercised end-to-end before any GPU code exists.
 
-## Track B — f32 lanes, f64 aggregation, everywhere
+## Track B — f32 lanes, f64 aggregation, everywhere — **LANDED 2026-07-14**
+
+**Status: shipped, all four steps.** Every backend runs f32 lanes and is bit-identical to the
+other two (full-batch bitwise interp↔JIT↔wasm conformance). Workspace green, clippy clean,
+wasm32 builds, browser package runs in V8. **Gate CLOSED: the corpus runs 3938 ms vs 4130 ms
+post-Squares (−4.6%), and vs the 4351 ms pre-PREGPU baseline (−9.5%).**
+
+What actually shipped, and where it differs from the sketch below:
+
+- **Pair-shared draws, not "one hash per lane".** A uniform needs 24 bits and one squares64
+  supplies 48 consumable ones, so `unif`/`normal`/`exp`/`geometric` hash ONCE per lane PAIR
+  (`rng::pair_ctr` = `(src << 36) + (lane >> 1)`; even lane → low 24, odd → high 24). This is
+  the "2 × 32 out of 64" idea, taken all the way. `unif_int` is the one exception: 24-bit Lemire
+  would put the bias at `count/2²⁴`, so it keeps a per-lane counter and spends all 48 bits.
+- **The certified stream is unchanged.** Each source still walks counters 0, 1, 2, … and spends
+  every one of its 48 consumed bits, in order — that byte stream *is* what C0 certified at 1 TB.
+  Track B changed only which lane each half lands in, so criterion 8 carries over without a
+  re-run (recorded in tools/rng-cert/RESULTS.md).
+- **f32 Box–Muller drops the half-ulp nudge**: `r = sqrt(-2·ln(1 − u1))` instead of
+  `ln(u1 + ½ulp)`. On the 2⁻²⁴ grid `1 − u1` is *exactly* representable and lies in `[2⁻²⁴, 1]`,
+  so the `ln(0)` guard is structural rather than a fudge — and all three backends compute the
+  identical expression with no rounding subtleties.
+- **`CellStream` (Knuth poisson, Permutation, Rotation) stays f64 internally**, casting to f32 on
+  write. Rotation's Gram–Schmidt in particular runs in an f64 scratch: orthonormality is then
+  limited by f32 *storage* (~1e-7) instead of f32 arithmetic accumulating through an O(d³)
+  elimination (~1e-5 at d=5). `turboquant` still reproduces the paper's distortion table.
+- **Measured (M4 Pro, single thread):** `fill_uniform` **1039 M/s vs 540** (1.92× — the halving,
+  exactly as designed); `fill_normal` **90 M/s vs 86** (only 1.04× — Box–Muller is
+  transcendental-*latency* bound, so the hash was never its bottleneck). The corpus win is
+  therefore mostly uniform-side plus halved memory traffic, and the f32 polynomials
+  (~12–16% faster than the f64 ones in the latency-bound shape they actually run in).
+  **The "2× SIMD width" story remains unbanked** — neither Cranelift nor wasm auto-vectorizes
+  these loops; f32 unlocks that, it doesn't deliver it. Browser (V8, 4M draws): π 16 ms,
+  normal-heavy 25 ms, arithmetic 9 ms.
+- **The precision boundary is sharper than this plan said** (see below): a distribution whose
+  spread is more than ~10⁻⁷ of its *location* loses the spread entirely. `normal(1e8, 1)` is no
+  longer representable. Documented in LANG.md and pinned by
+  `introspect::f32_lanes_lose_a_spread_far_below_the_location`.
 
 **The line it draws.** The language has two kinds of numbers and this makes the split
 explicit: *deterministic values* (`Value::Num`, `gcd`/`modpow`, ranges, array literals,
@@ -164,19 +201,30 @@ keeps *accumulation* from being the place f32 actually hurts.
 - `sampler.rs` / `introspect.rs` — public draw vectors stay `Vec<f64>` (widen at the copy
   boundary) so quantiles/plots/stats upstream are untouched.
 
-**The smaller limits (the user-visible part):**
+**The smaller limits (the user-visible part)** — all now in LANG.md ("Numeric precision"):
 
-- `unif_int(lo, hi)`: every value in the range must be exact in f32 → require
-  `|lo|, |hi| ≤ 2²⁴` (16,777,216). Enforced at the constructor with a teaching error, in
-  all modes. Corpus audit (2026-07-13): the largest range any example draws is **365**
-  (`birthday`); nothing is near the cap. Deterministic integer builtins (`gcd`, `modpow`)
-  are untouched — they never enter a lane.
-- `poisson(lambda)`: draws above 2²⁴ stop being exact integers; cap or document (the
-  normal-approximation regime is already an approximation — document).
-- Finite range: f32 overflows at 3.4e38 where f64 ran to 1.8e308 — a lane holding
-  `2^k`-style payouts or long products can now hit `inf`. Corpus audit: `st_petersburg`'s
-  `2^(k+1)` needs k > 126 (probability 2⁻¹²⁶ — unobservable) and `barrier_option` works in
-  log-space; no example is at risk, but this goes in LANG.md as a documented boundary.
+- ✅ `unif_int(lo, hi)`: every value in the range must be exact in f32 → require
+  `|lo|, |hi| ≤ 2²⁴` (16,777,216). **Enforced at the constructor** (`builtins::INT_LANE_MAX`)
+  with a teaching error, in all modes — native and browser. Corpus audit: the largest range any
+  example draws is **365** (`birthday`); nothing is near the cap. Deterministic integer builtins
+  (`gcd`, `modpow`) are untouched — they never enter a lane.
+- ✅ `poisson(lambda)`: draws above 2²⁴ stop being exact integers — documented (only the
+  normal-approximation regime, `lambda > 500`, can reach it, and that is already an
+  approximation).
+- ✅ Finite range: f32 overflows at 3.4e38 where f64 ran to 1.8e308. `st_petersburg`'s `2^(k+1)`
+  needs k > 126 (probability 2⁻¹²⁶ — unobservable) and `barrier_option` works in log-space; no
+  example is at risk. Documented.
+- ✅ `exp`/`geometric` tails truncate at `ln(2²⁴)/rate ≈ 16.6/rate` (was 33.3/rate): the f32
+  uniform grid has no smaller positive value to invert. Tail mass beyond it is 6e-8. Documented.
+- ⚠️ **The one this plan under-sold — spread vs location.** A lane carries ~7 significant digits,
+  so a distribution whose spread is more than ~10⁻⁷ of its location cannot be represented *at
+  all*: `normal(1e8, 1)` quantizes onto f32's ~8-wide grid around 1e8 and the unit spread is gone
+  before any reducer sees it (f64 aggregation cannot rescue information the lane never carried).
+  This is inherent to f32 lanes — and to any GPU backend — not a fixable bug. The old
+  `dist1_sd_is_stable_at_huge_mean` test (finding B1's regression guard, which *sampled*
+  `normal(1e8, 1)`) was re-scoped to test `Dist1`'s two-pass formula directly on an f64 draw
+  vector — which is what B1 was actually about — and a new test pins the boundary itself.
+  `normal(1e4, 1)` and everything the corpus does is comfortably inside it.
 - Subnormal tails: f32 flushes around 1e-38; irrelevant at MC precision but noted.
 
 ## Track C — pcg4d-3r counter RNG, everywhere
@@ -320,20 +368,24 @@ The gate is judged at C-landing after these — and after the generator verdict
 
 Order (owner's call, 2026-07-13): **C → B → A**, releasing after B.
 
-0. **C0 (generator spike)** — DONE 2026-07-14 (fast battery + verdict: pcg4d-3r;
-   PractRand deep runs pending — they must be clean before the numerics-v2 release).
-1. **C (pcg4d-3r + the simplification)** — the smallest self-contained cut: swap the
+0. ✅ **C0 (generator spike)** — CLOSED 2026-07-14. Every criterion adjudicated; pcg4d and its
+   variants disqualified at 256 GB of PractRand, **squares64** certified clean at 1 TB over the
+   engine's exact consumption stream. Evidence: tools/rng-cert/RESULTS.md.
+1. ✅ **C (counter RNG + the simplification)** — LANDED 2026-07-14 with squares64 (not pcg4d-3r —
+   C0's criterion 8 killed the pcg family). Gate closed at −5.1%. Original sketch below:
+   the smallest self-contained cut: swap the
    generator, delete the stream machinery (`STREAMS`/`seed_state`/`choose_streams`/
    `latency_bound`/`chunk_seed`), lanes stay f64 for now — each f64 uniform takes the
    consumed 24 bits of two words from one hash (2⁻⁴⁸ granularity; the low byte of a word
    is never consumed, per C0). Validates the counter design (determinism,
    chunk-as-lane-range) before the wider f32 surgery.
-2. **B (f32 lanes)** — riding the already-simplified RNG layer (the fills just drop to
-   one u32 per uniform): B1 seam type change (`&[f32]`) → B2 interpreter + fills → B3
-   JIT/wasm emitters + shared f32 polys → B4 corpus re-baseline + `example_times` gate.
-   **Cut the numerics-v2 release here** — after B, not between C and B — so the two
-   internal seed-breaks publish as one (one corpus re-baseline, one LANG.md update: f32
-   lane semantics, the 2²⁴ integer-draw cap, the new RNG).
+2. ✅ **B (f32 lanes)** — LANDED 2026-07-14, all four steps (B1 seam `&[f32]` → B2 interpreter +
+   pair-shared fills → B3 JIT/wasm emitters + shared f32 polys → B4 corpus gate). Gate closed at
+   **−9.5% vs the pre-PREGPU baseline**; three-backend bitwise parity holds; LANG.md gained the
+   "Numeric precision" section (f32 lane semantics, the 2²⁴ integer-draw cap, the
+   spread-vs-location limit, the exp/geometric tail cap).
+   **→ NEXT: cut the numerics-v2 release here.** Both internal seed-breaks (new RNG, new lane
+   type) publish as one. Nothing else is queued in front of it.
 3. **A (async)** — last (or in parallel: it touches the eval spine while B/C touch the
    backends, overlapping only in `sampler.rs`/`builtins.rs`). It gates nothing until
    PLAN-WEBGPU G3; A3's playground payoff (cancellation, responsive tab) just arrives

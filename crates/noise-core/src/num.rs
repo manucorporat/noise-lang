@@ -48,6 +48,40 @@ pub fn fold_binop(op: BinOp, a: f64, b: f64) -> f64 {
     }
 }
 
+/// Floored modulo in f32 — [`floored_mod`]'s lane twin (PLAN-PREGPU Track B).
+#[inline]
+pub fn floored_mod_f32(a: f32, b: f32) -> f32 {
+    a - b * (a / b).floor()
+}
+
+/// The scalar binary kernel over **lane values** (f32, PLAN-PREGPU Track B) — [`fold_binop`]'s
+/// twin, and the single definition the columnar VM shares with both emitters.
+///
+/// `Pow` is the one op that is *not* a plain f32 operation: it computes in f64 and rounds
+/// (`powf` has no correctly-rounded f32 form we can pin across backends). That is the shared
+/// contract — the JIT's `nz_pow` shim and the wasm module's `Math.pow` import do exactly the same
+/// promote/call/demote — so all three backends agree bit-for-bit. The same shape covers `atan`,
+/// `round` and `exp` in [`crate::bytecode::apply_un`].
+#[inline]
+pub fn fold_binop_f32(op: BinOp, a: f32, b: f32) -> f32 {
+    match op {
+        BinOp::Add => a + b,
+        BinOp::Sub => a - b,
+        BinOp::Mul => a * b,
+        BinOp::Div => a / b,
+        BinOp::Mod => floored_mod_f32(a, b),
+        BinOp::Pow => ((a as f64).powf(b as f64)) as f32,
+        BinOp::Lt => (a < b) as i32 as f32,
+        BinOp::Gt => (a > b) as i32 as f32,
+        BinOp::Le => (a <= b) as i32 as f32,
+        BinOp::Ge => (a >= b) as i32 as f32,
+        BinOp::Eq => (a == b) as i32 as f32,
+        BinOp::Ne => (a != b) as i32 as f32,
+        BinOp::And => ((a != 0.0) && (b != 0.0)) as i32 as f32,
+        BinOp::Or => ((a != 0.0) || (b != 0.0)) as i32 as f32,
+    }
+}
+
 /// Format a finite `f64` without floating-point dust: print to `places` decimals, then trim
 /// trailing zeros (and a lone `.`), so `1.0000000000000002` prints `1` and `0.0871` stays `0.0871`.
 /// `0.0`/`-0.0` collapse to `"0"`; non-finite values (`inf`/`nan`) print via their default `Display`.

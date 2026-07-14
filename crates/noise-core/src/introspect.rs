@@ -562,18 +562,20 @@ mod tests {
 
     #[test]
     fn dist1_sd_is_stable_at_huge_mean() {
-        // Regression for finding B1: `normal(1e8, 1)` reported sd ≈ 17 via `E[x²] − E[x]²`; the
-        // two-pass gives the true ~1.0.
-        use crate::dist::{RvKind, RvNode, Source};
-        let mut g = RvGraph::default();
-        let id = g.push(
-            RvNode::Src(Source::Normal {
-                mu: 1e8,
-                sigma: 1.0,
-            }),
-            RvKind::Num,
-        );
-        let draws = crate::sampler::sample_n(&g, id, 200_000, 0);
+        // Regression for finding B1: over draws centered at 1e8 with unit spread, `E[x²] − E[x]²`
+        // cancels catastrophically and reported sd ≈ 17; the two-pass gives the true ~1.0.
+        //
+        // The draws are built HERE rather than sampled: this pins `Dist1`'s *formula*, which is
+        // what B1 was about, and the f64 draw vector is the type that formula actually consumes.
+        // (Sampling them is no longer possible — an f32 lane cannot resolve 1e8 ± 1; see
+        // `f32_lanes_lose_a_spread_far_below_the_location`, which pins that boundary.)
+        let draws: Vec<f64> = (0..200_000)
+            .map(|i| {
+                // A deterministic, mean-zero, unit-variance sawtooth, offset to 1e8.
+                let u = (i as f64 % 1000.0) / 1000.0; // [0, 1)
+                1e8 + (u - 0.4995) * 12f64.sqrt()
+            })
+            .collect();
         let d = Dist1::from_draws(&draws, false, 5);
         assert!(
             (d.sd - 1.0).abs() < 0.05,
@@ -590,6 +592,36 @@ mod tests {
             "sd {} vs ref {}",
             d.sd,
             var.sqrt()
+        );
+    }
+
+    /// **A stated Track B boundary, not a discovered one.** Lanes are f32 (~7 significant digits),
+    /// so a distribution whose spread is more than ~10⁻⁷ of its location cannot be represented at
+    /// all: `normal(1e8, 1)` quantizes onto an 8-wide grid and its spread collapses. Aggregation
+    /// being f64 does not rescue it — the information is gone before the reducer sees it.
+    ///
+    /// The resolvable regime is the one every example lives in (`normal(1e4, 1)` below: f32 spacing
+    /// there is ~1e-3, so a unit sd is carried to four digits). This test exists so the limit is
+    /// documented and enforced rather than rediscovered as a wrong answer; LANG.md states it too.
+    #[test]
+    fn f32_lanes_lose_a_spread_far_below_the_location() {
+        use crate::dist::{RvKind, RvNode, Source};
+        let sd_of = |mu: f64, sigma: f64| {
+            let mut g = RvGraph::default();
+            let id = g.push(RvNode::Src(Source::Normal { mu, sigma }), RvKind::Num);
+            let draws = crate::sampler::sample_n(&g, id, 100_000, 0);
+            Dist1::from_draws(&draws, false, 5).sd
+        };
+        // Resolvable: location/spread = 1e4, well inside f32's ~1e7 headroom.
+        assert!(
+            (sd_of(1e4, 1.0) - 1.0).abs() < 0.02,
+            "normal(1e4, 1) must still carry its spread"
+        );
+        // Not resolvable: location/spread = 1e8 is past f32's mantissa. The spread is LOST (the
+        // draws land on the representable grid around 1e8), so the reported sd is far below 1.
+        assert!(
+            sd_of(1e8, 1.0) < 0.5,
+            "the boundary moved — re-check the f32 lane limit documented in LANG.md"
         );
     }
 

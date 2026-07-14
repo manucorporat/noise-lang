@@ -13,10 +13,15 @@ Numbers marked **[measured]** were run on this machine (Apple M4 Pro, 14 cores,
 
 ## Where the gate stands [measured]
 
-`example_times`: **4130 ms vs 4351 ms pre-Track-C baseline (−5.1%) — gate CLOSED,
-better than baseline** after the Squares swap (trajectory: first cut +30% → lane pairing
-+19% → items 1–2 +3.8% → squares64 −5.1%). Post-swap fill ceilings: uniform 540 M/s,
-normal 102 M/s, CellStream bulk normals 100 M/s [measured].
+`example_times`: **3938 ms vs 4351 ms pre-Track-C baseline (−9.5%) — gate CLOSED, well
+better than baseline** after Track B's f32 lanes (trajectory: first cut +30% → lane pairing
++19% → items 1–2 +3.8% → squares64 −5.1% → **f32 lanes −9.5%**). Post-B fill ceilings
+[measured, M4 Pro]: uniform **1039 M/s** (was 540 — the pair-shared draw's full 2×),
+uniform_int 490 M/s, exp 260 M/s, normal **90 M/s** (was 86 — Box–Muller is
+transcendental-*latency* bound, so halving the hashing barely moves it).
+
+Browser (V8, 4M draws, emitted f32 kernel): π 16 ms · normal-heavy 25 ms · dice 23 ms ·
+arithmetic 9 ms [measured].
 
 | example | before | first cut | + pairing | + items 1–2 | note |
 |---|---|---|---|---|---|
@@ -27,19 +32,20 @@ normal 102 M/s, CellStream bulk normals 100 M/s [measured].
 | noise_colors | 336 | 432 | 350 | 355 (+6%) | ~noise |
 | clt_normal | 12 | 23 | 22 | 23 (~2×) | small absolute; below JIT gate? |
 
-Keyed-fill ceilings, single thread [measured, `bench_keyed_fills`]:
+Keyed-fill ceilings, single thread [measured, `bench_keyed_fills`] — the pcg4d-3r/f64 column is
+the original PERF-3 baseline, the last one is what ships after Squares + Track B:
 
-| fill | M draws/s | vs xoshiro era |
-|---|---|---|
-| `fill_uniform` | 554 | **faster** (~194 was the serial ceiling) |
-| `fill_uniform_int(1,6)` | 529 | faster |
-| `fill_exp` | 169 | ~parity |
-| `fill_normal` (lane-paired) | 90 | ~parity |
-| `CellStream` normals (d²=256, Rotation's shape) | **38** | ~2.4× slower — the turboquant hole |
+| fill | pcg4d-3r, f64 | squares64, **f32 (shipped)** | note |
+|---|---|---|---|
+| `fill_uniform` | 554 | **1039** | 1.92× — one hash per lane pair, the designed halving |
+| `fill_uniform_int(1,6)` | 529 | 490 | unchanged by design (still one 48-bit Lemire draw per lane) |
+| `fill_exp` | 169 | **260** | one hash + two `ln` per pair |
+| `fill_normal` (lane-paired) | 90 | 90 | **flat** — Box–Muller is `ln`+trig *latency* bound; the hash was never its bottleneck |
+| `CellStream` normals (d²=256, Rotation's shape) | 38 → 96 (item 1) | 96 | stays f64 internally (Rotation's MGS scratch) |
 
-The keyed-batch hash itself reaches 236 M hashes/s = 942 M u32 words/s
-[measured, tools/rng-cert `bench`] — the fills above that fall short of their share of
-that ceiling are leaving instruction-level parallelism or vectorization on the table.
+The honest read of that table: the RNG halving is real and lands squarely on uniform-heavy
+graphs, while normal-heavy graphs are gated by the transcendental chain — which is exactly what
+item 4 (vectorized `approx`) targets, and why it is now the top open lever.
 
 ---
 
@@ -66,14 +72,18 @@ iteration), with `Normal` nodes computing the pair once — cos to the even lane
 sin to the odd's via a side map. `n` is always `BATCH` (even) from every runner.
 Expected to recover most of the ~200 ms the three JIT examples lost.
 
-### 3. Uniform lane-pairing (2 uniforms per hash) — after B, maybe
+### 3. ~~Uniform lane-pairing (2 uniforms per hash)~~ (LANDED 2026-07-14, *as part of Track B*)
 
-A hash yields four consumable words; the f64 uniform eats two, so half the entropy is
-discarded per cell. Pairing uniforms like normals (lanes (2i, 2i+1) ← word pairs of
-hash(2i)) halves hash count for uniform columns — but `fill_uniform` is already 554 M/s
-and ~3% of turboquant, and Track B's f32 (one word per uniform) restructures this
-anyway. Do it only if a profile after items 1–2 says uniform columns matter; don't
-pre-optimize a consumption contract B will rewrite.
+Exactly as predicted, Track B rewrote this consumption contract rather than bolting pairing
+onto the f64 one — which is why the plan said not to pre-optimize it. Shipped shape: one
+squares64 (48 consumable bits) feeds a whole lane PAIR for `unif`/`normal`/`exp`/`geometric`
+— even lane takes the low 24 bits, odd the high 24. `fill_uniform` **540 → 1039 M/s (1.92×)**,
+the clean halving. `unif_int` deliberately opted out (24-bit Lemire would put the bias at
+`count/2²⁴`), so it keeps one 48-bit draw per lane.
+
+The lesson worth keeping: the win landed on `unif` and **not** on `normal` (1.04×). Box–Muller
+was never hash-bound — it is `ln` + two-branch trig latency — so halving its hashing bought
+almost nothing. Profile the bottleneck, not the op count.
 
 ### 4. Vectorized `approx` transcendentals in the interpreter lane path (P2 — now the top open lever)
 

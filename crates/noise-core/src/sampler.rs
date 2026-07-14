@@ -17,12 +17,15 @@ pub struct Moments {
 
 /// Run `n` draws of `root`, calling `sink` with each batch's filled root column slice.
 /// The last batch may be partial (`len < BATCH`); the slice carries the true length.
+///
+/// Columns are **f32** (the lane type — PLAN-PREGPU Track B); every caller here widens to f64 as
+/// it copies out, so the public draw vectors stay f64.
 pub fn for_each_batch(
     graph: &RvGraph,
     root: RvId,
     n: usize,
     seed: u64,
-    mut sink: impl FnMut(&[f64]),
+    mut sink: impl FnMut(&[f32]),
 ) {
     if n == 0 {
         return;
@@ -44,7 +47,9 @@ pub fn for_each_batch(
 /// Collect raw draws (small N / tests that need the full vector).
 pub fn sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
     let mut out = Vec::with_capacity(n);
-    for_each_batch(graph, root, n, seed, |col| out.extend_from_slice(col));
+    for_each_batch(graph, root, n, seed, |col| {
+        out.extend(col.iter().map(|&x| x as f64))
+    });
     out
 }
 
@@ -57,9 +62,12 @@ pub fn sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
 /// sequential below it and on non-threaded wasm, over the *same* chunks). The caller sorts/selects
 /// centrally.
 ///
-/// Per-chunk reseeding means this does NOT reproduce [`sample_n`]'s single ordered stream — the
-/// same trade [`moments`] made, so `Q` and `P`/`E`/`Var` now share one seeding story: deterministic
-/// in `seed`, equal in distribution, differing per-draw.
+/// **It reproduces [`sample_n`]'s stream exactly** — element for element, at any thread count.
+/// Counter keying (PLAN-PREGPU Track C) made a chunk *just a lane range*, so "chunk `i`" and
+/// "lanes `i·CHUNK ..`" are the same draws by construction; there is no per-chunk reseed left to
+/// diverge. (Before Track C this was a documented trade-off: same distribution, different draws.
+/// The guarantee got strictly stronger and the caveat is gone.) Pinned by
+/// `par_and_seq_collect_the_identical_stream`.
 pub fn sample_n_par(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
     crate::reduce::run_reduction(
         graph,
@@ -73,11 +81,10 @@ pub fn sample_n_par(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64
 /// Empirical mean + population variance over `n` draws — the forcing path behind `P`/`E`/`Var`.
 ///
 /// Delegates to the parallel, deterministic monoid reduction in [`crate::reduce`]: draws are split
-/// into fixed, independently-seeded chunks, folded with Welford, and merged in chunk-index order.
-/// The result is identical for any thread count (native multicore for large `n`, sequential
-/// otherwise and on wasm). Note this uses per-chunk seeding, so it does not consume the RNG stream
-/// identically to [`sample_n`] (which stays a single ordered stream); both are deterministic in
-/// `seed` and converge to the same values within Monte-Carlo error.
+/// into fixed lane-range chunks, folded into Σx/Σx², and merged in chunk-index order. The result is
+/// identical for any thread count (native multicore for large `n`, sequential otherwise and on
+/// wasm) — and, since counter keying made a chunk a pure lane range, it folds over exactly the
+/// draws [`sample_n`] would produce, in the same order. One stream, one seeding story.
 pub fn moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Moments {
     crate::reduce::run_reduction(graph, root, n, seed, &crate::reduce::MomentsReducer)
         .into_moments()
@@ -113,7 +120,7 @@ pub fn cond_moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> (Moment
 pub fn cond_sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
     let mut out = Vec::new();
     for_each_batch(graph, root, n, seed, |col| {
-        out.extend(col.iter().copied().filter(|x| !x.is_nan()));
+        out.extend(col.iter().filter(|x| !x.is_nan()).map(|&x| x as f64));
     });
     out
 }
@@ -140,15 +147,16 @@ pub fn cond_sample_n_par(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Ve
 /// bytecode interpreter otherwise — **record the run-time cost** here (so a
 /// `describe`/`hist`/`corr`/`fan` pass is no longer invisible in the engine's stats readout), then
 /// loop `ceil(n / cap)` batches invoking `sink(cols, take)`: `cols[j]` is `roots[j]`'s column and
-/// `take` is this (possibly partial final) batch's true length. A single ordered RNG stream (not
-/// the per-chunk reseed of [`moments`]) keeps the batch loop deterministic per backend; lane
-/// pairing across roots holds on every backend by construction (one shared instruction stream).
+/// `take` is this (possibly partial final) batch's true length. The batch loop walks lanes `0..n`
+/// in order — the same lane-keyed stream every other driver consumes (counter keying, PLAN-PREGPU
+/// Track C); lane pairing across roots holds on every backend by construction (one shared
+/// instruction stream).
 fn for_each_joint_batch(
     graph: &RvGraph,
     roots: &[RvId],
     n: usize,
     seed: u64,
-    mut sink: impl FnMut(&[&[f64]], usize),
+    mut sink: impl FnMut(&[&[f32]], usize),
 ) {
     if n == 0 {
         return;
@@ -169,7 +177,7 @@ fn for_each_joint_batch(
     while remaining > 0 {
         runner.next_batch();
         let take = remaining.min(cap);
-        let cols: Vec<&[f64]> = (0..roots.len()).map(|j| runner.col(j)).collect();
+        let cols: Vec<&[f32]> = (0..roots.len()).map(|j| runner.col(j)).collect();
         sink(&cols, take);
         remaining -= take;
     }
@@ -179,9 +187,8 @@ fn for_each_joint_batch(
 /// introspection). `a` and `b` are sampled in **one** pass over a shared instruction stream
 /// ([`compile_roots`]), so each returned `(aᵢ, bᵢ)` is one lane's *paired* draw (shared upstream
 /// randomness). When `cond` is `Some(c)`, only the lanes where `c` holds (its draw ≠ 0) are kept —
-/// the conditional relationship `corr(A, B | C)`. A single ordered RNG stream (not the per-chunk
-/// reseed of [`moments`]) keeps the batch loop deterministic; pairing holds on every backend by
-/// construction (see [`for_each_joint_batch`]).
+/// the conditional relationship `corr(A, B | C)`. Lane-keyed draws keep the batch loop
+/// deterministic; pairing holds on every backend by construction (see [`for_each_joint_batch`]).
 pub fn sample_pairs(
     graph: &RvGraph,
     a: RvId,
@@ -204,7 +211,7 @@ pub fn sample_pairs(
         let cc = if has_cond { Some(cols[2]) } else { None };
         for k in 0..take {
             if cc.is_none_or(|c| c[k] != 0.0) {
-                out.push((ca[k], cb[k]));
+                out.push((ca[k] as f64, cb[k] as f64));
             }
         }
     });
@@ -234,6 +241,7 @@ pub fn grid_moments(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec
             let col = cols[j];
             let (mut s, mut sq) = (0.0f64, 0.0f64);
             for &x in &col[..take] {
+                let x = x as f64;
                 s += x;
                 sq += x * x;
             }
@@ -267,7 +275,7 @@ pub fn grid_draws(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<V
     let mut out: Vec<Vec<f64>> = (0..k).map(|_| Vec::with_capacity(n)).collect();
     for_each_joint_batch(graph, roots, n, seed, |cols, take| {
         for j in 0..k {
-            out[j].extend_from_slice(&cols[j][..take]);
+            out[j].extend(cols[j][..take].iter().map(|&x| x as f64));
         }
     });
     out
@@ -289,7 +297,7 @@ pub fn corr_matrix(graph: &RvGraph, roots: &[RvId], n: usize, seed: u64) -> Vec<
     for_each_joint_batch(graph, roots, n, seed, |cols, take| {
         for lane in 0..take {
             for i in 0..k {
-                vals[i] = cols[i][lane];
+                vals[i] = cols[i][lane] as f64;
             }
             for i in 0..k {
                 sum[i] += vals[i];
@@ -335,6 +343,34 @@ mod tests {
         (g, id)
     }
 
+    /// Counter keying (PLAN-PREGPU Track C) made a reducer chunk *just a lane range*, so the
+    /// parallel collector must now draw the SAME stream as the sequential one — element for
+    /// element, at any thread count. If this ever fails, `Runner::position` is no longer a pure
+    /// function of `(seed, lane)` and the whole determinism story is broken.
+    #[test]
+    fn par_and_seq_collect_the_identical_stream() {
+        let mut g = RvGraph::default();
+        let x = g.push(
+            RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
+            RvKind::Num,
+        );
+        let z = g.push(
+            RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }),
+            RvKind::Num,
+        );
+        let sum = g.push(RvNode::Binary(BinOp::Add, x, z), RvKind::Num);
+        // Above the parallel threshold, so the par path really does fan out over threads.
+        let n = 500_000;
+        let seq = sample_n(&g, sum, n, 7);
+        let par = sample_n_par(&g, sum, n, 7);
+        assert_eq!(seq.len(), par.len());
+        assert_eq!(
+            seq.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            par.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            "sample_n and sample_n_par must draw the identical stream"
+        );
+    }
+
     /// The joint drivers now route through the backend seam (`backend::compile_roots`), so this
     /// pins THE joint invariant on whichever backend this build selects (interpreter, or the JIT
     /// joint kernel under `--features jit` — the draw count is above `MIN_DRAWS_JIT` on purpose):
@@ -377,7 +413,13 @@ mod tests {
         let pairs = sample_pairs(&g, z, z1, None, n, 43);
         assert_eq!(pairs.len(), n);
         for &(a, b) in &pairs {
-            assert_eq!(b, a + 1.0, "roots must share the lane's draw of Z");
+            // The lane arithmetic is f32 (Track B), so the pairing identity must be checked in the
+            // lane type: `z + 1` is one f32 add, not an f64 one over the widened draw.
+            assert_eq!(
+                b as f32,
+                a as f32 + 1.0f32,
+                "roots must share the lane's draw of Z"
+            );
         }
         let mean = pairs.iter().map(|p| p.0).sum::<f64>() / n as f64;
         assert!(mean.abs() < 0.02, "E[Z] should be ~0, got {mean}");

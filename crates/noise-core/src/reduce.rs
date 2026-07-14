@@ -3,7 +3,8 @@
 //! Sampling is an embarrassingly parallel reduction: draws are independent and the quantities we
 //! force (`P`, `E`, `Var`) are *monoid folds* over the sample stream. This module captures that
 //! with a [`Reducer`] trait — a commutative monoid over sample columns — and a driver that runs it
-//! over **fixed, deterministically-seeded chunks**.
+//! over **fixed lane-range chunks** (counter keying, PLAN-PREGPU Track C: a chunk IS a lane range,
+//! so there is nothing to seed per chunk — and the chunked stream is the sequential one).
 //!
 //! Determinism is the whole point: the chunk set and each chunk's seed depend only on `(seed, n)`,
 //! never on thread scheduling, and per-chunk accumulators are merged in **chunk-index order**. So
@@ -27,7 +28,7 @@ use crate::dist::{RvGraph, RvId};
 use crate::sampler::Moments;
 
 /// Samples per chunk: 16 batches. Small enough that even a default `N=1e6` run yields ~60 chunks
-/// — enough to keep a many-core machine load-balanced — yet large enough that per-chunk reseed and
+/// — enough to keep a many-core machine load-balanced — yet large enough that per-chunk setup and
 /// accumulator-merge stay negligible against the sampling work. **Fixed** (not thread-derived) so
 /// chunking is deterministic: the load-bearing choice for core-count-invariant results.
 const CHUNK_SAMPLES: usize = 16 * crate::bytecode::BATCH; // 16_384
@@ -45,8 +46,10 @@ const PAR_MIN_SAMPLES: usize = 1 << 18; // 262_144
 pub trait Reducer: Sync {
     type Acc: Send;
     fn identity(&self) -> Self::Acc;
-    /// Fold one batch column of draws into `acc`.
-    fn absorb(&self, acc: &mut Self::Acc, col: &[f64]);
+    /// Fold one batch column of draws into `acc`. The column is **f32** (the lane type, Track B);
+    /// every accumulator here widens to f64 on the way in, so *aggregation* — the thing that
+    /// becomes a reported estimate — never loses precision to the narrow lanes.
+    fn absorb(&self, acc: &mut Self::Acc, col: &[f32]);
     /// Combine two partial accumulators. Must be associative (with `identity` as the unit); the
     /// index-ordered fold supplies the ordering, so commutativity is optional.
     fn merge(&self, a: Self::Acc, b: Self::Acc) -> Self::Acc;
@@ -299,16 +302,18 @@ impl Reducer for MomentsReducer {
         }
     }
 
-    fn absorb(&self, acc: &mut MomentAcc, col: &[f64]) {
+    fn absorb(&self, acc: &mut MomentAcc, col: &[f32]) {
         // Element `i` always lands in lane `i % REDUCE_LANES` — a fixed mapping, so the partial
         // sums (and thus the final value) don't depend on scheduling. The `chunks_exact` + const
-        // inner loop is the idiom LLVM autovectorizes into NEON/AVX reduction code.
+        // inner loop is the idiom LLVM autovectorizes into NEON/AVX reduction code; the f32→f64
+        // widen is itself a vector convert, and the accumulators stay f64 (Track B: narrow lanes,
+        // wide sums — `x·x` in f32 would lose half the bits of Σx² before it is ever added).
         let mut lane_sum = [0.0f64; REDUCE_LANES];
         let mut lane_sq = [0.0f64; REDUCE_LANES];
         let mut chunks = col.chunks_exact(REDUCE_LANES);
         for c in chunks.by_ref() {
             for k in 0..REDUCE_LANES {
-                let x = c[k];
+                let x = c[k] as f64;
                 lane_sum[k] += x;
                 lane_sq[k] += x * x;
             }
@@ -316,6 +321,7 @@ impl Reducer for MomentsReducer {
         // Tail (fewer than REDUCE_LANES elements), then fold the lanes — fixed order both times.
         let (mut sum, mut sum_sq) = (0.0f64, 0.0f64);
         for &x in chunks.remainder() {
+            let x = x as f64;
             sum += x;
             sum_sq += x * x;
         }
@@ -364,9 +370,10 @@ impl Reducer for CondMomentsReducer {
         }
     }
 
-    fn absorb(&self, acc: &mut MomentAcc, col: &[f64]) {
+    fn absorb(&self, acc: &mut MomentAcc, col: &[f32]) {
         for &x in col {
             if !x.is_nan() {
+                let x = x as f64;
                 acc.count += 1;
                 acc.sum += x;
                 acc.sum_sq += x * x;
@@ -391,8 +398,8 @@ impl Reducer for CondMomentsReducer {
 /// sorts/selects centrally. Concatenation is associative but not commutative — deterministic anyway
 /// because the driver folds in chunk-index order (see [`Reducer::merge`]), and the downstream sort
 /// erases concatenation order entirely. So the collected vector, like the moments, is bit-identical
-/// for any thread count; it does NOT reproduce `sample_n`'s single ordered stream (per-chunk reseed
-/// — the same one-seeding-story trade `moments` already made).
+/// for any thread count — and, since counter keying made a chunk a pure lane range, it IS
+/// `sample_n`'s stream, element for element (see `sampler::sample_n_par`).
 ///
 /// `skip_nan` drops NaN lanes instead of collecting them — the conditioning sentinel of a
 /// `select(C, x, NaN)` root (`Q(x | C, q)`), mirroring [`CondMomentsReducer`] including its KNOWN
@@ -408,16 +415,18 @@ impl Reducer for CollectReducer {
         Vec::new()
     }
 
-    fn absorb(&self, acc: &mut Vec<f64>, col: &[f64]) {
+    fn absorb(&self, acc: &mut Vec<f64>, col: &[f32]) {
         // First batch of a chunk: reserve the whole chunk up front so a chunk costs exactly one
         // allocation (a chunk never exceeds CHUNK_SAMPLES draws — no doubling churn per batch).
+        // The collected vector is f64 (the public draw type — quantiles/plots/stats upstream are
+        // untouched by Track B); widening happens here, at the copy that was already happening.
         if acc.capacity() == 0 {
             acc.reserve(CHUNK_SAMPLES);
         }
         if self.skip_nan {
-            acc.extend(col.iter().copied().filter(|x| !x.is_nan()));
+            acc.extend(col.iter().filter(|x| !x.is_nan()).map(|&x| x as f64));
         } else {
-            acc.extend_from_slice(col);
+            acc.extend(col.iter().map(|&x| x as f64));
         }
     }
 
@@ -496,11 +505,11 @@ mod tests {
 
         // A representative column (small-magnitude draws, like dice/uniform outputs).
         let n = 4_000_000usize;
-        let mut col = vec![0.0f64; n];
+        let mut col = vec![0.0f32; n]; // lanes are f32 (Track B); the accumulators stay f64
         let mut z = 0x1234_5678u64;
         for x in col.iter_mut() {
             z = z.wrapping_mul(6364136223846793005).wrapping_add(1);
-            *x = ((z >> 11) as f64) * (1.0 / (1u64 << 53) as f64) * 12.0;
+            *x = ((z >> 40) as f32) * (1.0 / (1u32 << 24) as f32) * 12.0;
         }
 
         // New: Σx/Σx² (the shipped MomentsReducer).
@@ -516,6 +525,7 @@ mod tests {
         let (mut count, mut mean, mut m2) = (0u64, 0.0f64, 0.0f64);
         for &x in &col {
             count += 1;
+            let x = x as f64;
             let delta = x - mean;
             mean += delta / count as f64;
             m2 += delta * (x - mean);

@@ -183,9 +183,209 @@ pub fn sin(x: f64) -> f64 {
     quadrant(k & 3, sin_kernel(r), cos_kernel(r), false)
 }
 
+// ---------------------------------------------------------------------------
+// f32 twins (PLAN-PREGPU Track B): the lane type is f32, so these — not the f64
+// references above — are what the interpreter's lane ops and both emitters compute.
+// Same shapes, shorter series: f32 carries ~24 bits, so the tails that earn the last
+// f64 digits are pure cost here. The f64 versions stay: deterministic values
+// (`Value::Num`, const folding, the signal folder) are still f64, and the f64 `ln` is
+// what `CellStream`'s interpreter-only fills use.
+// ---------------------------------------------------------------------------
+
+/// `ln(m)` series in f32 — the atanh expansion truncated where f32 runs out of bits:
+/// with `|f| ≤ 0.1716` the dropped `f¹¹/11` term is ~3e-9, well under one f32 ulp of
+/// `ln`'s result.
+pub(crate) const LN_COEFFS_F32: [f32; 5] = [1.0, 1.0 / 3.0, 1.0 / 5.0, 1.0 / 7.0, 1.0 / 9.0];
+
+/// `sin(r)/r` tail on `[-π/4, π/4]` (Taylor, f32): dropped `r¹¹/11!` ≈ 1.8e-9 at the range end.
+pub(crate) const SIN_COEFFS_F32: [f32; 4] = [
+    -1.0 / 6.0,
+    1.0 / 120.0,
+    -1.0 / 5040.0,
+    1.0 / 362_880.0,
+];
+
+/// `cos(r)` tail on `[-π/4, π/4]` (Taylor, f32): dropped `r¹²/12!` ≈ 1.1e-10 at the range end.
+pub(crate) const COS_COEFFS_F32: [f32; 4] = [
+    1.0 / 24.0,
+    -1.0 / 720.0,
+    1.0 / 40_320.0,
+    -1.0 / 3_628_800.0,
+];
+
+/// π/2 split for the f32 Cody–Waite reduction. The high part has only 8 significant mantissa
+/// bits (`0x3FC90000`), so `k · PIO2_HI_F32` is *exact* in f32 for every `k` below 2¹⁵ — far past
+/// any `k` the guard admits — and the pair `HI + LO` pins π/2 to ~3e-11.
+pub(crate) const PIO2_HI_F32: f32 = 1.5703125;
+pub(crate) const PIO2_LO_F32: f32 =
+    (std::f64::consts::FRAC_PI_2 - PIO2_HI_F32 as f64) as f32;
+
+/// The f32 twin of [`TRIG_MAX`], and much lower: the 2-term reduction's error grows like
+/// `k · 3e-11`, and an f32 ulp near 1 is only 6e-8, so the inline poly stays trustworthy to
+/// `|x| < 2¹⁰` (k ≤ 652, error ≲ 2e-8 — a third of an ulp). Past it, all three backends defer to
+/// the accurate library `sin`/`cos` **computed in f64 and rounded to f32** (see [`sin_f32`]) —
+/// the same shape the f64 path uses, so `sin(1e12 · X)` still agrees everywhere.
+pub(crate) const TRIG_MAX_F32: f32 = (1u32 << 10) as f32;
+
+/// Subnormal lift for the f32 `ln` (smallest f32 subnormal `2^-149 · 2^25 = 2^-124` is normal).
+pub(crate) const LN_SUBNORMAL_SCALE_F32: f32 = (1u32 << 25) as f32;
+pub(crate) const LN_SUBNORMAL_CORR_F32: f32 = 25.0 * std::f32::consts::LN_2;
+
+fn horner_f32(z: f32, c: &[f32]) -> f32 {
+    c.iter().rev().fold(0.0, |acc, &ci| acc * z + ci)
+}
+
+/// `ln(x)` for `x > 0`, f32 — [`ln`]'s algorithm on f32 fields (8-bit exponent, 23-bit mantissa).
+pub fn ln_f32(x: f32) -> f32 {
+    use std::f32::consts::{LN_2, SQRT_2};
+    if x > 0.0 && x < f32::MIN_POSITIVE {
+        return ln_f32(x * LN_SUBNORMAL_SCALE_F32) - LN_SUBNORMAL_CORR_F32;
+    }
+    let bits = x.to_bits();
+    let e0 = ((bits >> 23) & 0xff) as i32 - 127;
+    let m_bits = (bits & 0x007f_ffff) | 0x3f80_0000;
+    let m0 = f32::from_bits(m_bits); // [1, 2)
+    let big = m0 > SQRT_2;
+    let m = if big { m0 * 0.5 } else { m0 };
+    let e = if big { e0 + 1 } else { e0 };
+    let f = (m - 1.0) / (m + 1.0);
+    let f2 = f * f;
+    2.0 * f * horner_f32(f2, &LN_COEFFS_F32) + (e as f32) * LN_2
+}
+
+/// Full-domain f32 `ln` — the guards both emitters lower, so `log(RV)` is bit-identical
+/// everywhere (see [`ln_guarded`]).
+pub fn ln_guarded_f32(x: f32) -> f32 {
+    if x > 0.0 {
+        if x == f32::INFINITY {
+            f32::INFINITY
+        } else {
+            ln_f32(x)
+        }
+    } else if x == 0.0 {
+        f32::NEG_INFINITY
+    } else {
+        f32::NAN
+    }
+}
+
+fn reduce_f32(x: f32) -> (f32, i32) {
+    let k = (x * std::f32::consts::FRAC_2_PI).round_ties_even();
+    let r = (x - k * PIO2_HI_F32) - k * PIO2_LO_F32;
+    (r, k as i32)
+}
+
+fn sin_kernel_f32(r: f32) -> f32 {
+    let z = r * r;
+    r + r * z * horner_f32(z, &SIN_COEFFS_F32)
+}
+
+fn cos_kernel_f32(r: f32) -> f32 {
+    let z = r * r;
+    1.0 - 0.5 * z + z * z * horner_f32(z, &COS_COEFFS_F32)
+}
+
+fn quadrant_f32(kq: i32, sin_r: f32, cos_r: f32, is_cos: bool) -> f32 {
+    let (q0, q1, q2, q3) = if is_cos {
+        (cos_r, -sin_r, -cos_r, sin_r)
+    } else {
+        (sin_r, cos_r, -sin_r, -cos_r)
+    };
+    let mut res = q0;
+    if kq == 1 {
+        res = q1;
+    }
+    if kq == 2 {
+        res = q2;
+    }
+    if kq == 3 {
+        res = q3;
+    }
+    res
+}
+
+/// `cos(x)` in f32 — inline poly under [`TRIG_MAX_F32`], else the f64 library `cos` rounded to
+/// f32. That "promote, call, demote" shape (rather than `f32::cos`, i.e. `cosf`) is the shared
+/// contract: the JIT's shim and the wasm module's `Math.cos` import both compute in f64 and
+/// round, so all three backends agree bit-for-bit on the fallback too.
+pub fn cos_f32(x: f32) -> f32 {
+    if x.abs() >= TRIG_MAX_F32 {
+        return (x as f64).cos() as f32;
+    }
+    let (r, k) = reduce_f32(x);
+    quadrant_f32(k & 3, sin_kernel_f32(r), cos_kernel_f32(r), true)
+}
+
+/// `sin(x)` in f32 (see [`cos_f32`] — same guard and f64-rounded fallback).
+pub fn sin_f32(x: f32) -> f32 {
+    if x.abs() >= TRIG_MAX_F32 {
+        return (x as f64).sin() as f32;
+    }
+    let (r, k) = reduce_f32(x);
+    quadrant_f32(k & 3, sin_kernel_f32(r), cos_kernel_f32(r), false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The f32 polynomials must track libm to within a few f32 ulps over the ranges the lane ops
+    /// exercise — the Track B bar (f32 carries ~7 decimal digits; Monte-Carlo noise dwarfs the
+    /// rest). `ln` is checked *relative*, trig *absolute* (their outputs are O(1)).
+    #[test]
+    fn f32_approximations_track_libm() {
+        let mut max_ln = 0.0f32;
+        // The whole f32-uniform-reachable ln domain: Box–Muller feeds `1 - u ∈ [2^-24, 1]`.
+        let mut x = 2f32.powi(-24);
+        while x <= 4.0 {
+            let want = (x as f64).ln() as f32;
+            let rel = (ln_f32(x) - want).abs() / want.abs().max(1.0);
+            max_ln = max_ln.max(rel);
+            x *= 1.000_01;
+        }
+        assert!(max_ln < 1e-6, "ln_f32 relative err {max_ln:e}");
+
+        // Down into the subnormals and up past 1e30 (a user can steer `math::log` anywhere).
+        let mut x = f32::MIN_POSITIVE * 0.5;
+        let mut max_wide = 0.0f32;
+        for _ in 0..300 {
+            let want = (x as f64).ln() as f32;
+            max_wide = max_wide.max((ln_f32(x) - want).abs() / want.abs().max(1.0));
+            x *= 1.7;
+        }
+        assert!(max_wide < 1e-6, "ln_f32 wide-range relative err {max_wide:e}");
+
+        let (mut max_sin, mut max_cos) = (0.0f32, 0.0f32);
+        for i in 0..400_000 {
+            let x = (i as f32 - 200_000.0) / 2_000.0; // -100 .. 100
+            max_sin = max_sin.max((sin_f32(x) - (x as f64).sin() as f32).abs());
+            max_cos = max_cos.max((cos_f32(x) - (x as f64).cos() as f32).abs());
+        }
+        assert!(max_sin < 1e-6, "sin_f32 max abs err {max_sin:e}");
+        assert!(max_cos < 1e-6, "cos_f32 max abs err {max_cos:e}");
+    }
+
+    /// Past [`TRIG_MAX_F32`] the reduction is nonsense, so the guard must hand off to the f64
+    /// library — the f32 twin of the C3 fallback (`sin(1e12 * X)`).
+    #[test]
+    fn f32_trig_agrees_past_the_reduction_limit() {
+        for &x in &[1e4f32, 1e6, 1e12, 1e20, -1e12, TRIG_MAX_F32, TRIG_MAX_F32 * 4.0] {
+            assert_eq!(sin_f32(x), (x as f64).sin() as f32, "sin_f32({x:e})");
+            assert_eq!(cos_f32(x), (x as f64).cos() as f32, "cos_f32({x:e})");
+        }
+    }
+
+    /// The exact anchors the Box–Muller path depends on: `ln(1) == 0` exactly (so `u1 == 0`
+    /// yields `r == 0`, never a NaN), and the reduced-argument kernels are exact at 0.
+    #[test]
+    fn f32_anchors() {
+        assert_eq!(ln_f32(1.0), 0.0);
+        assert_eq!(ln_guarded_f32(0.0), f32::NEG_INFINITY);
+        assert!(ln_guarded_f32(-1.0).is_nan());
+        assert_eq!(ln_guarded_f32(f32::INFINITY), f32::INFINITY);
+        assert_eq!(cos_f32(0.0), 1.0);
+        assert_eq!(sin_f32(0.0), 0.0);
+    }
 
     /// Max abs error of the approximations vs `libm` over the ranges the kernels actually exercise.
     /// The bar is ~1e-9 — far tighter than Monte-Carlo noise, so the emitted kernels are

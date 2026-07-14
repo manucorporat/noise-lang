@@ -313,8 +313,10 @@ fn complex_matmul() {
 #[test]
 fn complex_random_variable_paths() {
     // |e^{iX}| = 1 for every lane (cos²+sin² = 1): exp lifts the imaginary RV via cos/sin.
+    // Identically 1 — no Monte-Carlo error — so the only slack is lane arithmetic, and lanes are
+    // f32 (PLAN-PREGPU Track B): the bar is f32 rounding through cos/sin/hypot (~1e-7), not f64's.
     let m = run_num("X ~ rand::unif(0, 1); E(math::abs(math::exp(math::i * X)))");
-    assert!((m - 1.0).abs() < 1e-9, "E|e^iX| = {m}");
+    assert!((m - 1.0).abs() < 1e-6, "E|e^iX| = {m}");
     // exp of a *random real part* lifts too (PLAN-FINANCE F1): E[e^U] over U(0,1) = e - 1.
     let x = run_num("X ~ rand::unif(0,1); E(math::exp(X))");
     assert!(

@@ -5,13 +5,17 @@
 //! so, unlike the columnar interpreter, **no intermediate column is materialized to memory**. That
 //! fusion is the win on arithmetic-dense graphs (see the `poly_*` benches).
 //!
-//! **Counter-based RNG.** Every draw is a pure hash of `(key, global_lane, source_offset)`
-//! (pcg4d-3r — see `rng.rs` and tools/rng-cert), inlined as straight u32 arithmetic; there is no
+//! **Counter-based RNG.** Every draw is a pure hash of `(key, lane-or-pair, source_offset)`
+//! (squares64 — see `rng.rs` and tools/rng-cert), inlined as straight i64 arithmetic; there is no
 //! RNG state chain, so the old multi-stream interleave (built to overlap xoshiro's serial state
 //! latency) is gone — every loop iteration is independent and the out-of-order core overlaps them
 //! on its own. Because the interpreter keys draws identically, the JIT and interpreter agree
 //! **bit-for-bit** under a shared seed (the PLAN-PREGPU draw-stream-parity contract), not merely
 //! in distribution.
+//!
+//! **f32 lanes** (Track B). Values are `F32` SSA end to end and the output column is `f32`; one
+//! squares64 draw feeds a whole lane PAIR (48 consumed bits = two 24-bit uniforms), so the
+//! pair-unrolled loop below hashes once per two lanes for every source but `unif_int`.
 //!
 //! Scope: `unif` / `unif_int` / `normal` / `exp` / `geometric` sources, `+ - * /`, integer-constant
 //! `^`, comparisons, `&& ||`, unary `- !` and the math ufuncs, lifted `if` (`Select`), and `Gather`
@@ -42,37 +46,42 @@ use crate::rng::Key;
 /// `extern "C"` signature of a generated kernel: `kernel(out_ptr, n, key_lo, key_hi, lane0)` fills
 /// `out[0..n]` with the root draws for global lanes `lane0 .. lane0 + n` (key words and lane index
 /// are the low 32 bits of their `i64` arguments). Stateless: the same arguments always produce the
-/// same column.
-type KernelFn = unsafe extern "C" fn(*mut f64, i64, i64, i64, i64);
+/// same column. The column is `f32` (Track B).
+type KernelFn = unsafe extern "C" fn(*mut f32, i64, i64, i64, i64);
 
 // Scalar math the kernel can't express as a single CLIF instruction is delegated to these
 // `extern "C"` shims (registered as JIT symbols, called per draw). `sqrt`/`floor` are NOT here —
 // they are native CLIF instructions on the targets we run, and neither are `ln`/`sin`/`cos`, which
 // are inlined as polynomials (see `emit_ln`/`emit_trig` and [`crate::approx`]). Names are prefixed
 // `nz_` to avoid any clash with libm symbols the module might resolve itself.
-extern "C" fn nz_atan(x: f64) -> f64 {
-    x.atan()
+//
+// Each shim takes and returns `f32` but computes in `f64` and rounds — the cross-backend contract
+// (`num::fold_binop_f32`, `bytecode::apply_un`): the interpreter does the same promote/call/demote
+// and the wasm module imports the f64 `Math.*` around a promote/demote pair, so all three backends
+// agree bit-for-bit. (`f32::atan` — i.e. `atanf` — would NOT agree.)
+extern "C" fn nz_atan(x: f32) -> f32 {
+    (x as f64).atan() as f32
 }
-extern "C" fn nz_round(x: f64) -> f64 {
-    x.round()
+extern "C" fn nz_round(x: f32) -> f32 {
+    (x as f64).round() as f32
 }
-extern "C" fn nz_pow(a: f64, b: f64) -> f64 {
-    a.powf(b)
+extern "C" fn nz_pow(a: f32, b: f32) -> f32 {
+    ((a as f64).powf(b as f64)) as f32
 }
 // Accurate library `sin`/`cos` for the large-argument fallback: the inlined polynomial degrades
 // past `approx::TRIG_MAX`, so `emit_trig` calls these there to stay in agreement with the
 // interpreter's libm across the whole range (finding C3). Rare path — the compare almost always
 // picks the inline poly, so the shim is only a defended edge, not a hot cost.
-extern "C" fn nz_sin(x: f64) -> f64 {
-    x.sin()
+extern "C" fn nz_sin(x: f32) -> f32 {
+    (x as f64).sin() as f32
 }
-extern "C" fn nz_cos(x: f64) -> f64 {
-    x.cos()
+extern "C" fn nz_cos(x: f32) -> f32 {
+    (x as f64).cos() as f32
 }
 // `e^x` via the exact library `exp`, so the JIT matches the interpreter's `f64::exp` bit-for-bit
 // (finding C9 — the old `pow(e, x)` lowering could differ in the last bit from `x.exp()`).
-extern "C" fn nz_exp(x: f64) -> f64 {
-    x.exp()
+extern "C" fn nz_exp(x: f32) -> f32 {
+    (x as f64).exp() as f32
 }
 
 /// Module-level `FuncId`s for the math shims (declared once per build).
@@ -98,13 +107,13 @@ struct MathRefs {
 }
 
 /// Const gather tables materialized during emission ([`GatherClass::ConstTable`]). Each table is a
-/// `Box<[f64]>` — a stable heap address the emitted code references as an `iconst` — deduped by
+/// `Box<[f32]>` — a stable heap address the emitted code references as an `iconst` — deduped by
 /// `RvId` so a gather shared across streams/roots (per-stream memos don't cover it) is built once.
 /// The boxes land in [`JitProgramInner::_tables`], which pins their lifetime to the code's.
 struct GatherTables {
     /// Native pointer type, for emitting the base-address `iconst`.
     ptr_ty: Type,
-    boxes: Vec<Box<[f64]>>,
+    boxes: Vec<Box<[f32]>>,
     by_node: HashMap<RvId, usize>,
 }
 
@@ -118,12 +127,12 @@ impl GatherTables {
     }
 
     /// Base pointer of node `id`'s table, materializing it from the `ConstNum` elems on first use.
-    fn base_ptr(&mut self, graph: &RvGraph, id: RvId, elems: &[RvId]) -> *const f64 {
+    fn base_ptr(&mut self, graph: &RvGraph, id: RvId, elems: &[RvId]) -> *const f32 {
         let slot = *self.by_node.entry(id).or_insert_with(|| {
-            let table: Box<[f64]> = elems
+            let table: Box<[f32]> = elems
                 .iter()
                 .map(|&e| match graph.node(e) {
-                    RvNode::ConstNum(x) => *x,
+                    RvNode::ConstNum(x) => *x as f32,
                     _ => unreachable!("ConstTable gather has only ConstNum elems"),
                 })
                 .collect();
@@ -221,11 +230,11 @@ struct JitProgramInner {
     // compiled programs per Engine) rather than to reinstate the free.
     _module: JITModule,
     func: KernelFn,
-    /// Const gather tables the kernel loads from ([`GatherClass::ConstTable`]): each `Box<[f64]>`
+    /// Const gather tables the kernel loads from ([`GatherClass::ConstTable`]): each `Box<[f32]>`
     /// is a stable heap allocation whose address was baked into the code as an `iconst`, so the
     /// program must own them exactly as long as the code (moving the `Vec` moves only the box
     /// pointers, never the table storage). Read-only after build — see the Send/Sync note below.
-    _tables: Vec<Box<[f64]>>,
+    _tables: Vec<Box<[f32]>>,
 }
 
 // SAFETY: after `finalize_definitions`, the module's code is immutable and we never touch the
@@ -257,7 +266,7 @@ impl Program for JitProgram {
 /// draw key + lane cursor (the kernel itself is stateless).
 struct JitRunner {
     inner: Arc<JitProgramInner>,
-    buf: Vec<f64>,
+    buf: Vec<f32>,
     key: Key,
     lane: u32,
 }
@@ -268,10 +277,10 @@ impl Runner for JitRunner {
         self.lane = lane;
     }
 
-    fn next_batch(&mut self, len: usize) -> &[f64] {
+    fn next_batch(&mut self, len: usize) -> &[f32] {
         // Always fill the full BATCH (constant lane consumption per call), then slice to `len`.
         let n = self.buf.len() as i64;
-        // SAFETY: `func` is a finalized kernel with this exact ABI; `buf` holds `n` f64s, valid
+        // SAFETY: `func` is a finalized kernel with this exact ABI; `buf` holds `n` f32s, valid
         // for the duration of the call.
         unsafe {
             (self.inner.func)(
@@ -315,7 +324,7 @@ impl JointProgram for JitJointProgram {
 struct JitJointRunner {
     inner: Arc<JitProgramInner>,
     k: usize,
-    buf: Vec<f64>,
+    buf: Vec<f32>,
     key: Key,
     lane: u32,
 }
@@ -328,7 +337,7 @@ impl JointRunner for JitJointRunner {
 
     fn next_batch(&mut self) {
         debug_assert_eq!(self.buf.len(), self.k * BATCH);
-        // SAFETY: `func` is a finalized kernel with this exact ABI; `buf` holds `k * BATCH` f64s
+        // SAFETY: `func` is a finalized kernel with this exact ABI; `buf` holds `k * BATCH` f32s
         // (the kernel writes lanes `0..BATCH` of each of the `k` BATCH-strided columns), valid for
         // the duration of the call.
         unsafe {
@@ -343,7 +352,7 @@ impl JointRunner for JitJointRunner {
         self.lane = self.lane.wrapping_add(BATCH as u32);
     }
 
-    fn col(&self, j: usize) -> &[f64] {
+    fn col(&self, j: usize) -> &[f32] {
         &self.buf[j * BATCH..(j + 1) * BATCH]
     }
 
@@ -397,10 +406,10 @@ fn build_kernel(graph: &RvGraph, roots: &[RvId]) -> Result<JitProgramInner, Stri
     builder.symbol("nz_exp", nz_exp as *const u8);
     let mut module = JITModule::new(builder);
 
-    // Declare the math shims as imports (f64->f64, except `pow` which is f64,f64->f64).
+    // Declare the math shims as imports (f32->f32, except `pow` which is f32,f32->f32).
     let math_ids = declare_math(&mut module)?;
 
-    // kernel(out: *mut f64, n: i64, key_lo: i64, key_hi: i64, lane0: i64)
+    // kernel(out: *mut f32, n: i64, key_lo: i64, key_hi: i64, lane0: i64)
     let ptr = module.target_config().pointer_type();
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(ptr)); // out
@@ -486,13 +495,13 @@ fn build_kernel(graph: &RvGraph, roots: &[RvId]) -> Result<JitProgramInner, Stri
             let even_ctx = DrawCtx { key, lane };
             let mut pair = PairMode::Even(HashMap::new());
             let mut memo: HashMap<RvId, Value> = HashMap::new();
-            let off = fb.ins().imul_imm(iv, 8);
+            let off = fb.ins().imul_imm(iv, 4);
             let addr = fb.ins().iadd(out, off);
             for (r, &root) in roots.iter().enumerate() {
                 let result =
                     emit_node(&mut fb, graph, root, even_ctx, &math, &mut memo, &mut tables, &mut pair);
                 fb.ins()
-                    .store(MemFlags::trusted(), result, addr, (r * BATCH * 8) as i32);
+                    .store(MemFlags::trusted(), result, addr, (r * BATCH * 4) as i32);
             }
             let sin_bank = match pair {
                 PairMode::Even(m) => m,
@@ -506,20 +515,20 @@ fn build_kernel(graph: &RvGraph, roots: &[RvId]) -> Result<JitProgramInner, Stri
                 let result =
                     emit_node(&mut fb, graph, root, odd_ctx, &math, &mut memo, &mut tables, &mut pair);
                 fb.ins()
-                    .store(MemFlags::trusted(), result, addr, ((r * BATCH + 1) * 8) as i32);
+                    .store(MemFlags::trusted(), result, addr, ((r * BATCH + 1) * 4) as i32);
             }
             2
         } else {
             let ctx = DrawCtx { key, lane };
             let mut pair = PairMode::Single;
             let mut memo: HashMap<RvId, Value> = HashMap::new();
-            let off = fb.ins().imul_imm(iv, 8);
+            let off = fb.ins().imul_imm(iv, 4);
             let addr = fb.ins().iadd(out, off);
             for (r, &root) in roots.iter().enumerate() {
                 let result =
                     emit_node(&mut fb, graph, root, ctx, &math, &mut memo, &mut tables, &mut pair);
                 fb.ins()
-                    .store(MemFlags::trusted(), result, addr, (r * BATCH * 8) as i32);
+                    .store(MemFlags::trusted(), result, addr, (r * BATCH * 4) as i32);
             }
             1
         };
@@ -559,15 +568,15 @@ fn build_kernel(graph: &RvGraph, roots: &[RvId]) -> Result<JitProgramInner, Stri
 fn declare_math(module: &mut JITModule) -> Result<MathIds, String> {
     let sig1 = {
         let mut s = module.make_signature();
-        s.params.push(AbiParam::new(types::F64));
-        s.returns.push(AbiParam::new(types::F64));
+        s.params.push(AbiParam::new(types::F32));
+        s.returns.push(AbiParam::new(types::F32));
         s
     };
     let sig2 = {
         let mut s = module.make_signature();
-        s.params.push(AbiParam::new(types::F64));
-        s.params.push(AbiParam::new(types::F64));
-        s.returns.push(AbiParam::new(types::F64));
+        s.params.push(AbiParam::new(types::F32));
+        s.params.push(AbiParam::new(types::F32));
+        s.returns.push(AbiParam::new(types::F32));
         s
     };
     let decl = |module: &mut JITModule, name: &str, sig: &cranelift::codegen::ir::Signature| {
@@ -620,15 +629,37 @@ struct DrawCtx {
 /// dwarfs. Comfortably above every JIT-profitable normal-heavy example.
 const PAIR_UNROLL_MAX_NODES: usize = 2048;
 
-/// How this lane's `Normal` draws relate to the Box–Muller lane pairing (PLAN-PERF-3 item 2).
-/// The pair-unrolled loop emits two lanes per iteration: the even lane computes the pair once
-/// and banks the sin branch per node; the odd lane just reads it. Cones too large to unroll
-/// (register pressure) use `Single`: every lane hashes the pair's even lane and parity-selects
-/// a branch — same values, twice the transcendental work.
+/// How this lane relates to the **shared pair draw** (Track B): with f32 lanes one squares64
+/// output serves two lanes, so `unif`, `normal`, `exp` and `geometric` all hash once per pair.
+/// The pair-unrolled loop emits two lanes per iteration: the even lane computes each such source
+/// once and banks the odd lane's finished value; the odd lane just reads the bank. Cones too large
+/// to unroll (register pressure) use `Single`: every lane hashes its pair's counter and selects
+/// its half by lane parity — same values, twice the hashing.
 enum PairMode {
     Single,
     Even(HashMap<RvId, Value>),
     Odd(HashMap<RvId, Value>),
+}
+
+/// Emit a pair-shared source through the current [`PairMode`]: `emit_pair` returns the (even, odd)
+/// lane values from ONE draw; `emit_single` computes just this lane's. This is the whole
+/// even-banks/odd-reads protocol, spelled once for all four pair-shared sources.
+fn emit_paired(
+    fb: &mut FunctionBuilder,
+    id: RvId,
+    pair: &mut PairMode,
+    emit_pair: impl FnOnce(&mut FunctionBuilder) -> (Value, Value),
+    emit_single: impl FnOnce(&mut FunctionBuilder) -> Value,
+) -> Value {
+    match pair {
+        PairMode::Single => emit_single(fb),
+        PairMode::Even(bank) => {
+            let (even, odd) = emit_pair(fb);
+            bank.insert(id, odd);
+            even
+        }
+        PairMode::Odd(bank) => bank[&id],
+    }
 }
 
 /// Emit the value of node `id` as an `f64` SSA value for the current lane, memoizing by `RvId` so
@@ -649,19 +680,47 @@ fn emit_node(
         return *v;
     }
     let v = match graph.node(id) {
-        RvNode::Src(Source::Uniform(u)) => emit_uniform(fb, ctx, id.0, u.lo, u.hi),
+        RvNode::Src(Source::Uniform(u)) => {
+            let (lo, hi) = (u.lo, u.hi);
+            emit_paired(
+                fb,
+                id,
+                pair,
+                |fb| emit_uniform_pair(fb, ctx, id.0, lo, hi),
+                |fb| emit_uniform_single(fb, ctx, id.0, lo, hi),
+            )
+        }
         RvNode::Src(Source::UniformInt { lo, hi }) => emit_uniform_int(fb, ctx, id.0, *lo, *hi),
-        RvNode::Src(Source::Normal { mu, sigma }) => match pair {
-            PairMode::Single => emit_normal_single(fb, ctx, id.0, *mu, *sigma),
-            PairMode::Even(sin_bank) => {
-                let (even, odd) = emit_normal_pair(fb, ctx, id.0, *mu, *sigma);
-                sin_bank.insert(id, odd);
-                even
-            }
-            PairMode::Odd(sin_bank) => sin_bank[&id],
-        },
-        RvNode::Src(Source::Exp { rate }) => emit_exp(fb, ctx, id.0, *rate),
-        RvNode::Src(Source::Geometric { p }) => emit_geometric(fb, ctx, id.0, *p),
+        RvNode::Src(Source::Normal { mu, sigma }) => {
+            let (mu, sigma) = (*mu, *sigma);
+            emit_paired(
+                fb,
+                id,
+                pair,
+                |fb| emit_normal_pair(fb, ctx, id.0, mu, sigma),
+                |fb| emit_normal_single(fb, ctx, id.0, mu, sigma),
+            )
+        }
+        RvNode::Src(Source::Exp { rate }) => {
+            let rate = *rate;
+            emit_paired(
+                fb,
+                id,
+                pair,
+                |fb| emit_exp_pair(fb, ctx, id.0, rate),
+                |fb| emit_exp_single(fb, ctx, id.0, rate),
+            )
+        }
+        RvNode::Src(Source::Geometric { p }) => {
+            let p = *p;
+            emit_paired(
+                fb,
+                id,
+                pair,
+                |fb| emit_geometric_pair(fb, ctx, id.0, p),
+                |fb| emit_geometric_single(fb, ctx, id.0, p),
+            )
+        }
         RvNode::Src(Source::Poisson { .. }) => unreachable!("profitable() excludes Poisson"),
         RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => {
             unreachable!("profitable() excludes the array-valued draw nodes")
@@ -683,8 +742,10 @@ fn emit_node(
                 None => unreachable!("profitable() excludes large non-const Gather"),
             }
         }
-        RvNode::ConstNum(x) => fb.ins().f64const(*x),
-        RvNode::ConstBool(b) => fb.ins().f64const(if *b { 1.0 } else { 0.0 }),
+        // Graph constants are f64; a lane holds `x as f32` — the same rounding the interpreter
+        // and the wasm emitter apply.
+        RvNode::ConstNum(x) => fb.ins().f32const(*x as f32),
+        RvNode::ConstBool(b) => fb.ins().f32const(if *b { 1.0 } else { 0.0 }),
         RvNode::Unary(op, a) => {
             let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair);
             emit_unary(fb, math, *op, av)
@@ -710,7 +771,7 @@ fn emit_node(
             let cv = emit_node(fb, graph, *cond, ctx, math, memo, tables, pair);
             let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair);
             let bv = emit_node(fb, graph, *b, ctx, math, memo, tables, pair);
-            let zero = fb.ins().f64const(0.0);
+            let zero = fb.ins().f32const(0.0);
             let cb = fb.ins().fcmp(FloatCC::NotEqual, cv, zero);
             fb.ins().select(cb, av, bv)
         }
@@ -725,7 +786,7 @@ fn emit_node(
 ///
 ///   * ties-away rounding without a libcall: `r = nearest(x)` (ties-even) then `+1` exactly when
 ///     `x - r == 0.5` — for positive `x` that corrects precisely the ties `nearest` sent down, so
-///     `r == f64::round(x)` there; a negative tie may land one off `f64::round` but every negative
+///     `r == f32::round(x)` there; a negative tie may land one off `f32::round` but every negative
 ///     `r` clamps to index 0 anyway (the interpreter also clamps *after* rounding). `+inf` passes
 ///     through (`d = NaN`, compare false) and clamps to `last`; `-inf` clamps to 0.
 ///   * `fcvt_to_sint` would TRAP on NaN, so the saturating form converts (NaN → 0) and the final
@@ -735,33 +796,33 @@ fn emit_gather_table(
     fb: &mut FunctionBuilder,
     ptr_ty: Type,
     xv: Value,
-    base: *const f64,
+    base: *const f32,
     len: usize,
 ) -> Value {
     debug_assert!(len > 0, "gather table is never empty (eval rejects [])");
-    let last = (len - 1) as f64; // exact: table lengths are far below 2^53
+    let last = (len - 1) as f32; // exact: table lengths are far below 2^24
     let r0 = fb.ins().nearest(xv);
     let d = fb.ins().fsub(xv, r0);
-    let half = fb.ins().f64const(0.5);
+    let half = fb.ins().f32const(0.5);
     let tie = fb.ins().fcmp(FloatCC::Equal, d, half);
-    let one = fb.ins().f64const(1.0);
-    let zero = fb.ins().f64const(0.0);
+    let one = fb.ins().f32const(1.0);
+    let zero = fb.ins().f32const(0.0);
     let corr = fb.ins().select(tie, one, zero);
     let r = fb.ins().fadd(r0, corr);
     // Clamp in the float domain (fmax/fmin propagate NaN; the sat-convert then maps NaN to 0,
     // which the NaN guard below overrides).
     let rlo = fb.ins().fmax(r, zero);
-    let lastc = fb.ins().f64const(last);
+    let lastc = fb.ins().f32const(last);
     let rcl = fb.ins().fmin(rlo, lastc);
     let idx = fb.ins().fcvt_to_sint_sat(types::I64, rcl);
-    let off = fb.ins().imul_imm(idx, 8);
+    let off = fb.ins().imul_imm(idx, 4);
     let basec = fb.ins().iconst(ptr_ty, base as i64);
     let addr = fb.ins().iadd(basec, off);
     let loaded = fb
         .ins()
-        .load(types::F64, MemFlags::trusted().with_readonly(), addr, 0);
+        .load(types::F32, MemFlags::trusted().with_readonly(), addr, 0);
     let is_nan = fb.ins().fcmp(FloatCC::NotEqual, xv, xv);
-    let nan = fb.ins().f64const(f64::NAN);
+    let nan = fb.ins().f32const(f32::NAN);
     fb.ins().select(is_nan, nan, loaded)
 }
 
@@ -769,29 +830,26 @@ fn emit_gather_table(
 /// needs NO rounding — `acc = e[last]; for i in (0..last).rev() { acc = x < i+0.5 ? e[i] : acc }`
 /// picks `e[min i: x < i+0.5]`, which equals round-ties-away-then-clamp for every non-NaN `x`
 /// (a tie `x = i+0.5` fails the strict `<` and rounds away to `i+1`; anything below `0.5`,
-/// including `-inf`, takes `e[0]`; `+inf` falls through to `e[last]`). `i + 0.5` is exact in f64
+/// including `-inf`, takes `e[0]`; `+inf` falls through to `e[last]`). `i + 0.5` is exact in f32
 /// for any table within [`kernel::GATHER_SELECT_MAX`]. NaN fails every compare (falls through to
 /// `e[last]`) and the final guard replaces it with NaN, matching the interpreter.
 fn emit_gather_chain(fb: &mut FunctionBuilder, xv: Value, evs: &[Value]) -> Value {
     let last = evs.len() - 1; // table never empty (eval rejects [])
     let mut acc = evs[last];
     for i in (0..last).rev() {
-        let t = fb.ins().f64const(i as f64 + 0.5);
+        let t = fb.ins().f32const(i as f32 + 0.5);
         let c = fb.ins().fcmp(FloatCC::LessThan, xv, t);
         acc = fb.ins().select(c, evs[i], acc);
     }
     let is_nan = fb.ins().fcmp(FloatCC::NotEqual, xv, xv);
-    let nan = fb.ins().f64const(f64::NAN);
+    let nan = fb.ins().f32const(f32::NAN);
     fb.ins().select(is_nan, nan, acc)
 }
 
-/// One squares64 draw for `(ctx.lane, src)`'s scalar counter — a straight-line
-/// transcription of `rng::draw48` (bit-identical draws): `ctr = (src << 36) + lane`, five
-/// middle-square rounds over `ctr * key` in native `I64` arithmetic, then the 48 consumed
-/// bits `((w >> 40) << 24) | ((w >> 8) & 0xFFFFFF)`.
-fn emit_draw48(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32) -> Value {
-    let lane64 = fb.ins().uextend(types::I64, ctx.lane);
-    let ctr = fb.ins().iadd_imm(lane64, ((src as u64) << 36) as i64);
+/// One squares64 draw at counter `ctr` (an `I64` value) — a straight-line transcription of
+/// `rng::squares64` + the 48-bit consumption contract (bit-identical draws): five middle-square
+/// rounds over `ctr * key`, then `((w >> 40) << 24) | ((w >> 8) & 0xFFFFFF)`.
+fn emit_draw48_at(fb: &mut FunctionBuilder, ctx: DrawCtx, ctr: Value) -> Value {
     let mut x = fb.ins().imul(ctr, ctx.key);
     let y = x;
     let z = fb.ins().iadd(x, ctx.key);
@@ -815,109 +873,173 @@ fn emit_draw48(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32) -> Value {
     fb.ins().bor(hi, lo)
 }
 
-/// Uniform `f64` in `[0, 1)` from a 48-bit draw — mirrors `bits · 2⁻⁴⁸`.
-fn emit_unit48(fb: &mut FunctionBuilder, bits: Value) -> Value {
-    let f = fb.ins().fcvt_from_uint(types::F64, bits);
-    let scale = fb.ins().f64const(1.0 / ((1u64 << 48) as f64));
+/// The pair draw for this lane's PAIR — `rng::pair_bits`: counter `(src << 36) + (lane >> 1)`,
+/// so both lanes of a pair hash the same cell. Returns the 48 consumed bits.
+fn emit_pair_draw(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32) -> Value {
+    let pair_idx = fb.ins().ushr_imm(ctx.lane, 1);
+    let p64 = fb.ins().uextend(types::I64, pair_idx);
+    let ctr = fb.ins().iadd_imm(p64, ((src as u64) << 36) as i64);
+    emit_draw48_at(fb, ctx, ctr)
+}
+
+/// The per-lane draw for `unif_int` — `rng::scalar_ctr`: counter `(src << 36) + lane`, all 48 bits
+/// spent on this lane (Lemire needs them; see `rng::fill_uniform_int`).
+fn emit_lane_draw(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32) -> Value {
+    let lane64 = fb.ins().uextend(types::I64, ctx.lane);
+    let ctr = fb.ins().iadd_imm(lane64, ((src as u64) << 36) as i64);
+    emit_draw48_at(fb, ctx, ctr)
+}
+
+/// The pair's two 24-bit halves (`rng::lo24` / `rng::hi24`): even lane's, odd lane's.
+fn emit_halves(fb: &mut FunctionBuilder, bits: Value) -> (Value, Value) {
+    let lo = fb.ins().band_imm(bits, 0xFF_FFFF);
+    let hi = fb.ins().ushr_imm(bits, 24);
+    (lo, hi)
+}
+
+/// This lane's own half of the pair draw: `(lane & 1) != 0 ? hi24 : lo24` — the `Single`-mode
+/// selector (the unrolled loop knows its parity statically and takes the half directly).
+fn emit_my_half(fb: &mut FunctionBuilder, ctx: DrawCtx, bits: Value) -> Value {
+    let (lo, hi) = emit_halves(fb, bits);
+    let parity = fb.ins().band_imm(ctx.lane, 1);
+    let is_odd = fb.ins().icmp_imm(IntCC::NotEqual, parity, 0);
+    fb.ins().select(is_odd, hi, lo)
+}
+
+/// Uniform f32 in `[0, 1)` from a 24-bit draw — mirrors `rng::unit24` (`bits · 2⁻²⁴`, exact).
+fn emit_unit24(fb: &mut FunctionBuilder, bits24: Value) -> Value {
+    let f = fb.ins().fcvt_from_uint(types::F32, bits24);
+    let scale = fb.ins().f32const(1.0 / ((1u32 << 24) as f32));
     fb.ins().fmul(f, scale)
 }
 
-fn emit_uniform(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, lo: f64, hi: f64) -> Value {
-    let bits = emit_draw48(fb, ctx, src);
-    let u = emit_unit48(fb, bits);
-    let loc = fb.ins().f64const(lo);
-    let span = fb.ins().f64const(hi - lo);
+/// `lo + (hi - lo) · u` for one 24-bit draw — the shared tail of both uniform lowerings. The
+/// constants are the f64 bounds rounded ONCE, exactly as `rng::fill_uniform` rounds them.
+fn emit_uniform_from(fb: &mut FunctionBuilder, bits24: Value, lo: f64, hi: f64) -> Value {
+    let u = emit_unit24(fb, bits24);
+    let loc = fb.ins().f32const(lo as f32);
+    let span = fb.ins().f32const((hi - lo) as f32);
     let scaled = fb.ins().fmul(span, u);
     fb.ins().fadd(loc, scaled)
 }
 
-/// `unif_int(lo, hi)` as `f64` via Lemire's multiply-high on the 48 consumed bits:
+/// Both lanes' `unif(lo, hi)` from ONE pair draw (the unrolled loop's even phase).
+fn emit_uniform_pair(
+    fb: &mut FunctionBuilder,
+    ctx: DrawCtx,
+    src: u32,
+    lo: f64,
+    hi: f64,
+) -> (Value, Value) {
+    let bits = emit_pair_draw(fb, ctx, src);
+    let (b0, b1) = emit_halves(fb, bits);
+    (
+        emit_uniform_from(fb, b0, lo, hi),
+        emit_uniform_from(fb, b1, lo, hi),
+    )
+}
+
+/// This lane's `unif(lo, hi)` (the non-unrolled loop): hash the pair, take this lane's half.
+fn emit_uniform_single(
+    fb: &mut FunctionBuilder,
+    ctx: DrawCtx,
+    src: u32,
+    lo: f64,
+    hi: f64,
+) -> Value {
+    let bits = emit_pair_draw(fb, ctx, src);
+    let mine = emit_my_half(fb, ctx, bits);
+    emit_uniform_from(fb, mine, lo, hi)
+}
+
+/// `unif_int(lo, hi)` as `f32` via Lemire's multiply-high on the 48 consumed bits:
 /// `umulhi(bits48 << 16, count)` = `(bits48 · count) >> 48`, exactly the interpreter's
 /// `(bits as u128 * count) >> 48` — uniform in `0..count`, bias ≤ `count / 2^48`.
-/// `count >= 1`, so `count == 1` always gives `k == 0` (point mass at `lo`).
+/// `count >= 1`, so `count == 1` always gives `k == 0` (point mass at `lo`). NOT pair-shared: 24
+/// bits would put the bias at `count / 2^24` (up to 1 at Track B's range cap).
 fn emit_uniform_int(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, lo: f64, hi: f64) -> Value {
     let count = (hi - lo + 1.0).max(1.0) as u64;
-    let bits = emit_draw48(fb, ctx, src);
+    let bits = emit_lane_draw(fb, ctx, src);
     let bits_hi = fb.ins().ishl_imm(bits, 16);
     let count_c = fb.ins().iconst(types::I64, count as i64);
     let k = fb.ins().umulhi(bits_hi, count_c);
-    let kf = fb.ins().fcvt_from_uint(types::F64, k); // k < count ≤ 2^53 → exact
-    let loc = fb.ins().f64const(lo);
+    let kf = fb.ins().fcvt_from_uint(types::F32, k); // k < count ≤ 2^24 → exact in f32
+    let loc = fb.ins().f32const(lo as f32);
     fb.ins().fadd(loc, kf)
 }
 
 /// Horner evaluation of `Σ c[i]·z^i` (coeffs low→high) as straight-line CLIF — the exact reduction
-/// `crate::approx::horner` performs, so the inlined transcendentals match the reference op-for-op.
-fn emit_horner(fb: &mut FunctionBuilder, z: Value, coeffs: &[f64]) -> Value {
-    let mut acc = fb.ins().f64const(*coeffs.last().unwrap());
+/// `crate::approx::horner_f32` performs, so the inlined transcendentals match the reference
+/// op-for-op.
+fn emit_horner(fb: &mut FunctionBuilder, z: Value, coeffs: &[f32]) -> Value {
+    let mut acc = fb.ins().f32const(*coeffs.last().unwrap());
     for &c in coeffs.iter().rev().skip(1) {
         let mul = fb.ins().fmul(acc, z);
-        let cc = fb.ins().f64const(c);
+        let cc = fb.ins().f32const(c);
         acc = fb.ins().fadd(mul, cc);
     }
     acc
 }
 
-/// Inlined `ln(x)` for `x > 0` — straight-line transcription of [`crate::approx::ln`] (no libcall,
-/// and the same polynomial the interpreter's fills now compute, so draws stay bit-identical).
+/// Inlined f32 `ln(x)` for `x > 0` — straight-line transcription of [`crate::approx::ln_f32`] (no
+/// libcall, and the same polynomial the interpreter's fills compute, so draws stay bit-identical).
 fn emit_ln(fb: &mut FunctionBuilder, x: Value) -> Value {
-    use std::f64::consts::{LN_2, SQRT_2};
-    // x = m·2^e: pull the IEEE-754 exponent and mantissa fields out by bit-surgery.
-    let bits = fb.ins().bitcast(types::I64, MemFlags::new(), x);
-    let exp_raw = fb.ins().ushr_imm(bits, 52);
-    let exp_masked = fb.ins().band_imm(exp_raw, 0x7ff);
-    let e0 = fb.ins().iadd_imm(exp_masked, -1023);
-    let mant = fb.ins().band_imm(bits, 0x000f_ffff_ffff_ffff);
-    let mbits = fb.ins().bor_imm(mant, 0x3ff0_0000_0000_0000u64 as i64);
-    let m0 = fb.ins().bitcast(types::F64, MemFlags::new(), mbits); // [1, 2)
+    use std::f32::consts::{LN_2, SQRT_2};
+    // x = m·2^e: pull the IEEE-754 f32 exponent (8 bits, bias 127) and mantissa (23 bits) out.
+    let bits = fb.ins().bitcast(types::I32, MemFlags::new(), x);
+    let exp_raw = fb.ins().ushr_imm(bits, 23);
+    let exp_masked = fb.ins().band_imm(exp_raw, 0xff);
+    let e0 = fb.ins().iadd_imm(exp_masked, -127);
+    let mant = fb.ins().band_imm(bits, 0x007f_ffff);
+    let mbits = fb.ins().bor_imm(mant, 0x3f80_0000);
+    let m0 = fb.ins().bitcast(types::F32, MemFlags::new(), mbits); // [1, 2)
                                                                    // Recenter when m0 > √2 (branchless): m = m0/2, e = e0 + 1, so |f| ≤ 0.172.
-    let sqrt2 = fb.ins().f64const(SQRT_2);
+    let sqrt2 = fb.ins().f32const(SQRT_2);
     let big = fb.ins().fcmp(FloatCC::GreaterThan, m0, sqrt2);
-    let half = fb.ins().f64const(0.5);
+    let half = fb.ins().f32const(0.5);
     let m0_half = fb.ins().fmul(m0, half);
     let m = fb.ins().select(big, m0_half, m0);
     let e0_p1 = fb.ins().iadd_imm(e0, 1);
     let e = fb.ins().select(big, e0_p1, e0);
-    let ef = fb.ins().fcvt_from_sint(types::F64, e);
+    let ef = fb.ins().fcvt_from_sint(types::F32, e);
     // f = (m-1)/(m+1); ln(m) = 2·f·Σ cₖf²ᵏ; ln(x) = ln(m) + e·ln2.
-    let one = fb.ins().f64const(1.0);
+    let one = fb.ins().f32const(1.0);
     let num = fb.ins().fsub(m, one);
     let den = fb.ins().fadd(m, one);
     let f = fb.ins().fdiv(num, den);
     let f2 = fb.ins().fmul(f, f);
-    let p = emit_horner(fb, f2, &crate::approx::LN_COEFFS);
+    let p = emit_horner(fb, f2, &crate::approx::LN_COEFFS_F32);
     let fp = fb.ins().fmul(f, p);
-    let two = fb.ins().f64const(2.0);
+    let two = fb.ins().f32const(2.0);
     let two_fp = fb.ins().fmul(two, fp);
-    let ln2 = fb.ins().f64const(LN_2);
+    let ln2 = fb.ins().f32const(LN_2);
     let e_ln2 = fb.ins().fmul(ef, ln2);
     fb.ins().fadd(two_fp, e_ln2)
 }
 
-/// Range-guarded `cos`/`sin`: the inlined polynomial ([`emit_trig_poly`]) for `|x| < TRIG_MAX`, else
-/// the accurate library `sin`/`cos` shim (finding C3) — the 2-term reduction degrades past that, so
-/// this keeps the emitted trig in agreement with the interpreter's libm on large arguments (e.g.
-/// `sin(1e12 * X)`). Mirrors the `|x| < TRIG_MAX ? poly : call` shape in [`crate::approx::sin`].
-/// (The Box–Muller draw path calls [`emit_trig_poly`] directly — its argument is always `< 2π`.)
+/// Range-guarded `cos`/`sin`: the inlined polynomial ([`emit_trig_poly`]) for `|x| < TRIG_MAX_F32`,
+/// else the library `sin`/`cos` shim (which computes in f64 and rounds — finding C3's f32 twin).
+/// Mirrors the `|x| < TRIG_MAX_F32 ? poly : call` shape in [`crate::approx::sin_f32`]. (The
+/// Box–Muller draw path calls [`emit_trig_poly`] directly — its argument is always `< 2π`.)
 fn emit_trig(fb: &mut FunctionBuilder, math: &MathRefs, x: Value, is_cos: bool) -> Value {
     let ax = fb.ins().fabs(x);
-    let thresh = fb.ins().f64const(crate::approx::TRIG_MAX);
+    let thresh = fb.ins().f32const(crate::approx::TRIG_MAX_F32);
     let big = fb.ins().fcmp(FloatCC::GreaterThanOrEqual, ax, thresh);
 
     let big_block = fb.create_block();
     let poly_block = fb.create_block();
     let merge = fb.create_block();
-    fb.append_block_param(merge, types::F64);
+    fb.append_block_param(merge, types::F32);
     fb.ins().brif(big, big_block, &[], poly_block, &[]);
 
-    // |x| >= TRIG_MAX: defer to the library shim (rare — this branch is predicted not-taken).
+    // |x| >= TRIG_MAX_F32: defer to the library shim (rare — predicted not-taken).
     fb.switch_to_block(big_block);
     fb.seal_block(big_block);
     let shim = if is_cos { math.cos } else { math.sin };
     let big_v = call1(fb, shim, x);
     fb.ins().jump(merge, &[BlockArg::from(big_v)]);
 
-    // |x| < TRIG_MAX: the inline polynomial.
+    // |x| < TRIG_MAX_F32: the inline polynomial.
     fb.switch_to_block(poly_block);
     fb.seal_block(poly_block);
     let poly_v = emit_trig_poly(fb, x, is_cos);
@@ -928,39 +1050,39 @@ fn emit_trig(fb: &mut FunctionBuilder, math: &MathRefs, x: Value, is_cos: bool) 
     fb.block_params(merge)[0]
 }
 
-/// Inlined `cos(x)` (`is_cos`) / `sin(x)` for `|x| < TRIG_MAX` — transcription of
-/// [`crate::approx::cos`]/[`crate::approx::sin`]: Cody–Waite reduce to `[-π/4, π/4]`, evaluate both
-/// reduced kernels, then pick by quadrant. `nearest`/`fcvt_to_sint_sat` are native instructions.
+/// Inlined f32 `cos(x)` (`is_cos`) / `sin(x)` for `|x| < TRIG_MAX_F32` — transcription of
+/// [`crate::approx::cos_f32`]/[`crate::approx::sin_f32`]: Cody–Waite reduce to `[-π/4, π/4]`,
+/// evaluate both reduced kernels, then pick by quadrant.
 fn emit_trig_poly(fb: &mut FunctionBuilder, x: Value, is_cos: bool) -> Value {
-    use crate::approx::{COS_COEFFS, PIO2_HI, PIO2_LO, SIN_COEFFS};
-    use std::f64::consts::FRAC_2_PI;
+    use crate::approx::{COS_COEFFS_F32, PIO2_HI_F32, PIO2_LO_F32, SIN_COEFFS_F32};
+    use std::f32::consts::FRAC_2_PI;
     // k = round(x·2/π); r = (x - k·π/2_hi) - k·π/2_lo ∈ [-π/4, π/4].
-    let two_pi_inv = fb.ins().f64const(FRAC_2_PI);
+    let two_pi_inv = fb.ins().f32const(FRAC_2_PI);
     let scaled = fb.ins().fmul(x, two_pi_inv);
     let kf = fb.ins().nearest(scaled);
-    let hi = fb.ins().f64const(PIO2_HI);
+    let hi = fb.ins().f32const(PIO2_HI_F32);
     let khi = fb.ins().fmul(kf, hi);
     let x1 = fb.ins().fsub(x, khi);
-    let lo = fb.ins().f64const(PIO2_LO);
+    let lo = fb.ins().f32const(PIO2_LO_F32);
     let klo = fb.ins().fmul(kf, lo);
     let r = fb.ins().fsub(x1, klo);
     let z = fb.ins().fmul(r, r);
     // sin(r) = r + r·z·P_sin(z)
-    let sp = emit_horner(fb, z, &SIN_COEFFS);
+    let sp = emit_horner(fb, z, &SIN_COEFFS_F32);
     let rz = fb.ins().fmul(r, z);
     let rzsp = fb.ins().fmul(rz, sp);
     let sin_r = fb.ins().fadd(r, rzsp);
     // cos(r) = 1 - z/2 + z²·P_cos(z)
-    let cp = emit_horner(fb, z, &COS_COEFFS);
+    let cp = emit_horner(fb, z, &COS_COEFFS_F32);
     let zz = fb.ins().fmul(z, z);
     let zzcp = fb.ins().fmul(zz, cp);
-    let one = fb.ins().f64const(1.0);
-    let half = fb.ins().f64const(0.5);
+    let one = fb.ins().f32const(1.0);
+    let half = fb.ins().f32const(0.5);
     let halfz = fb.ins().fmul(half, z);
     let onemhz = fb.ins().fsub(one, halfz);
     let cos_r = fb.ins().fadd(onemhz, zzcp);
-    // Pick the kernel + sign for quadrant kq = (k as i64) & 3 (saturating cvt = Rust's `as`).
-    let ki = fb.ins().fcvt_to_sint_sat(types::I64, kf);
+    // Pick the kernel + sign for quadrant kq = (k as i32) & 3 (saturating cvt = Rust's `as`).
+    let ki = fb.ins().fcvt_to_sint_sat(types::I32, kf);
     let kq = fb.ins().band_imm(ki, 3);
     let neg_sin = fb.ins().fneg(sin_r);
     let neg_cos = fb.ins().fneg(cos_r);
@@ -977,40 +1099,35 @@ fn emit_trig_poly(fb: &mut FunctionBuilder, x: Value, is_cos: bool) -> Value {
     fb.ins().select(c3, q3, r2)
 }
 
-/// The Box–Muller pair for the lane pair whose EVEN lane is `even_ctx.lane` — a straight-line
-/// transcription of `rng::normal_pair` (bit-identical draws): one hash, `u1` from words 0+1
-/// offset by half a 48-bit-grid ulp (dodges `ln(0)`), `u2` from words 2+3; returns
-/// `(mu + sigma·r·cos θ, mu + sigma·r·sin θ)` — the even and odd lanes' values. `sqrt` is
-/// native; `ln`/trig are the shared inlined polynomials the interpreter also computes.
+/// The Box–Muller pair from ONE draw — a straight-line transcription of `rng::normal_pair`
+/// (bit-identical): `u1` from the pair's low 24 bits, `u2` from its high 24,
+/// `r = sqrt(-2·ln(1 - u1))` (exact on the 24-bit grid — no `ln(0)`, no half-ulp nudge), and the
+/// two branches `(mu + sigma·r·cos θ, mu + sigma·r·sin θ)` — the even and odd lanes' values.
+/// `sqrt` is native; `ln`/trig are the shared inlined f32 polynomials the interpreter computes.
 fn emit_normal_pair(
     fb: &mut FunctionBuilder,
-    even_ctx: DrawCtx,
+    ctx: DrawCtx,
     src: u32,
     mu: f64,
     sigma: f64,
 ) -> (Value, Value) {
-    use std::f64::consts::TAU;
-    // u1 from the even lane's counter, u2 from the odd lane's — mirrors `rng::normal_pair`.
-    let bits1 = emit_draw48(fb, even_ctx, src);
-    let f1 = fb.ins().fcvt_from_uint(types::F64, bits1);
-    let half = fb.ins().f64const(0.5);
-    let f1h = fb.ins().fadd(f1, half);
-    let scale = fb.ins().f64const(1.0 / ((1u64 << 48) as f64));
-    let u1 = fb.ins().fmul(f1h, scale); // (0, 1)
-    let odd_lane = fb.ins().bor_imm(even_ctx.lane, 1);
-    let odd_ctx = DrawCtx { lane: odd_lane, ..even_ctx };
-    let bits2 = emit_draw48(fb, odd_ctx, src);
-    let u2 = emit_unit48(fb, bits2);
-    let lnv = emit_ln(fb, u1);
-    let neg2 = fb.ins().f64const(-2.0);
+    use std::f32::consts::TAU;
+    let bits = emit_pair_draw(fb, ctx, src);
+    let (b1, b2) = emit_halves(fb, bits);
+    let u1 = emit_unit24(fb, b1);
+    let one = fb.ins().f32const(1.0);
+    let om = fb.ins().fsub(one, u1); // 1 - u1 ∈ [2^-24, 1], exact
+    let lnv = emit_ln(fb, om);
+    let neg2 = fb.ins().f32const(-2.0);
     let inner = fb.ins().fmul(neg2, lnv);
     let r = fb.ins().sqrt(inner);
-    let tau = fb.ins().f64const(TAU);
+    let u2 = emit_unit24(fb, b2);
+    let tau = fb.ins().f32const(TAU);
     let ang = fb.ins().fmul(tau, u2);
     // Argument is `TAU * u2 ∈ [0, 2π)` — always well inside the polynomial's range, so call it
     // directly (no range guard) to keep the hot Box–Muller draw lean.
-    let sig = fb.ins().f64const(sigma);
-    let mu_c = fb.ins().f64const(mu);
+    let sig = fb.ins().f32const(sigma as f32);
+    let mu_c = fb.ins().f32const(mu as f32);
     let scale_branch = |fb: &mut FunctionBuilder, b: Value| {
         let rb = fb.ins().fmul(r, b);
         let sb = fb.ins().fmul(sig, rb);
@@ -1023,9 +1140,9 @@ fn emit_normal_pair(
     (even, odd)
 }
 
-/// `N(mu, sigma^2)` for a single-lane loop (cones too big to pair-unroll): hash the pair's EVEN
-/// lane (`lane & !1`), compute both branches via [`emit_normal_pair`], select by lane parity —
-/// the same values the unrolled loop computes, at twice the per-lane transcendental cost.
+/// `N(mu, sigma^2)` for a single-lane loop (cones too big to pair-unroll): compute the pair via
+/// [`emit_normal_pair`] and select by lane parity — the same values the unrolled loop computes, at
+/// twice the per-lane transcendental cost.
 fn emit_normal_single(
     fb: &mut FunctionBuilder,
     ctx: DrawCtx,
@@ -1033,46 +1150,73 @@ fn emit_normal_single(
     mu: f64,
     sigma: f64,
 ) -> Value {
-    let even_lane = fb.ins().band_imm(ctx.lane, !1i64 & 0xFFFF_FFFF);
-    let pair_ctx = DrawCtx { lane: even_lane, ..ctx };
-    let (even, odd) = emit_normal_pair(fb, pair_ctx, src, mu, sigma);
+    let (even, odd) = emit_normal_pair(fb, ctx, src, mu, sigma);
     let parity = fb.ins().band_imm(ctx.lane, 1);
     let is_odd = fb.ins().icmp_imm(IntCC::NotEqual, parity, 0);
     fb.ins().select(is_odd, odd, even)
 }
 
-/// `Exp(rate)` via inverse-CDF `-ln(1 - u) / rate` — mirrors `rng::fill_exp` bit-for-bit
-/// (`1 - u ∈ [2⁻⁴⁸, 1]` keeps `ln` finite and in the polynomial's normal range).
-fn emit_exp(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, rate: f64) -> Value {
-    let bits = emit_draw48(fb, ctx, src);
-    let u = emit_unit48(fb, bits);
-    let one = fb.ins().f64const(1.0);
-    let om = fb.ins().fsub(one, u); // (0, 1]
+/// `-ln(1 - u) / rate` for one 24-bit draw — mirrors `rng::fill_exp` bit-for-bit (`1 - u ∈
+/// [2⁻²⁴, 1]` keeps `ln` finite and in the polynomial's normal range).
+fn emit_exp_from(fb: &mut FunctionBuilder, bits24: Value, rate: f64) -> Value {
+    let u = emit_unit24(fb, bits24);
+    let one = fb.ins().f32const(1.0);
+    let om = fb.ins().fsub(one, u); // [2^-24, 1]
     let lnv = emit_ln(fb, om);
     let neg = fb.ins().fneg(lnv);
-    let rate_c = fb.ins().f64const(rate);
+    let rate_c = fb.ins().f32const(rate as f32);
     fb.ins().fdiv(neg, rate_c)
 }
 
-/// `Geometric(p)` (failures before first success) via `floor(ln(1 - u) / ln(1 - p))` — mirrors
-/// `rng::fill_geometric` bit-for-bit. `ln(1 - p)` is a compile-time constant (folded in Rust);
-/// `p == 1` makes it `-inf`, so every draw floors to `0`, matching the interpreter's point mass.
-fn emit_geometric(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, p: f64) -> Value {
-    let denom = (1.0 - p).ln();
-    let bits = emit_draw48(fb, ctx, src);
-    let u = emit_unit48(fb, bits);
-    let one = fb.ins().f64const(1.0);
-    let om = fb.ins().fsub(one, u); // (0, 1]
+fn emit_exp_pair(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, rate: f64) -> (Value, Value) {
+    let bits = emit_pair_draw(fb, ctx, src);
+    let (b0, b1) = emit_halves(fb, bits);
+    (
+        emit_exp_from(fb, b0, rate),
+        emit_exp_from(fb, b1, rate),
+    )
+}
+
+fn emit_exp_single(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, rate: f64) -> Value {
+    let bits = emit_pair_draw(fb, ctx, src);
+    let mine = emit_my_half(fb, ctx, bits);
+    emit_exp_from(fb, mine, rate)
+}
+
+/// `floor(ln(1 - u) / ln(1 - p))` for one 24-bit draw — mirrors `rng::fill_geometric` bit-for-bit.
+/// `ln(1 - p)` is a compile-time constant (the f64 `ln` rounded to f32, as the interpreter rounds
+/// it); `p == 1` makes it `-inf`, so every draw floors to `0` — the interpreter's point mass.
+fn emit_geometric_from(fb: &mut FunctionBuilder, bits24: Value, denom: f32) -> Value {
+    let u = emit_unit24(fb, bits24);
+    let one = fb.ins().f32const(1.0);
+    let om = fb.ins().fsub(one, u); // [2^-24, 1]
     let lnv = emit_ln(fb, om);
-    let denom_c = fb.ins().f64const(denom);
+    let denom_c = fb.ins().f32const(denom);
     let q = fb.ins().fdiv(lnv, denom_c);
     fb.ins().floor(q)
+}
+
+fn emit_geometric_pair(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, p: f64) -> (Value, Value) {
+    let denom = (1.0 - p).ln() as f32;
+    let bits = emit_pair_draw(fb, ctx, src);
+    let (b0, b1) = emit_halves(fb, bits);
+    (
+        emit_geometric_from(fb, b0, denom),
+        emit_geometric_from(fb, b1, denom),
+    )
+}
+
+fn emit_geometric_single(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, p: f64) -> Value {
+    let denom = (1.0 - p).ln() as f32;
+    let bits = emit_pair_draw(fb, ctx, src);
+    let mine = emit_my_half(fb, ctx, bits);
+    emit_geometric_from(fb, mine, denom)
 }
 
 /// `base ^ k` for a small non-negative integer `k`, as repeated multiply (k = 0 → 1.0).
 fn emit_pow(fb: &mut FunctionBuilder, base: Value, k: u32) -> Value {
     if k == 0 {
-        return fb.ins().f64const(1.0);
+        return fb.ins().f32const(1.0);
     }
     let mut acc = base;
     for _ in 1..k {
@@ -1087,28 +1231,28 @@ fn emit_pow(fb: &mut FunctionBuilder, base: Value, k: u32) -> Value {
 /// ever fed positive uniforms by the draw kernels, so they keep calling it unguarded.)
 fn emit_ln_guarded(fb: &mut FunctionBuilder, a: Value) -> Value {
     // Subnormal positive inputs (exponent field 0) would corrupt `emit_ln`'s mantissa bit-surgery,
-    // so scale them into the normal range and correct by `54·ln2` (finding C9). `is_sub` is also
+    // so scale them into the normal range and correct by `25·ln2` (finding C9's f32 twin). `is_sub` is also
     // true for `a <= 0`, but those lanes are overwritten by the domain selects below, so the bogus
     // scaled value is harmless. Normal inputs pass through unscaled (select picks the raw poly).
-    let min_pos = fb.ins().f64const(f64::MIN_POSITIVE);
+    let min_pos = fb.ins().f32const(f32::MIN_POSITIVE);
     let is_sub = fb.ins().fcmp(FloatCC::LessThan, a, min_pos);
-    let scale = fb.ins().f64const(crate::approx::LN_SUBNORMAL_SCALE);
+    let scale = fb.ins().f32const(crate::approx::LN_SUBNORMAL_SCALE_F32);
     let a_scaled = fb.ins().fmul(a, scale);
     let a_in = fb.ins().select(is_sub, a_scaled, a);
     let poly_raw = emit_ln(fb, a_in);
-    let corr = fb.ins().f64const(crate::approx::LN_SUBNORMAL_CORR);
+    let corr = fb.ins().f32const(crate::approx::LN_SUBNORMAL_CORR_F32);
     let poly_corr = fb.ins().fsub(poly_raw, corr);
     let poly = fb.ins().select(is_sub, poly_corr, poly_raw);
-    let zero = fb.ins().f64const(0.0);
-    let neg_inf = fb.ins().f64const(f64::NEG_INFINITY);
-    let nan = fb.ins().f64const(f64::NAN);
+    let zero = fb.ins().f32const(0.0);
+    let neg_inf = fb.ins().f32const(f32::NEG_INFINITY);
+    let nan = fb.ins().f32const(f32::NAN);
     // Non-positive lanes: 0 → -inf; negative or NaN input → NaN.
     let is_zero = fb.ins().fcmp(FloatCC::Equal, a, zero);
     let non_pos = fb.ins().select(is_zero, neg_inf, nan);
     let is_pos = fb.ins().fcmp(FloatCC::GreaterThan, a, zero);
     let r = fb.ins().select(is_pos, poly, non_pos);
-    // The poly mangles +inf (exponent bit-surgery reads it as 2^1024) — patch it back to +inf.
-    let inf = fb.ins().f64const(f64::INFINITY);
+    // The poly mangles +inf (exponent bit-surgery reads it as 2^128) — patch it back to +inf.
+    let inf = fb.ins().f32const(f32::INFINITY);
     let is_inf = fb.ins().fcmp(FloatCC::Equal, a, inf);
     fb.ins().select(is_inf, inf, r)
 }
@@ -1118,9 +1262,9 @@ fn emit_unary(fb: &mut FunctionBuilder, math: &MathRefs, op: UnOp, a: Value) -> 
         UnOp::Neg => fb.ins().fneg(a),
         UnOp::Not => {
             // logical not over a 0/1 column: (a == 0) ? 1 : 0
-            let zero = fb.ins().f64const(0.0);
+            let zero = fb.ins().f32const(0.0);
             let is_zero = fb.ins().fcmp(FloatCC::Equal, a, zero);
-            bool_to_f64(fb, is_zero)
+            bool_to_f32(fb, is_zero)
         }
         UnOp::Sin => emit_trig(fb, math, a, false),
         UnOp::Cos => emit_trig(fb, math, a, true),
@@ -1139,11 +1283,11 @@ fn emit_unary(fb: &mut FunctionBuilder, math: &MathRefs, op: UnOp, a: Value) -> 
         UnOp::Exp => call1(fb, math.exp, a),
         UnOp::Sign => {
             // -1 / 0 / +1 as (a > 0) - (a < 0), matching `apply_un` (0 exactly at 0, unlike signum).
-            let zero = fb.ins().f64const(0.0);
+            let zero = fb.ins().f32const(0.0);
             let gt = fb.ins().fcmp(FloatCC::GreaterThan, a, zero);
             let lt = fb.ins().fcmp(FloatCC::LessThan, a, zero);
-            let gtf = bool_to_f64(fb, gt);
-            let ltf = bool_to_f64(fb, lt);
+            let gtf = bool_to_f32(fb, gt);
+            let ltf = bool_to_f32(fb, lt);
             fb.ins().fsub(gtf, ltf)
         }
     }
@@ -1162,27 +1306,27 @@ fn emit_binary(fb: &mut FunctionBuilder, op: BinOp, a: Value, b: Value) -> Value
             let bf = fb.ins().fmul(b, fq);
             fb.ins().fsub(a, bf)
         }
-        BinOp::Lt => cmp_to_f64(fb, FloatCC::LessThan, a, b),
-        BinOp::Gt => cmp_to_f64(fb, FloatCC::GreaterThan, a, b),
-        BinOp::Le => cmp_to_f64(fb, FloatCC::LessThanOrEqual, a, b),
-        BinOp::Ge => cmp_to_f64(fb, FloatCC::GreaterThanOrEqual, a, b),
-        BinOp::Eq => cmp_to_f64(fb, FloatCC::Equal, a, b),
-        BinOp::Ne => cmp_to_f64(fb, FloatCC::NotEqual, a, b),
-        BinOp::And => logic_to_f64(fb, a, b, true),
-        BinOp::Or => logic_to_f64(fb, a, b, false),
+        BinOp::Lt => cmp_to_f32(fb, FloatCC::LessThan, a, b),
+        BinOp::Gt => cmp_to_f32(fb, FloatCC::GreaterThan, a, b),
+        BinOp::Le => cmp_to_f32(fb, FloatCC::LessThanOrEqual, a, b),
+        BinOp::Ge => cmp_to_f32(fb, FloatCC::GreaterThanOrEqual, a, b),
+        BinOp::Eq => cmp_to_f32(fb, FloatCC::Equal, a, b),
+        BinOp::Ne => cmp_to_f32(fb, FloatCC::NotEqual, a, b),
+        BinOp::And => logic_to_f32(fb, a, b, true),
+        BinOp::Or => logic_to_f32(fb, a, b, false),
         BinOp::Pow => unreachable!("Pow is handled before emit_binary"),
     }
 }
 
 /// Float compare → `1.0`/`0.0` column.
-fn cmp_to_f64(fb: &mut FunctionBuilder, cc: FloatCC, a: Value, b: Value) -> Value {
+fn cmp_to_f32(fb: &mut FunctionBuilder, cc: FloatCC, a: Value, b: Value) -> Value {
     let c = fb.ins().fcmp(cc, a, b);
-    bool_to_f64(fb, c)
+    bool_to_f32(fb, c)
 }
 
 /// `&&` / `||` over 0/1 columns: `(a != 0) op (b != 0)` → `1.0`/`0.0`.
-fn logic_to_f64(fb: &mut FunctionBuilder, a: Value, b: Value, and: bool) -> Value {
-    let zero = fb.ins().f64const(0.0);
+fn logic_to_f32(fb: &mut FunctionBuilder, a: Value, b: Value, and: bool) -> Value {
+    let zero = fb.ins().f32const(0.0);
     let an = fb.ins().fcmp(FloatCC::NotEqual, a, zero);
     let bn = fb.ins().fcmp(FloatCC::NotEqual, b, zero);
     let r = if and {
@@ -1190,13 +1334,13 @@ fn logic_to_f64(fb: &mut FunctionBuilder, a: Value, b: Value, and: bool) -> Valu
     } else {
         fb.ins().bor(an, bn)
     };
-    bool_to_f64(fb, r)
+    bool_to_f32(fb, r)
 }
 
 /// Select `1.0` when the boolean (any nonzero int) is true, else `0.0`.
-fn bool_to_f64(fb: &mut FunctionBuilder, cond: Value) -> Value {
-    let one = fb.ins().f64const(1.0);
-    let zero = fb.ins().f64const(0.0);
+fn bool_to_f32(fb: &mut FunctionBuilder, cond: Value) -> Value {
+    let one = fb.ins().f32const(1.0);
+    let zero = fb.ins().f32const(0.0);
     fb.ins().select(cond, one, zero)
 }
 
@@ -1217,7 +1361,7 @@ mod tests {
 
     /// First root sample from a compiled program (seeded to 0). For an RNG-free graph every lane is
     /// identical and seed-independent, so `[0]` fully characterizes the backend's output.
-    fn first_sample(program: &dyn Program) -> f64 {
+    fn first_sample(program: &dyn Program) -> f32 {
         let mut r = program.runner();
         r.position(0, 0);
         let cap = r.batch_cap();
@@ -1284,7 +1428,7 @@ mod tests {
         let mut ir = InterpBackend.compile(graph, id, ENOUGH_DRAWS).runner();
         ir.position(seed, 0);
         {
-            let interp_col: Vec<f64> = ir.next_batch(cap).to_vec();
+            let interp_col: Vec<f32> = ir.next_batch(cap).to_vec();
             let jit_col = jit.next_batch(cap);
             for (lane, (a, b)) in interp_col.iter().zip(jit_col.iter()).enumerate() {
                 assert_eq!(
@@ -1304,7 +1448,7 @@ mod tests {
         jit.position(seed, 0);
         for _ in 0..16 {
             for &x in jit.next_batch(cap) {
-                sum += x;
+                sum += x as f64;
                 count += 1;
             }
         }
@@ -1407,7 +1551,7 @@ mod tests {
         let (mut acc, mut done) = (0.0f64, 0usize);
         while done < n {
             let col = runner.next_batch(cap);
-            acc += col[0] + col[cap - 1];
+            acc += (col[0] + col[cap - 1]) as f64;
             done += cap;
         }
         let jit_mps = done as f64 / t.elapsed().as_secs_f64() / 1e6;
@@ -1416,17 +1560,20 @@ mod tests {
         // Hand-written, fused, LLVM-compiled equivalent — also fills a column (same memory
         // behavior as the JIT), so the comparison is pure codegen quality, not store traffic.
         let key = crate::rng::Key::from_seed(0xC0FFEE);
-        let mut buf = vec![0.0f64; cap];
+        let mut buf = vec![0.0f32; cap];
         let mut lane = 0u32;
         let t = Instant::now();
         let (mut acc2, mut done2) = (0.0f64, 0usize);
         while done2 < n {
+            // Same f32 lanes + pair-shared draw the kernel does (Track B), so this stays an
+            // apples-to-apples codegen comparison.
+            crate::rng::fill_uniform(key, 0, lane, 0.0, 1.0, &mut buf);
+            lane = lane.wrapping_add(cap as u32);
             for slot in buf.iter_mut() {
-                let x = crate::rng::unit_uniform(key, lane, 0);
-                lane = lane.wrapping_add(1);
+                let x = *slot;
                 *slot = ((x * x + x) * x - x) * x + x * x - x + 1.0;
             }
-            acc2 += buf[0] + buf[cap - 1];
+            acc2 += (buf[0] + buf[cap - 1]) as f64;
             done2 += cap;
         }
         let llvm_mps = done2 as f64 / t.elapsed().as_secs_f64() / 1e6;
@@ -1509,7 +1656,7 @@ mod tests {
         let (mut sum, mut count) = (0.0f64, 0u64);
         for _ in 0..16 {
             for &x in r.next_batch(cap) {
-                sum += x;
+                sum += x as f64;
                 count += 1;
             }
         }
@@ -1583,7 +1730,7 @@ mod tests {
             let t = Instant::now();
             let mut acc = 0.0f64;
             for _ in 0..batches {
-                acc += r.next_batch(cap)[0];
+                acc += r.next_batch(cap)[0] as f64;
             }
             std::hint::black_box(acc);
             t.elapsed().as_secs_f64() * 1e9 / (batches * cap) as f64

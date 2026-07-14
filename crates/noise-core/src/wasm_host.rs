@@ -49,7 +49,7 @@ use crate::wasm_emit::{emit_for, emit_for_roots};
 // instance. We still intentionally don't tie instance lifetime to Rust `Drop` (that FFI call can
 // be elided; the LRU + status-return is simpler and sound).
 //
-// The kernel writes its output column at byte 4096 of its OWN memory — the convention `wasm_emit`
+// The kernel writes its output column (f32 lanes) at byte 4096 of its OWN memory — the convention `wasm_emit`
 // is built around. It is stateless (counter-keyed): the key words and starting lane arrive as call
 // arguments, so a content-addressed, reused instance can never leak one program's draws into
 // another's — there is nothing to seed and nothing left behind.
@@ -105,8 +105,9 @@ export function nz_kernel_run(handle, out, n, k0, k1, lane0) {
   const inst = _byId.get(handle);
   if (inst === undefined) return -1;
   inst.exports.kernel(4096, n, k0, k1, lane0); // kernel(out_ptr, n, key_lo, key_hi, lane0)
-  // `out` is a live Float64Array view over wasm memory (from Rust `&mut [f64]`); fill it directly.
-  out.set(new Float64Array(inst.exports.memory.buffer, 4096, n));
+  // `out` is a live Float32Array view over wasm memory (from Rust `&mut [f32]` — lanes are f32,
+  // PLAN-PREGPU Track B); fill it directly.
+  out.set(new Float32Array(inst.exports.memory.buffer, 4096, n));
   return 0;
 }
 
@@ -117,16 +118,16 @@ export function nz_kernel_run_cols(handle, out, n, k0, k1, lane0) {
   const inst = _byId.get(handle);
   if (inst === undefined) return -1;
   inst.exports.kernel(4096, n, k0, k1, lane0);
-  out.set(new Float64Array(inst.exports.memory.buffer, 4096, out.length));
+  out.set(new Float32Array(inst.exports.memory.buffer, 4096, out.length));
   return 0;
 }
 "#)]
 extern "C" {
     fn nz_kernel_new(bytes: &[u8]) -> i32;
-    fn nz_kernel_run(handle: i32, out: &mut [f64], n: u32, k0: u32, k1: u32, lane0: u32) -> i32;
+    fn nz_kernel_run(handle: i32, out: &mut [f32], n: u32, k0: u32, k1: u32, lane0: u32) -> i32;
     fn nz_kernel_run_cols(
         handle: i32,
-        out: &mut [f64],
+        out: &mut [f32],
         n: u32,
         k0: u32,
         k1: u32,
@@ -222,7 +223,7 @@ impl Program for WasmProgram {
             key: Key::from_seed(0),
             lane: 0,
             seed: 0,
-            buf: vec![0.0; BATCH],
+            buf: vec![0.0f32; BATCH],
             fallback: self.fallback.clone(),
             fell_back: None,
         })
@@ -239,7 +240,7 @@ struct WasmRunner {
     key: Key,
     lane: u32,
     seed: u64,
-    buf: Vec<f64>,
+    buf: Vec<f32>,
     fallback: Arc<dyn Program>,
     fell_back: Option<Box<dyn Runner>>,
 }
@@ -264,7 +265,7 @@ impl Runner for WasmRunner {
         }
     }
 
-    fn next_batch(&mut self, len: usize) -> &[f64] {
+    fn next_batch(&mut self, len: usize) -> &[f32] {
         // Fill the full BATCH (constant lane consumption per call), then slice to `len`.
         if self.fell_back.is_none() {
             let ok = nz_kernel_run(
@@ -313,7 +314,7 @@ impl JointProgram for WasmJointProgram {
             key: Key::from_seed(0),
             lane: 0,
             seed: 0,
-            buf: vec![0.0; self.k * BATCH],
+            buf: vec![0.0f32; self.k * BATCH],
             fallback: self.fallback.clone(),
             fell_back: None,
         })
@@ -329,7 +330,7 @@ struct WasmJointRunner {
     key: Key,
     lane: u32,
     seed: u64,
-    buf: Vec<f64>,
+    buf: Vec<f32>,
     fallback: Arc<dyn JointProgram>,
     fell_back: Option<Box<dyn JointRunner>>,
 }
@@ -373,7 +374,7 @@ impl JointRunner for WasmJointRunner {
         self.fell_back.as_mut().unwrap().next_batch();
     }
 
-    fn col(&self, j: usize) -> &[f64] {
+    fn col(&self, j: usize) -> &[f32] {
         match self.fell_back.as_ref() {
             Some(fb) => fb.col(j),
             None => &self.buf[j * BATCH..(j + 1) * BATCH],

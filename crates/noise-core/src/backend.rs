@@ -195,7 +195,13 @@ pub trait Runner {
     /// Produce the next batch of draws and return the **first `len`** root samples (`len <=
     /// batch_cap()`). Advances the lane cursor by a *fixed* `batch_cap()` per call (independent of
     /// `len`), so the draw stream doesn't depend on how a final partial batch is sliced.
-    fn next_batch(&mut self, len: usize) -> &[f64];
+    ///
+    /// Lanes are **f32** (PLAN-PREGPU Track B). This one signature is the whole type change: a
+    /// draw is a Monte-Carlo sample whose `O(1/√N)` standard error dwarfs f32's ~1e-7 rounding, so
+    /// the transport type can be narrow — while everything that becomes a *reported estimate*
+    /// (`reduce`'s Σx/Σx² accumulators, quantile interpolation, the public draw vectors) widens to
+    /// f64 at this boundary and stays there. Narrow lanes, wide sums.
+    fn next_batch(&mut self, len: usize) -> &[f32];
 
     /// Maximum `len` accepted by [`next_batch`](Runner::next_batch) — the backend's column width.
     fn batch_cap(&self) -> usize;
@@ -224,7 +230,7 @@ impl Program for InterpProgram {
         // Allocate this worker's column file once; reused across its batches. Array registers
         // (`Inst::Permutation`) get their own `n × BATCH` buffers, sized by `Program::arrays`.
         let regs = (0..self.inner.n_regs)
-            .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+            .map(|_| vec![0.0f32; BATCH].into_boxed_slice())
             .collect();
         let arrs = alloc_arrays(&self.inner);
         // Placeholder key/lane; the driver calls `position` before the first batch.
@@ -240,10 +246,10 @@ impl Program for InterpProgram {
 
 /// Allocate a worker's array-register file (one lane-major `n × BATCH` buffer per array register;
 /// see `bytecode::Program::arrays`). Empty for the common no-array program.
-fn alloc_arrays(prog: &ByteProgram) -> Vec<Box<[f64]>> {
+fn alloc_arrays(prog: &ByteProgram) -> Vec<Box<[f32]>> {
     prog.arrays
         .iter()
-        .map(|&n| vec![0.0f64; n as usize * BATCH].into_boxed_slice())
+        .map(|&n| vec![0.0f32; n as usize * BATCH].into_boxed_slice())
         .collect()
 }
 
@@ -251,8 +257,8 @@ fn alloc_arrays(prog: &ByteProgram) -> Vec<Box<[f64]>> {
 /// draw key + lane cursor.
 struct InterpRunner {
     prog: Arc<ByteProgram>,
-    regs: Vec<Box<[f64]>>,
-    arrs: Vec<Box<[f64]>>,
+    regs: Vec<Box<[f32]>>,
+    arrs: Vec<Box<[f32]>>,
     key: Key,
     lane: u32,
 }
@@ -263,7 +269,7 @@ impl Runner for InterpRunner {
         self.lane = lane;
     }
 
-    fn next_batch(&mut self, len: usize) -> &[f64] {
+    fn next_batch(&mut self, len: usize) -> &[f32] {
         // Fill the full BATCH (lane consumption is constant per call), then slice to `len`.
         run_batch(&self.prog, &mut self.regs, &mut self.arrs, self.key, self.lane);
         self.lane = self.lane.wrapping_add(BATCH as u32);
@@ -294,8 +300,9 @@ pub trait JointRunner {
     fn next_batch(&mut self);
 
     /// Root `j`'s column of the current batch (`batch_cap()` lanes; the driver slices a final
-    /// partial batch itself). Lane `i` across all columns is one *joint* draw.
-    fn col(&self, j: usize) -> &[f64];
+    /// partial batch itself). Lane `i` across all columns is one *joint* draw. f32, like
+    /// [`Runner::next_batch`].
+    fn col(&self, j: usize) -> &[f32];
 
     /// Lanes per batch — the backend's column width.
     fn batch_cap(&self) -> usize;
@@ -310,7 +317,7 @@ struct InterpJointProgram {
 impl JointProgram for InterpJointProgram {
     fn runner(&self) -> Box<dyn JointRunner> {
         let buf = (0..self.inner.n_regs)
-            .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+            .map(|_| vec![0.0f32; BATCH].into_boxed_slice())
             .collect();
         let arrs = alloc_arrays(&self.inner);
         // Placeholder key/lane; the driver calls `position` before the first batch.
@@ -329,8 +336,8 @@ impl JointProgram for InterpJointProgram {
 struct InterpJointRunner {
     prog: Arc<ByteProgram>,
     regs: Vec<usize>,
-    buf: Vec<Box<[f64]>>,
-    arrs: Vec<Box<[f64]>>,
+    buf: Vec<Box<[f32]>>,
+    arrs: Vec<Box<[f32]>>,
     key: Key,
     lane: u32,
 }
@@ -346,7 +353,7 @@ impl JointRunner for InterpJointRunner {
         self.lane = self.lane.wrapping_add(BATCH as u32);
     }
 
-    fn col(&self, j: usize) -> &[f64] {
+    fn col(&self, j: usize) -> &[f32] {
         &self.buf[self.regs[j]]
     }
 

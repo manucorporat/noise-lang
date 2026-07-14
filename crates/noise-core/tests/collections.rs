@@ -393,19 +393,23 @@ fn arithmetic_broadcasts_over_arrays() {
 
 #[test]
 fn rotation_is_orthonormal() {
-    // `rotation(d)` is a random orthonormal matrix, so every sample preserves length exactly:
-    // ||Pi x|| = ||x|| = 1 (the mean is exactly 1, hence a tight tolerance at tiny N).
+    // `rotation(d)` is a random orthonormal matrix, so every sample preserves length: ||Pi x|| =
+    // ||x|| = 1, deterministically — there is no Monte-Carlo error here, so the only slack is
+    // arithmetic. Draw lanes are f32 (PLAN-PREGPU Track B), so the bar is f32 rounding through a
+    // d=8 matrix-vector product (~1e-7), NOT the old f64 1e-9. The Gram–Schmidt itself still runs
+    // in f64 (bytecode.rs `Inst::Rotation`), so what's measured here is purely the f32 *storage*
+    // and matmul — which is exactly what a GPU would give too.
     let nrm = run_num("d = 8; x = normalize(ones(d)); Pi ~ rotation(d); E(normsq(Pi @ x), 100)");
     assert!(
-        (nrm - 1.0).abs() < 1e-9,
-        "||Pi x||^2 = {nrm}, want exactly 1"
+        (nrm - 1.0).abs() < 1e-6,
+        "||Pi x||^2 = {nrm}, want 1 to f32 precision"
     );
     // And it round-trips: Pi^T Pi x = x (same Pi reused, so transpose is the inverse).
     let rt = run_num(
         "d = 8; Pi ~ rotation(d); x = normalize(iota(d)); \
          E(normsq(transpose(Pi) @ (Pi @ x) - x), 100)",
     );
-    assert!(rt < 1e-9, "||Pi^T Pi x - x||^2 = {rt}, want ~0");
+    assert!(rt < 1e-6, "||Pi^T Pi x - x||^2 = {rt}, want ~0 to f32 precision");
 }
 
 #[test]

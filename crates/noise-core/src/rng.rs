@@ -18,10 +18,12 @@
 // tools/rng-cert/RESULTS.md.
 //
 // Counter layout (the whole u64 space, disjoint by construction):
-//   * scalar fills:  `(source << 36) + lane` — sequential per source (the certified
-//     regime), one counter per lane, 2^36 counters per source ≫ the 2^32 lane cap.
-//     `normal` consumes the pair's two counters (even lane's and odd lane's) for one
-//     Box–Muller pair.
+//   * pair-shared scalar fills (`unif`, `normal`, `exp`, `geometric`):
+//     `(source << 36) + (lane >> 1)` — sequential per source (the certified regime), ONE
+//     counter per lane PAIR. With f32 lanes (Track B) a uniform needs 24 bits and a draw
+//     supplies 48, so one hash feeds two lanes: even → low 24, odd → high 24.
+//   * `unif_int`: `(source << 36) + lane` — one counter per lane, all 48 bits spent on
+//     Lemire's multiply-high (24 would put the bias at count/2^24).
 //   * cell streams (`CellStream`: Knuth poisson, Permutation, Rotation — variable or
 //     large per-lane consumption): `(1 << 63) | (stream << 49) | (lane << 17) | j`,
 //     where `stream` is a compile-time per-program ordinal (< 2^14) and `j` counts the
@@ -29,7 +31,9 @@
 //
 // Consumption contract (C0): only bits 8..31 of each u32 half are consumable (never a
 // low byte). One squares64 output yields the 48-bit uniform
-// `((w >> 40) << 24) | ((w >> 8) & 0xFFFFFF)`.
+// `((w >> 40) << 24) | ((w >> 8) & 0xFFFFFF)`. Every source walks its counters 0, 1, 2, …
+// and spends all 48 bits of each — the byte stream C0 certified at 1 TB. Track B changed
+// only which lane each half lands in, not the stream.
 // ---------------------------------------------------------------------------
 
 /// Largest Poisson `lambda` sampled by the exact Knuth loop; above this `fill_poisson` uses the
@@ -112,13 +116,51 @@ pub fn draw48(key: Key, ctr: u64) -> u64 {
     ((w >> 40) << 24) | ((w >> 8) & 0xFF_FFFF)
 }
 
-/// Scalar-fill counter: sequential per source, one per lane.
+/// Scalar-fill counter: sequential per source, one per lane. Used by the fills that consume all
+/// 48 bits in one lane (`unif_int`'s Lemire draw).
 #[inline(always)]
 pub fn scalar_ctr(source: u32, lane: u32) -> u64 {
     ((source as u64) << 36) + lane as u64
 }
 
+/// Scalar-fill counter of the LANE PAIR `lane` belongs to (PLAN-PREGPU Track B): with f32 lanes a
+/// uniform needs only 24 bits, and one squares64 output carries 48 consumable ones — so **one hash
+/// feeds two lanes**. The even lane takes the low 24 ([`lo24`]), the odd lane the high 24
+/// ([`hi24`]).
+///
+/// The certified stream is untouched by this: a source still walks counters `0, 1, 2, …`
+/// sequentially and every one of its 48 consumed bits is used exactly once, in order — C0's
+/// criterion-8 evidence is over precisely this byte stream (tools/rng-cert `stream-sq64-engine`).
+/// All Track B changed is which *lane* each half lands in.
+#[inline(always)]
+pub fn pair_ctr(source: u32, lane: u32) -> u64 {
+    ((source as u64) << 36) + (lane >> 1) as u64
+}
+
+/// The even lane's 24 bits of a pair draw.
+#[inline(always)]
+pub fn lo24(bits48: u64) -> u32 {
+    (bits48 & 0xFF_FFFF) as u32
+}
+
+/// The odd lane's 24 bits of a pair draw.
+#[inline(always)]
+pub fn hi24(bits48: u64) -> u32 {
+    (bits48 >> 24) as u32
+}
+
 const SCALE48: f64 = 1.0 / (1u64 << 48) as f64;
+
+/// f32 uniform grid: a 24-bit draw scales to `[0, 1)` with `2^-24` spacing — every value exactly
+/// representable, and `1 - u` (what `ln` is fed) exactly representable too, which is what lets the
+/// f32 Box–Muller drop the old half-ulp offset (see [`normal_pair`]).
+const SCALE24: f32 = 1.0 / (1u32 << 24) as f32;
+
+/// Uniform f32 in `[0, 1)` from a 24-bit draw — `bits · 2⁻²⁴`, exact.
+#[inline(always)]
+pub fn unit24(bits24: u32) -> f32 {
+    bits24 as f32 * SCALE24
+}
 
 /// Sequential per-cell-stream draw supply for fills that consume a variable or
 /// per-lane-large number of draws (Knuth `poisson`, `Permutation`'s Fisher–Yates,
@@ -209,97 +251,132 @@ impl CellStream {
     }
 }
 
-/// Uniform `f64` in `[0, 1)` for one scalar draw cell.
+/// The two lanes' 24-bit draws of one pair — the shared head of every pair-shared fill.
+/// `lane` may be either member of the pair; the counter is the pair's ([`pair_ctr`]).
 #[inline(always)]
-pub fn unit_uniform(key: Key, lane: u32, source: u32) -> f64 {
-    draw48(key, scalar_ctr(source, lane)) as f64 * SCALE48
+pub fn pair_bits(key: Key, source: u32, lane: u32) -> (u32, u32) {
+    let bits = draw48(key, pair_ctr(source, lane));
+    (lo24(bits), hi24(bits))
 }
 
-/// Fill a column with `lo + (hi - lo) * u01` for lanes `lane0..`.
+/// Fill a column with `lo + (hi - lo) * u01` for lanes `lane0..` — one hash per lane PAIR.
+/// The `f64` bounds are rounded to f32 ONCE (`lo as f32`, `(hi - lo) as f32`), which is exactly
+/// what both emitters bake in as constants, so the arithmetic agrees op-for-op.
 #[inline]
-pub fn fill_uniform(key: Key, source: u32, lane0: u32, lo: f64, hi: f64, out: &mut [f64]) {
-    let span = hi - lo;
-    for (i, x) in out.iter_mut().enumerate() {
-        *x = lo + span * unit_uniform(key, lane0.wrapping_add(i as u32), source);
+pub fn fill_uniform(key: Key, source: u32, lane0: u32, lo: f64, hi: f64, out: &mut [f32]) {
+    debug_assert_eq!(lane0 & 1, 0, "fills start on even lanes (pair-shared draws)");
+    let (loc, span) = (lo as f32, (hi - lo) as f32);
+    for (t, pair) in out.chunks_mut(2).enumerate() {
+        let lane = lane0.wrapping_add(2 * t as u32);
+        let (b0, b1) = pair_bits(key, source, lane);
+        pair[0] = loc + span * unit24(b0);
+        if let Some(x) = pair.get_mut(1) {
+            *x = loc + span * unit24(b1);
+        }
     }
 }
 
-/// Integers uniform over `lo..=hi` (inclusive) as `f64`, via Lemire multiply-high on the
-/// 48 consumed bits (bias ≤ `count / 2^48`; Track B's 2^24 cap makes it ≤ 2^-24).
+/// Integers uniform over `lo..=hi` (inclusive) as `f32`, via Lemire multiply-high on the
+/// 48 consumed bits (bias ≤ `count / 2^48` ≤ `2^-24` under Track B's 2^24 range cap).
+///
+/// The one fill that does NOT pair-share: 24 bits would put Lemire's bias at `count / 2^24` — up
+/// to 1 at the cap — so this keeps its own per-lane counter and spends all 48 bits on one lane.
+/// Every value in the range is exact in f32 because the range cap *is* f32's integer limit.
 #[inline]
-pub fn fill_uniform_int(key: Key, source: u32, lane0: u32, lo: f64, hi: f64, out: &mut [f64]) {
+pub fn fill_uniform_int(key: Key, source: u32, lane0: u32, lo: f64, hi: f64, out: &mut [f32]) {
     debug_assert!(
         hi >= lo,
         "fill_uniform_int needs hi >= lo (constant bounds are validated upstream), got ({lo}, {hi})"
     );
     let count = (hi - lo + 1.0).max(1.0) as u64;
+    let loc = lo as f32;
     for (i, x) in out.iter_mut().enumerate() {
         let bits = draw48(key, scalar_ctr(source, lane0.wrapping_add(i as u32)));
         let k = ((bits as u128 * count as u128) >> 48) as u64;
-        *x = lo + k as f64;
+        *x = loc + k as f32;
     }
 }
 
-/// `Exp(rate)` via inverse-CDF `-ln(1 - u) / rate`. Uses the shared [`crate::approx::ln`]
-/// (not libm) so the JIT/wasm/WGSL lowerings — which inline exactly that polynomial —
-/// produce bit-identical draws (PLAN-PREGPU draw-stream parity).
-#[inline]
-pub fn fill_exp(key: Key, source: u32, lane0: u32, rate: f64, out: &mut [f64]) {
-    for (i, x) in out.iter_mut().enumerate() {
-        let u = unit_uniform(key, lane0.wrapping_add(i as u32), source);
-        *x = -crate::approx::ln(1.0 - u) / rate;
-    }
-}
-
-/// `Geometric(p)` (failures before first success) via `floor(ln(u)/ln(1-p))`, `u ∈ (0, 1]`.
-/// Shared-`approx` transcendentals for cross-backend bit parity (see [`fill_exp`]); the
-/// compile-time `denom` stays libm (a constant, folded identically everywhere).
-#[inline]
-pub fn fill_geometric(key: Key, source: u32, lane0: u32, p: f64, out: &mut [f64]) {
-    let denom = (1.0 - p).ln();
-    for (i, x) in out.iter_mut().enumerate() {
-        let u = 1.0 - unit_uniform(key, lane0.wrapping_add(i as u32), source);
-        *x = (crate::approx::ln(u) / denom).floor();
-    }
-}
-
-/// The Box–Muller pair for the even/odd lane pair `(lane & !1, lane | 1)`: `u1` from the
-/// even lane's counter (offset half an ulp of the 48-bit grid to dodge `ln(0)`), `u2` from
-/// the odd lane's; the even lane takes the cos branch, the odd lane the sin branch.
-/// Shared-`approx` `ln`/`sin`/`cos` (not libm) for cross-backend bit parity — the
-/// JIT/wasm/WGSL lowerings inline exactly those polynomials (and their trig kernel computes
-/// both branches anyway, so a lowering that emits one lane per iteration just selects by
-/// lane parity at no real cost). `TAU·u2 < 2π` is always in the exact-reduction range.
+/// `Exp(rate)` via inverse-CDF `-ln(1 - u) / rate`, pair-shared. `1 - u ∈ [2⁻²⁴, 1]` — exact on
+/// the f32 uniform grid, so `ln` is never fed 0. Uses the shared [`crate::approx::ln_f32`] (not
+/// libm) so the JIT/wasm/WGSL lowerings — which inline exactly that polynomial — produce
+/// bit-identical draws (PLAN-PREGPU draw-stream parity).
 ///
-/// Pairing is why every fill must start on an EVEN lane: batch (1024) and reducer-chunk
-/// (16384) boundaries all are, so a pair never straddles a range split — asserted in the
-/// fills, stated here rather than discovered.
+/// The 24-bit grid caps a draw at `ln(2^24) / rate ≈ 16.6 / rate` (it was `33.3 / rate`): the
+/// f32 uniform simply has no smaller positive value to invert. Tail mass beyond it is 6e-8.
 #[inline]
-pub fn normal_pair(key: Key, even_lane: u32, source: u32) -> (f64, f64) {
-    use std::f64::consts::TAU;
-    debug_assert_eq!(even_lane & 1, 0);
-    let bits1 = draw48(key, scalar_ctr(source, even_lane));
-    let u1 = (bits1 as f64 + 0.5) * SCALE48; // (0, 1)
-    let u2 = draw48(key, scalar_ctr(source, even_lane | 1)) as f64 * SCALE48;
-    let r = (-2.0 * crate::approx::ln(u1)).sqrt();
-    let theta = TAU * u2;
-    (r * crate::approx::cos(theta), r * crate::approx::sin(theta))
+pub fn fill_exp(key: Key, source: u32, lane0: u32, rate: f64, out: &mut [f32]) {
+    debug_assert_eq!(lane0 & 1, 0, "fills start on even lanes (pair-shared draws)");
+    let rate = rate as f32;
+    let one_minus_ln = |b: u32| -crate::approx::ln_f32(1.0 - unit24(b)) / rate;
+    for (t, pair) in out.chunks_mut(2).enumerate() {
+        let lane = lane0.wrapping_add(2 * t as u32);
+        let (b0, b1) = pair_bits(key, source, lane);
+        pair[0] = one_minus_ln(b0);
+        if let Some(x) = pair.get_mut(1) {
+            *x = one_minus_ln(b1);
+        }
+    }
 }
 
-/// `N(mu, sigma^2)` via Box–Muller over lane pairs (see [`normal_pair`]): the pair's two
-/// counters, one `ln`, one two-branch trig evaluation per TWO lanes — the pair sharing
-/// xoshiro had, kept under counter keying by pinning the pair to the even lane.
+/// `Geometric(p)` (failures before first success) via `floor(ln(1 - u)/ln(1 - p))`, pair-shared;
+/// `1 - u ∈ [2⁻²⁴, 1]` (see [`fill_exp`]). Shared-`approx` transcendentals for cross-backend bit
+/// parity; the compile-time `denom` is the f64 `ln` rounded to f32 — the exact constant both
+/// emitters bake in. Same 24-bit tail cap as [`fill_exp`].
 #[inline]
-pub fn fill_normal(key: Key, source: u32, lane0: u32, mu: f64, sigma: f64, out: &mut [f64]) {
-    debug_assert_eq!(lane0 & 1, 0, "fills start on even lanes (batch-aligned)");
-    let mut i = 0;
-    while i < out.len() {
-        let (z0, z1) = normal_pair(key, lane0.wrapping_add(i as u32), source);
-        out[i] = mu + sigma * z0;
-        i += 1;
-        if i < out.len() {
-            out[i] = mu + sigma * z1;
-            i += 1;
+pub fn fill_geometric(key: Key, source: u32, lane0: u32, p: f64, out: &mut [f32]) {
+    debug_assert_eq!(lane0 & 1, 0, "fills start on even lanes (pair-shared draws)");
+    let denom = (1.0 - p).ln() as f32;
+    let geo = |b: u32| (crate::approx::ln_f32(1.0 - unit24(b)) / denom).floor();
+    for (t, pair) in out.chunks_mut(2).enumerate() {
+        let lane = lane0.wrapping_add(2 * t as u32);
+        let (b0, b1) = pair_bits(key, source, lane);
+        pair[0] = geo(b0);
+        if let Some(x) = pair.get_mut(1) {
+            *x = geo(b1);
+        }
+    }
+}
+
+/// The standard-normal Box–Muller pair for the lane pair containing `lane` — **one hash for both
+/// lanes** (Track B): `u1` from the pair draw's low 24 bits, `u2` from its high 24; the even lane
+/// takes the cos branch, the odd lane the sin branch.
+///
+/// `r = sqrt(-2·ln(1 - u1))`, not the f64 path's `ln(u1 + ½ulp)`: on the 24-bit grid `1 - u1` is
+/// *exactly* representable in f32 and lies in `[2⁻²⁴, 1]`, so the domain guard is structural
+/// rather than a nudge — and every backend computes the identical expression with no rounding
+/// subtleties. (`u1 == 0` gives `ln(1) == 0` exactly, hence `r == 0` — a draw of `mu`, not a NaN.)
+///
+/// Shared-`approx` `ln`/`sin`/`cos` (not libm) for cross-backend bit parity; the trig kernel
+/// computes both branches anyway, so a lowering that emits one lane per iteration just selects by
+/// lane parity. `TAU·u2 < 2π` is always inside [`crate::approx::TRIG_MAX_F32`].
+///
+/// Pairing is why every fill must start on an EVEN lane: batch (1024) and reducer-chunk (16384)
+/// boundaries all are, so a pair never straddles a range split — asserted in the fills.
+#[inline]
+pub fn normal_pair(key: Key, lane: u32, source: u32) -> (f32, f32) {
+    use std::f32::consts::TAU;
+    let (b1, b2) = pair_bits(key, source, lane);
+    let r = (-2.0 * crate::approx::ln_f32(1.0 - unit24(b1))).sqrt();
+    let theta = TAU * unit24(b2);
+    (
+        r * crate::approx::cos_f32(theta),
+        r * crate::approx::sin_f32(theta),
+    )
+}
+
+/// `N(mu, sigma^2)` via Box–Muller over lane pairs (see [`normal_pair`]): ONE hash, one `ln`, one
+/// two-branch trig evaluation per TWO lanes.
+#[inline]
+pub fn fill_normal(key: Key, source: u32, lane0: u32, mu: f64, sigma: f64, out: &mut [f32]) {
+    debug_assert_eq!(lane0 & 1, 0, "fills start on even lanes (pair-shared draws)");
+    let (mu, sigma) = (mu as f32, sigma as f32);
+    for (t, pair) in out.chunks_mut(2).enumerate() {
+        let lane = lane0.wrapping_add(2 * t as u32);
+        let (z0, z1) = normal_pair(key, lane, source);
+        pair[0] = mu + sigma * z0;
+        if let Some(x) = pair.get_mut(1) {
+            *x = mu + sigma * z1;
         }
     }
 }
@@ -313,8 +390,13 @@ pub fn fill_normal(key: Key, source: u32, lane0: u32, mu: f64, sigma: f64, out: 
 /// Gaussian is excellent from `lambda ≈ 20` (finding A8).
 /// `source` keys the normal-approximation path (a scalar fill); `stream` is the
 /// per-program cell-stream ordinal keying the Knuth loop's counters.
+///
+/// The Knuth loop keeps its f64 `CellStream` uniforms (an `O(lambda)` product needs the headroom,
+/// and this path never reaches codegen); only the *result* is an f32 lane value. Counts above 2²⁴
+/// stop being exact integers in f32 — a documented Track B boundary, and one that only the
+/// normal-approximation regime (`lambda > 500`) can reach.
 #[inline]
-pub fn fill_poisson(key: Key, source: u32, stream: u32, lane0: u32, lambda: f64, out: &mut [f64]) {
+pub fn fill_poisson(key: Key, source: u32, stream: u32, lane0: u32, lambda: f64, out: &mut [f32]) {
     if lambda > POISSON_KNUTH_MAX {
         fill_normal(key, source, lane0, lambda, lambda.sqrt(), out);
         for x in out.iter_mut() {
@@ -334,7 +416,7 @@ pub fn fill_poisson(key: Key, source: u32, stream: u32, lane0: u32, lambda: f64,
                 break;
             }
         }
-        *x = (k - 1) as f64;
+        *x = (k - 1) as f32;
     }
 }
 
@@ -375,11 +457,27 @@ mod tests {
         assert_eq!(draw48(key, scalar_ctr(0, 1)), KAT_DRAWS[1]);
         assert_eq!(draw48(key, scalar_ctr(1, 0)), KAT_DRAWS[2]);
         assert_eq!(draw48(key, scalar_ctr(7, 12345)), KAT_DRAWS[3]);
-        // Uniform KATs on exact bit patterns (bits, not decimal literals, are the contract).
-        assert_eq!(unit_uniform(key, 0, 0).to_bits(), KAT_UNITS[0]);
-        assert_eq!(unit_uniform(key, 1, 0).to_bits(), KAT_UNITS[1]);
-        assert_eq!(unit_uniform(key, 0, 1).to_bits(), KAT_UNITS[2]);
-        assert_eq!(unit_uniform(key, 12345, 7).to_bits(), KAT_UNITS[3]);
+    }
+
+    /// The **f32 lane** contract (Track B): the pair-shared 24-bit uniforms and the Box–Muller
+    /// pair, pinned to exact bit patterns. This is what the JIT, the wasm emitter and a future
+    /// WGSL emitter must reproduce bit for bit — the pair split (even → low 24, odd → high 24) as
+    /// much as the arithmetic.
+    #[test]
+    fn f32_lane_known_answer() {
+        let key = Key::from_seed(0);
+        // The pair draw is the SAME 48 bits as the f64 KAT above — split, not re-derived.
+        let (b0, b1) = pair_bits(key, 0, 0);
+        assert_eq!(b0, lo24(KAT_DRAWS[0]));
+        assert_eq!(b1, hi24(KAT_DRAWS[0]));
+        // Both members of a pair see the same draw (the odd lane does not re-hash).
+        assert_eq!(pair_bits(key, 0, 1), (b0, b1));
+
+        let mut col = [0.0f32; 4];
+        fill_uniform(key, 0, 0, 0.0, 1.0, &mut col);
+        assert_eq!(col.map(f32::to_bits), KAT_UNIF_F32);
+        fill_normal(key, 2, 0, 0.0, 1.0, &mut col);
+        assert_eq!(col.map(f32::to_bits), KAT_NORM_F32);
     }
 
     /// Regeneration helper for the KAT constants above (prints the current values):
@@ -392,9 +490,11 @@ mod tests {
         for (src, lane) in [(0u32, 0u32), (0, 1), (1, 0), (7, 12345)] {
             println!("draw48(src {src}, lane {lane}) = 0x{:012X}", draw48(key, scalar_ctr(src, lane)));
         }
-        for (lane, src) in [(0u32, 0u32), (1, 0), (0, 1), (12345, 7)] {
-            println!("unit({lane},{src}).to_bits() = 0x{:016X}", unit_uniform(key, lane, src).to_bits());
-        }
+        let mut col = [0.0f32; 4];
+        fill_uniform(key, 0, 0, 0.0, 1.0, &mut col);
+        println!("KAT_UNIF_F32 = {:?}", col.map(|x| format!("0x{:08X}", x.to_bits())));
+        fill_normal(key, 2, 0, 0.0, 1.0, &mut col);
+        println!("KAT_NORM_F32 = {:?}", col.map(|x| format!("0x{:08X}", x.to_bits())));
     }
 
     const KAT_KEY0: u64 = 0x432A_B7DF_C618_529F;
@@ -404,12 +504,11 @@ mod tests {
         0x127B_1743_B147,
         0x552C_3662_C4EC,
     ];
-    const KAT_UNITS: [u64; 4] = [
-        0x3FE9_74F8_B137_63A0,
-        0x3FBC_7464_5A5F_0000,
-        0x3FB2_7B17_43B1_4700,
-        0x3FD5_4B0D_98B1_3B00,
-    ];
+    // The pair split is visible in these bits: lane 0's uniform is `0x3F09BB1D`, whose mantissa
+    // ends in the low 24 bits of `KAT_DRAWS[0] = 0xCBA7C589BB1D`, and lane 1's is `0x3F4BA7C5`,
+    // carrying its high 24 — the 24-bit draw scales into f32 exactly, with no rounding.
+    const KAT_UNIF_F32: [u32; 4] = [0x3F09_BB1D, 0x3F4B_A7C5, 0x3EB4_BE00, 0x3DE3_A320];
+    const KAT_NORM_F32: [u32; 4] = [0xBF25_F524, 0xBE36_10E6, 0x4036_2457, 0x3F7D_8F37];
 
     /// Counter keying means a fill is a pure function of the lane range: filling
     /// `[0, n)` in one call must equal filling any split of it — the property that makes
@@ -418,9 +517,9 @@ mod tests {
     fn keyed_fills_are_lane_range_pure() {
         let key = Key::from_seed(42);
         let n = 4096;
-        let mut whole = vec![0.0; n];
-        let mut split = vec![0.0; n];
-        type Fill = fn(Key, u32, u32, f64, f64, &mut [f64]);
+        let mut whole = vec![0.0f32; n];
+        let mut split = vec![0.0f32; n];
+        type Fill = fn(Key, u32, u32, f64, f64, &mut [f32]);
         let fills: [(Fill, f64, f64); 3] = [
             (fill_uniform, 2.0, 5.0),
             (fill_uniform_int, 1.0, 6.0),
@@ -428,15 +527,15 @@ mod tests {
         ];
         for (fill, a, b) in fills {
             fill(key, 3, 0, a, b, &mut whole);
-            // Even split point: fills start on even lanes (Box–Muller lane pairing; every real
-            // range start — batch, reducer chunk — is a multiple of 1024).
+            // Even split point: fills start on even lanes (the pair-shared draw; every real range
+            // start — batch, reducer chunk — is a multiple of 1024).
             let (lo, hi) = split.split_at_mut(1026);
             fill(key, 3, 0, a, b, lo);
             fill(key, 3, 1026, a, b, hi);
             assert_eq!(whole, split);
         }
-        let mut whole_p = vec![0.0; n];
-        let mut split_p = vec![0.0; n];
+        let mut whole_p = vec![0.0f32; n];
+        let mut split_p = vec![0.0f32; n];
         fill_poisson(key, 3, 0, 0, 4.5, &mut whole_p);
         let (lo, hi) = split_p.split_at_mut(1026);
         fill_poisson(key, 3, 0, 0, 4.5, lo);
@@ -448,13 +547,14 @@ mod tests {
     fn keyed_fills_match_requested_moments() {
         let key = Key::from_seed(7);
         let n = 200_000;
-        let stats = |col: &[f64]| {
+        // f32 lanes, f64 aggregation — the Track B split, exactly as `reduce` does it.
+        let stats = |col: &[f32]| {
             let nf = col.len() as f64;
-            let mean = col.iter().sum::<f64>() / nf;
-            let var = col.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / nf;
+            let mean = col.iter().map(|&x| x as f64).sum::<f64>() / nf;
+            let var = col.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / nf;
             (mean, var)
         };
-        let mut col = vec![0.0; n];
+        let mut col = vec![0.0f32; n];
         fill_normal(key, 0, 0, 2.0, 3.0, &mut col); // N(2, 9)
         let (mean, var) = stats(&col);
         assert!((mean - 2.0).abs() < 0.03, "normal mean = {mean}");
@@ -483,7 +583,7 @@ mod tests {
     #[test]
     fn keyed_uniform_int_is_uniform_over_range() {
         let key = Key::from_seed(99);
-        let mut col = vec![0.0f64; 6_000_000];
+        let mut col = vec![0.0f32; 6_000_000];
         fill_uniform_int(key, 0, 0, 1.0, 6.0, &mut col);
         let mut counts = [0u64; 7];
         for &x in &col {
@@ -510,23 +610,34 @@ mod tests {
         // approximation must return promptly with mean ≈ lambda and variance ≈ lambda. A huge
         // lambda (`1e12`) must not hang: this test *completing* is the proof.
         let key = Key::from_seed(3);
-        let mut col = vec![0.0f64; 200_000];
+        let mut col = vec![0.0f32; 200_000];
         let lambda = 100_000.0;
         fill_poisson(key, 0, 0, 0, lambda, &mut col);
         let n = col.len() as f64;
-        let mean = col.iter().sum::<f64>() / n;
-        let var = col.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        let mean = col.iter().map(|&x| x as f64).sum::<f64>() / n;
+        let var = col.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n;
         assert!((mean / lambda - 1.0).abs() < 0.01, "mean = {mean}");
         assert!((var / lambda - 1.0).abs() < 0.05, "var = {var}");
-        // The extreme case: just has to terminate, not hang.
-        let mut one = [0.0f64; 8];
-        fill_poisson(key, 1, 0, 1, 1e12, &mut one);
+        // The extreme case: just has to terminate, not hang. (Lane 0: the pair-shared draws need
+        // every fill range to start on an even lane — every real caller is batch-aligned.)
+        let mut one = [0.0f32; 8];
+        fill_poisson(key, 1, 0, 0, 1e12, &mut one);
         assert!(one.iter().all(|&x| x.is_finite() && x >= 0.0));
     }
 
-    /// Throughput of the keyed fills, single thread — the interpreter's RNG ceiling. The
-    /// tools/rng-cert keyed-batch bench reaches ~236 M hashes/s (942 M u32 words/s) on this
-    /// shape; fills that fall far short of it are leaving vectorization on the table. Run with:
+    /// Throughput of the keyed fills, single thread — the interpreter's RNG ceiling. Measured
+    /// 2026-07-14 on M4 Pro after Track B (f32 lanes, pair-shared draws):
+    ///
+    /// | fill | f32 (Track B) | f64 (before) | note |
+    /// |---|---|---|---|
+    /// | `fill_uniform` | 1039 M/s | 540 M/s | **1.92×** — one hash per two lanes, as designed |
+    /// | `fill_uniform_int` | 490 M/s | ~480 M/s | unchanged by design (still one 48-bit draw/lane) |
+    /// | `fill_exp` | 260 M/s | — | one hash + two `ln` per pair |
+    /// | `fill_normal` | 90 M/s | 86 M/s | only **1.04×**: Box–Muller is transcendental-LATENCY bound, so halving the hashing barely shows |
+    ///
+    /// The normal row is the honest one: `ln` + a two-branch trig is ~20 ns of dependent chain per
+    /// pair and the hash was never the bottleneck there. Uniform-heavy graphs get the full 2×.
+    /// Run with:
     /// `cargo test -p noise-core --release -- --ignored --nocapture bench_keyed_fills`
     #[test]
     #[ignore]
@@ -534,8 +645,8 @@ mod tests {
         use std::time::Instant;
         let key = Key::from_seed(1);
         let n = 1 << 22; // 4M lanes
-        let mut col = vec![0.0f64; n];
-        let mut time = |label: &str, f: &mut dyn FnMut(&mut [f64])| {
+        let mut col = vec![0.0f32; n];
+        let mut time = |label: &str, f: &mut dyn FnMut(&mut [f32])| {
             f(&mut col); // warm
             let t = Instant::now();
             f(&mut col);
@@ -553,16 +664,17 @@ mod tests {
         let d2 = 256;
         let lanes = n / d2;
         let mut scratch = Vec::new();
+        let mut fcol = vec![0.0f64; n]; // CellStream normals stay f64 (Rotation's MGS scratch)
         let t = Instant::now();
         for lane in 0..lanes as u32 {
             let mut s = CellStream::new(key, lane, 4);
             s.fill_normals(
-                &mut col[lane as usize * d2..(lane as usize + 1) * d2],
+                &mut fcol[lane as usize * d2..(lane as usize + 1) * d2],
                 &mut scratch,
             );
         }
         let el = t.elapsed().as_secs_f64();
-        std::hint::black_box(&col);
+        std::hint::black_box(&fcol);
         println!(
             "  {:<28}{:>8.1} M draws/s",
             "CellStream bulk normals",
@@ -570,12 +682,16 @@ mod tests {
         );
     }
 
+    /// Every 24-bit lane uniform lands in `[0, 1)` — and `1 - u`, which the `ln` paths are fed,
+    /// lands in `[2⁻²⁴, 1]`, never 0 (the structural `ln(0)` guard the f32 Box–Muller relies on).
     #[test]
-    fn unit_uniform_in_unit_interval() {
+    fn lane_uniforms_stay_in_the_unit_interval() {
         let key = Key::from_seed(42);
-        for lane in 0..10_000 {
-            let x = unit_uniform(key, lane, 0);
-            assert!((0.0..1.0).contains(&x));
+        let mut col = vec![0.0f32; 10_000];
+        fill_uniform(key, 0, 0, 0.0, 1.0, &mut col);
+        for &u in &col {
+            assert!((0.0..1.0).contains(&u), "uniform out of range: {u}");
+            assert!(1.0 - u >= (1.0f32 / (1u32 << 24) as f32), "1 - u underflowed to 0");
         }
     }
 }

@@ -14,6 +14,15 @@ use crate::sampler;
 use crate::signal::{SigExpr, Wave};
 use crate::value::Value;
 
+/// Largest magnitude an **exact integer draw** can take: draw lanes are f32 (PLAN-PREGPU Track B),
+/// which represents every integer up to 2²⁴ and only every *other* one past that. `unif_int`
+/// refuses bounds beyond this so a range can never silently lose the integers inside it.
+///
+/// The corpus is nowhere near it — the widest range any example draws is 365 (`birthday`) — and
+/// deterministic integer math (`gcd`, `modpow`, ranges, array indices) is unaffected: those are
+/// f64 `Value::Num`s that never enter a lane.
+pub const INT_LANE_MAX: f64 = (1u32 << 24) as f64;
+
 /// Default Monte Carlo budget for a language-surface `P`/`E`/`Var`/`Q` when the call carries no
 /// explicit sample count. Large enough that a probability estimate's standard error
 /// (`sqrt(p(1-p)/N) ≈ 5e-4`) is tight. A program can lower (or raise) this for the whole run with
@@ -93,6 +102,22 @@ pub fn call(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
                     if lo > hi {
                         return Err(NoiseError::runtime(
                             format!("unif_int needs lo <= hi, got ({lo}, {hi})"),
+                            span,
+                        ));
+                    }
+                    // Every value in the range must be an EXACT integer in a draw lane, and lanes
+                    // are f32 (PLAN-PREGPU Track B) — so the bounds cap at f32's integer limit,
+                    // 2^24. Past it, consecutive integers stop being distinguishable and the draw
+                    // would silently return non-integers. Refused here rather than discovered as a
+                    // wrong answer. (`gcd`/`modpow` and other deterministic integer math are
+                    // untouched — they never enter a lane.)
+                    if lo.abs() > INT_LANE_MAX || hi.abs() > INT_LANE_MAX {
+                        return Err(NoiseError::runtime(
+                            format!(
+                                "unif_int bounds must be within ±{} (a draw lane carries exact \
+                                 integers only up to 2^24); got ({lo}, {hi})",
+                                INT_LANE_MAX as u64
+                            ),
                             span,
                         ));
                     }

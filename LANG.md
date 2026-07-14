@@ -404,6 +404,43 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
 >   ```
 > Still to build: user-defined functions (§4) and the full value-type unification (§1).
 
+## Numeric precision: deterministic values vs draw lanes
+
+Noise carries numbers at two precisions, and the split is deliberate:
+
+| where | precision | why |
+|---|---|---|
+| **deterministic values** (`number`, array elements, ranges, `gcd`/`modpow`, signal time axes) | `f64` | exact integer and scientific work; nothing here is a sample |
+| **draw lanes** (the per-sample value of a random variable, every value inside an RV expression) | `f32` | a sample's Monte-Carlo error `O(1/√N)` dwarfs f32's ~1e-7 rounding; narrow lanes are ~2× faster and are what a GPU runs natively |
+| **estimates** (`P`, `E`, `Var`, quantiles — anything reported) | `f64` | the accumulators are wide, so *aggregating* a million narrow draws never loses precision |
+
+The rule of thumb: **a draw carries about 7 significant digits; an answer carries full f64.**
+Three consequences are worth stating outright, because they are the boundaries of the language,
+not bugs to be found:
+
+- **`unif_int(lo, hi)` requires `|lo|, |hi| ≤ 2^24`** (16,777,216). Every value in the range has
+  to be an exact integer in a lane, and past 2²⁴ f32 can only represent every *other* integer.
+  Bounds beyond the cap are a spanned error, not a silent wrong answer. (Deterministic integer
+  math — `gcd`, `modpow`, ranges, array indices — is `f64` and is untouched.)
+- **A distribution's spread must not be more than ~10⁻⁷ of its location.** `normal(1e8, 1)` is
+  not representable: the draws land on f32's ~8-wide grid around 1e8 and the spread of 1 is lost
+  before anything aggregates it. Work in the natural units (or in log-space, as
+  `barrier_option` does) rather than as a tiny perturbation of a huge constant. `normal(1e4, 1)`
+  and anything like it is comfortably fine.
+- **A lane overflows to `inf` past ~3.4e38** (f64 ran to 1.8e308). `st_petersburg`'s `2^(k+1)`
+  would need `k > 126` — a probability of 2⁻¹²⁶ — so no example is near it, but a long product
+  or an exponential payout can reach it where f64 would not.
+
+`exp(rate)` and `geometric(p)` draw from a 2⁻²⁴ uniform grid, so their tails are truncated at
+`ln(2^24)/rate ≈ 16.6/rate` (the mass beyond that is 6e-8). `poisson(lambda)` counts are exact
+integers below 2²⁴, which only the normal-approximation regime (`lambda > 500`) can exceed.
+
+**Draw counts** are capped at **2³² samples per forcing** (~4.3 billion). Every draw is a pure
+function of `(seed, lane, source)` and the lane index is a `u32` — which is exactly what makes a
+sample a *pure function of its position*, so results are bit-identical at any thread count and a
+parallel run consumes the same stream as a sequential one. A single query past 2³² draws is a
+hard error, not a wraparound.
+
 ## Random variables (Phase 2)
 
 - **`unif(a, b)`** is a distribution constructor. `a` and `b` are numbers **or numeric random

@@ -158,3 +158,33 @@ construction-compliant keys, certified over its exact consumption stream at 1 TB
 The harness (this crate) stays as the re-certification instrument for any future
 generator or consumption-schedule change — with its three recorded defects as the
 cautionary tale for why the certified reference must always run alongside.
+
+## Track B (f32 lanes) — consumption reviewed, criterion 8 CARRIES OVER — 2026-07-14
+
+Track B changed how draws are *spent*, so by the rule above it needs adjudicating. It does not
+need a re-run, and here is the argument, stated so it can be checked rather than trusted:
+
+- **What changed.** With f32 lanes a uniform needs 24 bits, and one squares64 output yields 48
+  consumable ones — so `unif`/`normal`/`exp`/`geometric` now hash once per lane PAIR
+  (`ctr = (src << 36) + (lane >> 1)`), the even lane taking the low 24 bits and the odd lane the
+  high 24. `unif_int` is unchanged (one counter per lane, all 48 bits — 24-bit Lemire would put
+  the bias at `count/2²⁴`).
+- **What did NOT change: the stream.** Each source still walks its counters `0, 1, 2, …`
+  sequentially and still consumes all 48 bits of each, in order. The byte sequence a PractRand
+  run would see is **identical** to the one criterion 8 already certified at 1 TB
+  (`stream-sq64-engine`) — the same counters, the same 48 bits, the same order. The only
+  difference is which *lane* each half is delivered to, which is a relabeling of the output, not
+  a change to the generator's output.
+- **Why the relabeling is not itself a hazard.** The pairing is a fixed, source-independent
+  partition of each 48-bit word into its two documented halves (bits 8..31 of each u32 half —
+  still never a low byte). It creates no reuse (each bit is consumed exactly once), no stride
+  (counters stay sequential — the trap that produced harness defect #1), and no cross-source
+  aliasing (the `src << 36` block structure is untouched). Two lanes of a pair are correlated
+  only in the sense that they come from one hash — which is exactly what the certified stream
+  measures.
+- **Verdict: criterion 8 stands, no re-run required.** The KATs pin it: `rng::f32_lane_known_answer`
+  asserts the pair split against `KAT_DRAWS[0]` bit-for-bit, so a future change to the schedule
+  breaks a test rather than quietly voiding this entry.
+
+A change that altered the *counter sequence* or the *consumed bits* (e.g. going to 32-bit
+uniforms, or per-lane strides) would NOT get this treatment — it would need the 1 TB run again.

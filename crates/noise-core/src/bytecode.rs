@@ -2,7 +2,8 @@
 //! "Performance thesis").
 //!
 //! The RV expression compiles ONCE to a flat list of [`Inst`] over column registers. A
-//! register is a contiguous `[f64; BATCH]` buffer. `run_batch` walks the instruction list,
+//! register is a contiguous `[f32; BATCH]` buffer (PLAN-PREGPU Track B: **lanes are f32**,
+//! aggregation stays f64 — see [`crate::reduce`]). `run_batch` walks the instruction list,
 //! filling each instruction's whole `dst` column before moving on — so one pass evaluates
 //! `BATCH` draws, never tree-walking per draw. CSE via `HashMap<RvId, Reg>` guarantees a
 //! shared sub-RV (e.g. `X` in `X + X`) compiles to ONE register/instruction, so both lanes
@@ -13,8 +14,10 @@ use std::collections::HashMap;
 use crate::ast::{BinOp, UnOp};
 use crate::dist::{RvGraph, RvId, RvNode, Source};
 
-/// Batch / column width. 8 KiB per f64 column: small enough to stay in cache, large enough
-/// to amortize dispatch and give the autovectorizer long runs. Tunable in Phase 4.
+/// Batch / column width. 4 KiB per f32 column (8 KiB before Track B halved the lane type):
+/// small enough to stay in cache, large enough to amortize dispatch and give the autovectorizer
+/// long runs. Always EVEN — the pair-shared draws (`rng::pair_ctr`) need every fill range to
+/// start on an even lane, and every real range start is a multiple of this.
 pub const BATCH: usize = 1024;
 
 /// Register index into the column file.
@@ -135,7 +138,7 @@ pub struct Program {
     /// Element-register tables for `Inst::Gather`, indexed by its `table` field.
     pub gathers: Vec<Box<[Reg]>>,
     /// Element count of each **array register** (`Inst::Permutation`/`Inst::ArrIndex`), indexed by
-    /// [`ArrReg`]. A runner allocates `arrays[a] × BATCH` f64s per register, **lane-major**
+    /// [`ArrReg`]. A runner allocates `arrays[a] × BATCH` f32s per register, **lane-major**
     /// (`buf[k*n + j]` is lane `k`'s element `j`): the Fisher–Yates fill writes a whole lane's
     /// array at a time (contiguous swaps stay in one cache line for realistic `n`), where an
     /// element-major layout would stride every swap `BATCH × 8` bytes apart. The ArrIndex read of
@@ -416,8 +419,8 @@ fn lower(
 /// uniform-width and programs without array nodes pass `&mut []` for free.
 pub fn run_batch(
     program: &Program,
-    regs: &mut [Box<[f64]>],
-    arrs: &mut [Box<[f64]>],
+    regs: &mut [Box<[f32]>],
+    arrs: &mut [Box<[f32]>],
     key: crate::rng::Key,
     lane0: u32,
 ) {
@@ -447,14 +450,17 @@ pub fn run_batch(
             Inst::Geometric { dst, src, p } => {
                 rng::fill_geometric(key, src, lane0, p, &mut regs[dst as usize]);
             }
+            // The graph's constants are f64 (deterministic values stay f64); a lane holds
+            // `val as f32` — the same rounding both emitters bake into their f32 constants.
+            // A magnitude past f32's range becomes ±inf here: a documented Track B boundary.
             Inst::ConstNum { dst, val } => {
                 for x in regs[dst as usize].iter_mut() {
-                    *x = val;
+                    *x = val as f32;
                 }
             }
             Inst::ConstBool { dst, val } => {
                 for x in regs[dst as usize].iter_mut() {
-                    *x = val;
+                    *x = val as f32;
                 }
             }
             Inst::Un { dst, op, a } => {
@@ -475,7 +481,7 @@ pub fn run_batch(
             Inst::Select { dst, cond, a, b } => {
                 let (dst, cond, a, b) = (dst as usize, cond as usize, a as usize, b as usize);
                 for k in 0..BATCH {
-                    regs[dst][k] = if regs[cond][k] != 0.0 {
+                    regs[dst][k] = if regs[cond][k] != 0.0f32 {
                         regs[a][k]
                     } else {
                         regs[b][k]
@@ -495,11 +501,11 @@ pub fn run_batch(
                 let tbl = &program.gathers[table as usize];
                 let last = tbl.len() - 1; // `gathers` never holds an empty table (eval rejects it)
                 let index = index as usize;
-                let mut scratch = [0.0f64; BATCH];
+                let mut scratch = [0.0f32; BATCH];
                 for k in 0..BATCH {
                     let raw = regs[index][k].round();
                     if raw.is_nan() {
-                        scratch[k] = f64::NAN;
+                        scratch[k] = f32::NAN;
                         continue;
                     }
                     let i = if raw <= 0.0 {
@@ -526,7 +532,7 @@ pub fn run_batch(
                     let mut draws = rng::CellStream::new(key, stream, lane0.wrapping_add(k as u32));
                     let lane = &mut buf[k * n..(k + 1) * n];
                     for (j, x) in lane.iter_mut().enumerate() {
-                        *x = j as f64;
+                        *x = j as f32;
                     }
                     for j in (1..n).rev() {
                         let i = draws.next_bounded(j as u64 + 1) as usize;
@@ -545,14 +551,22 @@ pub fn run_batch(
                 // consumption a pure function of `(lane, src)` — partial batches can't change the
                 // stream. A zero-norm row (probability 0 for Gaussians) would yield inf/NaN
                 // entries — the same IEEE answer the graph-level `normalize` produced.
+                //
+                // The Gaussian seed and the MGS itself run in **f64 scratch**, and only the
+                // finished matrix is rounded into the f32 array register: orthonormality is then
+                // limited by f32 *storage* (~1e-7) rather than by f32 arithmetic accumulating
+                // through an O(d³) elimination (~1e-5 at d = 5). The cost is one d²-element
+                // scratch buffer per batch — nothing against the O(d³) flops it protects, and
+                // `turboquant`'s distortion result depends on the rotation being a true
+                // orthonormal one.
                 let d = d as usize;
                 let dd = d * d;
                 let buf = &mut arrs[dst as usize];
                 let mut u48s: Vec<u64> = Vec::new();
+                let mut m = vec![0.0f64; dd];
                 for k in 0..BATCH {
-                    let m = &mut buf[k * dd..(k + 1) * dd];
                     let mut draws = rng::CellStream::new(key, stream, lane0.wrapping_add(k as u32));
-                    draws.fill_normals(m, &mut u48s);
+                    draws.fill_normals(&mut m, &mut u48s);
                     for r in 0..d {
                         for p in 0..r {
                             let mut dot = 0.0;
@@ -572,6 +586,9 @@ pub fn run_batch(
                             m[r * d + c] *= inv;
                         }
                     }
+                    for (dstx, &srcx) in buf[k * dd..(k + 1) * dd].iter_mut().zip(m.iter()) {
+                        *dstx = srcx as f32;
+                    }
                 }
             }
             Inst::ArrIndex { dst, arr, index } => {
@@ -583,11 +600,11 @@ pub fn run_batch(
                 let n = buf.len() / BATCH; // never 0: eval builds no zero-length array node
                 let last = n - 1;
                 let index = index as usize;
-                let mut scratch = [0.0f64; BATCH];
+                let mut scratch = [0.0f32; BATCH];
                 for k in 0..BATCH {
                     let raw = regs[index][k].round();
                     if raw.is_nan() {
-                        scratch[k] = f64::NAN;
+                        scratch[k] = f32::NAN;
                         continue;
                     }
                     let i = if raw <= 0.0 {
@@ -605,9 +622,17 @@ pub fn run_batch(
     }
 }
 
-/// Scalar unary op. `Not` is logical not over a 0/1 bool column.
+/// Scalar unary op over a **lane value** (f32 — PLAN-PREGPU Track B). `Not` is logical not over a
+/// 0/1 bool column.
+///
+/// The ops with no pinnable f32 form — `atan`, `round`, `exp` — compute in f64 and round back
+/// (never `f32::atan`, i.e. `atanf`). That is the cross-backend contract: the JIT calls a shim
+/// that promotes/calls/demotes and the wasm module imports the f64 `Math.*` around an
+/// `f64.promote`/`f32.demote` pair, so all three agree bit-for-bit. `sin`/`cos`/`ln` are the
+/// shared `approx` f32 polynomials both emitters inline; `sqrt`/`floor`/`ceil` are native f32
+/// instructions (correctly rounded, hence identical everywhere).
 #[inline]
-fn apply_un(op: UnOp, x: f64) -> f64 {
+fn apply_un(op: UnOp, x: f32) -> f32 {
     match op {
         UnOp::Neg => -x,
         UnOp::Not => {
@@ -617,34 +642,29 @@ fn apply_un(op: UnOp, x: f64) -> f64 {
                 0.0
             }
         }
-        // Shared-`approx` trig (PLAN-PREGPU): the same polynomials (with the same `TRIG_MAX`
-        // libm fallback) the JIT and wasm emitter inline, so `sin(RV)` is bit-identical across
-        // backends instead of libm-vs-poly divergent within MC noise.
-        UnOp::Sin => crate::approx::sin(x),
-        UnOp::Cos => crate::approx::cos(x),
-        UnOp::Atan => x.atan(),
-        // sign: -1 / 0 / +1 (0 at exactly zero, unlike f64::signum which is ±1 at ±0.0).
-        UnOp::Sign => (x > 0.0) as i32 as f64 - (x < 0.0) as i32 as f64,
-        UnOp::Round => x.round(),
+        UnOp::Sin => crate::approx::sin_f32(x),
+        UnOp::Cos => crate::approx::cos_f32(x),
+        UnOp::Atan => (x as f64).atan() as f32,
+        // sign: -1 / 0 / +1 (0 at exactly zero, unlike signum which is ±1 at ±0.0).
+        UnOp::Sign => (x > 0.0) as i32 as f32 - (x < 0.0) as i32 as f32,
+        UnOp::Round => (x as f64).round() as f32,
         UnOp::Floor => x.floor(),
         UnOp::Ceil => x.ceil(),
-        // `exp` stays libm on every backend (the JIT/wasm call it as a shim/import — finding C9);
-        // `ln` is the shared guarded polynomial all backends compute (see `approx::ln_guarded`).
-        UnOp::Exp => x.exp(),
-        UnOp::Ln => crate::approx::ln_guarded(x),
+        UnOp::Exp => (x as f64).exp() as f32,
+        UnOp::Ln => crate::approx::ln_guarded_f32(x),
         // IEEE sqrt (correctly rounded, so the native sqrt instructions in both code generators
         // are bit-identical to this): sqrt(-0.0) = -0.0, sqrt(x<0) = NaN (incl. -inf).
         UnOp::Sqrt => x.sqrt(),
     }
 }
 
-/// Scalar binary op. Matches the deterministic evaluator's IEEE-754 behavior; comparisons
-/// produce 0.0/1.0 columns (the bool convention from PLAN.md, pre-wiring Phase 3's `P()`).
+/// Scalar binary op over lane values (f32). Comparisons produce 0.0/1.0 columns (the bool
+/// convention from PLAN.md, pre-wiring Phase 3's `P()`).
 #[inline]
-fn apply_bin(op: BinOp, a: f64, b: f64) -> f64 {
-    // The single shared scalar kernel (finding F4) — same computation the signal folder, the
-    // `eval` constant-fold, and the graph simplifier use, so the VM can never drift from them.
-    crate::num::fold_binop(op, a, b)
+fn apply_bin(op: BinOp, a: f32, b: f32) -> f32 {
+    // The single shared lane kernel (finding F4) — the same `num::` definition both emitters
+    // transcribe, so the VM can never drift from them.
+    crate::num::fold_binop_f32(op, a, b)
 }
 
 #[cfg(test)]
@@ -707,8 +727,8 @@ mod tests {
             RvKind::Num,
         );
         let prog = compile(&g, gather);
-        let mut buf: Vec<Box<[f64]>> = (0..prog.n_regs)
-            .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+        let mut buf: Vec<Box<[f32]>> = (0..prog.n_regs)
+            .map(|_| vec![0.0f32; BATCH].into_boxed_slice())
             .collect();
         run_batch(&prog, &mut buf, &mut [], crate::rng::Key::from_seed(0), 0);
         let out = &buf[prog.root as usize];
@@ -736,8 +756,8 @@ mod tests {
             RvKind::Num,
         );
         let prog = compile(&g, gather);
-        let mut buf: Vec<Box<[f64]>> = (0..prog.n_regs)
-            .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+        let mut buf: Vec<Box<[f32]>> = (0..prog.n_regs)
+            .map(|_| vec![0.0f32; BATCH].into_boxed_slice())
             .collect();
         run_batch(&prog, &mut buf, &mut [], crate::rng::Key::from_seed(0), 0);
         assert!(buf[prog.root as usize].iter().all(|&x| x == 20.0));
@@ -758,17 +778,17 @@ mod tests {
     }
 
     /// One worker's column file (scalar or array registers alike).
-    type RegFile = Vec<Box<[f64]>>;
+    type RegFile = Vec<Box<[f32]>>;
 
     /// Allocate the scalar + array register files a program needs (the runner's job in backend.rs).
     fn reg_files(prog: &Program) -> (RegFile, RegFile) {
         let regs = (0..prog.n_regs)
-            .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
+            .map(|_| vec![0.0f32; BATCH].into_boxed_slice())
             .collect();
         let arrs = prog
             .arrays
             .iter()
-            .map(|&n| vec![0.0f64; n as usize * BATCH].into_boxed_slice())
+            .map(|&n| vec![0.0f32; n as usize * BATCH].into_boxed_slice())
             .collect();
         (regs, arrs)
     }
@@ -790,11 +810,11 @@ mod tests {
             run_batch(&prog, &mut buf, &mut arrs, key, (b * BATCH) as u32);
             for k in 0..BATCH {
                 let mut seen = [false; N];
-                let mut sum = 0.0;
+                let mut sum = 0.0f32;
                 for (pos, &r) in regs.iter().enumerate() {
                     let v = buf[r as usize][k];
                     assert!(
-                        v.fract() == 0.0 && (0.0..N as f64).contains(&v),
+                        v.fract() == 0.0 && (0.0..N as f32).contains(&v),
                         "non-permutation value {v}"
                     );
                     let vi = v as usize;
@@ -803,7 +823,7 @@ mod tests {
                     sum += v;
                     counts[pos][vi] += 1;
                 }
-                assert_eq!(sum, (N * (N - 1) / 2) as f64, "lane is not a permutation");
+                assert_eq!(sum, (N * (N - 1) / 2) as f32, "lane is not a permutation");
             }
         }
         let expected = (batches * BATCH) as f64 / N as f64;
@@ -879,10 +899,11 @@ mod tests {
                 let q = |r: usize, c: usize| buf[regs[r * D + c] as usize][k];
                 for r1 in 0..D {
                     for r2 in r1..D {
-                        let dot: f64 = (0..D).map(|c| q(r1, c) * q(r2, c)).sum();
+                        let dot: f64 = (0..D).map(|c| q(r1, c) as f64 * q(r2, c) as f64).sum();
                         let want = if r1 == r2 { 1.0 } else { 0.0 };
+                        // f32 STORAGE limit (the MGS itself runs in f64 scratch): ~d·2^-24.
                         assert!(
-                            (dot - want).abs() < 1e-9,
+                            (dot - want).abs() < 1e-6,
                             "lane {k}: rows {r1}·{r2} = {dot}, want {want}"
                         );
                     }
@@ -907,7 +928,7 @@ mod tests {
         for b in 0..batches {
             run_batch(&prog, &mut buf, &mut arrs, key, (b * BATCH) as u32);
             for k in 0..BATCH {
-                let q00 = buf[regs[0] as usize][k];
+                let q00 = buf[regs[0] as usize][k] as f64;
                 sum += q00;
                 sum_sq += q00 * q00;
             }
