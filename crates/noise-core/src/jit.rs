@@ -1,23 +1,17 @@
-//! Cranelift native JIT backend (PLAN.md Phase 4, steps "B1"/"B2" + multi-stream RNG).
+//! Cranelift native JIT backend (PLAN.md Phase 4; counter RNG per PLAN-PREGPU Track C).
 //!
 //! Compiles the sample-DAG into ONE fused machine-code kernel: a loop that draws its sources,
 //! computes the whole expression keeping intermediates in registers, and stores the root `f64`s —
 //! so, unlike the columnar interpreter, **no intermediate column is materialized to memory**. That
 //! fusion is the win on arithmetic-dense graphs (see the `poly_*` benches).
 //!
-//! **Multi-stream RNG.** xoshiro256++ is a serial dependency chain — each `next_u64` waits on the
-//! previous mutating the state, and because the state threads through every loop iteration the
-//! *whole* loop is one chain. On RNG-bound graphs (`dice_sum`, `pi_indicator`) that latency, not
-//! the arithmetic, is the ceiling. The kernel therefore runs [`STREAMS`] **independent** xoshiro
-//! states, emitting that many samples per iteration; the out-of-order core overlaps the independent
-//! chains for ~2× (measured — see `bench_streams`). This is the scalar form of SIMD, and it wins
-//! where a hand-rolled `f64x2` Cranelift kernel lost (NEON's 2-wide ops — 3-instruction `rotl`, no
-//! native `u64→f64` — couldn't beat what the OoO core already extracts from scalar code).
-//!
-//! The PRNG (xoshiro256++ / SplitMix64, mirroring `rng`) is **inlined into the generated code** —
-//! no per-lane call back into Rust, which would otherwise dominate. Because the kernel consumes the
-//! RNG per-stream rather than column-by-column like the interpreter, the JIT and interpreter agree
-//! *in distribution* but not draw-for-draw under a shared seed; that's by design.
+//! **Counter-based RNG.** Every draw is a pure hash of `(key, global_lane, source_offset)`
+//! (pcg4d-3r — see `rng.rs` and tools/rng-cert), inlined as straight u32 arithmetic; there is no
+//! RNG state chain, so the old multi-stream interleave (built to overlap xoshiro's serial state
+//! latency) is gone — every loop iteration is independent and the out-of-order core overlaps them
+//! on its own. Because the interpreter keys draws identically, the JIT and interpreter agree
+//! **bit-for-bit** under a shared seed (the PLAN-PREGPU draw-stream-parity contract), not merely
+//! in distribution.
 //!
 //! Scope: `unif` / `unif_int` / `normal` / `exp` / `geometric` sources, `+ - * /`, integer-constant
 //! `^`, comparisons, `&& ||`, unary `- !` and the math ufuncs, lifted `if` (`Select`), and `Gather`
@@ -40,14 +34,14 @@ use crate::ast::{BinOp, UnOp};
 use crate::backend::{Backend, InterpBackend, JointProgram, JointRunner, Program, Runner};
 use crate::bytecode::BATCH;
 use crate::dist::{RvGraph, RvId, RvNode, Source};
-use crate::kernel::{
-    self, choose_streams, const_int_exponent, gather_class, profitable, seed_state, GatherClass,
-};
+use crate::kernel::{self, const_int_exponent, gather_class, profitable, GatherClass};
+use crate::rng::Key;
 
-/// `extern "C"` signature of a generated kernel: `kernel(out_ptr, n, state_ptr)` fills `out[0..n]`
-/// with fresh root draws, reading and writing the xoshiro state (`4 * STREAMS` words) via
-/// `state_ptr`.
-type KernelFn = unsafe extern "C" fn(*mut f64, i64, *mut u64);
+/// `extern "C"` signature of a generated kernel: `kernel(out_ptr, n, key_lo, key_hi, lane0)` fills
+/// `out[0..n]` with the root draws for global lanes `lane0 .. lane0 + n` (key words and lane index
+/// are the low 32 bits of their `i64` arguments). Stateless: the same arguments always produce the
+/// same column.
+type KernelFn = unsafe extern "C" fn(*mut f64, i64, i64, i64, i64);
 
 // Scalar math the kernel can't express as a single CLIF instruction is delegated to these
 // `extern "C"` shims (registered as JIT symbols, called per draw). `sqrt`/`floor` are NOT here —
@@ -195,8 +189,8 @@ impl Backend for JitBackend {
     }
 }
 
-/// The immutable JIT artifact: the finalized module (owns the executable memory), the entry
-/// pointer, and the stream count (so runners size their RNG state). Shared behind an `Arc`.
+/// The immutable JIT artifact: the finalized module (owns the executable memory) and the entry
+/// pointer. Shared behind an `Arc`.
 struct JitProgramInner {
     // `func` points into `_module`'s code memory; the module is kept alive for the program's life.
     //
@@ -225,7 +219,6 @@ struct JitProgramInner {
     // compiled programs per Engine) rather than to reinstate the free.
     _module: JITModule,
     func: KernelFn,
-    streams: usize,
     /// Const gather tables the kernel loads from ([`GatherClass::ConstTable`]): each `Box<[f64]>`
     /// is a stable heap allocation whose address was baked into the code as an `iconst`, so the
     /// program must own them exactly as long as the code (moving the `Vec` moves only the box
@@ -247,46 +240,47 @@ struct JitProgram {
     inner: Arc<JitProgramInner>,
 }
 
-#[cfg(test)]
-impl JitProgram {
-    /// Number of independent RNG streams the kernel was built with — lets tests assert the
-    /// multi-stream kernel emitted (no silent fallback to a narrower build).
-    fn streams(&self) -> usize {
-        self.inner.streams
-    }
-}
-
 impl Program for JitProgram {
     fn runner(&self) -> Box<dyn Runner> {
         Box::new(JitRunner {
             inner: self.inner.clone(),
             buf: vec![0.0; BATCH],
-            state: seed_state(0, self.inner.streams),
+            key: Key::from_seed(0),
+            lane: 0,
         })
     }
 }
 
 /// A per-worker JIT runner: a clone of the shared kernel `Arc`, its own output buffer, and the
-/// xoshiro state (`4 * streams` words) carried across batches.
+/// draw key + lane cursor (the kernel itself is stateless).
 struct JitRunner {
     inner: Arc<JitProgramInner>,
     buf: Vec<f64>,
-    state: Vec<u64>,
+    key: Key,
+    lane: u32,
 }
 
 impl Runner for JitRunner {
-    fn reseed(&mut self, seed: u64) {
-        self.state = seed_state(seed, self.inner.streams);
+    fn position(&mut self, seed: u64, lane: u32) {
+        self.key = Key::from_seed(seed);
+        self.lane = lane;
     }
 
     fn next_batch(&mut self, len: usize) -> &[f64] {
-        // Always fill the full BATCH (constant RNG consumption per call), then slice to `len`.
+        // Always fill the full BATCH (constant lane consumption per call), then slice to `len`.
         let n = self.buf.len() as i64;
-        // SAFETY: `func` is a finalized kernel with this exact ABI; `buf` holds `n` f64s and
-        // `state` holds the `4 * streams`-word RNG state, both valid for the duration of the call.
+        // SAFETY: `func` is a finalized kernel with this exact ABI; `buf` holds `n` f64s, valid
+        // for the duration of the call.
         unsafe {
-            (self.inner.func)(self.buf.as_mut_ptr(), n, self.state.as_mut_ptr());
+            (self.inner.func)(
+                self.buf.as_mut_ptr(),
+                n,
+                self.key.k0 as i64,
+                self.key.k1 as i64,
+                self.lane as i64,
+            );
         }
+        self.lane = self.lane.wrapping_add(BATCH as u32);
         &self.buf[..len]
     }
 
@@ -309,32 +303,42 @@ impl JointProgram for JitJointProgram {
             inner: self.inner.clone(),
             k: self.k,
             buf: vec![0.0; self.k * BATCH],
-            state: seed_state(0, self.inner.streams),
+            key: Key::from_seed(0),
+            lane: 0,
         })
     }
 }
 
-/// Per-worker joint runner: one flat `k×BATCH` column buffer plus the xoshiro state.
+/// Per-worker joint runner: one flat `k×BATCH` column buffer plus the draw key + lane cursor.
 struct JitJointRunner {
     inner: Arc<JitProgramInner>,
     k: usize,
     buf: Vec<f64>,
-    state: Vec<u64>,
+    key: Key,
+    lane: u32,
 }
 
 impl JointRunner for JitJointRunner {
-    fn reseed(&mut self, seed: u64) {
-        self.state = seed_state(seed, self.inner.streams);
+    fn position(&mut self, seed: u64, lane: u32) {
+        self.key = Key::from_seed(seed);
+        self.lane = lane;
     }
 
     fn next_batch(&mut self) {
         debug_assert_eq!(self.buf.len(), self.k * BATCH);
         // SAFETY: `func` is a finalized kernel with this exact ABI; `buf` holds `k * BATCH` f64s
-        // (the kernel writes lanes `0..BATCH` of each of the `k` BATCH-strided columns) and `state`
-        // holds the `4 * streams`-word RNG state, both valid for the duration of the call.
+        // (the kernel writes lanes `0..BATCH` of each of the `k` BATCH-strided columns), valid for
+        // the duration of the call.
         unsafe {
-            (self.inner.func)(self.buf.as_mut_ptr(), BATCH as i64, self.state.as_mut_ptr());
+            (self.inner.func)(
+                self.buf.as_mut_ptr(),
+                BATCH as i64,
+                self.key.k0 as i64,
+                self.key.k1 as i64,
+                self.lane as i64,
+            );
         }
+        self.lane = self.lane.wrapping_add(BATCH as u32);
     }
 
     fn col(&self, j: usize) -> &[f64] {
@@ -346,47 +350,30 @@ impl JointRunner for JitJointRunner {
     }
 }
 
-/// Build the JIT module + kernel for `root` (the caller falls back to the interpreter on error),
-/// choosing the stream count from the graph via [`choose_streams`].
+/// Build the JIT module + kernel for `root` (the caller falls back to the interpreter on error).
 fn build(graph: &RvGraph, root: RvId) -> Result<JitProgram, String> {
-    build_with(graph, root, choose_streams(graph, root))
-}
-
-/// Single-root [`build_kernel`], wrapped as a [`Program`].
-fn build_with(graph: &RvGraph, root: RvId, streams: usize) -> Result<JitProgram, String> {
     Ok(JitProgram {
-        inner: Arc::new(build_kernel(graph, &[root], streams)?),
+        inner: Arc::new(build_kernel(graph, &[root])?),
     })
 }
 
-/// Multi-root [`build_kernel`], wrapped as a [`JointProgram`]; stream policy over the union cone.
+/// Multi-root [`build_kernel`], wrapped as a [`JointProgram`].
 fn build_joint(graph: &RvGraph, roots: &[RvId]) -> Result<JitJointProgram, String> {
-    let streams = kernel::choose_streams_roots(graph, roots);
     Ok(JitJointProgram {
-        inner: Arc::new(build_kernel(graph, roots, streams)?),
+        inner: Arc::new(build_kernel(graph, roots)?),
         k: roots.len(),
     })
 }
 
-/// Build the kernel with `streams` independent xoshiro states interleaved per loop iteration.
-/// `streams == 1` is the plain fused kernel; higher values overlap the RNG latency chains. The
-/// skeleton is: load each stream's state → counted loop emitting `streams` lanes per iteration →
-/// store state back → return.
+/// Build the stateless counter-keyed kernel. The skeleton is: reduce the key/lane arguments to
+/// i32 → counted loop emitting one lane per iteration (each draw a pure hash of
+/// `(key, lane, source)`, so iterations are independent and the OoO core overlaps them) → return.
 ///
-/// Multi-root: each stream's lane evaluates **every** root from one shared memo — a source feeding
-/// two roots is drawn once, so the roots are sampled *jointly* — and root `r`'s value is stored
-/// into its own BATCH-strided column at `out[r*BATCH + i + j]`. A single root (`roots == &[root]`)
-/// emits exactly the kernel this function always emitted.
-fn build_kernel(
-    graph: &RvGraph,
-    roots: &[RvId],
-    streams: usize,
-) -> Result<JitProgramInner, String> {
-    assert!(
-        streams >= 1 && BATCH.is_multiple_of(streams),
-        "streams must divide BATCH"
-    );
-
+/// Multi-root: each lane evaluates **every** root from one shared memo — a source feeding two
+/// roots is drawn once, so the roots are sampled *jointly* — and root `r`'s value is stored into
+/// its own BATCH-strided column at `out[r*BATCH + i]`. A single root (`roots == &[root]`) emits
+/// exactly the plain single-column kernel.
+fn build_kernel(graph: &RvGraph, roots: &[RvId]) -> Result<JitProgramInner, String> {
     // --- ISA + module setup ---
     let mut flags = settings::builder();
     flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
@@ -411,12 +398,14 @@ fn build_kernel(
     // Declare the math shims as imports (f64->f64, except `pow` which is f64,f64->f64).
     let math_ids = declare_math(&mut module)?;
 
-    // kernel(out: *mut f64, n: i64, state: *mut u64)
+    // kernel(out: *mut f64, n: i64, key_lo: i64, key_hi: i64, lane0: i64)
     let ptr = module.target_config().pointer_type();
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(ptr)); // out
     sig.params.push(AbiParam::new(types::I64)); // n
-    sig.params.push(AbiParam::new(ptr)); // state
+    sig.params.push(AbiParam::new(types::I64)); // key_lo (low 32 bits significant)
+    sig.params.push(AbiParam::new(types::I64)); // key_hi
+    sig.params.push(AbiParam::new(types::I64)); // lane0
     let func_id = module
         .declare_function("kernel", Linkage::Export, &sig)
         .map_err(|e| e.to_string())?;
@@ -453,33 +442,21 @@ fn build_kernel(
         fb.seal_block(entry);
         let out = fb.block_params(entry)[0];
         let n = fb.block_params(entry)[1];
-        let state_ptr = fb.block_params(entry)[2];
+        // Key words + starting lane arrive as i64; the hash world is pure i32.
+        let k0_64 = fb.block_params(entry)[2];
+        let k1_64 = fb.block_params(entry)[3];
+        let lane0_64 = fb.block_params(entry)[4];
+        let k0 = fb.ins().ireduce(types::I32, k0_64);
+        let k1 = fb.ins().ireduce(types::I32, k1_64);
+        let lane0 = fb.ins().ireduce(types::I32, lane0_64);
 
-        // Loop counter `i` (a sample index, stepped by `streams`) and `streams` independent xoshiro
-        // states, each four `I64` Variables. The OoO core overlaps the independent state chains.
+        // Loop counter `i` (i64 sample index) and the current global lane (i32, wraps with the
+        // 2^32-lane forcing cap).
         let i_var = fb.declare_var(types::I64);
-        let states: Vec<[Variable; 4]> = (0..streams)
-            .map(|_| {
-                [
-                    fb.declare_var(types::I64),
-                    fb.declare_var(types::I64),
-                    fb.declare_var(types::I64),
-                    fb.declare_var(types::I64),
-                ]
-            })
-            .collect();
+        let lane_var = fb.declare_var(types::I32);
         let zero_i = fb.ins().iconst(types::I64, 0);
         fb.def_var(i_var, zero_i);
-        // Load stream `j` word `k` from the strided slot `state[k*streams + j]` (seed layout).
-        for (j, st) in states.iter().enumerate() {
-            for (k, v) in st.iter().enumerate() {
-                let off = ((k * streams + j) * 8) as i32;
-                let w = fb
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), state_ptr, off);
-                fb.def_var(*v, w);
-            }
-        }
+        fb.def_var(lane_var, lane0);
         fb.ins().jump(header, &[]);
 
         // header: if i < n goto body else exit  (left unsealed — body adds the back-edge)
@@ -488,38 +465,32 @@ fn build_kernel(
         let cond = fb.ins().icmp(IntCC::SignedLessThan, iv, n);
         fb.ins().brif(cond, body, &[], exit, &[]);
 
-        // body: for each stream emit the fused DAG (own memo per stream — independent draws;
-        // shared across roots — joint draws) and store root `r` at out[r*BATCH + i + j] (the
-        // column stride is a constant store offset); then i += streams, loop.
+        // body: emit the fused DAG for this lane (one shared memo across roots — joint draws) and
+        // store root `r` at out[r*BATCH + i] (the column stride is a constant store offset); then
+        // i += 1, lane += 1, loop.
         fb.switch_to_block(body);
         fb.seal_block(body);
         let iv = fb.use_var(i_var);
-        for (j, st) in states.iter().enumerate() {
-            let mut memo: HashMap<RvId, Value> = HashMap::new();
-            let idx = fb.ins().iadd_imm(iv, j as i64);
-            let off = fb.ins().imul_imm(idx, 8);
-            let addr = fb.ins().iadd(out, off);
-            for (r, &root) in roots.iter().enumerate() {
-                let result = emit_node(&mut fb, graph, root, st, &math, &mut memo, &mut tables);
-                fb.ins()
-                    .store(MemFlags::trusted(), result, addr, (r * BATCH * 8) as i32);
-            }
+        let lane = fb.use_var(lane_var);
+        let ctx = DrawCtx { k0, k1, lane };
+        let mut memo: HashMap<RvId, Value> = HashMap::new();
+        let off = fb.ins().imul_imm(iv, 8);
+        let addr = fb.ins().iadd(out, off);
+        for (r, &root) in roots.iter().enumerate() {
+            let result = emit_node(&mut fb, graph, root, ctx, &math, &mut memo, &mut tables);
+            fb.ins()
+                .store(MemFlags::trusted(), result, addr, (r * BATCH * 8) as i32);
         }
-        let inext = fb.ins().iadd_imm(iv, streams as i64);
+        let inext = fb.ins().iadd_imm(iv, 1);
         fb.def_var(i_var, inext);
+        let lnext = fb.ins().iadd_imm(lane, 1);
+        fb.def_var(lane_var, lnext);
         fb.ins().jump(header, &[]);
         fb.seal_block(header); // both preds (entry, body) now known
 
-        // exit: write each stream's advanced state back to its slot, return.
+        // exit: nothing to persist — the kernel is stateless.
         fb.switch_to_block(exit);
         fb.seal_block(exit);
-        for (j, st) in states.iter().enumerate() {
-            for (k, v) in st.iter().enumerate() {
-                let off = ((k * streams + j) * 8) as i32;
-                let w = fb.use_var(*v);
-                fb.ins().store(MemFlags::trusted(), w, state_ptr, off);
-            }
-        }
         fb.ins().return_(&[]);
         fb.finalize();
     }
@@ -537,7 +508,6 @@ fn build_kernel(
     Ok(JitProgramInner {
         _module: module,
         func,
-        streams,
         _tables: tables.boxes,
     })
 }
@@ -590,16 +560,26 @@ fn call2(
     fb.inst_results(c)[0]
 }
 
-// --- DAG → CLIF emission (per draw, in the loop body, for one stream `s`) ---
+// --- DAG → CLIF emission (per draw, in the loop body, for one lane) ---
 
-/// Emit the value of node `id` as an `f64` SSA value for stream `s`, memoizing by `RvId` so a
-/// shared sub-RV (e.g. `X` in `X + X`) is emitted ONCE — the same CSE guarantee the interpreter
-/// gets. (Each stream uses a fresh memo, since its draws are independent.)
+/// Per-iteration draw context: the run's two key words and this lane's global index, all `I32`
+/// SSA values defined in the entry/body blocks. Every source hash takes these plus its own
+/// compile-time `source_offset` (the node's `RvId` — the cross-backend keying contract).
+#[derive(Clone, Copy)]
+struct DrawCtx {
+    k0: Value,
+    k1: Value,
+    lane: Value,
+}
+
+/// Emit the value of node `id` as an `f64` SSA value for the current lane, memoizing by `RvId` so
+/// a shared sub-RV (e.g. `X` in `X + X`) is emitted ONCE — the same CSE guarantee the interpreter
+/// gets (and, with counter keying, the same *draw*: one hash per node per lane).
 fn emit_node(
     fb: &mut FunctionBuilder,
     graph: &RvGraph,
     id: RvId,
-    s: &[Variable; 4],
+    ctx: DrawCtx,
     math: &MathRefs,
     memo: &mut HashMap<RvId, Value>,
     tables: &mut GatherTables,
@@ -608,17 +588,17 @@ fn emit_node(
         return *v;
     }
     let v = match graph.node(id) {
-        RvNode::Src(Source::Uniform(u)) => emit_uniform(fb, s, u.lo, u.hi),
-        RvNode::Src(Source::UniformInt { lo, hi }) => emit_uniform_int(fb, s, *lo, *hi),
-        RvNode::Src(Source::Normal { mu, sigma }) => emit_normal(fb, s, *mu, *sigma),
-        RvNode::Src(Source::Exp { rate }) => emit_exp(fb, s, *rate),
-        RvNode::Src(Source::Geometric { p }) => emit_geometric(fb, s, *p),
+        RvNode::Src(Source::Uniform(u)) => emit_uniform(fb, ctx, id.0, u.lo, u.hi),
+        RvNode::Src(Source::UniformInt { lo, hi }) => emit_uniform_int(fb, ctx, id.0, *lo, *hi),
+        RvNode::Src(Source::Normal { mu, sigma }) => emit_normal(fb, ctx, id.0, *mu, *sigma),
+        RvNode::Src(Source::Exp { rate }) => emit_exp(fb, ctx, id.0, *rate),
+        RvNode::Src(Source::Geometric { p }) => emit_geometric(fb, ctx, id.0, *p),
         RvNode::Src(Source::Poisson { .. }) => unreachable!("profitable() excludes Poisson"),
         RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => {
             unreachable!("profitable() excludes the array-valued draw nodes")
         }
         RvNode::Gather { elems, index } => {
-            let xv = emit_node(fb, graph, *index, s, math, memo, tables);
+            let xv = emit_node(fb, graph, *index, ctx, math, memo, tables);
             match gather_class(graph, elems) {
                 Some(GatherClass::ConstTable) => {
                     let base = tables.base_ptr(graph, id, elems);
@@ -627,7 +607,7 @@ fn emit_node(
                 Some(GatherClass::SelectChain) => {
                     let evs: Vec<Value> = elems
                         .iter()
-                        .map(|&e| emit_node(fb, graph, e, s, math, memo, tables))
+                        .map(|&e| emit_node(fb, graph, e, ctx, math, memo, tables))
                         .collect();
                     emit_gather_chain(fb, xv, &evs)
                 }
@@ -637,30 +617,30 @@ fn emit_node(
         RvNode::ConstNum(x) => fb.ins().f64const(*x),
         RvNode::ConstBool(b) => fb.ins().f64const(if *b { 1.0 } else { 0.0 }),
         RvNode::Unary(op, a) => {
-            let av = emit_node(fb, graph, *a, s, math, memo, tables);
+            let av = emit_node(fb, graph, *a, ctx, math, memo, tables);
             emit_unary(fb, math, *op, av)
         }
         RvNode::Binary(BinOp::Pow, a, b) => {
-            let av = emit_node(fb, graph, *a, s, math, memo, tables);
+            let av = emit_node(fb, graph, *a, ctx, math, memo, tables);
             match const_int_exponent(graph, *b) {
                 // Small non-negative integer power → repeated multiply (no libcall).
                 Some(k) => emit_pow(fb, av, k),
                 // Any other exponent → a `pow` libcall over both operands.
                 None => {
-                    let bv = emit_node(fb, graph, *b, s, math, memo, tables);
+                    let bv = emit_node(fb, graph, *b, ctx, math, memo, tables);
                     call2(fb, math.pow, av, bv)
                 }
             }
         }
         RvNode::Binary(op, a, b) => {
-            let av = emit_node(fb, graph, *a, s, math, memo, tables);
-            let bv = emit_node(fb, graph, *b, s, math, memo, tables);
+            let av = emit_node(fb, graph, *a, ctx, math, memo, tables);
+            let bv = emit_node(fb, graph, *b, ctx, math, memo, tables);
             emit_binary(fb, *op, av, bv)
         }
         RvNode::Select { cond, a, b } => {
-            let cv = emit_node(fb, graph, *cond, s, math, memo, tables);
-            let av = emit_node(fb, graph, *a, s, math, memo, tables);
-            let bv = emit_node(fb, graph, *b, s, math, memo, tables);
+            let cv = emit_node(fb, graph, *cond, ctx, math, memo, tables);
+            let av = emit_node(fb, graph, *a, ctx, math, memo, tables);
+            let bv = emit_node(fb, graph, *b, ctx, math, memo, tables);
             let zero = fb.ins().f64const(0.0);
             let cb = fb.ins().fcmp(FloatCC::NotEqual, cv, zero);
             fb.ins().select(cb, av, bv)
@@ -736,59 +716,85 @@ fn emit_gather_chain(fb: &mut FunctionBuilder, xv: Value, evs: &[Value]) -> Valu
     fb.ins().select(is_nan, nan, acc)
 }
 
-/// One xoshiro256++ step, mutating the state Variables; returns the raw `u64` output.
-/// Mirrors `Rng::next_u64` exactly (capturing pre-mutation words in locals).
-fn emit_next_u64(fb: &mut FunctionBuilder, s: &[Variable; 4]) -> Value {
-    let s0 = fb.use_var(s[0]);
-    let s1 = fb.use_var(s[1]);
-    let s2 = fb.use_var(s[2]);
-    let s3 = fb.use_var(s[3]);
-
-    let sum = fb.ins().iadd(s0, s3);
-    let rot = fb.ins().rotl_imm(sum, 23);
-    let result = fb.ins().iadd(rot, s0);
-
-    let t = fb.ins().ishl_imm(s1, 17);
-    let s2a = fb.ins().bxor(s2, s0); // s2 ^= s0
-    let s3a = fb.ins().bxor(s3, s1); // s3 ^= s1
-    let s1a = fb.ins().bxor(s1, s2a); // s1 ^= s2 (updated)
-    let s0a = fb.ins().bxor(s0, s3a); // s0 ^= s3 (updated)
-    let s2b = fb.ins().bxor(s2a, t); // s2 ^= t
-    let s3b = fb.ins().rotl_imm(s3a, 45); // s3 = rotl(s3, 45)
-
-    fb.def_var(s[0], s0a);
-    fb.def_var(s[1], s1a);
-    fb.def_var(s[2], s2b);
-    fb.def_var(s[3], s3b);
-    result
+/// One pcg4d-3r round: the four dependent add-multiplies (`v0 += v1·v3; v1 += v2·v0; …`).
+fn emit_cell_round(fb: &mut FunctionBuilder, v: &mut [Value; 4]) {
+    let m = fb.ins().imul(v[1], v[3]);
+    v[0] = fb.ins().iadd(v[0], m);
+    let m = fb.ins().imul(v[2], v[0]);
+    v[1] = fb.ins().iadd(v[1], m);
+    let m = fb.ins().imul(v[0], v[1]);
+    v[2] = fb.ins().iadd(v[2], m);
+    let m = fb.ins().imul(v[1], v[2]);
+    v[3] = fb.ins().iadd(v[3], m);
 }
 
-/// Uniform `f64` in `[0, 1)` from the top 53 bits — mirrors `Rng::next_f64`.
-fn emit_next_f64(fb: &mut FunctionBuilder, s: &[Variable; 4]) -> Value {
-    let bits = emit_next_u64(fb, s);
-    let shifted = fb.ins().ushr_imm(bits, 11);
-    let f = fb.ins().fcvt_from_uint(types::F64, shifted);
-    let scale = fb.ins().f64const(1.0 / ((1u64 << 53) as f64));
+/// Per-word xorshift `v ^= v >> 16` over the four words.
+fn emit_cell_xs(fb: &mut FunctionBuilder, v: &mut [Value; 4]) {
+    for x in v.iter_mut() {
+        let sh = fb.ins().ushr_imm(*x, 16);
+        *x = fb.ins().bxor(*x, sh);
+    }
+}
+
+/// The draw-cell hash for one `(lane, source)` — a straight-line transcription of
+/// [`crate::rng::cell`] (pcg4d-3r) in pure `I32` arithmetic, so the JIT's draws are bit-identical
+/// to the interpreter's.
+fn emit_cell(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32) -> [Value; 4] {
+    let srcv = fb.ins().iconst(types::I32, src as i32 as i64);
+    let mut v = [ctx.k0, ctx.k1, ctx.lane, srcv];
+    // LCG step per word (i32 mul/add wrap like the Rust `wrapping_*`).
+    for x in v.iter_mut() {
+        let m = fb.ins().imul_imm(*x, 1664525);
+        *x = fb.ins().iadd_imm(m, 1013904223);
+    }
+    emit_cell_round(fb, &mut v);
+    emit_cell_xs(fb, &mut v);
+    emit_cell_round(fb, &mut v);
+    emit_cell_xs(fb, &mut v);
+    emit_cell_round(fb, &mut v);
+    v
+}
+
+/// The consumed 48 bits of a word pair as an `I64` (`((w0 >> 8) << 24) | (w1 >> 8)`) — the
+/// integer the f64-uniform conversion and the Lemire bounded draw both start from.
+fn emit_bits48(fb: &mut FunctionBuilder, w0: Value, w1: Value) -> Value {
+    let a = fb.ins().ushr_imm(w0, 8);
+    let b = fb.ins().ushr_imm(w1, 8);
+    let a64 = fb.ins().uextend(types::I64, a);
+    let b64 = fb.ins().uextend(types::I64, b);
+    let hi = fb.ins().ishl_imm(a64, 24);
+    fb.ins().bor(hi, b64)
+}
+
+/// Uniform `f64` in `[0, 1)` from a word pair — mirrors `rng::unit_f64` (`bits · 2⁻⁴⁸`).
+fn emit_unit48(fb: &mut FunctionBuilder, w0: Value, w1: Value) -> Value {
+    let bits = emit_bits48(fb, w0, w1);
+    let f = fb.ins().fcvt_from_uint(types::F64, bits);
+    let scale = fb.ins().f64const(1.0 / ((1u64 << 48) as f64));
     fb.ins().fmul(f, scale)
 }
 
-fn emit_uniform(fb: &mut FunctionBuilder, s: &[Variable; 4], lo: f64, hi: f64) -> Value {
-    let u = emit_next_f64(fb, s);
+fn emit_uniform(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, lo: f64, hi: f64) -> Value {
+    let w = emit_cell(fb, ctx, src);
+    let u = emit_unit48(fb, w[0], w[1]);
     let loc = fb.ins().f64const(lo);
     let span = fb.ins().f64const(hi - lo);
     let scaled = fb.ins().fmul(span, u);
     fb.ins().fadd(loc, scaled)
 }
 
-/// `unif_int(lo, hi)` as `f64` via Lemire's multiply-high (`umulhi(bits, count)` = the top 64 bits
-/// of the 128-bit product) — uniform in `0..count` with no `u64→f64`/`floor` round-trip, mirroring
-/// `Rng::fill_uniform_int`. `count >= 1`, so `count == 1` always gives `k == 0` (point mass at `lo`).
-fn emit_uniform_int(fb: &mut FunctionBuilder, s: &[Variable; 4], lo: f64, hi: f64) -> Value {
+/// `unif_int(lo, hi)` as `f64` via Lemire's multiply-high on the 48 consumed bits:
+/// `umulhi(bits48 << 16, count)` = `(bits48 · count) >> 48`, exactly the interpreter's
+/// `(bits as u128 * count) >> 48` — uniform in `0..count`, bias ≤ `count / 2^48`.
+/// `count >= 1`, so `count == 1` always gives `k == 0` (point mass at `lo`).
+fn emit_uniform_int(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, lo: f64, hi: f64) -> Value {
     let count = (hi - lo + 1.0).max(1.0) as u64;
-    let bits = emit_next_u64(fb, s);
+    let w = emit_cell(fb, ctx, src);
+    let bits = emit_bits48(fb, w[0], w[1]);
+    let bits_hi = fb.ins().ishl_imm(bits, 16);
     let count_c = fb.ins().iconst(types::I64, count as i64);
-    let k = fb.ins().umulhi(bits, count_c); // high 64 bits of bits * count → [0, count)
-    let kf = fb.ins().fcvt_from_uint(types::F64, k); // k < count, small → exact
+    let k = fb.ins().umulhi(bits_hi, count_c);
+    let kf = fb.ins().fcvt_from_uint(types::F64, k); // k < count ≤ 2^53 → exact
     let loc = fb.ins().f64const(lo);
     fb.ins().fadd(loc, kf)
 }
@@ -805,9 +811,8 @@ fn emit_horner(fb: &mut FunctionBuilder, z: Value, coeffs: &[f64]) -> Value {
     acc
 }
 
-/// Inlined `ln(x)` for `x > 0` — straight-line transcription of [`crate::approx::ln`] (no libcall).
-/// Removing the call is what lets `normal`/`exp`/`geometric` graphs run multi-stream (the libcall
-/// previously serialized the lanes and pinned them to a single stream — see [`crate::kernel`]).
+/// Inlined `ln(x)` for `x > 0` — straight-line transcription of [`crate::approx::ln`] (no libcall,
+/// and the same polynomial the interpreter's fills now compute, so draws stay bit-identical).
 fn emit_ln(fb: &mut FunctionBuilder, x: Value) -> Value {
     use std::f64::consts::{LN_2, SQRT_2};
     // x = m·2^e: pull the IEEE-754 exponent and mantissa fields out by bit-surgery.
@@ -925,16 +930,24 @@ fn emit_trig_poly(fb: &mut FunctionBuilder, x: Value, is_cos: bool) -> Value {
     fb.ins().select(c3, q3, r2)
 }
 
-/// `N(mu, sigma^2)` via Box–Muller, **one normal per draw**: draw two uniforms and keep the cosine
-/// arm (the interpreter keeps both arms of a pair; per-draw we discard the sine one). The extra
-/// uniform is cheap and avoids carrying a cross-draw cache. `sqrt` is native; `ln`/`cos` are
-/// inlined polynomials ([`emit_ln`]/[`emit_trig`]).
-fn emit_normal(fb: &mut FunctionBuilder, s: &[Variable; 4], mu: f64, sigma: f64) -> Value {
+/// `N(mu, sigma^2)` via Box–Muller over lane pairs — a straight-line transcription of
+/// `rng::normal_pair` (bit-identical draws): hash the pair's EVEN lane (`lane & !1`), `u1` from
+/// words 0+1 offset by half a 48-bit-grid ulp (dodges `ln(0)`), `u2` from words 2+3; the even lane
+/// takes the cos branch, the odd lane the sin branch (selected by lane parity — both kernels are
+/// computed by the shared reduction anyway). `sqrt` is native; `ln`/trig are the shared inlined
+/// polynomials the interpreter also computes ([`emit_ln`]/[`emit_trig_poly`]).
+fn emit_normal(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, mu: f64, sigma: f64) -> Value {
     use std::f64::consts::TAU;
-    let one = fb.ins().f64const(1.0);
-    let n1 = emit_next_f64(fb, s);
-    let u1 = fb.ins().fsub(one, n1); // (0, 1] keeps ln finite
-    let u2 = emit_next_f64(fb, s);
+    let even_lane = fb.ins().band_imm(ctx.lane, !1i64 & 0xFFFF_FFFF);
+    let pair_ctx = DrawCtx { lane: even_lane, ..ctx };
+    let w = emit_cell(fb, pair_ctx, src);
+    let bits1 = emit_bits48(fb, w[0], w[1]);
+    let f1 = fb.ins().fcvt_from_uint(types::F64, bits1);
+    let half = fb.ins().f64const(0.5);
+    let f1h = fb.ins().fadd(f1, half);
+    let scale = fb.ins().f64const(1.0 / ((1u64 << 48) as f64));
+    let u1 = fb.ins().fmul(f1h, scale); // (0, 1)
+    let u2 = emit_unit48(fb, w[2], w[3]);
     let lnv = emit_ln(fb, u1);
     let neg2 = fb.ins().f64const(-2.0);
     let inner = fb.ins().fmul(neg2, lnv);
@@ -944,17 +957,23 @@ fn emit_normal(fb: &mut FunctionBuilder, s: &[Variable; 4], mu: f64, sigma: f64)
     // Argument is `TAU * u2 ∈ [0, 2π)` — always well inside the polynomial's range, so call it
     // directly (no range guard) to keep the hot Box–Muller draw lean.
     let c = emit_trig_poly(fb, ang, true);
-    let rc = fb.ins().fmul(r, c);
+    let sn = emit_trig_poly(fb, ang, false);
+    let parity = fb.ins().band_imm(ctx.lane, 1);
+    let is_odd = fb.ins().icmp_imm(IntCC::NotEqual, parity, 0);
+    let branch = fb.ins().select(is_odd, sn, c);
+    let rc = fb.ins().fmul(r, branch);
     let sig = fb.ins().f64const(sigma);
     let scaled = fb.ins().fmul(sig, rc);
     let mu_c = fb.ins().f64const(mu);
     fb.ins().fadd(mu_c, scaled)
 }
 
-/// `Exp(rate)` via inverse-CDF `-ln(1 - u) / rate` — mirrors `Rng::fill_exp`.
-fn emit_exp(fb: &mut FunctionBuilder, s: &[Variable; 4], rate: f64) -> Value {
+/// `Exp(rate)` via inverse-CDF `-ln(1 - u) / rate` — mirrors `rng::fill_exp` bit-for-bit
+/// (`1 - u ∈ [2⁻⁴⁸, 1]` keeps `ln` finite and in the polynomial's normal range).
+fn emit_exp(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, rate: f64) -> Value {
+    let w = emit_cell(fb, ctx, src);
+    let u = emit_unit48(fb, w[0], w[1]);
     let one = fb.ins().f64const(1.0);
-    let u = emit_next_f64(fb, s);
     let om = fb.ins().fsub(one, u); // (0, 1]
     let lnv = emit_ln(fb, om);
     let neg = fb.ins().fneg(lnv);
@@ -963,12 +982,13 @@ fn emit_exp(fb: &mut FunctionBuilder, s: &[Variable; 4], rate: f64) -> Value {
 }
 
 /// `Geometric(p)` (failures before first success) via `floor(ln(1 - u) / ln(1 - p))` — mirrors
-/// `Rng::fill_geometric`. `ln(1 - p)` is a compile-time constant (folded in Rust); `p == 1` makes
-/// it `-inf`, so every draw floors to `0`, matching the interpreter's point mass.
-fn emit_geometric(fb: &mut FunctionBuilder, s: &[Variable; 4], p: f64) -> Value {
+/// `rng::fill_geometric` bit-for-bit. `ln(1 - p)` is a compile-time constant (folded in Rust);
+/// `p == 1` makes it `-inf`, so every draw floors to `0`, matching the interpreter's point mass.
+fn emit_geometric(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, p: f64) -> Value {
     let denom = (1.0 - p).ln();
+    let w = emit_cell(fb, ctx, src);
+    let u = emit_unit48(fb, w[0], w[1]);
     let one = fb.ins().f64const(1.0);
-    let u = emit_next_f64(fb, s);
     let om = fb.ins().fsub(one, u); // (0, 1]
     let lnv = emit_ln(fb, om);
     let denom_c = fb.ins().f64const(denom);
@@ -1117,7 +1137,6 @@ mod tests {
     const ENOUGH_DRAWS: usize = usize::MAX;
 
     use crate::kernel::supported;
-    use crate::kernel::STREAMS;
     use crate::sampler::moments;
 
     // The shared cross-backend conformance corpus (finding C2), also consumed by `wasm_emit`.
@@ -1127,7 +1146,7 @@ mod tests {
     /// identical and seed-independent, so `[0]` fully characterizes the backend's output.
     fn first_sample(program: &dyn Program) -> f64 {
         let mut r = program.runner();
-        r.reseed(0);
+        r.position(0, 0);
         let cap = r.batch_cap();
         r.next_batch(cap)[0]
     }
@@ -1183,11 +1202,33 @@ mod tests {
         // interpreter for transcendental-bound graphs) so this test always validates codegen.
         let program = build(graph, id).expect("jit build failed");
         let mut jit = program.runner();
-        jit.reseed(seed);
+        jit.position(seed, 0);
         let cap = jit.batch_cap();
-        // Drive a couple of batches by hand and accumulate mean to sanity-check the kernel runs.
+
+        // Counter keying makes the JIT and interpreter agree DRAW-FOR-DRAW (the PLAN-PREGPU
+        // parity contract), so compare the first batch bit-for-bit against the interpreter —
+        // far stronger than the old in-distribution check.
+        let mut ir = InterpBackend.compile(graph, id, ENOUGH_DRAWS).runner();
+        ir.position(seed, 0);
+        {
+            let interp_col: Vec<f64> = ir.next_batch(cap).to_vec();
+            let jit_col = jit.next_batch(cap);
+            for (lane, (a, b)) in interp_col.iter().zip(jit_col.iter()).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "{src}: lane {lane}: interp {a} ({:#018x}) != jit {b} ({:#018x})",
+                    a.to_bits(),
+                    b.to_bits()
+                );
+            }
+        }
+
+        // And the mean over a larger run still matches the sampler-driven estimate (guards the
+        // lane advance across batches, which the single-batch bitwise check can't see).
         let mut sum = 0.0;
         let mut count = 0u64;
+        jit.position(seed, 0);
         for _ in 0..16 {
             for &x in jit.next_batch(cap) {
                 sum += x;
@@ -1195,9 +1236,7 @@ mod tests {
             }
         }
         let jit_mean = sum / count as f64;
-
         let interp_mean = moments(graph, id, count as usize, seed).mean;
-        // Both estimate the same true mean; with ~16k samples they land close.
         assert!(
             (jit_mean - interp_mean).abs() < 0.05 + 0.05 * interp_mean.abs(),
             "{src}: jit_mean={jit_mean} interp_mean={interp_mean}"
@@ -1268,132 +1307,6 @@ mod tests {
         assert_jit_matches_interp("use rand; use math; X ~ unif(1, 2); log(X / 0) > 100", 23);
     }
 
-    /// The default kernel must actually interleave `STREAMS` RNG streams (not silently build a
-    /// 1-stream kernel) — that's where the RNG-bound speedup comes from.
-    #[test]
-    fn default_kernel_is_multi_stream() {
-        let mut eng = crate::Engine::new();
-        let id = match eng
-            .run_rv("use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B")
-            .unwrap()
-        {
-            crate::Value::Dist(id) => id,
-            _ => unreachable!(),
-        };
-        let program = build(eng.graph(), id).expect("jit build failed");
-        assert_eq!(program.streams(), STREAMS);
-    }
-
-    /// The stream count must not change the distribution: a 1-stream and an `STREAMS`-stream kernel
-    /// estimate the same moments (each stream is an independent, identically-distributed substream).
-    #[test]
-    fn stream_count_preserves_distribution() {
-        let cases = [
-            ("use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B", 7.0),
-            (
-                "use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1",
-                std::f64::consts::FRAC_PI_4,
-            ),
-        ];
-        for (src, expected) in cases {
-            let mut eng = crate::Engine::new();
-            let id = match eng.run_rv(src).unwrap() {
-                crate::Value::Dist(id) => id,
-                _ => unreachable!(),
-            };
-            for streams in [1usize, STREAMS] {
-                let program = build_with(eng.graph(), id, streams).expect("jit build failed");
-                let mut runner = program.runner();
-                runner.reseed(0xABCDEF);
-                let cap = runner.batch_cap();
-                let (mut sum, mut count) = (0.0f64, 0u64);
-                for _ in 0..256 {
-                    for &x in runner.next_batch(cap) {
-                        sum += x;
-                        count += 1;
-                    }
-                }
-                let mean = sum / count as f64;
-                assert!(
-                    (mean - expected).abs() < 0.02,
-                    "{src} @ {streams} streams: mean={mean}, want≈{expected}"
-                );
-            }
-        }
-    }
-
-    /// Same-process A/B of kernel throughput by stream count, single-threaded — the clean
-    /// measurement of the multi-stream win (no multicore / criterion-baseline noise). Ignored by
-    /// default; run with:
-    /// `cargo test -p noise-core --features jit --release -- --ignored --nocapture bench_streams`
-    #[test]
-    #[ignore]
-    fn bench_streams() {
-        use std::time::Instant;
-
-        fn drive(program: &JitProgram, batches: usize) -> f64 {
-            let mut runner = program.runner();
-            runner.reseed(0xC0FFEE);
-            let cap = runner.batch_cap();
-            for _ in 0..64 {
-                runner.next_batch(cap);
-            }
-            let t = Instant::now();
-            let mut acc = 0.0f64;
-            for _ in 0..batches {
-                let col = runner.next_batch(cap);
-                acc += col[0] + col[cap - 1];
-            }
-            std::hint::black_box(acc);
-            (batches * cap) as f64 / t.elapsed().as_secs_f64() / 1e6
-        }
-
-        let cases = [
-            (
-                "pi_indicator",
-                "use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X^2 + Y^2 < 1",
-            ),
-            (
-                "dice_sum",
-                "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B",
-            ),
-            (
-                "poly_deep",
-                "use rand; X ~ unif(0,1); ((X*X+X)*X - X)*X + X*X - X + 1",
-            ),
-            (
-                "normal_poly",
-                "use rand; Z ~ normal(0,1); ((Z*Z+Z)*Z - Z)*Z + Z*Z",
-            ),
-            // Transcendental-bound now that ln/cos are inlined: the multi-stream win should appear.
-            (
-                "normal_sum",
-                "use rand; X ~ normal(0,1); Y ~ normal(0,1); X + Y",
-            ),
-            ("exp_tail", "use rand; X ~ exponential(2); X > 1"),
-            (
-                "sin_wave",
-                "use rand; use math; X ~ unif(0,1); sin(6.283*X) + cos(6.283*X)",
-            ),
-        ];
-        let batches = 4000;
-        println!("\n  kernel throughput by stream count (single thread, M elem/s):");
-        for (name, src) in cases {
-            let mut eng = crate::Engine::new();
-            let id = match eng.run_rv(src).unwrap() {
-                crate::Value::Dist(id) => id,
-                _ => unreachable!(),
-            };
-            let g = eng.graph();
-            print!("    {name:14}");
-            for streams in [1usize, 2, 4, 8] {
-                let p = build_with(g, id, streams).expect("build");
-                print!("  s{streams}={:6.0}", drive(&p, batches));
-            }
-            println!();
-        }
-    }
-
     /// Codegen-quality probe: race the Cranelift JIT against a hand-written, LLVM-compiled fused
     /// kernel computing the *identical* graph (same inlined xoshiro, same arithmetic). Isolates
     /// Cranelift's codegen vs LLVM's. Ignored by default; run with:
@@ -1401,7 +1314,6 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_cranelift_vs_llvm() {
-        use crate::rng::Rng;
         use std::time::Instant;
 
         let n = 8_000_000usize;
@@ -1413,7 +1325,7 @@ mod tests {
         };
         let program = build(eng.graph(), id).expect("jit build");
         let mut runner = program.runner();
-        runner.reseed(0xC0FFEE);
+        runner.position(0xC0FFEE, 0);
         let cap = runner.batch_cap();
         for _ in 0..64 {
             runner.next_batch(cap);
@@ -1430,18 +1342,15 @@ mod tests {
 
         // Hand-written, fused, LLVM-compiled equivalent — also fills a column (same memory
         // behavior as the JIT), so the comparison is pure codegen quality, not store traffic.
-        let mut rng = Rng::seed_from_u64(0xC0FFEE);
+        let key = crate::rng::Key::from_seed(0xC0FFEE);
         let mut buf = vec![0.0f64; cap];
-        for _ in 0..64 {
-            for x in buf.iter_mut() {
-                *x = rng.next_f64();
-            }
-        }
+        let mut lane = 0u32;
         let t = Instant::now();
         let (mut acc2, mut done2) = (0.0f64, 0usize);
         while done2 < n {
             for slot in buf.iter_mut() {
-                let x = rng.next_f64();
+                let x = crate::rng::unit_uniform(key, lane, 0);
+                lane = lane.wrapping_add(1);
                 *slot = ((x * x + x) * x - x) * x + x * x - x + 1.0;
             }
             acc2 += buf[0] + buf[cap - 1];
@@ -1476,7 +1385,7 @@ mod tests {
             let program = build(g, id).expect("jit build failed");
             // Touch the code memory before it is freed on drop.
             let mut r = program.runner();
-            r.reseed(1);
+            r.position(1, 0);
             let cap = r.batch_cap();
             let x = r.next_batch(cap)[0];
             assert!(x.is_finite());
@@ -1521,13 +1430,8 @@ mod tests {
             kernel::MIN_DRAWS_JIT
         ));
         let program = build(&g, root).expect("jit build failed");
-        assert_eq!(
-            program.streams(),
-            STREAMS,
-            "gather cone stays latency-bound"
-        );
         let mut r = program.runner();
-        r.reseed(42);
+        r.position(42, 0);
         let cap = r.batch_cap();
         let (mut sum, mut count) = (0.0f64, 0u64);
         for _ in 0..16 {
@@ -1598,7 +1502,7 @@ mod tests {
         // Nanoseconds per draw, steady state (compile excluded, cache warm).
         fn ns_per_draw(program: &dyn crate::backend::Program, batches: usize) -> f64 {
             let mut r = program.runner();
-            r.reseed(0xC0FFEE);
+            r.position(0xC0FFEE, 0);
             let cap = r.batch_cap();
             for _ in 0..8 {
                 r.next_batch(cap);

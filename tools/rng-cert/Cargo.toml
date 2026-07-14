@@ -1,0 +1,12 @@
+[package]
+name = "rng-cert"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "PLAN-PREGPU C0: certification harness for the counter-RNG swap (pcg4d vs Squares over the engine's exact keying)"
+
+[dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1

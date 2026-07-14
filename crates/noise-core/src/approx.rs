@@ -100,6 +100,25 @@ pub fn ln(x: f64) -> f64 {
     2.0 * f * horner(f2, &LN_COEFFS) + (e as f64) * LN_2
 }
 
+/// Full-domain `ln(x)` — [`ln`] wrapped in the exact domain guards `jit::emit_ln_guarded` and the
+/// wasm emitter lower, so the interpreter's lane path (`bytecode::apply_un`) computes the same
+/// bits: `x > 0` → poly (subnormals handled inside [`ln`]), `x == 0` → `-inf`, `x < 0` / NaN →
+/// NaN, `+inf` → `+inf`. This is what makes `log(RV)` bit-identical across backends
+/// (PLAN-PREGPU draw-stream parity extended to the lane ops).
+pub fn ln_guarded(x: f64) -> f64 {
+    if x > 0.0 {
+        if x == f64::INFINITY {
+            f64::INFINITY
+        } else {
+            ln(x)
+        }
+    } else if x == 0.0 {
+        f64::NEG_INFINITY
+    } else {
+        f64::NAN
+    }
+}
+
 /// Reduce `x` to `r ∈ [-π/4, π/4]` with quadrant `k` (so `x ≈ k·π/2 + r`), via round-to-nearest
 /// and a two-part subtraction of π/2. Uses **round-ties-to-even** (`round_ties_even`) — the same
 /// tie rule the emitters' `nearest` / `f64.nearest` instructions apply — rather than `f64::round`'s

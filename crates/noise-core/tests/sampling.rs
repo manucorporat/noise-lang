@@ -447,6 +447,26 @@ fn quantile_of_known_distributions() {
     assert!((run_num("Z ~ normal(0, 1); Q(Z, 0.975)") - 1.96).abs() < 0.02);
     // Median of Exp(rate) is ln(2)/rate; for rate = 1 that's ≈ 0.693.
     assert!((run_num("X ~ exponential(1); Q(X, 0.5)") - 2.0f64.ln()).abs() < 5e-3);
+    // q10/q90 of a standard normal are ∓Φ⁻¹(0.9) ≈ ∓1.2816 (both tails of the parallel collection).
+    assert!((run_num("Z ~ normal(0, 1); Q(Z, 0.1)") + 1.2816).abs() < 0.02);
+    assert!((run_num("Z ~ normal(0, 1); Q(Z, 0.9)") - 1.2816).abs() < 0.02);
+}
+
+#[test]
+fn quantile_is_bit_reproducible_run_to_run() {
+    // `Q` now collects its draws through the parallel chunked reduction (PLAN-PERF-2 item 6):
+    // fixed per-chunk seeds + index-ordered concatenation make the answer a pure function of
+    // `(seed, n)` — repeated runs are bit-identical despite work-stealing threads, exactly like
+    // `P`/`E`/`Var`. (The default n = 1e6 sits above the parallel threshold, so this exercises
+    // the threaded path on a multicore machine.)
+    let src = "Z ~ normal(0, 1); Q(Z, 0.9)";
+    assert_eq!(run_num(src).to_bits(), run_num(src).to_bits());
+    // The conditional collection (NaN lanes dropped per chunk) is just as reproducible.
+    let cond = "X ~ normal(0, 1); Q(X | X > 0, 0.5)";
+    let a = run_num(cond);
+    assert_eq!(a.to_bits(), run_num(cond).to_bits());
+    // Median of a half-normal is Φ⁻¹(0.75) ≈ 0.6745.
+    assert!((a - 0.6745).abs() < 0.01, "median |Z| = {a}");
 }
 
 #[test]

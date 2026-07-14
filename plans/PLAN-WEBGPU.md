@@ -1,7 +1,7 @@
 # PLAN-WEBGPU — the GPU as a fourth lowering of the RvGraph
 
 **Date:** 2026-07-13 · **Status:** proposal (nothing started). G0 spike gates everything
-else. **Depends on PLAN-PREGPU** (async engine, f32 lanes in all modes, the pcg4d
+else. **Depends on PLAN-PREGPU** (async engine, f32 lanes in all modes, the pcg4d-3r
 counter RNG in all modes), which moves every cross-backend decision out of this plan —
 the GPU then lands as just another backend under one shared contract.
 
@@ -14,10 +14,10 @@ lowerings of the same IR (bytecode interpreter, Cranelift JIT, WASM emitter); WG
 fourth, and structurally the easiest one:
 
 - **No RNG state chain — and no RNG *decision* left.** PLAN-PREGPU Track C moves every
-  backend to the counter-based **pcg4d**, keyed
+  backend to the counter-based **pcg4d-3r** (C0 verdict, 2026-07-14 — published pcg4d failed avalanche; see tools/rng-cert), keyed
   `(key_lo, key_hi, global_lane, source_offset)`, before this plan starts. The WGSL
-  emitter just spells the identical hash in WGSL — pcg4d is pure u32 ops precisely so it
-  can be, ~5 ALU ops per uniform — so the GPU's draws are **bit-identical** to the CPU
+  emitter just spells the identical hash in WGSL — pcg4d-3r is pure u32 ops precisely so
+  it can be, ~10 ALU ops per uniform — so the GPU's draws are **bit-identical** to the CPU
   backends', not merely equidistributed. No state upload, no streams, no
   latency-vs-throughput policy; each source node's offset is a compile-time constant, so
   every uniform in the kernel is an independent hash. (xoshiro couldn't have come along
@@ -48,7 +48,7 @@ WGSL has no `f64` and no timeline for one. Originally this plan carried a GPU-on
 mode" with a weakened cross-backend contract; **PLAN-PREGPU instead moves every backend to
 f32 lanes / f64 aggregation first**, so by the time this plan runs there is no numeric
 fork — the GPU computes the same f32 lanes every CPU backend computes, over bit-identical
-pcg4d draws. What remains GPU-specific:
+pcg4d-3r draws. What remains GPU-specific:
 
 - **Aggregation placement.** Reducers stay f64 and stay off the GPU in phase 1: read raw
   f32 samples back, widen, feed the existing `Reducer::absorb` (unchanged fold). Phase 2
@@ -98,7 +98,7 @@ surface permanently; async-first also buys cancellation and progress for free. (
   dispatch+readback latency, and whether a 40k-statement shader compiles at all. These
   are the only real unknowns; everything else in this plan is known-shape work.
 - **G1 — emitter + conformance (native).** `wgsl_emit.rs`: post-order walk of the
-  simplified cone, memoized `let vN: f32` per node, the shared pcg4d sources spelled in
+  simplified cone, memoized `let vN: f32` per node, the shared pcg4d-3r sources spelled in
   WGSL, scope = the CPU-codegen subset (no `Poisson`, no `Gather`). `wgpu` as a
   dev-dependency; parity tests vs the interpreter — bitwise for the draws and the
   add/mul/select subset, ULP/statistical elsewhere.

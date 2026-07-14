@@ -19,13 +19,13 @@ Three tracks, one contract:
   sample columns every backend fills) become `f32`; everything deterministic — scalar
   `Value::Num` math, reducer accumulation (Σx/Σx² already `f64`), final estimates — stays
   `f64`. `unif_int` and friends get much smaller (but honest) limits everywhere.
-- **C — counter-based RNG (pcg4d) in all modes.** One generator — pcg4d, keyed
-  `(seed, lane, source)` — on the interpreter, the JIT, the wasm emitter, and later the
-  GPU, bit-identically.
+- **C — counter-based RNG (pcg4d-3r) in all modes.** One generator — pcg4d-3r (C0
+  verdict; see Track C), keyed `(seed, lane, source)` — on the interpreter, the JIT, the
+  wasm emitter, and later the GPU, bit-identically.
 
 What this buys:
 
-- **Draw-stream parity.** A uniform draw is `pcg4d(key) → u32 → f32` — pure u32
+- **Draw-stream parity.** A uniform draw is `pcg4d_3r(key) → u32 → f32` — pure u32
   arithmetic + one exactly-specified conversion, native in both Rust and WGSL — so the
   *same seed produces the same draws, bit for bit, on every backend including the future
   GPU*. The determinism story survives the GPU intact instead of degrading to "per
@@ -42,10 +42,10 @@ What this buys:
 - **CPU upside, not a tax.** f32 doubles SIMD width (NEON: 4 lanes → 8) and halves memory
   traffic in every column; f32 polynomial approximations need fewer terms than the current
   f64 ones in `approx.rs`; and the counter RNG deletes the entire multi-stream apparatus —
-  measured on this machine (scratch bench, M-series): pcg4d 188 M u64-equiv/s vs
-  xoshiro256++×4-streams 194 M u64/s single-threaded, i.e. the ILP the 4-stream interleave
-  was built to expose comes free with independent counters. The RNG swap itself is
-  expected ~neutral; the **checkable f32 prediction** is the big-cone interpreter demos:
+  measured on this machine (tools/rng-cert bench, M4 Pro, keyed-batch shape): pcg4d-3r
+  942 M u32/s vs xoshiro256++×4-streams ~388 M u32/s single-threaded, i.e. independent
+  counters beat the ILP the 4-stream interleave was built to expose, by ~2.4×. The
+  **checkable f32 prediction** is the big-cone interpreter demos:
   the columnar VM's register file is `cone × 1024 × 8 B` — ~144 MB for `turboquant`
   (17.6k nodes), ~367 MB for `prisoners` (44.8k) — and they run at 50–80 M op-lanes/s
   today (locality-bound, not arithmetic-bound; measured 2026-07-13). Halving the footprint
@@ -178,29 +178,34 @@ keeps *accumulation* from being the place f32 actually hurts.
   log-space; no example is at risk, but this goes in LANG.md as a documented boundary.
 - Subnormal tails: f32 flushes around 1e-38; irrelevant at MC precision but noted.
 
-## Track C — pcg4d counter RNG, everywhere
+## Track C — pcg4d-3r counter RNG, everywhere
 
-**Generator (settled after weighing Squares, 2026-07-13): pcg4d** (Jarzynski–Olano,
-*Hash Functions for GPU Rendering*, JCGT 2020) — pure u32 mul/add/xor/shift, 4×u32 in →
-4×u32 out, native in both Rust and WGSL (no u64, no mulhi, nothing to emulate). One hash
-yields four u32s → up to four f32 uniforms; `normal` takes its Box–Muller pair from a
-single hash.
+**Generator (C0 verdict, owner-ratified 2026-07-14): pcg4d-3r** — pcg4d
+(Jarzynski–Olano, JCGT 2020) with one appended xorshift + dependent-product round
+(+12 ops). Pure u32 mul/add/xor/shift, 4×u32 in → 4×u32 out, native in both Rust and
+WGSL (no u64, no mulhi, nothing to emulate). One hash yields four u32s → up to four f32
+uniforms; `normal` takes its Box–Muller pair from a single hash. **Only bits 8..31 of a
+word are ever consumed** (`w >> 8` — a C0 finding promoted to contract: pcg-family low
+bits are structurally weak); the interim f64 uniform takes 24+24 bits from two words.
 
-**Why pcg4d and not Squares/Philox.** Measured per f32 uniform (scratch bench, M-series,
-single thread): **pcg4d ~750 M/s** · squares32 ~136 M/s · Philox ~118 M/s; on the GPU,
-pcg4d is ~5 ALU ops per uniform vs ~70–90 for either alternative (both are built on wide
-multiplies WGSL must emulate via 16-bit splits). The quality question is *certification
-depth, not known flaws*: pcg4d was a top performer in its paper's TestU01-based
-evaluation and is a de-facto standard in production shaders, but nobody has published for
-it the dedicated BigCrush + large-volume PractRand campaign Widynski ran on Squares — and
-its 4-word keying is ad-hoc where Squares' sequential-counter regime is exactly what was
-certified. For Monte-Carlo estimation (means/variances/quantiles at 10⁶–10⁸ draws) that
-evidence gap is expected to be immaterial — generators that fail batteries only after
-terabytes are indistinguishable in MC results — but it is *checkable*, which is C0's job.
-**Fallback: Squares** (`squares32`; it dominates Philox — 3× faster on CPU, similar
-emulated GPU cost, equal certification). Exactly one generator ships; a swap happens only
-on a C0 failure or a G0 measurement, always before the numerics-v2 release, frozen after
-(a later change is a second seed-break).
+**Why pcg4d-3r and not published pcg4d/Squares/Philox.** C0's first battery
+(tools/rng-cert, 2026-07-14) **disqualified pcg4d as published**: u32 carries only
+propagate upward and its single `^= >>16` is the only downward path, giving it fully
+deterministic input-bit → output-bit relations *inside the consumed region under
+realistic keying* (e.g. key-bit 25 → mantissa bit 8, p = 0 or 1). The third round fixes
+exactly that: pcg4d-3r is clean on every consumed bit (0/9696 cells outside ±0.01,
+worst 0.0052 ≈ null) and passes all seven statistical criteria. Measured keyed-batch
+throughput (M4 Pro, single thread): **pcg4d-3r 942 M u32/s** (2.4× the current 4-stream
+xoshiro's ~388 M u32/s) · squares32 211 M/s (0.54× — a corpus-gate risk) · Philox ~118
+M/s; on the GPU, pcg4d-3r is ~10 ALU ops per uniform vs ~70–90 for Squares/Philox (wide
+multiplies emulated via 16-bit splits). The cost of the choice: pcg4d-3r is a custom
+variant with **no published certification — the C0 harness carries the entire evidence
+burden** (amended criterion 1, criteria 2–7, and PractRand ≥ 1 TB over the
+consumed-bit stream, with squares32 running as the certified in-harness reference).
+**Fallback: Squares** (`squares32` — clean over every reachable input bit; its only
+avalanche failures are ctr bits 58–63, unreachable below 2⁵⁸ draws): a criterion-8
+failure of pcg4d-3r swaps to Squares, accepting the ~2× CPU cost, always before the
+numerics-v2 release, frozen after (a later change is a second seed-break).
 
 **Keying.** Input words `(key_lo, key_hi, global_lane, source_offset)`: the key is
 SplitMix64(seed) split into two u32s (computed once per run), `source_offset` is a
@@ -218,39 +223,100 @@ reducer chunk is just a lane range — no per-chunk key derivation, and thread-c
 invariance is a triviality instead of a theorem.
 
 **What it breaks:** every seeded sequence. The `rng.rs` known-answer test gets re-pinned
-to pcg4d vectors; committed example outputs re-baseline — and re-baseline *again* when
+to pcg4d-3r vectors; committed example outputs re-baseline — and re-baseline *again* when
 Track B lands, which is why the release cuts after B, not between (see Sequencing).
 
-**C0 — the generator spike (run first; zero codebase dependencies).** pcg4d is ~15 lines
-of Rust and the battery needs nothing from the engine; one day of harness + an unattended
-weekend of compute settles the question before any integration exists. It certifies *our
-exact usage*, where pcg4d's evidence is thinnest — the ad-hoc keying: cross-word
-avalanche (flip any input bit, especially low `global_lane` bits → each output bit flips
-with p = 0.50 ± 0.01), lane-*i*-vs-lane-*i+1* and source-*k*-vs-source-*k+1* correlations
-over millions of pairs (the pairings that would bias joint queries), domain known-answers
-at high N (`pi/4` CI, chi-square on `unif_int(1,6)`, Box–Muller normality through
-kurtosis), and PractRand to ≥1 TB over bits serialized in kernel-consumption order — with
-Squares running the same statistics as the in-harness certified reference. **Pass/fail
-criteria fixed before running** (PractRand clean, avalanche in band, conformance
-false-positive rate at the Bonferroni-corrected alpha) so the verdict can't be negotiated
-after the fact. Fail → Squares replaces pcg4d and the same harness re-certifies the swap.
+**C0 — the generator spike (RAN 2026-07-14; harness + evidence in `tools/rng-cert/`).**
+The battery — cross-word avalanche, lane-adjacent/source-adjacent correlations, domain
+known-answers (`pi/4` CI, die chi-square, Box–Muller skew/kurtosis), PractRand over the
+consumed-bit stream in kernel-consumption order, Squares as the certified in-harness
+reference, pass/fail frozen in `tools/rng-cert/README.md` before running — produced a
+verdict the plan didn't predict: **pcg4d as published failed** (deterministic
+key-bit → consumed-mantissa-bit relations; carries only propagate upward and one `>>16`
+xorshift is the only downward path), and the certified reference *also* failed the
+literal criterion — only on unreachable input bits — flagging the criterion itself as
+miscalibrated. Owner-ratified resolution (amendment in the README): criterion re-frozen
+to consumed-bits × reachable-inputs, pcg4d disqualified, **pcg4d-3r adopted**, PractRand
+≥ 1 TB still pending on both pcg4d-3r and Squares. A pcg4d-3r PractRand failure swaps to
+Squares and the same harness re-certifies the swap.
 
 **Gate:** land only if the example corpus is neutral-or-better on `example_times`
-(expectation: neutral-to-better — pcg4d matches the current 4-stream xoshiro on the
-microbench (188 vs 194 M u64-equiv/s) before counting the deleted stream machinery and —
-with B — wider SIMD; the corpus verdict, not the microbench, decides).
+(expectation: better — pcg4d-3r measures 2.4× the current 4-stream xoshiro per u32 in
+keyed-batch shape (942 vs ~388 M u32/s) before counting the deleted stream machinery and
+— with B — wider SIMD; the corpus verdict, not the microbench, decides).
+
+**Consumption contract (fixed by C0, holds in every backend and later WGSL):**
+
+- One hash per `(lane, source)` cell; only bits 8..31 of a word are consumable.
+- f32 uniform (after B): word 0, `(w0 >> 8) as f32 · 2⁻²⁴`.
+- Interim f64 uniform (C, before B): words 0+1, `((w0>>8) << 24 | (w1>>8)) as f64 · 2⁻⁴⁸`.
+- `normal`: `u1` from words 0+1 (offset +0.5 to dodge 0), `u2` from words 2+3, **cos
+  branch only** — one normal per lane per hash, so lane-range chunking never straddles a
+  Box–Muller pair (the sin twin is discarded; transcendentals dominate the cost anyway).
+- `unif_int`: Lemire multiply-high on the 48 consumed bits (bias ≤ count/2⁴⁸; B's 2²⁴ cap
+  makes it ≤ 2⁻²⁴).
+- Fills needing more than one hash per lane (Knuth `poisson`, `Permutation`'s
+  Fisher–Yates, `Rotation`'s Gaussian seed) chain via `rng::CellStream`: the base cell's
+  words 2+3 become a chain key and iteration `j ≥ 1` hashes `(chain_key, j, source)` —
+  full-u32 iteration space, no consumed-word reuse as key material, no cross-source
+  aliasing (which any `source + f(j)` scheme would risk).
+- `source_offset` = the source's `RvId` index in the simplified graph (stable across
+  backends and joint compiles — which is exactly what `corr`'s shared-draw semantics
+  need).
+
+**Implementation status (2026-07-14 — steps 1–5 LANDED, gate open):**
+
+1. ✅ `rng.rs`: `pcg4d_3r`, `Key::from_seed`, keyed fills, `CellStream` (iteration
+   chain), KATs pinned to exact bit patterns.
+2. ✅ Interpreter cut: `Runner::position(seed, lane)` replaces `reseed`; `Src`
+   instructions carry `source_offset = RvId`; `chunk_seed` deleted (a chunk is a lane
+   range).
+3. ✅ `jit.rs`: inline pcg4d-3r (i32 ops), stateless `kernel(out, n, k0, k1, lane0)`
+   ABI, stream machinery gone. **Conformance upgraded to bitwise**: interpreter and JIT
+   batches are bit-identical across the whole RNG corpus (the lane-path `sin`/`cos`/`ln`
+   now use the shared `approx` polynomials on every backend — `approx::ln_guarded` is
+   the new full-domain twin).
+4. ✅ `wasm_emit.rs`/`wasm_host.rs`: same swap; kernel ABI
+   `kernel(out, n, key_lo, key_hi, lane0)`; `nz_kernel_seed` deleted (stateless kernel —
+   the reused-instance leftover-state hazard is structurally gone); `unif_int` is exact
+   split-multiply Lemire for `count < 2³⁹`; wasm conformance also bitwise vs interp.
+5. ✅ Old `Rng` + `STREAMS`/`seed_state`/`choose_streams`/`latency_bound` deleted.
+   Workspace green (440+ tests), clippy clean, wasm32 builds.
+
+**Consumption amendment (perf-driven, same C0 words):** `normal` consumes the
+Box–Muller pair over the *lane pair* `(2i, 2i+1)` — one hash (of the even lane), even
+lane takes cos, odd takes sin (`rng::normal_pair`). Fill ranges always start on even
+lanes (batch/chunk boundaries are multiples of 1024). Per-lane lowerings (JIT/wasm)
+compute both branches and select by parity — bit-identical, and the shared trig
+reduction computes both kernels anyway. `CellStream::next_normal` pair-caches likewise.
+
+**Gate status (example_times, M4 Pro, `--features jit`): OPEN — 5177 ms vs 4351 ms
+baseline (+19%).** Recovered by pairing: prisoners 961→982 (+2%), noise_colors 336→350
+(+4%), am_vs_fm 405→435 (+7%). Still hot: turboquant 1428→2003 (+40%, interpreter,
+Rotation/uniform-heavy), barrier_option 973→1131 (+16%, JIT normal-bound), clt_normal
+~2× (JIT). Known levers, in order:
+1. **Pair-unrolled JIT/wasm loop**: emit two lanes per iteration sharing the normal
+   pair's hash+ln+trig (the parity-select interim recomputes them per lane) — should
+   recover most of barrier/am_vs_fm/clt_normal.
+2. **Interpreter fill vectorization**: check LLVM vectorizes the 3-round hash across
+   lanes in `fill_uniform`/`fill_normal` (the rng-cert keyed-batch bench reached
+   942 M u32/s; if the in-crate fills don't match that shape, restructure).
+3. Track B's f32 halves per-uniform hash work again (one word pair → one word).
+The gate is judged at C-landing after these — and after the generator verdict
+(criterion 8) settles, since a swap re-prices everything.
 
 ## Sequencing
 
 Order (owner's call, 2026-07-13): **C → B → A**, releasing after B.
 
-0. **C0 (generator spike)** — immediately: zero dependencies, certifies pcg4d over our
-   exact keying (with Squares as the in-harness reference) before any integration exists.
-1. **C (pcg4d + the simplification)** — the smallest self-contained cut: swap the
+0. **C0 (generator spike)** — DONE 2026-07-14 (fast battery + verdict: pcg4d-3r;
+   PractRand deep runs pending — they must be clean before the numerics-v2 release).
+1. **C (pcg4d-3r + the simplification)** — the smallest self-contained cut: swap the
    generator, delete the stream machinery (`STREAMS`/`seed_state`/`choose_streams`/
-   `latency_bound`/`chunk_seed`), lanes stay f64 for now — each f64 uniform takes two
-   u32s from one hash (~376 M f64-uniforms/s, ~2× today's per-uniform rate). Validates
-   the counter design (determinism, chunk-as-lane-range) before the wider f32 surgery.
+   `latency_bound`/`chunk_seed`), lanes stay f64 for now — each f64 uniform takes the
+   consumed 24 bits of two words from one hash (2⁻⁴⁸ granularity; the low byte of a word
+   is never consumed, per C0). Validates the counter design (determinism,
+   chunk-as-lane-range) before the wider f32 surgery.
 2. **B (f32 lanes)** — riding the already-simplified RNG layer (the fills just drop to
    one u32 per uniform): B1 seam type change (`&[f32]`) → B2 interpreter + fills → B3
    JIT/wasm emitters + shared f32 polys → B4 corpus re-baseline + `example_times` gate.
@@ -271,7 +337,7 @@ Order (owner's call, 2026-07-13): **C → B → A**, releasing after B.
 |---|---|
 | f32 lanes change every published estimate | Within each estimate's own MC confidence interval; the one-time re-baseline is the cost, and it's shared with the RNG break |
 | A real program needs integer draws > 2²⁴ or lane magnitudes > 3.4e38 | Corpus max today: 365 and ~2²³; teaching errors at the constructor make the boundary honest. If it ever genuinely bites, that program belongs on f64 CPU — a per-program escape hatch (`engine::set_lane_precision`?) is deliberately NOT in scope until someone real asks |
-| pcg4d's certification is thinner than Squares'/Philox's (one paper's hash evaluation, ad-hoc keying) | No known flaws — the gap is evidence depth, and MC estimation is far less demanding than the batteries. C0 closes it empirically over our exact keyed usage, with fixed pass/fail criteria and Squares as the certified in-harness reference; a C0 failure swaps to Squares before the seed-break |
+| pcg4d-3r is a custom variant with no published certification | Deliberate, owner-ratified trade after C0 disqualified published pcg4d: the C0 harness carries the full evidence burden (amended avalanche criterion clean, 7/7 stats, PractRand ≥ 1 TB pending), with certified Squares running as in-harness reference; a PractRand failure swaps to Squares before the seed-break |
 | f32 transcendental polys diverge across backends | One shared `approx.rs` f32 table consumed by JIT, wasm emitter, and later the WGSL emitter — divergence is a compile error, not a drift |
 | Interpreter throughput regresses on the per-lane hash | Bench says counter ≈ 4-stream xoshiro before SIMD; corpus-neutral gate enforces it |
 | Async borrow/stack surprises | Scoped by call-graph walk; `MAX_EVAL_DEPTH` test guards the poll stack (see Track A traps) |

@@ -3,8 +3,9 @@
 //! [`crate::wasm_emit`] turns a graph into a WebAssembly module (`Vec<u8>`); this module is what
 //! *runs* it in the browser. A wasm sandbox can't run a child module by itself — only the JS host
 //! can `WebAssembly.instantiate` — so the kernel is driven through a tiny inline-JS shim
-//! (`nz_kernel_*`): compile+instantiate once, seed the xoshiro state into the child's own linear
-//! memory, then run a batch per call, copying only the output column back across the boundary.
+//! (`nz_kernel_*`): compile+instantiate once, then run a batch per call — the kernel is stateless
+//! (counter-keyed, PLAN-PREGPU Track C): the runner passes the key words and starting lane as
+//! arguments, and only the output column crosses the boundary.
 //!
 //! It plugs into the exact same [`Backend`]/[`Program`]/[`Runner`] seam the interpreter and native
 //! JIT use, so on `wasm32` [`crate::backend::compile_root`] transparently routes profitable graphs
@@ -12,10 +13,9 @@
 //! fails — e.g. the main-thread sync-compile size limit). Correctness is never at stake, only speed.
 //!
 //! One instance per runner, not per program. With the `wasm-threads` feature, `reduce::run_reduction`
-//! fans out across Web Workers, so several [`Runner`]s drive one program concurrently — and each must
-//! own its own child instance, because the xoshiro state lives *in that instance's memory* across
-//! batches (only `reseed` writes it, which is what keeps the per-batch crossing to a single output
-//! copy). Sharing one instance between workers would have them stomping on each other's RNG state.
+//! fans out across Web Workers, so several [`Runner`]s drive one program concurrently — and each
+//! instantiates in its own JS agent (the kernel itself is stateless, so instance sharing would be
+//! sound; the per-agent registry is what forces per-thread instantiation).
 //!
 //! That is why [`Program`] holds the kernel *bytes* and instantiates in [`Program::runner`], on the
 //! thread that will drive it: a JS host handle is not portable across workers (each worker is a
@@ -29,7 +29,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 use crate::backend::{Backend, InterpBackend, JointProgram, JointRunner, Program, Runner};
 use crate::bytecode::BATCH;
 use crate::dist::{RvGraph, RvId};
-use crate::kernel::seed_state;
+use crate::rng::Key;
 use crate::wasm_emit::{emit_for, emit_for_roots};
 
 // The JS host. An ES module (wasm-bindgen `inline_js`) whose module-level state persists across
@@ -43,17 +43,16 @@ use crate::wasm_emit::{emit_for, emit_for_roots};
 // most-recent entry and evicts strictly oldest-first, so a kernel that was just created or reused —
 // i.e. one a `Runner` is about to drive — is never the eviction victim (single-runner on wasm32
 // means it is used before `_CAP` other distinct kernels can be created). As defense-in-depth,
-// `nz_kernel_seed`/`nz_kernel_run` are **status-returning**: they return -1 (instead of
-// dereferencing `undefined` and throwing) if their instance is ever gone, and the Rust caller then
-// transparently falls back to the interpreter — so an evicted live handle degrades to correct-slow
-// rather than a poisoned instance. We still intentionally don't tie instance lifetime to Rust `Drop`
-// (that FFI call can be elided; the LRU + status-return is simpler and sound).
+// `nz_kernel_run*` are **status-returning**: they return -1 (instead of dereferencing `undefined`
+// and throwing) if their instance is ever gone, and the Rust caller then transparently falls back
+// to the interpreter — so an evicted live handle degrades to correct-slow rather than a poisoned
+// instance. We still intentionally don't tie instance lifetime to Rust `Drop` (that FFI call can
+// be elided; the LRU + status-return is simpler and sound).
 //
-// The kernel reads/writes its xoshiro state at byte 0 and writes its output column at byte 4096 of
-// its OWN memory — the convention `wasm_emit` is built around (state low, output at 4096; one 64 KiB
-// page is plenty). `Program::runner` seeds a placeholder state on creation (matching the JIT path)
-// so a reused instance never runs a batch on a previous program's leftover state; the driver
-// `reseed`s again before its first batch.
+// The kernel writes its output column at byte 4096 of its OWN memory — the convention `wasm_emit`
+// is built around. It is stateless (counter-keyed): the key words and starting lane arrive as call
+// arguments, so a content-addressed, reused instance can never leak one program's draws into
+// another's — there is nothing to seed and nothing left behind.
 #[wasm_bindgen(inline_js = r#"
 const _CAP = 64;
 const _byHash = new Map(); // hash -> id
@@ -62,8 +61,9 @@ let _next = 1;
 // round-half-away-from-zero, matching Rust's f64::round (Math.round rounds half toward +inf).
 const _round = (x) => { const a = Math.floor(Math.abs(x) + 0.5); return x < 0 ? -a : a; };
 // `ln` is inlined; `sin`/`cos` are inlined but re-imported for the large-argument fallback
-// (finding C3); `exp` is imported to match the interpreter (finding C9).
-const _imports = { m: { atan: Math.atan, round: _round, pow: Math.pow, sin: Math.sin, cos: Math.cos, exp: Math.exp } };
+// (finding C3); `exp` is imported to match the interpreter (finding C9); `sqrt` is imported
+// because V8/arm64 regresses ~30% on large kernel bodies with inline `f64.sqrt` (2026-07-14).
+const _imports = { m: { atan: Math.atan, round: _round, pow: Math.pow, sin: Math.sin, cos: Math.cos, exp: Math.exp, sqrt: Math.sqrt } };
 
 function _hash(bytes) { // FNV-1a over the kernel bytes (cheap; bytes are small and run once per program)
   let h = 0x811c9dc5;
@@ -98,19 +98,13 @@ export function nz_kernel_new(bytes) {
 }
 
 // Status-returning: 0 on success, -1 if the instance is gone (evicted). The Rust caller falls back
-// to the interpreter on -1 instead of the host throwing (finding C5).
-export function nz_kernel_seed(handle, state) {
+// to the interpreter on -1 instead of the host throwing (finding C5). The kernel is stateless:
+// key words + starting lane arrive per call (i32 wrap of the u32 values is fine — the kernel
+// treats them as raw 32-bit words).
+export function nz_kernel_run(handle, out, n, k0, k1, lane0) {
   const inst = _byId.get(handle);
   if (inst === undefined) return -1;
-  // `state` is a BigUint64Array view over wasm memory (from Rust `&[u64]`); copy it into the child.
-  new BigUint64Array(inst.exports.memory.buffer, 0, state.length).set(state);
-  return 0;
-}
-
-export function nz_kernel_run(handle, out, n) {
-  const inst = _byId.get(handle);
-  if (inst === undefined) return -1;
-  inst.exports.kernel(4096, n, 0); // kernel(out_ptr, n, state_ptr) over the child's own memory
+  inst.exports.kernel(4096, n, k0, k1, lane0); // kernel(out_ptr, n, key_lo, key_hi, lane0)
   // `out` is a live Float64Array view over wasm memory (from Rust `&mut [f64]`); fill it directly.
   out.set(new Float64Array(inst.exports.memory.buffer, 4096, n));
   return 0;
@@ -119,19 +113,25 @@ export function nz_kernel_run(handle, out, n) {
 // Multi-column twin of nz_kernel_run for a joint (multi-root) kernel: the kernel fills `n` lanes
 // of each BATCH-strided column at 4096, and `out` (length k*BATCH) receives all columns in one
 // copy. Same status contract: -1 if the instance is gone (finding C5).
-export function nz_kernel_run_cols(handle, out, n) {
+export function nz_kernel_run_cols(handle, out, n, k0, k1, lane0) {
   const inst = _byId.get(handle);
   if (inst === undefined) return -1;
-  inst.exports.kernel(4096, n, 0);
+  inst.exports.kernel(4096, n, k0, k1, lane0);
   out.set(new Float64Array(inst.exports.memory.buffer, 4096, out.length));
   return 0;
 }
 "#)]
 extern "C" {
     fn nz_kernel_new(bytes: &[u8]) -> i32;
-    fn nz_kernel_seed(handle: i32, state: &[u64]) -> i32;
-    fn nz_kernel_run(handle: i32, out: &mut [f64], n: u32) -> i32;
-    fn nz_kernel_run_cols(handle: i32, out: &mut [f64], n: u32) -> i32;
+    fn nz_kernel_run(handle: i32, out: &mut [f64], n: u32, k0: u32, k1: u32, lane0: u32) -> i32;
+    fn nz_kernel_run_cols(
+        handle: i32,
+        out: &mut [f64],
+        n: u32,
+        k0: u32,
+        k1: u32,
+        lane0: u32,
+    ) -> i32;
 }
 
 /// The browser backend: emit a kernel for the graph and instantiate it in the JS host. Falls back to
@@ -147,7 +147,7 @@ impl WasmHostBackend {
 
 impl Backend for WasmHostBackend {
     fn compile(&self, graph: &RvGraph, root: RvId, draws: usize) -> Box<dyn Program> {
-        let Some((bytes, streams)) = emit_for(graph, root, draws) else {
+        let Some(bytes) = emit_for(graph, root, draws) else {
             // Gate rejected it: unsupported (Poisson / Gather), libcall-bound, or too few draws to
             // pay back the emit + instantiate (`kernel::break_even_draws`).
             return InterpBackend.compile(graph, root, draws);
@@ -159,7 +159,6 @@ impl Backend for WasmHostBackend {
         let fallback: Arc<dyn Program> = Arc::from(InterpBackend.compile(graph, root, draws));
         Box::new(WasmProgram {
             bytes: Arc::new(bytes),
-            streams,
             fallback,
         })
     }
@@ -174,7 +173,7 @@ impl Backend for WasmHostBackend {
         roots: &[RvId],
         draws: usize,
     ) -> Box<dyn JointProgram> {
-        let Some((bytes, streams)) = emit_for_roots(graph, roots, draws) else {
+        let Some(bytes) = emit_for_roots(graph, roots, draws) else {
             return InterpBackend.compile_joint(graph, roots, draws);
         };
         // Multi-root interpreter fallback for the same graph, for the same C5 degradation story as
@@ -183,7 +182,6 @@ impl Backend for WasmHostBackend {
             Arc::from(InterpBackend.compile_joint(graph, roots, draws));
         Box::new(WasmJointProgram {
             bytes: Arc::new(bytes),
-            streams,
             k: roots.len(),
             fallback,
         })
@@ -205,7 +203,6 @@ impl Backend for WasmHostBackend {
 /// host's content-addressing makes the second and later calls for a given kernel a cache hit.
 struct WasmProgram {
     bytes: Arc<Vec<u8>>,
-    streams: usize,
     fallback: Arc<dyn Program>,
 }
 
@@ -213,77 +210,79 @@ impl Program for WasmProgram {
     fn runner(&self) -> Box<dyn Runner> {
         // Instantiate in *this* thread's host registry (see the type docs). A negative handle means
         // this thread can't run the kernel (e.g. the main-thread sync-compile size limit) — the
-        // interpreter fallback keeps it correct.
+        // interpreter fallback keeps it correct. Nothing to seed: the kernel is stateless, so a
+        // reused (content-addressed) instance can't carry another program's draws (old finding C5
+        // seeding hazard, now structurally gone).
         let handle = nz_kernel_new(&self.bytes);
         if handle < 0 {
             return self.fallback.runner();
         }
-        // Seed a placeholder state into the (possibly reused, content-addressed) instance now —
-        // matching the JIT path (`jit::JitProgram::runner`) — so a reused instance never carries a
-        // previous program's xoshiro state into a batch, even before the driver's first `reseed`
-        // (finding C5). If the instance is already gone, start on the interpreter fallback.
-        let state = seed_state(0, self.streams);
-        let fell_back = if nz_kernel_seed(handle, &state) < 0 {
-            Some(self.fallback.runner())
-        } else {
-            None
-        };
         Box::new(WasmRunner {
             handle,
-            streams: self.streams,
+            key: Key::from_seed(0),
+            lane: 0,
+            seed: 0,
             buf: vec![0.0; BATCH],
             fallback: self.fallback.clone(),
-            fell_back,
-            last_seed: 0,
+            fell_back: None,
         })
     }
 }
 
-/// Per-runner state: a clone of the shared handle and an output column. The RNG state lives in the
-/// child instance's memory (written by `reseed`, advanced in place by each `next_batch`). If the
-/// host instance is lost (evicted), `fell_back` holds an interpreter runner that drives the rest of
-/// the run (finding C5); `last_seed` lets that fallback resume from the right seed.
+/// Per-runner state: the host handle, this runner's draw key + lane cursor (the kernel is
+/// stateless — both are call arguments), and an output column. If the host instance is lost
+/// (evicted), `fell_back` holds an interpreter runner that drives the rest of the run (finding
+/// C5); `seed`/`lane` let it resume from exactly the right position — with counter keying the
+/// fallback's draws are bit-identical to what the kernel would have produced.
 struct WasmRunner {
     handle: i32,
-    streams: usize,
+    key: Key,
+    lane: u32,
+    seed: u64,
     buf: Vec<f64>,
     fallback: Arc<dyn Program>,
     fell_back: Option<Box<dyn Runner>>,
-    last_seed: u64,
 }
 
 impl WasmRunner {
-    /// Switch to the interpreter fallback, seeded to `seed`, for this and every subsequent batch.
-    fn switch_to_fallback(&mut self, seed: u64) {
+    /// Switch to the interpreter fallback, positioned at (`seed`, `lane`), for this and every
+    /// subsequent batch.
+    fn switch_to_fallback(&mut self) {
         let mut r = self.fallback.runner();
-        r.reseed(seed);
+        r.position(self.seed, self.lane);
         self.fell_back = Some(r);
     }
 }
 
 impl Runner for WasmRunner {
-    fn reseed(&mut self, seed: u64) {
-        self.last_seed = seed;
+    fn position(&mut self, seed: u64, lane: u32) {
+        self.seed = seed;
+        self.key = Key::from_seed(seed);
+        self.lane = lane;
         if let Some(fb) = self.fell_back.as_mut() {
-            fb.reseed(seed);
-            return;
-        }
-        let state = seed_state(seed, self.streams);
-        if nz_kernel_seed(self.handle, &state) < 0 {
-            self.switch_to_fallback(seed); // instance evicted; degrade to the interpreter
+            fb.position(seed, lane);
         }
     }
 
     fn next_batch(&mut self, len: usize) -> &[f64] {
-        // Fill the full BATCH (constant RNG consumption per call), then slice to `len`.
+        // Fill the full BATCH (constant lane consumption per call), then slice to `len`.
         if self.fell_back.is_none() {
-            if nz_kernel_run(self.handle, &mut self.buf, BATCH as u32) >= 0 {
+            let ok = nz_kernel_run(
+                self.handle,
+                &mut self.buf,
+                BATCH as u32,
+                self.key.k0,
+                self.key.k1,
+                self.lane,
+            ) >= 0;
+            if ok {
+                self.lane = self.lane.wrapping_add(BATCH as u32);
                 return &self.buf[..len];
             }
             // Instance evicted mid-run: fall back for this and all future batches (finding C5).
-            let seed = self.last_seed;
-            self.switch_to_fallback(seed);
+            self.switch_to_fallback();
         }
+        self.lane = self.lane.wrapping_add(BATCH as u32);
         self.fell_back.as_mut().unwrap().next_batch(len)
     }
 
@@ -296,7 +295,6 @@ impl Runner for WasmRunner {
 /// interpreter fallback. Bytes-not-handle for the same cross-worker reason as [`WasmProgram`].
 struct WasmJointProgram {
     bytes: Arc<Vec<u8>>,
-    streams: usize,
     /// Number of roots (BATCH-strided output columns) the kernel writes.
     k: usize,
     fallback: Arc<dyn JointProgram>,
@@ -304,70 +302,74 @@ struct WasmJointProgram {
 
 impl JointProgram for WasmJointProgram {
     fn runner(&self) -> Box<dyn JointRunner> {
-        // Same instantiate-on-the-driving-thread + placeholder-seed story as `WasmProgram::runner`.
+        // Same instantiate-on-the-driving-thread story as `WasmProgram::runner` (stateless kernel:
+        // nothing to seed).
         let handle = nz_kernel_new(&self.bytes);
         if handle < 0 {
             return self.fallback.runner();
         }
-        let state = seed_state(0, self.streams);
-        let fell_back = if nz_kernel_seed(handle, &state) < 0 {
-            Some(self.fallback.runner())
-        } else {
-            None
-        };
         Box::new(WasmJointRunner {
             handle,
-            streams: self.streams,
+            key: Key::from_seed(0),
+            lane: 0,
+            seed: 0,
             buf: vec![0.0; self.k * BATCH],
             fallback: self.fallback.clone(),
-            fell_back,
-            last_seed: 0,
+            fell_back: None,
         })
     }
 }
 
-/// Per-runner joint state: the host handle plus one flat `k×BATCH` column buffer. Fallback story
-/// mirrors [`WasmRunner`] (finding C5): if the instance is ever gone, the rest of the run degrades
-/// to the multi-root interpreter, reseeded to `last_seed`.
+/// Per-runner joint state: the host handle, the draw key + lane cursor, and one flat `k×BATCH`
+/// column buffer. Fallback story mirrors [`WasmRunner`] (finding C5): if the instance is ever
+/// gone, the rest of the run degrades to the multi-root interpreter positioned at (`seed`,
+/// `lane`) — bit-identical draws under counter keying.
 struct WasmJointRunner {
     handle: i32,
-    streams: usize,
+    key: Key,
+    lane: u32,
+    seed: u64,
     buf: Vec<f64>,
     fallback: Arc<dyn JointProgram>,
     fell_back: Option<Box<dyn JointRunner>>,
-    last_seed: u64,
 }
 
 impl WasmJointRunner {
-    fn switch_to_fallback(&mut self, seed: u64) {
+    fn switch_to_fallback(&mut self) {
         let mut r = self.fallback.runner();
-        r.reseed(seed);
+        r.position(self.seed, self.lane);
         self.fell_back = Some(r);
     }
 }
 
 impl JointRunner for WasmJointRunner {
-    fn reseed(&mut self, seed: u64) {
-        self.last_seed = seed;
+    fn position(&mut self, seed: u64, lane: u32) {
+        self.seed = seed;
+        self.key = Key::from_seed(seed);
+        self.lane = lane;
         if let Some(fb) = self.fell_back.as_mut() {
-            fb.reseed(seed);
-            return;
-        }
-        let state = seed_state(seed, self.streams);
-        if nz_kernel_seed(self.handle, &state) < 0 {
-            self.switch_to_fallback(seed); // instance evicted; degrade to the interpreter
+            fb.position(seed, lane);
         }
     }
 
     fn next_batch(&mut self) {
         if self.fell_back.is_none() {
-            if nz_kernel_run_cols(self.handle, &mut self.buf, BATCH as u32) >= 0 {
+            let ok = nz_kernel_run_cols(
+                self.handle,
+                &mut self.buf,
+                BATCH as u32,
+                self.key.k0,
+                self.key.k1,
+                self.lane,
+            ) >= 0;
+            if ok {
+                self.lane = self.lane.wrapping_add(BATCH as u32);
                 return;
             }
             // Instance evicted mid-run: fall back for this and all future batches (finding C5).
-            let seed = self.last_seed;
-            self.switch_to_fallback(seed);
+            self.switch_to_fallback();
         }
+        self.lane = self.lane.wrapping_add(BATCH as u32);
         self.fell_back.as_mut().unwrap().next_batch();
     }
 

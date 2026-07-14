@@ -476,8 +476,10 @@ fn moment(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
 /// `Q(x, q)` / `Q(x, q, n)` — the **quantile** (inverse CDF) of a *numeric* quantity at level
 /// `q ∈ [0, 1]`: `Q(X, 0.5)` is the median, `Q(X, 0.95)` the 95th percentile, `Q(X, 0)`/`Q(X, 1)`
 /// the min/max draw. The companion to `E`/`Var` for tail/spread questions. Estimated by Monte
-/// Carlo: draw `n` samples (default `1e6`, fixed seed), sort, and linearly interpolate between the
-/// two bracketing order statistics. A deterministic value is its own quantile at every level.
+/// Carlo: draw `n` samples (default `1e6`, fixed seed) — in parallel, via the same chunked
+/// deterministic reduction `P`/`E`/`Var` use ([`sampler::sample_n_par`]; only the sort below stays
+/// central) — then sort and linearly interpolate between the two bracketing order statistics. A
+/// deterministic value is its own quantile at every level.
 ///
 /// Returns a plain `Num` (not an `Est`): a sample quantile's standard error depends on the density
 /// at that point, so we don't claim auto-rounded precision the way `P`/`E` do.
@@ -535,7 +537,7 @@ fn quantile(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
                 return Ok(Value::Num(0.0));
             }
             let n = clamp_to_op_budget(n, graph, *id, max_opts);
-            let mut draws = sampler::sample_n(graph, *id, n, P_DEFAULT_SEED);
+            let mut draws = sampler::sample_n_par(graph, *id, n, P_DEFAULT_SEED);
             draws.sort_by(f64::total_cmp);
             Ok(Value::Num(crate::num::quantile_sorted(&draws, q)))
         }
@@ -666,7 +668,8 @@ pub fn moment_cond(name: &str, root: RvId, tail: &[Value], ctx: &QueryCtx) -> Re
 
 /// `Q(x | cond, q)` / `Q(x | cond, q, n)` — the conditional quantile over the worlds where `cond`
 /// holds. `root` is `select(cond, x, NaN)`; `tail` is `[q]` or `[q, n]`. Estimated by collecting the
-/// in-condition draws (NaN lanes dropped), sorting, and interpolating — like the unconditional `Q`.
+/// in-condition draws (NaN lanes dropped) in parallel ([`sampler::cond_sample_n_par`], the same
+/// chunked reduction as the unconditional `Q`), then sorting and interpolating centrally.
 pub fn quantile_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value> {
     let QueryCtx {
         graph,
@@ -696,7 +699,7 @@ pub fn quantile_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value
     }
     let n = opt_count("Q", tail.get(1), default_n, span)?;
     let n = clamp_to_op_budget(n, graph, root, max_opts);
-    let mut draws = sampler::cond_sample_n(graph, root, n, P_DEFAULT_SEED);
+    let mut draws = sampler::cond_sample_n_par(graph, root, n, P_DEFAULT_SEED);
     if draws.is_empty() {
         return Err(cond_never(n, span));
     }

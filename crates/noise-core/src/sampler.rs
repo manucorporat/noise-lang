@@ -30,7 +30,7 @@ pub fn for_each_batch(
     let (program, cost) = compile_root(graph, root, n);
     crate::stats::record(n, cost.ops, cost.sources);
     let mut runner = program.runner();
-    runner.reseed(seed);
+    runner.position(seed, 0);
     let cap = runner.batch_cap();
 
     let mut remaining = n;
@@ -46,6 +46,28 @@ pub fn sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
     let mut out = Vec::with_capacity(n);
     for_each_batch(graph, root, n, seed, |col| out.extend_from_slice(col));
     out
+}
+
+/// Collect `n` raw draws **in parallel** — the forcing path behind `Q` (quantiles, PLAN-PERF-2
+/// item 6). A quantile is an order statistic, so unlike `P`/`E`/`Var` it can't fold; but the
+/// *sampling* is still embarrassingly parallel, so this delegates to the same chunked reduction as
+/// [`moments`] ([`crate::reduce`], [`crate::reduce::CollectReducer`]): fixed, independently-seeded
+/// chunks drawn in parallel and concatenated in chunk-index order, giving a vector that is
+/// bit-identical for any thread count (and native multicore above the reduction's threshold —
+/// sequential below it and on non-threaded wasm, over the *same* chunks). The caller sorts/selects
+/// centrally.
+///
+/// Per-chunk reseeding means this does NOT reproduce [`sample_n`]'s single ordered stream — the
+/// same trade [`moments`] made, so `Q` and `P`/`E`/`Var` now share one seeding story: deterministic
+/// in `seed`, equal in distribution, differing per-draw.
+pub fn sample_n_par(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
+    crate::reduce::run_reduction(
+        graph,
+        root,
+        n,
+        seed,
+        &crate::reduce::CollectReducer { skip_nan: false },
+    )
 }
 
 /// Empirical mean + population variance over `n` draws — the forcing path behind `P`/`E`/`Var`.
@@ -96,6 +118,21 @@ pub fn cond_sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f6
     out
 }
 
+/// Parallel twin of [`cond_sample_n`] — the forcing path behind `Q(x | C, q)`. Same chunked
+/// reduction as [`sample_n_par`], with each chunk dropping its NaN (condition-false) lanes before
+/// the index-ordered concatenation — the kept draws per chunk are fixed by `(seed, n)` alone, so
+/// the result stays bit-identical for any thread count. Same KNOWN HOLE (finding B2) as
+/// [`cond_sample_n`]: an in-condition NaN quantity is dropped rather than propagated.
+pub fn cond_sample_n_par(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Vec<f64> {
+    crate::reduce::run_reduction(
+        graph,
+        root,
+        n,
+        seed,
+        &crate::reduce::CollectReducer { skip_nan: true },
+    )
+}
+
 /// Drive a **joint** pass over `roots` — the single batch loop the four joint drivers
 /// (`sample_pairs`/`grid_moments`/`grid_draws`/`corr_matrix`) share (finding B8). Compile the roots
 /// through the backend seam ([`compile_roots`]) into ONE shared kernel so every lane draws them
@@ -124,7 +161,7 @@ fn for_each_joint_batch(
     // `n × k` times (200k draws × 60 elements in `birthday`). One batch fully characterizes the
     // result (quantiles, moments, correlations of a constant are that constant), so clamp to it.
     let mut runner = prog.runner();
-    runner.reseed(seed);
+    runner.position(seed, 0);
     let cap = runner.batch_cap();
     let n = if cost.sources == 0 { n.min(cap) } else { n };
     crate::stats::record(n, cost.ops, cost.sources);

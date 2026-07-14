@@ -90,9 +90,10 @@ pub const CONST_CASES: &[(&str, &str)] = &[
     ),
     // --- non-integer `^` → a `powf` call on every backend (exact) ---
     ("pow_frac", "use rand; X ~ unif(0,0); (2.0 + X) ^ (0.5 + X)"),
-    // --- sqrt → the native sqrt instruction on both backends (`UnOp::Sqrt`, PLAN-PERF-2 §5):
-    // IEEE correctly rounded, so bit-identical to the interpreter's `f64::sqrt` across the whole
-    // domain. The edge cases are exactly where sqrt differs from the old `powf(x, 0.5)` lowering
+    // --- sqrt → `UnOp::Sqrt` (PLAN-PERF-2 §5): the native sqrt instruction on Cranelift, a
+    // `Math.sqrt` import call on wasm (V8/arm64 regresses on inline `f64.sqrt` — see `wasm_emit`).
+    // Both are IEEE correctly rounded, so bit-identical to the interpreter's `f64::sqrt` across the
+    // whole domain. The edge cases are exactly where sqrt differs from the old `powf(x, 0.5)` lowering
     // (sqrt(-0.0) = -0.0 not +0.0, sqrt(-inf and any x<0) = NaN not +inf), so these pin the new
     // semantics at the bit level (the -0.0 case only passes if the sign bit survives). ---
     ("sqrt_pos", "use rand; use math; X ~ unif(9,9); sqrt(X)"), // → 3

@@ -19,7 +19,7 @@ use crate::bytecode::{
 };
 use crate::dist::{RvGraph, RvId};
 use crate::kernel::NodeCost;
-use crate::rng::Rng;
+use crate::rng::Key;
 
 /// Compiles the transitive cone of a root RV into an immutable, shareable [`Program`].
 ///
@@ -186,12 +186,15 @@ pub trait Program: Send + Sync {
 
 /// Per-worker execution state. Used by exactly one thread, so it need not be `Send`/`Sync`.
 pub trait Runner {
-    /// (Re)initialize the RNG from `seed`. Must be called before [`next_batch`](Runner::next_batch).
-    fn reseed(&mut self, seed: u64);
+    /// Position this runner: derive the draw key from `seed` and set the next batch's starting
+    /// global lane. Counter keying (PLAN-PREGPU Track C) makes this O(1) and makes any lane range
+    /// independently computable — a reducer chunk is just a range. Must be called before
+    /// [`next_batch`](Runner::next_batch).
+    fn position(&mut self, seed: u64, lane: u32);
 
     /// Produce the next batch of draws and return the **first `len`** root samples (`len <=
-    /// batch_cap()`). Advances the RNG by a *fixed* amount per call (independent of `len`), so the
-    /// draw stream doesn't depend on how a final partial batch is sliced.
+    /// batch_cap()`). Advances the lane cursor by a *fixed* `batch_cap()` per call (independent of
+    /// `len`), so the draw stream doesn't depend on how a final partial batch is sliced.
     fn next_batch(&mut self, len: usize) -> &[f64];
 
     /// Maximum `len` accepted by [`next_batch`](Runner::next_batch) — the backend's column width.
@@ -224,12 +227,13 @@ impl Program for InterpProgram {
             .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
             .collect();
         let arrs = alloc_arrays(&self.inner);
-        // Placeholder RNG; the driver calls `reseed` before the first batch.
+        // Placeholder key/lane; the driver calls `position` before the first batch.
         Box::new(InterpRunner {
             prog: self.inner.clone(),
             regs,
             arrs,
-            rng: Rng::seed_from_u64(0),
+            key: Key::from_seed(0),
+            lane: 0,
         })
     }
 }
@@ -243,22 +247,26 @@ fn alloc_arrays(prog: &ByteProgram) -> Vec<Box<[f64]>> {
         .collect()
 }
 
-/// Interpreter runner: a clone of the shared bytecode `Arc`, this worker's column file, and its RNG.
+/// Interpreter runner: a clone of the shared bytecode `Arc`, this worker's column file, and its
+/// draw key + lane cursor.
 struct InterpRunner {
     prog: Arc<ByteProgram>,
     regs: Vec<Box<[f64]>>,
     arrs: Vec<Box<[f64]>>,
-    rng: Rng,
+    key: Key,
+    lane: u32,
 }
 
 impl Runner for InterpRunner {
-    fn reseed(&mut self, seed: u64) {
-        self.rng = Rng::seed_from_u64(seed);
+    fn position(&mut self, seed: u64, lane: u32) {
+        self.key = Key::from_seed(seed);
+        self.lane = lane;
     }
 
     fn next_batch(&mut self, len: usize) -> &[f64] {
-        // Fill the full BATCH (so RNG consumption is constant per call), then slice to `len`.
-        run_batch(&self.prog, &mut self.regs, &mut self.arrs, &mut self.rng);
+        // Fill the full BATCH (lane consumption is constant per call), then slice to `len`.
+        run_batch(&self.prog, &mut self.regs, &mut self.arrs, self.key, self.lane);
+        self.lane = self.lane.wrapping_add(BATCH as u32);
         &self.regs[self.prog.root as usize][..len]
     }
 
@@ -276,11 +284,13 @@ pub trait JointProgram: Send + Sync {
 
 /// Per-worker execution state of a [`JointProgram`]. Used by exactly one thread.
 pub trait JointRunner {
-    /// (Re)initialize the RNG from `seed`. Must be called before [`next_batch`](JointRunner::next_batch).
-    fn reseed(&mut self, seed: u64);
+    /// Position this runner: derive the draw key from `seed` and set the next batch's starting
+    /// global lane (see [`Runner::position`]). Must be called before
+    /// [`next_batch`](JointRunner::next_batch).
+    fn position(&mut self, seed: u64, lane: u32);
 
-    /// Produce the next batch of joint draws. Advances the RNG by a *fixed* amount per call, so the
-    /// draw stream doesn't depend on how a final partial batch is consumed.
+    /// Produce the next batch of joint draws. Advances the lane cursor by a *fixed* `batch_cap()`
+    /// per call, so the draw stream doesn't depend on how a final partial batch is consumed.
     fn next_batch(&mut self);
 
     /// Root `j`'s column of the current batch (`batch_cap()` lanes; the driver slices a final
@@ -303,13 +313,14 @@ impl JointProgram for InterpJointProgram {
             .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
             .collect();
         let arrs = alloc_arrays(&self.inner);
-        // Placeholder RNG; the driver calls `reseed` before the first batch.
+        // Placeholder key/lane; the driver calls `position` before the first batch.
         Box::new(InterpJointRunner {
             prog: self.inner.clone(),
             regs: self.regs.clone(),
             buf,
             arrs,
-            rng: Rng::seed_from_u64(0),
+            key: Key::from_seed(0),
+            lane: 0,
         })
     }
 }
@@ -320,16 +331,19 @@ struct InterpJointRunner {
     regs: Vec<usize>,
     buf: Vec<Box<[f64]>>,
     arrs: Vec<Box<[f64]>>,
-    rng: Rng,
+    key: Key,
+    lane: u32,
 }
 
 impl JointRunner for InterpJointRunner {
-    fn reseed(&mut self, seed: u64) {
-        self.rng = Rng::seed_from_u64(seed);
+    fn position(&mut self, seed: u64, lane: u32) {
+        self.key = Key::from_seed(seed);
+        self.lane = lane;
     }
 
     fn next_batch(&mut self) {
-        run_batch(&self.prog, &mut self.buf, &mut self.arrs, &mut self.rng);
+        run_batch(&self.prog, &mut self.buf, &mut self.arrs, self.key, self.lane);
+        self.lane = self.lane.wrapping_add(BATCH as u32);
     }
 
     fn col(&self, j: usize) -> &[f64] {

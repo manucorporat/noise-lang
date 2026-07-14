@@ -296,6 +296,16 @@ correctly-rounded → bit-identical to the oracle), and the cost model prices it
 `512/0`), which matters on wasm where `MIN_DRAWS_WASM = 10k` admits them. The plan's `exp` claim
 was stale: exp has had a direct `nz_exp` shim / `Math.exp` import since finding C9 — untouched.
 
+**V8 postscript (the whole reason we bench)**: inline `f64.sqrt` in emitted wasm kernels regressed
+`am_vs_fm` **+21%** on V8/arm64 — bisected to the sqrt commit, kernel-diffed to a pure
+`call pow → f64.sqrt` substitution, micro-benched to a codegen pathology (the 64 import-call sites
+were live-range split points in a ~100 KB single-block body; the call itself is near-free — a
+no-op import costs the same). Bun/JSC and native Cranelift *prefer* inline sqrt. Fix: the wasm
+emitter calls a dedicated `Math.sqrt` import (NOT `pow(x, 0.5)` — powf disagrees with sqrt at
+`-0.0`/`-inf`, and the conformance bit-checks would catch it); the JIT keeps the native
+instruction. Result: `am_vs_fm` 0.95× vs the pre-sqrt baseline (a net win — `Math.sqrt` beats the
+old `Math.pow`). Revisit the inline lowering if V8's regalloc improves.
+
 ### 6. Quantiles don't parallelize (P2)
 `Q(...)` goes through `sample_n` → `for_each_batch`, which is sequential — it never touches
 `run_reduction`, so it gets none of the threading. `P`/`E`/`Var` do. (A quantile is an order

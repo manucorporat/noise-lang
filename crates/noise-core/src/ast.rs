@@ -48,12 +48,15 @@ pub enum UnOp {
     Exp,
     Ln,
     // IEEE square root (`math::sqrt` of an RV, `vec::norm`, complex `abs`). Its own node — NOT
-    // `Pow(x, 0.5)` — because both Cranelift and wasm have a single correctly-rounded `f64.sqrt`
-    // instruction, so `Sqrt` is *fusible* in the codegen cost model where non-integer `pow` is a
-    // libcall (PLAN-PERF-2 §5). Semantics are `f64::sqrt`, which differs from `powf(x, 0.5)` at
-    // exactly two inputs: `sqrt(-0.0) = -0.0` vs `powf(-0.0, 0.5) = +0.0`, and `sqrt(-inf) = NaN`
-    // vs `powf(-inf, 0.5) = +inf` (C99 pow). Every backend implements it as native sqrt, so all
-    // three stay bit-identical.
+    // `Pow(x, 0.5)` — semantics are `f64::sqrt`, which differs from `powf(x, 0.5)` at exactly
+    // two inputs: `sqrt(-0.0) = -0.0` vs `powf(-0.0, 0.5) = +0.0`, and `sqrt(-inf) = NaN` vs
+    // `powf(-inf, 0.5) = +inf` (C99 pow). The native JIT lowers it to the single correctly-
+    // rounded Cranelift `sqrt` instruction (fusible where non-integer `pow` is a libcall;
+    // PLAN-PERF-2 §5). The wasm emitter instead calls a `Math.sqrt` import: V8/arm64 regresses
+    // ~30% on large single-block kernel bodies when the sites become inline `f64.sqrt`
+    // (measured 2026-07-14, `am_vs_fm` +21% run-level — the calls act as live-range split
+    // points for V8's regalloc); JSC prefers inline, revisit if V8 improves. `Math.sqrt` is
+    // IEEE-exact, so all three backends stay bit-identical to `f64::sqrt`.
     Sqrt,
 }
 

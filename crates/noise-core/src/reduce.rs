@@ -37,28 +37,26 @@ const CHUNK_SAMPLES: usize = 16 * crate::bytecode::BATCH; // 16_384
 #[cfg(threaded)]
 const PAR_MIN_SAMPLES: usize = 1 << 18; // 262_144
 
-/// A commutative monoid over sample columns. Parallel soundness reduces to a single local property:
-/// `merge` is associative + commutative, and `absorb` depends only on the column (not global order).
+/// A monoid over sample columns. Parallel soundness reduces to a single local property: `merge` is
+/// associative, and `absorb` depends only on the column (not global order). Commutativity is NOT
+/// required — the driver always folds in chunk-index order ([`combine_in_order`]) — so an
+/// order-preserving merge like concatenation ([`CollectReducer`]) is exactly as deterministic as a
+/// commutative one.
 pub trait Reducer: Sync {
     type Acc: Send;
     fn identity(&self) -> Self::Acc;
     /// Fold one batch column of draws into `acc`.
     fn absorb(&self, acc: &mut Self::Acc, col: &[f64]);
-    /// Combine two partial accumulators. Must be associative + commutative.
+    /// Combine two partial accumulators. Must be associative (with `identity` as the unit); the
+    /// index-ordered fold supplies the ordering, so commutativity is optional.
     fn merge(&self, a: Self::Acc, b: Self::Acc) -> Self::Acc;
 }
 
-/// Deterministic per-chunk seed: a SplitMix64 mix of `(seed, chunk_index)`, giving each chunk a
-/// well-separated xoshiro substream regardless of run order or core count.
-fn chunk_seed(seed: u64, chunk: usize) -> u64 {
-    let mut z = seed.wrapping_add((chunk as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
-
 /// Run chunk `chunk` (covering `[chunk*CHUNK .. )`, clamped to `n`) into a fresh accumulator,
-/// reusing this worker's `runner`.
+/// reusing this worker's `runner`. Counter keying (PLAN-PREGPU Track C) makes a chunk just a
+/// lane range: positioning the runner at `chunk * CHUNK_SAMPLES` IS the per-chunk isolation —
+/// no derived per-chunk seed, and thread-count invariance is by construction (the draw at lane
+/// `i` is a pure function of `(seed, i, source)`).
 fn reduce_chunk<R: Reducer>(
     runner: &mut dyn Runner,
     r: &R,
@@ -68,7 +66,10 @@ fn reduce_chunk<R: Reducer>(
 ) -> R::Acc {
     let start = chunk * CHUNK_SAMPLES;
     let len = CHUNK_SAMPLES.min(n - start);
-    runner.reseed(chunk_seed(seed, chunk));
+    // One u32 of lane index caps a forcing at 2^32 draws (documented language boundary;
+    // far above the op budget's practical caps).
+    let lane = u32::try_from(start).expect("forcing exceeds 2^32 lanes");
+    runner.position(seed, lane);
     let cap = runner.batch_cap();
     let mut acc = r.identity();
     let mut rem = len;
@@ -382,6 +383,56 @@ impl Reducer for CondMomentsReducer {
     }
 }
 
+// --- the collect reducer (raw draws), powering Q / quantiles ---
+
+/// Collects the raw draws themselves — the reduction behind `Q` (quantiles, PLAN-PERF-2 item 6). A
+/// quantile is an order statistic, not a monoid fold, so nothing compresses: the accumulator is the
+/// chunk's draw vector and `merge` is concatenation. Only the *sampling* parallelizes; the caller
+/// sorts/selects centrally. Concatenation is associative but not commutative — deterministic anyway
+/// because the driver folds in chunk-index order (see [`Reducer::merge`]), and the downstream sort
+/// erases concatenation order entirely. So the collected vector, like the moments, is bit-identical
+/// for any thread count; it does NOT reproduce `sample_n`'s single ordered stream (per-chunk reseed
+/// — the same one-seeding-story trade `moments` already made).
+///
+/// `skip_nan` drops NaN lanes instead of collecting them — the conditioning sentinel of a
+/// `select(C, x, NaN)` root (`Q(x | C, q)`), mirroring [`CondMomentsReducer`] including its KNOWN
+/// HOLE (finding B2): an in-condition NaN quantity is dropped, not propagated.
+pub struct CollectReducer {
+    pub skip_nan: bool,
+}
+
+impl Reducer for CollectReducer {
+    type Acc = Vec<f64>;
+
+    fn identity(&self) -> Vec<f64> {
+        Vec::new()
+    }
+
+    fn absorb(&self, acc: &mut Vec<f64>, col: &[f64]) {
+        // First batch of a chunk: reserve the whole chunk up front so a chunk costs exactly one
+        // allocation (a chunk never exceeds CHUNK_SAMPLES draws — no doubling churn per batch).
+        if acc.capacity() == 0 {
+            acc.reserve(CHUNK_SAMPLES);
+        }
+        if self.skip_nan {
+            acc.extend(col.iter().copied().filter(|x| !x.is_nan()));
+        } else {
+            acc.extend_from_slice(col);
+        }
+    }
+
+    fn merge(&self, mut a: Vec<f64>, mut b: Vec<f64>) -> Vec<f64> {
+        // Index-ordered concatenation. The empty fast path hands chunk 0's buffer straight to the
+        // fold instead of copying it into the identity; thereafter `append` doubles, so the whole
+        // n-element concat is O(n) amortized — noise against the sampling it follows.
+        if a.is_empty() {
+            return b;
+        }
+        a.append(&mut b);
+        a
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -486,6 +537,73 @@ mod tests {
         assert!(
             (new_m.variance - m2 / count as f64).abs() < 1e-6,
             "var mismatch"
+        );
+    }
+
+    /// The quantile collection shares the moments' determinism guarantee: the collected draw
+    /// vector is **bit-identical, element for element,** for any thread count (fixed chunk seeds +
+    /// index-ordered concatenation), and the public driver — whatever thread count it picks,
+    /// including the sequential below-threshold branch — returns exactly that vector. This is the
+    /// invariant that makes a `Q(...)` answer independent of the machine's core count.
+    #[test]
+    fn collected_draws_are_bit_identical_across_thread_counts() {
+        let (eng, id) = pi_graph();
+        let g = eng.graph();
+        let (n, seed) = (500_000usize, 9_876u64);
+        let n_chunks = n.div_ceil(CHUNK_SAMPLES);
+        let r = CollectReducer { skip_nan: false };
+
+        let (program, _cost) = compile_root(g, id, n);
+        let base = run_parallel(&*program, n, seed, &r, n_chunks, 1);
+        assert_eq!(base.len(), n);
+        for t in [2usize, 3, 5, 8] {
+            let v = run_parallel(&*program, n, seed, &r, n_chunks, t);
+            assert!(
+                v.len() == n && v.iter().zip(&base).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "collected draws differ at {t} threads"
+            );
+        }
+        // The public entry (its own compile + threshold + thread choice) agrees bit for bit.
+        let public = run_reduction(g, id, n, seed, &r);
+        assert!(
+            public.iter().zip(&base).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "run_reduction disagrees with the pinned 1-thread collection"
+        );
+    }
+
+    /// Before/after readout for PLAN-PERF-2 item 6: the OLD sequential quantile collection
+    /// (`sample_n` — one runner, one ordered stream) vs the NEW parallel chunked collection
+    /// (`sample_n_par`), each followed by the (shared, central) sort — a 5M-draw `Q` over a normal
+    /// cone. Ignored; run with:
+    /// `cargo test -p noise-core [--features jit] --release -- --ignored --nocapture bench_quantile_collect`
+    #[test]
+    #[ignore]
+    fn bench_quantile_collect() {
+        use std::time::Instant;
+
+        let mut eng = crate::eval::Engine::new();
+        let rv = eng.run_rv("use rand; Z ~ normal(0, 1); Z + Z * Z").unwrap();
+        let id = match rv {
+            Value::Dist(id) => id,
+            other => panic!("expected dist, got {other:?}"),
+        };
+        let g = eng.graph();
+        let (n, seed) = (5_000_000usize, 0u64);
+
+        let time = |f: &dyn Fn() -> Vec<f64>| {
+            let _ = f(); // warm (compile cache, allocator)
+            let t = Instant::now();
+            let mut draws = f();
+            draws.sort_by(f64::total_cmp);
+            std::hint::black_box(crate::num::quantile_sorted(&draws, 0.9));
+            t.elapsed().as_secs_f64() * 1e3
+        };
+        let old_ms = time(&|| crate::sampler::sample_n(g, id, n, seed));
+        let new_ms = time(&|| crate::sampler::sample_n_par(g, id, n, seed));
+        println!("\n  Q collection + sort, 5M draws of a normal cone (ms):");
+        println!(
+            "    sequential(old) {old_ms:8.1}   parallel(new) {new_ms:8.1}   speedup {:.2}x",
+            old_ms / new_ms
         );
     }
 

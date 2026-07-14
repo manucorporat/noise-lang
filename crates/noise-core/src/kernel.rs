@@ -275,14 +275,18 @@ pub fn walk_cost(
             RvNode::ConstNum(_) | RvNode::ConstBool(_) => {} // neutral
             RvNode::Unary(op, a) => {
                 match op {
-                    UnOp::Sin | UnOp::Cos | UnOp::Ln => charge(1, fusible, libcalls), // inlined on both backends
-                    UnOp::Atan | UnOp::Round | UnOp::Exp => *libcalls += 1, // still a call everywhere
-                    // Cheap fused instructions on every backend (native/wasm floor/ceil/neg, and
-                    // sqrt — a single IEEE-exact instruction on both Cranelift and wasm, which is
-                    // why it is its own node and not `Pow(x, 0.5)`; PLAN-PERF-2 §5).
-                    UnOp::Neg | UnOp::Not | UnOp::Sign | UnOp::Floor | UnOp::Ceil | UnOp::Sqrt => {
-                        *fusible += 1
+                    // Inlined on both backends (trig/ln polynomials). `Sqrt` rides the same
+                    // gate: an inline `sqrt` instruction natively, and on wasm a `Math.sqrt`
+                    // import that V8 executes at near-instruction cost (the inline `f64.sqrt`
+                    // form regressed V8/arm64 ~30% on large kernels, 2026-07-14) — so it is
+                    // charged fusible wherever the backend inlines transcendentals, and as a
+                    // call on a hypothetical backend that can't (`inline_trans = false`).
+                    UnOp::Sin | UnOp::Cos | UnOp::Ln | UnOp::Sqrt => {
+                        charge(1, fusible, libcalls)
                     }
+                    UnOp::Atan | UnOp::Round | UnOp::Exp => *libcalls += 1, // still a call everywhere
+                    // Cheap fused instructions on every backend (native/wasm floor/ceil/neg).
+                    UnOp::Neg | UnOp::Not | UnOp::Sign | UnOp::Floor | UnOp::Ceil => *fusible += 1,
                 }
                 stack.push(*a);
             }
@@ -330,121 +334,6 @@ pub fn walk_cost(
     true
 }
 
-/// Pick the RNG stream count for a graph. Multi-stream pays off only when the kernel is bound by the
-/// **xoshiro latency chain** — pure inline arithmetic over `uniform`/`uniform_int` draws (`pi`,
-/// `dice`) — because independent streams let the out-of-order core overlap the otherwise-serial
-/// chains (~2×, see `jit::bench_streams`).
-///
-/// Transcendental draws/ufuncs are different: even inlined (`ln`/`sin`/`cos` polynomials), they are
-/// *arithmetic-throughput*-bound, not latency-bound — the execution units are already saturated, so
-/// adding streams just multiplies the work with nothing to overlap (measured flat `s1≈s4`, with
-/// worse register pressure on large kernels). Those — and any remaining real call (`atan`/`round`/
-/// non-integer `pow`) — stay single-stream. So the rule is "multi-stream iff latency-bound".
-pub fn choose_streams(graph: &RvGraph, root: RvId) -> usize {
-    choose_streams_roots(graph, &[root])
-}
-
-/// Multi-root [`choose_streams`]: one stream policy for a joint kernel — multi-stream only if
-/// *every* root's cone is latency-bound (any transcendental anywhere makes the whole loop body
-/// throughput-bound, exactly as it would in a single fused cone).
-pub fn choose_streams_roots(graph: &RvGraph, roots: &[RvId]) -> usize {
-    let mut seen = HashSet::new();
-    if roots.iter().all(|&r| latency_bound(graph, r, &mut seen)) {
-        STREAMS
-    } else {
-        1
-    }
-}
-
-/// Whether `root`'s cone is purely the xoshiro-latency-bound regime: only `uniform`/`uniform_int`
-/// sources and plain fusible arithmetic — no transcendental draw (`normal`/`exp`/`geometric`) or
-/// ufunc (`sin`/`cos`/`atan`/`round`) and no non-integer `pow`. (`Poisson` returns `false` here too,
-/// but the backend selector rejects it earlier via [`profitable`].)
-fn latency_bound(graph: &RvGraph, id: RvId, seen: &mut HashSet<RvId>) -> bool {
-    // Iterative worklist (not recursion) so a deep chain can't overflow the stack (finding A4).
-    // Returns `false` on the first node that breaks the latency-bound predicate.
-    let mut stack = vec![id];
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id) {
-            continue; // shared node already checked
-        }
-        // Exhaustive (no `_`) so a future op is force-classified here too (finding C6); see the
-        // `TODO(CostClass)` in `walk_cost`.
-        match graph.node(id) {
-            RvNode::Src(Source::Uniform(_) | Source::UniformInt { .. }) => {}
-            // normal / exp / geometric / poisson: transcendental draw → throughput-bound.
-            RvNode::Src(
-                Source::Normal { .. }
-                | Source::Exp { .. }
-                | Source::Geometric { .. }
-                | Source::Poisson { .. },
-            ) => return false,
-            // Interpreter-only (walk_cost already rejects them); classify conservatively.
-            RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => {
-                return false
-            }
-            // Gather lowers to compares/selects/loads — no transcendental, so it keeps the cone
-            // latency-bound (like `Select`). Const-table elems are never emitted; only the index
-            // (and, for the select chain, the elems) can break the predicate.
-            RvNode::Gather { elems, index } => match gather_class(graph, elems) {
-                Some(GatherClass::ConstTable) => stack.push(*index),
-                Some(GatherClass::SelectChain) => {
-                    for &e in elems.iter() {
-                        stack.push(e);
-                    }
-                    stack.push(*index);
-                }
-                None => return false, // interpreter-only (gated out before this)
-            },
-            RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
-            RvNode::Unary(op, a) => {
-                match op {
-                    // Transcendental/ufunc draws are arithmetic-throughput-bound, not latency-bound.
-                    UnOp::Sin | UnOp::Cos | UnOp::Atan | UnOp::Round | UnOp::Exp | UnOp::Ln => {
-                        return false
-                    }
-                    // Plain fused instructions keep the cone latency-bound (sqrt is longer-latency
-                    // than floor/neg but still a pipelined single instruction, not a call).
-                    UnOp::Neg | UnOp::Not | UnOp::Sign | UnOp::Floor | UnOp::Ceil | UnOp::Sqrt => {}
-                }
-                stack.push(*a);
-            }
-            RvNode::Binary(BinOp::Pow, a, b) => {
-                if const_int_exponent(graph, *b).is_none() {
-                    return false;
-                }
-                stack.push(*a);
-                stack.push(*b);
-            }
-            RvNode::Binary(
-                BinOp::Add
-                | BinOp::Sub
-                | BinOp::Mul
-                | BinOp::Div
-                | BinOp::Mod
-                | BinOp::Eq
-                | BinOp::Ne
-                | BinOp::Lt
-                | BinOp::Gt
-                | BinOp::Le
-                | BinOp::Ge
-                | BinOp::And
-                | BinOp::Or,
-                a,
-                b,
-            ) => {
-                stack.push(*a);
-                stack.push(*b);
-            }
-            RvNode::Select { cond, a, b } => {
-                stack.push(*cond);
-                stack.push(*a);
-                stack.push(*b);
-            }
-        }
-    }
-    true
-}
 
 /// Whether every node in the cone of `root` is something a code generator can emit — after "B2"
 /// that is everything except `Poisson` and large non-const `Gather` (see [`gather_class`]). (The

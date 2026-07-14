@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/noise-core", "crates/noise-cli", "crates/noise-wasm"]
-exclude = ["packages/legacy", "crates/noise-core/fuzz"]
+exclude = ["packages/legacy", "crates/noise-core/fuzz", "tools/rng-cert"]
 
 [workspace.package]
 edition = "2021"

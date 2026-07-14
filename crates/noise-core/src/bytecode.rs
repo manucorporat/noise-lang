@@ -29,29 +29,35 @@ pub type ArrReg = u32;
 pub enum Inst {
     Uniform {
         dst: Reg,
+        src: u32,
         lo: f64,
         hi: f64,
     },
     UniformInt {
         dst: Reg,
+        src: u32,
         lo: f64,
         hi: f64,
     },
     Normal {
         dst: Reg,
+        src: u32,
         mu: f64,
         sigma: f64,
     },
     Exp {
         dst: Reg,
+        src: u32,
         rate: f64,
     },
     Poisson {
         dst: Reg,
+        src: u32,
         lambda: f64,
     },
     Geometric {
         dst: Reg,
+        src: u32,
         p: f64,
     },
     ConstNum {
@@ -94,6 +100,7 @@ pub enum Inst {
     /// bounded draw `fill_uniform_int` uses.
     Permutation {
         dst: ArrReg,
+        src: u32,
         n: u32,
     },
     /// Per-lane Haar rotation: fill array register `dst` (element count `d²`, row-major
@@ -104,6 +111,7 @@ pub enum Inst {
     /// odd; full batch, like every other source).
     Rotation {
         dst: ArrReg,
+        src: u32,
         d: u32,
     },
     /// Per-lane read `dst = arr[round(clamp(index))]` of an array register — `Inst::Gather`'s
@@ -283,21 +291,26 @@ fn lower(
                     RvNode::Src(Source::Uniform(u)) => {
                         insts.push(Inst::Uniform {
                             dst,
+                            src: id.0,
                             lo: u.lo,
                             hi: u.hi,
                         });
                     }
                     RvNode::Src(Source::UniformInt { lo, hi }) => {
-                        insts.push(Inst::UniformInt { dst, lo, hi });
+                        insts.push(Inst::UniformInt { dst, src: id.0, lo, hi });
                     }
                     RvNode::Src(Source::Normal { mu, sigma }) => {
-                        insts.push(Inst::Normal { dst, mu, sigma });
+                        insts.push(Inst::Normal { dst, src: id.0, mu, sigma });
                     }
-                    RvNode::Src(Source::Exp { rate }) => insts.push(Inst::Exp { dst, rate }),
+                    RvNode::Src(Source::Exp { rate }) => {
+                        insts.push(Inst::Exp { dst, src: id.0, rate })
+                    }
                     RvNode::Src(Source::Poisson { lambda }) => {
-                        insts.push(Inst::Poisson { dst, lambda });
+                        insts.push(Inst::Poisson { dst, src: id.0, lambda });
                     }
-                    RvNode::Src(Source::Geometric { p }) => insts.push(Inst::Geometric { dst, p }),
+                    RvNode::Src(Source::Geometric { p }) => {
+                        insts.push(Inst::Geometric { dst, src: id.0, p })
+                    }
                     RvNode::ConstNum(v) => insts.push(Inst::ConstNum { dst, val: v }),
                     RvNode::ConstBool(b) => insts.push(Inst::ConstBool {
                         dst,
@@ -348,7 +361,7 @@ fn lower(
                             .expect("bytecode exceeded 2^32 array registers");
                         arrays.push(n);
                         arr_memo.insert(id, a);
-                        insts.push(Inst::Permutation { dst: a, n });
+                        insts.push(Inst::Permutation { dst: a, src: id.0, n });
                     }
                     RvNode::Rotation { d } => {
                         // Same array-valued-source shape as Permutation: one instruction slot (the
@@ -358,7 +371,7 @@ fn lower(
                             .expect("bytecode exceeded 2^32 array registers");
                         arrays.push(d * d);
                         arr_memo.insert(id, a);
-                        insts.push(Inst::Rotation { dst: a, d });
+                        insts.push(Inst::Rotation { dst: a, src: id.0, d });
                     }
                     RvNode::ArrIndex { arr, index } => {
                         let (a, ri) = (arr_memo[&arr], memo[&index]);
@@ -389,27 +402,29 @@ pub fn run_batch(
     program: &Program,
     regs: &mut [Box<[f64]>],
     arrs: &mut [Box<[f64]>],
-    rng: &mut crate::rng::Rng,
+    key: crate::rng::Key,
+    lane0: u32,
 ) {
+    use crate::rng;
     for inst in &program.insts {
         match *inst {
-            Inst::Uniform { dst, lo, hi } => {
-                rng.fill_uniform(lo, hi, &mut regs[dst as usize]);
+            Inst::Uniform { dst, src, lo, hi } => {
+                rng::fill_uniform(key, src, lane0, lo, hi, &mut regs[dst as usize]);
             }
-            Inst::UniformInt { dst, lo, hi } => {
-                rng.fill_uniform_int(lo, hi, &mut regs[dst as usize]);
+            Inst::UniformInt { dst, src, lo, hi } => {
+                rng::fill_uniform_int(key, src, lane0, lo, hi, &mut regs[dst as usize]);
             }
-            Inst::Normal { dst, mu, sigma } => {
-                rng.fill_normal(mu, sigma, &mut regs[dst as usize]);
+            Inst::Normal { dst, src, mu, sigma } => {
+                rng::fill_normal(key, src, lane0, mu, sigma, &mut regs[dst as usize]);
             }
-            Inst::Exp { dst, rate } => {
-                rng.fill_exp(rate, &mut regs[dst as usize]);
+            Inst::Exp { dst, src, rate } => {
+                rng::fill_exp(key, src, lane0, rate, &mut regs[dst as usize]);
             }
-            Inst::Poisson { dst, lambda } => {
-                rng.fill_poisson(lambda, &mut regs[dst as usize]);
+            Inst::Poisson { dst, src, lambda } => {
+                rng::fill_poisson(key, src, lane0, lambda, &mut regs[dst as usize]);
             }
-            Inst::Geometric { dst, p } => {
-                rng.fill_geometric(p, &mut regs[dst as usize]);
+            Inst::Geometric { dst, src, p } => {
+                rng::fill_geometric(key, src, lane0, p, &mut regs[dst as usize]);
             }
             Inst::ConstNum { dst, val } => {
                 for x in regs[dst as usize].iter_mut() {
@@ -477,44 +492,47 @@ pub fn run_batch(
                 }
                 regs[dst as usize].copy_from_slice(&scratch);
             }
-            Inst::Permutation { dst, n } => {
+            Inst::Permutation { dst, src, n } => {
                 // Per lane: identity, then Fisher–Yates high-to-low with the same Lemire
-                // multiply-high bounded draw `fill_uniform_int` uses (`k = ⌊u64·count / 2⁶⁴⌋`,
-                // bias ≤ count/2⁶⁴). Lane-major (`buf[k*n + j]`, see `Program::arrays`): the
-                // shuffle's swaps stay within lane `k`'s contiguous n-element run. Consumes
-                // exactly `(n-1) × BATCH` draws per batch — full batch like every source, so a
-                // final partial batch doesn't change the stream.
+                // multiply-high bounded draw `fill_uniform_int` uses (48 consumed bits, bias ≤
+                // count/2⁴⁸), drawing from the lane's `CellStream` chain. Lane-major
+                // (`buf[k*n + j]`, see `Program::arrays`): the shuffle's swaps stay within lane
+                // `k`'s contiguous n-element run. Per-cell keying makes consumption a pure
+                // function of `(lane, src)` — partial batches can't change the stream.
                 let n = n as usize;
                 let buf = &mut arrs[dst as usize];
                 for k in 0..BATCH {
+                    let mut stream = rng::CellStream::new(key, lane0.wrapping_add(k as u32), src);
                     let lane = &mut buf[k * n..(k + 1) * n];
                     for (j, x) in lane.iter_mut().enumerate() {
                         *x = j as f64;
                     }
                     for j in (1..n).rev() {
-                        let i = ((rng.next_u64() as u128 * (j as u128 + 1)) >> 64) as usize;
+                        let i = stream.next_bounded(j as u64 + 1) as usize;
                         lane.swap(i, j);
                     }
                 }
             }
-            Inst::Rotation { dst, d } => {
+            Inst::Rotation { dst, src, d } => {
                 // Per lane: fill the lane's contiguous `d²` run (row-major, `m[r*d + c]`) with iid
-                // standard normals via `fill_normal` — the SAME Box–Muller primitive `Inst::Normal`
-                // uses, so tails/quality match a hand-built Gaussian seed — then modified
+                // standard normals from the lane's `CellStream` chain (same cos-branch Box–Muller
+                // primitive every `Normal` source uses, so tails/quality match) — then modified
                 // Gram–Schmidt the rows in place: subtract each earlier (already unit) row's
                 // projection, then normalize. This is the native-Rust replacement for the old
                 // graph-level MGS (`O(d³)` interpreted nodes per draw); the flops are the same
-                // `O(d³)`, they just run as three tight loops per lane. RNG consumption is fixed
-                // per batch (`2·⌈d²/2⌉` uniforms per lane × full BATCH — Box–Muller draws its pair
-                // even for an odd final slot), so a partial batch doesn't change the stream. A
-                // zero-norm row (probability 0 for Gaussians) would yield inf/NaN entries — the
-                // same IEEE answer the graph-level `normalize` produced.
+                // `O(d³)`, they just run as three tight loops per lane. Per-cell keying makes
+                // consumption a pure function of `(lane, src)` — partial batches can't change the
+                // stream. A zero-norm row (probability 0 for Gaussians) would yield inf/NaN
+                // entries — the same IEEE answer the graph-level `normalize` produced.
                 let d = d as usize;
                 let dd = d * d;
                 let buf = &mut arrs[dst as usize];
                 for k in 0..BATCH {
                     let m = &mut buf[k * dd..(k + 1) * dd];
-                    rng.fill_normal(0.0, 1.0, m);
+                    let mut stream = rng::CellStream::new(key, lane0.wrapping_add(k as u32), src);
+                    for x in m.iter_mut() {
+                        *x = stream.next_normal();
+                    }
                     for r in 0..d {
                         for p in 0..r {
                             let mut dot = 0.0;
@@ -579,18 +597,21 @@ fn apply_un(op: UnOp, x: f64) -> f64 {
                 0.0
             }
         }
-        UnOp::Sin => x.sin(),
-        UnOp::Cos => x.cos(),
+        // Shared-`approx` trig (PLAN-PREGPU): the same polynomials (with the same `TRIG_MAX`
+        // libm fallback) the JIT and wasm emitter inline, so `sin(RV)` is bit-identical across
+        // backends instead of libm-vs-poly divergent within MC noise.
+        UnOp::Sin => crate::approx::sin(x),
+        UnOp::Cos => crate::approx::cos(x),
         UnOp::Atan => x.atan(),
         // sign: -1 / 0 / +1 (0 at exactly zero, unlike f64::signum which is ±1 at ±0.0).
         UnOp::Sign => (x > 0.0) as i32 as f64 - (x < 0.0) as i32 as f64,
         UnOp::Round => x.round(),
         UnOp::Floor => x.floor(),
         UnOp::Ceil => x.ceil(),
-        // The interpreter is the exact oracle: full-precision libm `exp`/`ln` (IEEE semantics —
-        // ln(0) = -inf, ln(x<0) = NaN). The code generators approximate these within MC noise.
+        // `exp` stays libm on every backend (the JIT/wasm call it as a shim/import — finding C9);
+        // `ln` is the shared guarded polynomial all backends compute (see `approx::ln_guarded`).
         UnOp::Exp => x.exp(),
-        UnOp::Ln => x.ln(),
+        UnOp::Ln => crate::approx::ln_guarded(x),
         // IEEE sqrt (correctly rounded, so the native sqrt instructions in both code generators
         // are bit-identical to this): sqrt(-0.0) = -0.0, sqrt(x<0) = NaN (incl. -inf).
         UnOp::Sqrt => x.sqrt(),
@@ -669,8 +690,7 @@ mod tests {
         let mut buf: Vec<Box<[f64]>> = (0..prog.n_regs)
             .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
             .collect();
-        let mut rng = crate::rng::Rng::seed_from_u64(0);
-        run_batch(&prog, &mut buf, &mut [], &mut rng);
+        run_batch(&prog, &mut buf, &mut [], crate::rng::Key::from_seed(0), 0);
         let out = &buf[prog.root as usize];
         assert!(
             out.iter().all(|x| x.is_nan()),
@@ -699,8 +719,7 @@ mod tests {
         let mut buf: Vec<Box<[f64]>> = (0..prog.n_regs)
             .map(|_| vec![0.0f64; BATCH].into_boxed_slice())
             .collect();
-        let mut rng = crate::rng::Rng::seed_from_u64(0);
-        run_batch(&prog, &mut buf, &mut [], &mut rng);
+        run_batch(&prog, &mut buf, &mut [], crate::rng::Key::from_seed(0), 0);
         assert!(buf[prog.root as usize].iter().all(|&x| x == 20.0));
     }
 
@@ -744,11 +763,11 @@ mod tests {
         let (g, _, roots) = perm_with_elems(N);
         let (prog, regs) = compile_roots(&g, &roots);
         let (mut buf, mut arrs) = reg_files(&prog);
-        let mut rng = crate::rng::Rng::seed_from_u64(7);
+        let key = crate::rng::Key::from_seed(7);
         let batches = 100;
         let mut counts = [[0u64; N]; N]; // counts[position][value]
-        for _ in 0..batches {
-            run_batch(&prog, &mut buf, &mut arrs, &mut rng);
+        for b in 0..batches {
+            run_batch(&prog, &mut buf, &mut arrs, key, (b * BATCH) as u32);
             for k in 0..BATCH {
                 let mut seen = [false; N];
                 let mut sum = 0.0;
@@ -797,8 +816,7 @@ mod tests {
         let roots = [first, last, neg, tie, huge, nan];
         let (prog, regs) = compile_roots(&g, &roots);
         let (mut buf, mut arrs) = reg_files(&prog);
-        let mut rng = crate::rng::Rng::seed_from_u64(11);
-        run_batch(&prog, &mut buf, &mut arrs, &mut rng);
+        run_batch(&prog, &mut buf, &mut arrs, crate::rng::Key::from_seed(11), 0);
         let col = |r: Reg| &buf[r as usize];
         for k in 0..BATCH {
             assert_eq!(col(regs[2])[k], col(regs[0])[k], "negative index → element 0");
@@ -834,9 +852,9 @@ mod tests {
         let (g, roots) = rot_with_elems(D);
         let (prog, regs) = compile_roots(&g, &roots);
         let (mut buf, mut arrs) = reg_files(&prog);
-        let mut rng = crate::rng::Rng::seed_from_u64(13);
-        for _ in 0..20 {
-            run_batch(&prog, &mut buf, &mut arrs, &mut rng);
+        let key = crate::rng::Key::from_seed(13);
+        for b in 0..20u32 {
+            run_batch(&prog, &mut buf, &mut arrs, key, b * BATCH as u32);
             for k in 0..BATCH {
                 let q = |r: usize, c: usize| buf[regs[r * D + c] as usize][k];
                 for r1 in 0..D {
@@ -863,11 +881,11 @@ mod tests {
         let (g, roots) = rot_with_elems(D);
         let (prog, regs) = compile_roots(&g, &roots);
         let (mut buf, mut arrs) = reg_files(&prog);
-        let mut rng = crate::rng::Rng::seed_from_u64(17);
+        let key = crate::rng::Key::from_seed(17);
         let batches = 20;
         let (mut sum, mut sum_sq) = (0.0f64, 0.0f64);
-        for _ in 0..batches {
-            run_batch(&prog, &mut buf, &mut arrs, &mut rng);
+        for b in 0..batches {
+            run_batch(&prog, &mut buf, &mut arrs, key, (b * BATCH) as u32);
             for k in 0..BATCH {
                 let q00 = buf[regs[0] as usize][k];
                 sum += q00;

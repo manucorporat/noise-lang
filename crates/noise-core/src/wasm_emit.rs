@@ -2,28 +2,29 @@
 //!
 //! A WASM sandbox can't emit or run native code, so the Cranelift JIT (B1/B2) is native-only. What
 //! *is* portable is the [`RvGraph`] IR. This module is the second lowering of that IR: it walks the
-//! identical graph the identical post-order way and emits the identical fused, multi-stream kernel —
-//! only the per-node encoding differs (`f64.mul` instead of `mulsd`, an inlined xoshiro step in
-//! either). The shared "what the graph means" lives in [`crate::kernel`] (the cost/profitability
-//! gate, stream policy, seed layout); this file is just "how to spell it in wasm bytes".
+//! identical graph the identical post-order way and emits the identical fused counter-keyed kernel
+//! (PLAN-PREGPU Track C) — only the per-node encoding differs (`f64.mul` instead of `mulsd`, the
+//! same inlined pcg4d-3r hash in either). The shared "what the graph means" lives in
+//! [`crate::kernel`] (the cost/profitability gate); this file is just "how to spell it in wasm
+//! bytes".
 //!
 //! **Output.** [`emit`] produces a complete WebAssembly module (`Vec<u8>`) exporting:
 //!   * `memory` — one linear memory the host reads/writes.
-//!   * `kernel(out: i32, n: i32, state: i32)` — fills `out[0..n]` with fresh root draws (`f64`s at
-//!     `out`), reading/writing the `4 * streams`-word xoshiro state at `state`. Same ABI shape as the
-//!     native kernel, but addresses are `i32` offsets into the module's linear memory.
+//!   * `kernel(out: i32, n: i32, key_lo: i32, key_hi: i32, lane0: i32)` — fills `out[0..n]` with
+//!     the root draws for global lanes `lane0 .. lane0 + n`. Stateless — same arguments, same
+//!     column, bit-identical to the interpreter and the native JIT under the same seed.
 //!
 //! `ln`/`sin`/`cos` are **inlined as polynomials** ([`emit_ln`]/[`emit_trig`], the same
 //! [`crate::approx`] reference the JIT uses) — wasm has no native ones, and a host call would cross
 //! the JS boundary per draw. The module imports `atan`/`round`/`pow` from module `"m"`, plus
-//! `sin`/`cos` (the large-argument fallback past `approx::TRIG_MAX` — finding C3) and `exp` (matched
-//! to the interpreter — finding C9); the browser supplies them via `Math.*` and the test harness via
-//! Rust `f64` methods. The inline `sin`/`cos` polynomial handles every ordinary argument, so those
+//! `sin`/`cos` (the large-argument fallback past `approx::TRIG_MAX` — finding C3), `exp` (matched
+//! to the interpreter — finding C9) and `sqrt` (V8/arm64 regresses on inline `f64.sqrt` in large
+//! kernel bodies — see `UnOp::Sqrt` in [`emit_unop`]); the browser supplies them via `Math.*` and
+//! the test harness via Rust `f64` methods. The inline `sin`/`cos` polynomial handles every ordinary argument, so those
 //! imports fire only on the rare huge-argument path. Because the transcendentals are inlined,
 //! [`emit_for`] passes `inline_trans = true` to
 //! [`kernel::profitable`] — the gate decision matches the native JIT, and the 2× win reaches the
-//! browser. [`kernel::choose_streams`] still keeps these single-stream (throughput-, not
-//! latency-bound).
+//! browser.
 //!
 //! **Why no host execution yet.** Running an emitted module means a JS host `instantiate`s it and
 //! drives it (the `Backend`/`Program`/`Runner` seam, browser-side). That wiring is a follow-up; this
@@ -35,9 +36,10 @@
 //! `Gather` — a const table becomes an active **data segment** after the output columns (indexed
 //! load; the `empirical`/bootstrap shape), a small non-const one a compare/select chain
 //! ([`crate::kernel::gather_class`]). `Poisson` and large non-const gathers stay interpreter-only
-//! (rejected by the gate). `unif_int` uses the float method
-//! (`lo + floor(u * count)`) rather than the native kernel's Lemire multiply-high — wasm has no
-//! 64×64→128 `mulhi`, and the float form is identical in distribution (what the parity tests check).
+//! (rejected by the gate). `unif_int` computes the same 48-bit Lemire multiply-high as the
+//! interpreter/JIT via a split multiply (wasm has no `mulhi`) — exact, hence bit-identical, for
+//! `count < 2^39` (every post-Track-B count; the 2^24 cap is far below), with the old
+//! float method (`lo + floor(u·count)`, identical in distribution) as the huge-count fallback.
 
 // The emitter and its host-import indices are exercised on the wasm32 target and by the wasmi
 // parity tests; on a native non-test build they read as dead. This module was previously `pub`,
@@ -55,36 +57,43 @@ use wasm_encoder::{
 use crate::ast::{BinOp, UnOp};
 use crate::bytecode::BATCH;
 use crate::dist::{RvGraph, RvId, RvNode, Source};
-use crate::kernel::{
-    choose_streams_roots, cone_size_roots, const_int_exponent, gather_class, GatherClass,
-};
+use crate::kernel::{cone_size_roots, const_int_exponent, gather_class, GatherClass};
 
 // --- imported-function indices (declared in import order, before the local `kernel`) ---
 // `ln` is inlined as a polynomial (`emit_ln`, mirroring `jit`). `sin`/`cos` are inlined too, but
 // the module re-imports them for the **large-argument fallback**: past `approx::TRIG_MAX` the 2-term
 // reduction degrades, so `emit_trig` defers to the host's accurate `sin`/`cos` there (finding C3).
 // `exp` is imported (rather than lowered as `pow(e, x)`) so it matches the interpreter's `exp`
-// (finding C9). The host (`wasm_host` / the test linker) supplies all of these via `Math.*`.
+// (finding C9). `sqrt` is imported for `UnOp::Sqrt` — NOT the inline `f64.sqrt` instruction:
+// V8/arm64 regresses ~30% on large single-block kernel bodies when the call sites become inline
+// sqrt (measured 2026-07-14, `am_vs_fm` +21% run-level; the import calls act as live-range split
+// points for V8's regalloc). JSC prefers inline; revisit if V8's regalloc improves. `Math.sqrt`
+// is IEEE-exact, so semantics are unchanged. The host (`wasm_host` / the test linker) supplies
+// all of these via `Math.*`.
 const ATAN: u32 = 0;
 const ROUND: u32 = 1;
 const POW: u32 = 2;
 const SIN: u32 = 3;
 const COS: u32 = 4;
 const EXP: u32 = 5;
-const N_IMPORTS: u32 = 6;
+const SQRT: u32 = 6;
+const N_IMPORTS: u32 = 7;
 
-// --- fixed local indices (params occupy 0..3) ---
+// --- fixed local indices (params occupy 0..4) ---
 const OUT: u32 = 0; // param: output base pointer
 const N: u32 = 1; // param: sample count
-const STATE: u32 = 2; // param: xoshiro-state base pointer
-const I: u32 = 3; // loop counter (sample index)
-                  // Four scratch i64s for one xoshiro step (shared across streams — the step is straight-line).
-const RES: u32 = 4;
-const T: u32 = 5;
-const S2A: u32 = 6;
-const S3A: u32 = 7;
-/// First local index of a stream's four state words; stream `j` word `k` is at `STATE_BASE + j*4 + k`.
-const STATE_BASE: u32 = 8;
+const K0: u32 = 2; // param: draw-key word 0
+const K1: u32 = 3; // param: draw-key word 1
+const LANE0: u32 = 4; // param: first global lane index
+const I: u32 = 5; // loop counter (sample index)
+const LANE: u32 = 6; // current global lane
+// The four hash words of the cell being computed (i32) — scratch for `emit_cell`, shared by every
+// source (a cell is computed atomically: set from the key/lane/source, mixed in place, consumed).
+const V0: u32 = 7;
+const V1: u32 = 8;
+const V2: u32 = 9;
+const V3: u32 = 10;
+const N_I32_LOCALS: u32 = 6; // I, LANE, V0..V3
 
 /// 8-byte aligned access (f64/i64) into memory 0 at an absolute address already on the stack.
 fn mem8(offset: u64) -> MemArg {
@@ -98,11 +107,6 @@ fn mem8(offset: u64) -> MemArg {
 /// f64 literal as the `Ieee64` the encoder wants.
 fn f64c(x: f64) -> Ieee64 {
     Ieee64::from(x)
-}
-
-/// Local holding stream `j`'s xoshiro word `k`.
-fn sl(j: usize, k: usize) -> u32 {
-    STATE_BASE + (j * 4 + k) as u32
 }
 
 /// Scratch locals the inlined transcendentals reuse: 2 i64 + 6 f64, shared across every `ln`/`sin`/
@@ -182,24 +186,19 @@ fn collect_gather_tables(
     (addrs, data)
 }
 
-/// Emit a complete WASM module computing `root` with the given RNG stream count. `streams` must
-/// divide [`BATCH`] (so a batch is a whole number of loop iterations) and be ≥ 1. The graph must be
-/// codegen-supported (no `Poisson`); it **panics** (assert / `unreachable!`) on an ungated graph, so
-/// it is `pub(crate)` — the public entry point is the gate-honoring [`emit_for`] (finding C10).
-pub(crate) fn emit(graph: &RvGraph, root: RvId, streams: usize) -> Vec<u8> {
-    emit_roots(graph, &[root], streams)
+/// Emit a complete WASM module computing `root`. The graph must be codegen-supported (no
+/// `Poisson`); it **panics** (assert / `unreachable!`) on an ungated graph, so it is `pub(crate)`
+/// — the public entry point is the gate-honoring [`emit_for`] (finding C10).
+pub(crate) fn emit(graph: &RvGraph, root: RvId) -> Vec<u8> {
+    emit_roots(graph, &[root])
 }
 
-/// Multi-root [`emit`]: ONE kernel computing every root per lane from a shared per-stream memo
+/// Multi-root [`emit`]: ONE kernel computing every root per lane from a shared per-lane memo
 /// (shared sources drawn once per lane — the roots stay *jointly* sampled), writing root `r`'s
 /// draws into its own BATCH-strided output column at `out + r*BATCH*8`. A single root emits
-/// exactly the module [`emit`] always emitted. Memory is sized for `k` columns after the state
-/// page (host convention: state low, columns at/after 4096).
-pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId], streams: usize) -> Vec<u8> {
-    assert!(
-        streams >= 1 && BATCH.is_multiple_of(streams),
-        "streams must divide BATCH"
-    );
+/// exactly the module [`emit`] always emitted. Memory is sized for `k` columns after the first
+/// page (host convention: columns at/after 4096; the counter kernel keeps no state region).
+pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId]) -> Vec<u8> {
     let cone = cone_size_roots(graph, roots) as u32;
 
     // --- types: (f64)->f64 for the unary shims, (f64,f64)->f64 for pow, kernel sig ---
@@ -208,19 +207,22 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId], streams: usize) -> Vec
     types
         .ty()
         .function([ValType::F64, ValType::F64], [ValType::F64]); // 1: pow
-    types
-        .ty()
-        .function([ValType::I32, ValType::I32, ValType::I32], []); // 2: kernel
+    types.ty().function(
+        [ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        [],
+    ); // 2: kernel(out, n, key_lo, key_hi, lane0)
 
-    // --- imports from module "m": unary `atan`/`round`/`sin`/`cos`/`exp` (type 0) + `pow` (type 1).
-    // `sin`/`cos` are the large-argument fallback (finding C3); `exp` matches the interpreter (C9).
-    // The declaration order fixes the indices `ATAN..EXP` above — keep them in sync.
+    // --- imports from module "m": unary `atan`/`round`/`sin`/`cos`/`exp`/`sqrt` (type 0) + `pow`
+    // (type 1). `sin`/`cos` are the large-argument fallback (finding C3); `exp` matches the
+    // interpreter (C9); `sqrt` sidesteps the V8/arm64 inline-`f64.sqrt` regression (see the index
+    // constants above). The declaration order fixes the indices `ATAN..SQRT` above — keep them in
+    // sync (`sqrt` was appended last so the earlier indices never shifted).
     let mut imports = ImportSection::new();
     for name in ["atan", "round"] {
         imports.import("m", name, EntityType::Function(0));
     }
     imports.import("m", "pow", EntityType::Function(1));
-    for name in ["sin", "cos", "exp"] {
+    for name in ["sin", "cos", "exp", "sqrt"] {
         imports.import("m", name, EntityType::Function(0));
     }
 
@@ -228,10 +230,11 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId], streams: usize) -> Vec
     let mut functions = FunctionSection::new();
     functions.function(2);
 
-    // --- one linear memory: state page, one BATCH-f64 column per root, then the gather tables ---
-    // Host convention: state low, columns at/after 4096 (the JS host only ever touches those two
-    // regions). Const gather tables live after the columns — `cols_end` is 8-aligned by
-    // construction — initialized by an active data segment, so the host needs no wiring at all.
+    // --- one linear memory: one BATCH-f64 column per root at/after 4096, then gather tables ---
+    // Host convention: columns at/after 4096 (the counter kernel keeps no state region; the first
+    // page stays reserved so the host layout is unchanged). Const gather tables live after the
+    // columns — `cols_end` is 8-aligned by construction — initialized by an active data segment,
+    // so the host needs no wiring at all.
     let mut memories = MemorySection::new();
     let cols_end = 4096 + roots.len() * BATCH * 8;
     let (gather_tables, table_data) = collect_gather_tables(graph, roots, cols_end as u64);
@@ -250,17 +253,16 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId], streams: usize) -> Vec
     exports.export("kernel", ExportKind::Func, N_IMPORTS);
 
     // --- code: declare locals, then emit the loop body ---
-    let i64_count = 4 + 4 * streams as u32; // 4 scratch + 4 state words per stream
-    let f64_count = cone * streams as u32; // one value slot per node, per stream
+    let f64_count = cone; // one value slot per node
     let mut func = Function::new([
-        (1, ValType::I32),                 // I (counter)
-        (i64_count + T_I64, ValType::I64), // xoshiro scratch + state words + transcendental i64
+        (N_I32_LOCALS, ValType::I32),      // I, LANE, V0..V3 (hash scratch)
+        (T_I64, ValType::I64),             // transcendental i64 scratch
         (T_F64 + f64_count, ValType::F64), // transcendental f64 scratch + node value slots
     ]);
-    // Layout (indices): I=3, then the i64 block from `RES` (4): 4 xoshiro scratch, `4*streams` state
-    // words, then `T_I64` transcendental scratch; then the f64 block: `T_F64` transcendental scratch,
-    // then the node value slots. Each group is contiguous in declaration order.
-    let ti = RES + i64_count; // transcendental i64 scratch (after xoshiro scratch + state words)
+    // Layout (indices): params 0..4, then the i32 block (I, LANE, V0..V3), then `T_I64`
+    // transcendental i64 scratch, then the f64 block: `T_F64` transcendental scratch, then the
+    // node value slots. Each group is contiguous in declaration order.
+    let ti = LANE0 + 1 + N_I32_LOCALS; // transcendental i64 scratch (after the i32 block)
     let tf = ti + T_I64; // first f64 local (transcendental f64 scratch)
     let ctx = Ctx {
         graph,
@@ -272,7 +274,7 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId], streams: usize) -> Vec
     };
     {
         let mut s = func.instructions();
-        emit_kernel(&mut s, &ctx, roots, streams);
+        emit_kernel(&mut s, &ctx, roots);
     }
 
     let mut code = CodeSection::new();
@@ -300,21 +302,20 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId], streams: usize) -> Vec
     module.finish()
 }
 
-/// Emit a module for the default stream count chosen by the shared policy ([`kernel::choose_streams`]
-/// — multi-stream only for purely-inline graphs). Returns `None` for a graph the backend won't emit
-/// (e.g. `Poisson`); the browser keeps the interpreter for those, exactly like the native gate.
+/// Gate-honoring module emission. Returns `None` for a graph the backend won't emit (e.g.
+/// `Poisson`); the browser keeps the interpreter for those, exactly like the native gate.
 ///
 /// `inline_trans = true`: this emitter inlines `ln`/`sin`/`cos` as polynomials (`emit_ln`/`emit_trig`,
 /// same `crate::approx` reference as the JIT), so `normal`/`exp`/trig graphs are fusible here too and
 /// the 2× transcendental win reaches the browser — the gate decision now matches the native JIT.
-pub fn emit_for(graph: &RvGraph, root: RvId, draws: usize) -> Option<(Vec<u8>, usize)> {
+pub fn emit_for(graph: &RvGraph, root: RvId, draws: usize) -> Option<Vec<u8>> {
     emit_for_roots(graph, &[root], draws)
 }
 
 /// Multi-root [`emit_for`] — the gate-honoring entry point behind the joint drivers
 /// (`scatter`/`describe`/`corr`/`fan`). One gate decision over the *union* cone, then one
 /// multi-column kernel ([`emit_roots`]).
-pub fn emit_for_roots(graph: &RvGraph, roots: &[RvId], draws: usize) -> Option<(Vec<u8>, usize)> {
+pub fn emit_for_roots(graph: &RvGraph, roots: &[RvId], draws: usize) -> Option<Vec<u8>> {
     // `draws` gates emit-vs-interpret the same way it does natively: emitting + instantiating a
     // module is a fixed cost, fusion is a per-draw saving, so a short query is faster interpreted.
     //
@@ -330,74 +331,53 @@ pub fn emit_for_roots(graph: &RvGraph, roots: &[RvId], draws: usize) -> Option<(
     ) {
         return None;
     }
-    let streams = choose_streams_roots(graph, roots);
-    Some((emit_roots(graph, roots, streams), streams))
+    Some(emit_roots(graph, roots))
 }
 
-/// The kernel skeleton: load each stream's state, run a counted loop emitting `streams` lanes per
-/// iteration (each lane computing every root from one shared memo — joint draws — into its
-/// BATCH-strided column), store the state back. Mirrors `jit::build_kernel`.
-fn emit_kernel(s: &mut InstructionSink, ctx: &Ctx, roots: &[RvId], streams: usize) {
-    // Load each stream's four state words from the strided seed layout `state[(k*streams+j)]`.
-    for j in 0..streams {
-        for k in 0..4 {
-            let off = ((k * streams + j) * 8) as u64;
-            s.local_get(STATE).i64_load(mem8(off)).local_set(sl(j, k));
-        }
-    }
+/// The kernel skeleton: a counted loop emitting one lane per iteration (each lane computing every
+/// root from one shared memo — joint draws — into its BATCH-strided column). Stateless — nothing
+/// to load or store around the loop. Mirrors `jit::build_kernel`.
+fn emit_kernel(s: &mut InstructionSink, ctx: &Ctx, roots: &[RvId]) {
     s.i32_const(0).local_set(I);
+    s.local_get(LANE0).local_set(LANE);
 
-    // block { loop { if I >= N: break; <body>; I += streams; continue } }
+    // block { loop { if I >= N: break; <body>; I += 1; LANE += 1; continue } }
     s.block(BlockType::Empty);
     s.loop_(BlockType::Empty);
     s.local_get(I).local_get(N).i32_ge_s().br_if(1); // break to the block end
 
-    for j in 0..streams {
-        // One memo per stream (independent draws), shared across all roots (joint draws).
-        let mut memo: HashMap<RvId, u32> = HashMap::new();
-        let mut slot = 0u32;
-        for (r, &root) in roots.iter().enumerate() {
-            // Address of out[I + j]: out + (I + j) * 8, pushed before the value so f64.store sees
-            // both; root `r`'s column stride is the constant store offset `r * BATCH * 8`.
-            s.local_get(OUT)
-                .local_get(I)
-                .i32_const(j as i32)
-                .i32_add()
-                .i32_const(8)
-                .i32_mul()
-                .i32_add();
-            // Emit this root's draw (stack-neutral), leaving its value in a local.
-            let lroot = emit_node(s, ctx, j, root, &mut memo, &mut slot);
-            s.local_get(lroot).f64_store(mem8((r * BATCH * 8) as u64));
-        }
+    // One memo per lane, shared across all roots (joint draws).
+    let mut memo: HashMap<RvId, u32> = HashMap::new();
+    let mut slot = 0u32;
+    for (r, &root) in roots.iter().enumerate() {
+        // Address of out[I]: out + I * 8, pushed before the value so f64.store sees both; root
+        // `r`'s column stride is the constant store offset `r * BATCH * 8`.
+        s.local_get(OUT)
+            .local_get(I)
+            .i32_const(8)
+            .i32_mul()
+            .i32_add();
+        // Emit this root's draw (stack-neutral), leaving its value in a local.
+        let lroot = emit_node(s, ctx, root, &mut memo, &mut slot);
+        s.local_get(lroot).f64_store(mem8((r * BATCH * 8) as u64));
     }
 
-    s.local_get(I)
-        .i32_const(streams as i32)
-        .i32_add()
-        .local_set(I);
+    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.local_get(LANE).i32_const(1).i32_add().local_set(LANE);
     s.br(0); // continue the loop
     s.end(); // end loop
     s.end(); // end block
-
-    // Write each stream's advanced state back to its slot.
-    for j in 0..streams {
-        for k in 0..4 {
-            let off = ((k * streams + j) * 8) as u64;
-            s.local_get(STATE).local_get(sl(j, k)).i64_store(mem8(off));
-        }
-    }
     s.end(); // end function
 }
 
-/// Emit node `id` for stream `j`, memoizing each `RvId` into its own f64 local so a shared sub-RV is
-/// computed once (the CSE guarantee the interpreter/JIT also give). Children are emitted first (each
-/// `local.set`s its slot and leaves the stack untouched); the parent then `local.get`s them. Returns
-/// the local index holding this node's value. Each stream uses a fresh memo (independent draws).
+/// Emit node `id`, memoizing each `RvId` into its own f64 local so a shared sub-RV is computed
+/// once (the CSE guarantee the interpreter/JIT also give — and, with counter keying, the same
+/// *draw*: one hash per node per lane). Children are emitted first (each `local.set`s its slot and
+/// leaves the stack untouched); the parent then `local.get`s them. Returns the local index holding
+/// this node's value.
 fn emit_node(
     s: &mut InstructionSink,
     ctx: &Ctx,
-    j: usize,
     id: RvId,
     memo: &mut HashMap<RvId, u32>,
     slot: &mut u32,
@@ -407,17 +387,17 @@ fn emit_node(
     }
     // Each branch leaves exactly one f64 on the stack; we `local.set` it into this node's slot below.
     match ctx.graph.node(id) {
-        RvNode::Src(Source::Uniform(u)) => emit_uniform(s, j, u.lo, u.hi),
-        RvNode::Src(Source::UniformInt { lo, hi }) => emit_uniform_int(s, j, *lo, *hi),
-        RvNode::Src(Source::Normal { mu, sigma }) => emit_normal(s, ctx, j, *mu, *sigma),
-        RvNode::Src(Source::Exp { rate }) => emit_exp(s, ctx, j, *rate),
-        RvNode::Src(Source::Geometric { p }) => emit_geometric(s, ctx, j, *p),
+        RvNode::Src(Source::Uniform(u)) => emit_uniform(s, id.0, u.lo, u.hi),
+        RvNode::Src(Source::UniformInt { lo, hi }) => emit_uniform_int(s, ctx, id.0, *lo, *hi),
+        RvNode::Src(Source::Normal { mu, sigma }) => emit_normal(s, ctx, id.0, *mu, *sigma),
+        RvNode::Src(Source::Exp { rate }) => emit_exp(s, ctx, id.0, *rate),
+        RvNode::Src(Source::Geometric { p }) => emit_geometric(s, ctx, id.0, *p),
         RvNode::Src(Source::Poisson { .. }) => unreachable!("profitable() excludes Poisson"),
         RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => {
             unreachable!("profitable() excludes the array-valued draw nodes")
         }
         RvNode::Gather { elems, index } => {
-            let lx = emit_node(s, ctx, j, *index, memo, slot);
+            let lx = emit_node(s, ctx, *index, memo, slot);
             match ctx.gather_tables.get(&id) {
                 // Const table (strategy A): round ties-away, clamp to [0, last], one indexed
                 // 8-byte load from the data segment — bit-identical to the interpreter's
@@ -460,7 +440,7 @@ fn emit_node(
                 None => {
                     let les: Vec<u32> = elems
                         .iter()
-                        .map(|&e| emit_node(s, ctx, j, e, memo, slot))
+                        .map(|&e| emit_node(s, ctx, e, memo, slot))
                         .collect();
                     let last = les.len() - 1;
                     s.f64_const(f64c(f64::NAN)); // NaN-guard arm
@@ -482,28 +462,28 @@ fn emit_node(
             s.f64_const(f64c(if *b { 1.0 } else { 0.0 }));
         }
         RvNode::Unary(op, a) => {
-            let la = emit_node(s, ctx, j, *a, memo, slot);
+            let la = emit_node(s, ctx, *a, memo, slot);
             emit_unary(s, ctx, *op, la);
         }
         RvNode::Binary(BinOp::Pow, a, b) => {
-            let la = emit_node(s, ctx, j, *a, memo, slot);
+            let la = emit_node(s, ctx, *a, memo, slot);
             match const_int_exponent(ctx.graph, *b) {
                 Some(k) => emit_pow(s, la, k), // repeated multiply, no call
                 None => {
-                    let lb = emit_node(s, ctx, j, *b, memo, slot);
+                    let lb = emit_node(s, ctx, *b, memo, slot);
                     s.local_get(la).local_get(lb).call(POW);
                 }
             }
         }
         RvNode::Binary(op, a, b) => {
-            let la = emit_node(s, ctx, j, *a, memo, slot);
-            let lb = emit_node(s, ctx, j, *b, memo, slot);
+            let la = emit_node(s, ctx, *a, memo, slot);
+            let lb = emit_node(s, ctx, *b, memo, slot);
             emit_binary(s, *op, la, lb);
         }
         RvNode::Select { cond, a, b } => {
-            let lc = emit_node(s, ctx, j, *cond, memo, slot);
-            let la = emit_node(s, ctx, j, *a, memo, slot);
-            let lb = emit_node(s, ctx, j, *b, memo, slot);
+            let lc = emit_node(s, ctx, *cond, memo, slot);
+            let la = emit_node(s, ctx, *a, memo, slot);
+            let lb = emit_node(s, ctx, *b, memo, slot);
             // wasm `select` pops [a, b, cond_i32] → a if cond != 0 else b.
             s.local_get(la)
                 .local_get(lb)
@@ -513,87 +493,141 @@ fn emit_node(
                 .select();
         }
     }
-    let l = ctx.fbase + (j as u32) * ctx.cone + *slot;
+    let l = ctx.fbase + *slot;
     *slot += 1;
     s.local_set(l);
     memo.insert(id, l);
     l
 }
 
-/// One xoshiro256++ step on stream `j`'s state locals, leaving the raw `u64` output on the stack.
-/// Mirrors `Rng::next_u64` / `jit::emit_next_u64` (capturing the pre-mutation words before overwrite).
-fn emit_next_u64(s: &mut InstructionSink, j: usize) {
-    // res = rotl(s0 + s3, 23) + s0
-    s.local_get(sl(j, 0))
-        .local_get(sl(j, 3))
-        .i64_add()
-        .i64_const(23)
-        .i64_rotl()
-        .local_get(sl(j, 0))
-        .i64_add()
-        .local_set(RES);
-    // t = s1 << 17
-    s.local_get(sl(j, 1)).i64_const(17).i64_shl().local_set(T);
-    // s2a = s2 ^ s0 ; s3a = s3 ^ s1  (capture before any overwrite)
-    s.local_get(sl(j, 2))
-        .local_get(sl(j, 0))
-        .i64_xor()
-        .local_set(S2A);
-    s.local_get(sl(j, 3))
-        .local_get(sl(j, 1))
-        .i64_xor()
-        .local_set(S3A);
-    // s1 ^= s2a ; s0 ^= s3a  (s1 set first; original s0 still intact for s0's update)
-    s.local_get(sl(j, 1))
-        .local_get(S2A)
-        .i64_xor()
-        .local_set(sl(j, 1));
-    s.local_get(sl(j, 0))
-        .local_get(S3A)
-        .i64_xor()
-        .local_set(sl(j, 0));
-    // s2 ^= t ; s3 = rotl(s3a, 45)
-    s.local_get(S2A).local_get(T).i64_xor().local_set(sl(j, 2));
-    s.local_get(S3A)
-        .i64_const(45)
-        .i64_rotl()
-        .local_set(sl(j, 3));
-    s.local_get(RES);
+/// The draw-cell hash for one `(lane, source)` — the wasm transcription of [`crate::rng::cell`]
+/// (pcg4d-3r) in pure i32 arithmetic, mixed in the `V0..V3` locals: LCG per word, then three
+/// dependent-product rounds with a per-word xorshift between. Leaves the words in `V0..V3`.
+fn emit_cell(s: &mut InstructionSink, src: u32) {
+    emit_cell_at(s, src, false);
 }
 
-/// Uniform `f64` in `[0, 1)` from the top 53 bits — mirrors `Rng::next_f64`.
-fn emit_next_f64(s: &mut InstructionSink, j: usize) {
-    emit_next_u64(s, j);
-    s.i64_const(11)
-        .i64_shr_u()
-        .f64_convert_i64_u()
-        .f64_const(f64c(1.0 / ((1u64 << 53) as f64)))
+/// [`emit_cell`], hashing either this lane or the pair's even lane (`LANE & !1` — Box–Muller
+/// pairing, see [`emit_normal`]).
+fn emit_cell_at(s: &mut InstructionSink, src: u32, even_lane: bool) {
+    // v = {k0, k1, lane, src}, each through v*1664525 + 1013904223 (i32 ops wrap like Rust).
+    for (v, init) in [(V0, K0), (V1, K1), (V2, LANE)] {
+        s.local_get(init);
+        if v == V2 && even_lane {
+            s.i32_const(!1).i32_and();
+        }
+        s.i32_const(1664525)
+            .i32_mul()
+            .i32_const(1013904223)
+            .i32_add()
+            .local_set(v);
+    }
+    s.i32_const(src as i32)
+        .i32_const(1664525)
+        .i32_mul()
+        .i32_const(1013904223)
+        .i32_add()
+        .local_set(V3);
+    for round in 0..3 {
+        if round > 0 {
+            for v in [V0, V1, V2, V3] {
+                s.local_get(v)
+                    .local_get(v)
+                    .i32_const(16)
+                    .i32_shr_u()
+                    .i32_xor()
+                    .local_set(v);
+            }
+        }
+        for (dst, a, b) in [(V0, V1, V3), (V1, V2, V0), (V2, V0, V1), (V3, V1, V2)] {
+            s.local_get(dst)
+                .local_get(a)
+                .local_get(b)
+                .i32_mul()
+                .i32_add()
+                .local_set(dst);
+        }
+    }
+}
+
+/// The consumed 48 bits of a word pair as an i64 on the stack (`((w0 >> 8) << 24) | (w1 >> 8)`)
+/// — mirrors the integer `rng::unit_f64` / `jit::emit_bits48` start from.
+fn emit_bits48(s: &mut InstructionSink, w0: u32, w1: u32) {
+    s.local_get(w0)
+        .i32_const(8)
+        .i32_shr_u()
+        .i64_extend_i32_u()
+        .i64_const(24)
+        .i64_shl()
+        .local_get(w1)
+        .i32_const(8)
+        .i32_shr_u()
+        .i64_extend_i32_u()
+        .i64_or();
+}
+
+/// Uniform `f64` in `[0, 1)` from a word pair — mirrors `rng::unit_f64` (`bits · 2⁻⁴⁸`).
+fn emit_unit48(s: &mut InstructionSink, w0: u32, w1: u32) {
+    emit_bits48(s, w0, w1);
+    s.f64_convert_i64_u()
+        .f64_const(f64c(1.0 / ((1u64 << 48) as f64)))
         .f64_mul();
 }
 
-fn emit_uniform(s: &mut InstructionSink, j: usize, lo: f64, hi: f64) {
-    emit_next_f64(s, j);
+fn emit_uniform(s: &mut InstructionSink, src: u32, lo: f64, hi: f64) {
+    emit_cell(s, src);
+    emit_unit48(s, V0, V1);
     s.f64_const(f64c(hi - lo))
         .f64_mul()
         .f64_const(f64c(lo))
         .f64_add();
 }
 
-/// `unif_int(lo, hi)` as `lo + min(floor(u * count), count - 1)` — uniform over `lo..=hi`. (The
-/// native kernel uses Lemire multiply-high, but wasm lacks a 64×64→128 high-multiply; this is
-/// identical in distribution.) The `min(·, count - 1)` clamp caps the top face: `u` is `< 1` but
-/// `floor(u * count)` can still round up to `count` for a huge `count` where Lemire cannot, which
-/// would yield an out-of-range `hi + 1` (finding C9). One extra `f64.min`.
-fn emit_uniform_int(s: &mut InstructionSink, j: usize, lo: f64, hi: f64) {
+/// Below this count, `unif_int` computes the exact 48-bit Lemire multiply-high (bit-identical to
+/// the interpreter/JIT); at or above it — unreachable once Track B's 2^24 cap lands — it falls
+/// back to the float method (`lo + min(floor(u·count), count-1)`, identical in distribution).
+/// The bound keeps the split multiply's `b_hi·count` term under 2^63.
+const LEMIRE_MAX_COUNT: u64 = 1 << 39;
+
+/// `unif_int(lo, hi)` via the same 48-bit Lemire multiply-high as the interpreter/JIT. Wasm has no
+/// `mulhi`, so split `bits = b_hi·2^24 + b_lo` and use
+/// `(bits·count) >> 48 = (b_hi·count + ((b_lo·count) >> 24)) >> 24` — exact (standard nested-floor
+/// identity), and every term fits i64 for `count < 2^39`.
+fn emit_uniform_int(s: &mut InstructionSink, ctx: &Ctx, src: u32, lo: f64, hi: f64) {
     let count = (hi - lo + 1.0).max(1.0);
-    emit_next_f64(s, j);
-    s.f64_const(f64c(count))
-        .f64_mul()
-        .f64_floor()
-        .f64_const(f64c(count - 1.0))
-        .f64_min()
-        .f64_const(f64c(lo))
-        .f64_add();
+    emit_cell(s, src);
+    if (count as u64) < LEMIRE_MAX_COUNT {
+        let bits = ctx.ti; // i64 scratch
+        emit_bits48(s, V0, V1);
+        s.local_set(bits);
+        s.local_get(bits)
+            .i64_const(24)
+            .i64_shr_u()
+            .i64_const(count as u64 as i64)
+            .i64_mul(); // b_hi * count
+        s.local_get(bits)
+            .i64_const(0xFF_FFFF)
+            .i64_and()
+            .i64_const(count as u64 as i64)
+            .i64_mul()
+            .i64_const(24)
+            .i64_shr_u(); // (b_lo * count) >> 24
+        s.i64_add()
+            .i64_const(24)
+            .i64_shr_u()
+            .f64_convert_i64_u()
+            .f64_const(f64c(lo))
+            .f64_add();
+    } else {
+        emit_unit48(s, V0, V1);
+        s.f64_const(f64c(count))
+            .f64_mul()
+            .f64_floor()
+            .f64_const(f64c(count - 1.0))
+            .f64_min()
+            .f64_const(f64c(lo))
+            .f64_add();
+    }
 }
 
 /// Horner `Σ c[i]·z^i` (coeffs low→high) with `z` already in a local — mirrors `crate::approx::horner`
@@ -741,22 +775,35 @@ fn emit_trig_poly(s: &mut InstructionSink, ctx: &Ctx, tx: u32, is_cos: bool) {
     s.local_get(tx);
 }
 
-/// `N(mu, sigma^2)` via Box–Muller, one normal per draw (cosine arm) — mirrors `jit::emit_normal`.
-/// `ln`/`cos` are inlined polynomials ([`emit_ln`]/[`emit_trig`]); `sqrt` is native.
-fn emit_normal(s: &mut InstructionSink, ctx: &Ctx, j: usize, mu: f64, sigma: f64) {
+/// `N(mu, sigma^2)` via Box–Muller over lane pairs — mirrors `rng::normal_pair` bit-for-bit:
+/// hash the pair's EVEN lane (`LANE & !1`), `u1` from words 0+1 offset by half a 48-bit-grid ulp,
+/// `u2` from words 2+3; even lane takes the cos branch, odd the sin branch (parity select).
+/// `ln`/trig are the shared inlined polynomials; `sqrt` is native.
+fn emit_normal(s: &mut InstructionSink, ctx: &Ctx, src: u32, mu: f64, sigma: f64) {
     use std::f64::consts::TAU;
-    // r = sqrt(-2 * ln(1 - u1))
-    s.f64_const(f64c(1.0));
-    emit_next_f64(s, j);
-    s.f64_sub();
+    emit_cell_at(s, src, true);
+    // r = sqrt(-2 * ln((bits48 + 0.5) * 2^-48))
+    emit_bits48(s, V0, V1);
+    s.f64_convert_i64_u()
+        .f64_const(f64c(0.5))
+        .f64_add()
+        .f64_const(f64c(1.0 / ((1u64 << 48) as f64)))
+        .f64_mul();
     emit_ln(s, ctx);
     s.f64_const(f64c(-2.0)).f64_mul().f64_sqrt();
-    // result = mu + sigma * r * cos(TAU * u2). The angle is `TAU * u2 ∈ [0, 2π)` — always inside the
-    // polynomial's range — so stash it and call `emit_trig_poly` directly (skip the range guard) to
-    // keep the hot Box–Muller draw lean.
-    emit_next_f64(s, j);
+    // z = parity-selected Box–Muller branch of angle TAU * u2 ∈ [0, 2π) — always inside the
+    // polynomial's range, so call `emit_trig_poly` directly (skip the range guard).
+    emit_unit48(s, V2, V3);
     s.f64_const(f64c(TAU)).f64_mul().local_set(ctx.tf);
-    emit_trig_poly(s, ctx, ctx.tf, true);
+    // wasm select pops [t1, t2, cond] and picks t1 when cond != 0: push cos (even) first.
+    // `emit_trig_poly` consumes its input local as the quadrant accumulator, so recompute the
+    // angle (the cell words are still live in V2/V3) before the sin call.
+    emit_trig_poly(s, ctx, ctx.tf, true); // cos branch (even lanes)
+    emit_unit48(s, V2, V3);
+    s.f64_const(f64c(TAU)).f64_mul().local_set(ctx.tf);
+    emit_trig_poly(s, ctx, ctx.tf, false); // sin branch (odd lanes)
+    s.local_get(LANE).i32_const(1).i32_and().i32_eqz();
+    s.select(); // (lane even) ? cos : sin
     s.f64_mul()
         .f64_const(f64c(sigma))
         .f64_mul()
@@ -764,21 +811,24 @@ fn emit_normal(s: &mut InstructionSink, ctx: &Ctx, j: usize, mu: f64, sigma: f64
         .f64_add();
 }
 
-/// `Exp(rate)` via inverse-CDF `-ln(1 - u) / rate` — mirrors `Rng::fill_exp`.
-fn emit_exp(s: &mut InstructionSink, ctx: &Ctx, j: usize, rate: f64) {
+/// `Exp(rate)` via inverse-CDF `-ln(1 - u) / rate` — mirrors `rng::fill_exp` bit-for-bit.
+fn emit_exp(s: &mut InstructionSink, ctx: &Ctx, src: u32, rate: f64) {
+    emit_cell(s, src);
     s.f64_const(f64c(1.0));
-    emit_next_f64(s, j);
+    emit_unit48(s, V0, V1);
     s.f64_sub();
     emit_ln(s, ctx);
     s.f64_neg().f64_const(f64c(rate)).f64_div();
 }
 
-/// `Geometric(p)` via `floor(ln(1 - u) / ln(1 - p))` — mirrors `Rng::fill_geometric`. `ln(1 - p)` is
-/// a compile-time constant; `p == 1` makes it `-inf`, so every draw floors to `0` (the point mass).
-fn emit_geometric(s: &mut InstructionSink, ctx: &Ctx, j: usize, p: f64) {
+/// `Geometric(p)` via `floor(ln(1 - u) / ln(1 - p))` — mirrors `rng::fill_geometric` bit-for-bit.
+/// `ln(1 - p)` is a compile-time constant; `p == 1` makes it `-inf`, so every draw floors to `0`
+/// (the point mass).
+fn emit_geometric(s: &mut InstructionSink, ctx: &Ctx, src: u32, p: f64) {
     let denom = (1.0 - p).ln();
+    emit_cell(s, src);
     s.f64_const(f64c(1.0));
-    emit_next_f64(s, j);
+    emit_unit48(s, V0, V1);
     s.f64_sub();
     emit_ln(s, ctx);
     s.f64_const(f64c(denom)).f64_div().f64_floor();
@@ -829,10 +879,14 @@ fn emit_unary(s: &mut InstructionSink, ctx: &Ctx, op: UnOp, a: u32) {
             s.local_get(a).f64_ceil();
         }
         UnOp::Sqrt => {
-            // Native `f64.sqrt` — IEEE correctly rounded (wasm spec), so bit-identical to the
-            // interpreter's `f64::sqrt` on the whole domain (incl. -0.0 → -0.0, x<0 → NaN). A
-            // single fused instruction, not a `pow` import call (PLAN-PERF-2 §5).
-            s.local_get(a).f64_sqrt();
+            // Imported `Math.sqrt`, NOT the inline `f64.sqrt` instruction: V8/arm64 regresses
+            // ~30% on large single-block kernel bodies when these become inline sqrt (measured
+            // 2026-07-14, `am_vs_fm` +21% run-level — the import calls serve as live-range split
+            // points for V8's regalloc). JSC prefers inline; revisit if V8 improves. `Math.sqrt`
+            // is IEEE correctly rounded, bit-identical to the interpreter's `f64::sqrt` on the
+            // whole domain (incl. -0.0 → -0.0, x<0 → NaN) — never `pow(x, 0.5)`, which disagrees
+            // at -0.0 and -inf (PLAN-PERF-2 §5). The native JIT keeps its inline `sqrt`.
+            s.local_get(a).call(SQRT);
         }
         UnOp::Ln => {
             use crate::approx::{LN_SUBNORMAL_CORR, LN_SUBNORMAL_SCALE};
@@ -964,16 +1018,17 @@ mod tests {
     const ENOUGH_DRAWS: usize = usize::MAX;
 
     use crate::backend::{Backend, InterpBackend};
-    use crate::kernel::{supported, STREAMS};
+    use crate::kernel::supported;
+    use crate::rng::Key;
     use crate::sampler::moments;
     use wasmi::{Engine, Linker, Module as WasmModule, Store};
 
     // The shared cross-backend conformance corpus (finding C2), also consumed by `jit`.
     use crate::conformance;
 
-    /// Instantiate an emitted kernel in `wasmi`, seed it, run one batch, and return `out[0]`. For an
-    /// RNG-free graph every lane is identical, so `[0]` fully characterizes the backend's output.
-    fn first_emitted(bytes: &[u8], streams: usize, seed: u64) -> f64 {
+    /// Instantiate an emitted kernel in `wasmi`, run one batch at lane 0, and return `out[0]`. For
+    /// an RNG-free graph every lane is identical, so `[0]` fully characterizes the backend's output.
+    fn first_emitted(bytes: &[u8], seed: u64) -> f64 {
         let engine = Engine::default();
         let module = WasmModule::new(&engine, bytes).expect("emitted module must validate");
         let mut store = Store::new(&engine, ());
@@ -986,22 +1041,19 @@ mod tests {
         linker.func_wrap("m", "sin", |x: f64| x.sin()).unwrap();
         linker.func_wrap("m", "cos", |x: f64| x.cos()).unwrap();
         linker.func_wrap("m", "exp", |x: f64| x.exp()).unwrap();
+        linker.func_wrap("m", "sqrt", |x: f64| x.sqrt()).unwrap();
         let instance = linker.instantiate_and_start(&mut store, &module).unwrap();
         let memory = instance.get_memory(&store, "memory").unwrap();
         let kernel = instance
-            .get_typed_func::<(i32, i32, i32), ()>(&store, "kernel")
+            .get_typed_func::<(i32, i32, i32, i32, i32), ()>(&store, "kernel")
             .unwrap();
-        let (state_ptr, out_ptr) = (0i32, 4096i32);
-        let state = crate::kernel::seed_state(seed, streams);
-        let mut state_bytes = Vec::with_capacity(state.len() * 8);
-        for w in &state {
-            state_bytes.extend_from_slice(&w.to_le_bytes());
-        }
-        memory
-            .write(&mut store, state_ptr as usize, &state_bytes)
-            .unwrap();
+        let out_ptr = 4096i32;
+        let key = Key::from_seed(seed);
         kernel
-            .call(&mut store, (out_ptr, BATCH as i32, state_ptr))
+            .call(
+                &mut store,
+                (out_ptr, BATCH as i32, key.k0 as i32, key.k1 as i32, 0),
+            )
             .unwrap();
         let mut b = [0u8; 8];
         memory.read(&store, out_ptr as usize, &mut b).unwrap();
@@ -1019,10 +1071,10 @@ mod tests {
             let (eng, id) = graph_of(src);
             let g = eng.graph();
             let mut ir = InterpBackend.compile(g, id, ENOUGH_DRAWS).runner();
-            ir.reseed(0);
+            ir.position(0, 0);
             let cap = ir.batch_cap();
             let interp = ir.next_batch(cap)[0];
-            let wasm = first_emitted(&emit(g, id, 1), 1, 0);
+            let wasm = first_emitted(&emit(g, id), 0);
             assert_eq!(
                 interp.to_bits(),
                 wasm.to_bits(),
@@ -1043,10 +1095,10 @@ mod tests {
     }
 
     /// Run an emitted kernel through the `wasmi` interpreter for `batches` batches, returning the
-    /// mean of every sample produced. The host supplies the six transcendental imports (Rust `f64`
-    /// methods) and a linear memory; state persists in memory across calls (the kernel reads it at
-    /// entry and writes it back at exit), exactly as a browser host would drive it.
-    fn run_emitted(bytes: &[u8], streams: usize, seed: u64, batches: usize) -> (f64, u64) {
+    /// mean of every sample produced. The host supplies the transcendental imports (Rust `f64`
+    /// methods) and advances the lane cursor across calls — the kernel itself is stateless —
+    /// exactly as a browser host would drive it.
+    fn run_emitted(bytes: &[u8], seed: u64, batches: usize) -> (f64, u64) {
         let engine = Engine::default();
         let module = WasmModule::new(&engine, bytes).expect("emitted module must validate");
         let mut store = Store::new(&engine, ());
@@ -1063,33 +1115,34 @@ mod tests {
         linker.func_wrap("m", "sin", |x: f64| x.sin()).unwrap();
         linker.func_wrap("m", "cos", |x: f64| x.cos()).unwrap();
         linker.func_wrap("m", "exp", |x: f64| x.exp()).unwrap();
+        linker.func_wrap("m", "sqrt", |x: f64| x.sqrt()).unwrap();
         let instance = linker.instantiate_and_start(&mut store, &module).unwrap();
         let memory = instance.get_memory(&store, "memory").unwrap();
         let kernel = instance
-            .get_typed_func::<(i32, i32, i32), ()>(&store, "kernel")
+            .get_typed_func::<(i32, i32, i32, i32, i32), ()>(&store, "kernel")
             .unwrap();
 
-        // Host memory convention: state at offset 0, output column at 4096.
-        let state_ptr: i32 = 0;
+        // Host memory convention: output column at 4096.
         let out_ptr: i32 = 4096;
         let cap = BATCH;
-
-        // Seed the state (strided layout) into memory as little-endian u64s.
-        let state = crate::kernel::seed_state(seed, streams);
-        let mut state_bytes = Vec::with_capacity(state.len() * 8);
-        for w in &state {
-            state_bytes.extend_from_slice(&w.to_le_bytes());
-        }
-        memory
-            .write(&mut store, state_ptr as usize, &state_bytes)
-            .unwrap();
+        let key = Key::from_seed(seed);
 
         let mut sum = 0.0f64;
         let mut count = 0u64;
         let mut out_bytes = vec![0u8; cap * 8];
-        for _ in 0..batches {
+        for b in 0..batches {
+            let lane0 = (b * cap) as u32;
             kernel
-                .call(&mut store, (out_ptr, cap as i32, state_ptr))
+                .call(
+                    &mut store,
+                    (
+                        out_ptr,
+                        cap as i32,
+                        key.k0 as i32,
+                        key.k1 as i32,
+                        lane0 as i32,
+                    ),
+                )
                 .unwrap();
             memory
                 .read(&store, out_ptr as usize, &mut out_bytes)
@@ -1111,8 +1164,9 @@ mod tests {
         (eng, id)
     }
 
-    /// The emitted WASM kernel and the interpreter must agree *in distribution* (compared via the
-    /// mean, like `jit`'s parity harness — RNG consumption order differs by design).
+    /// The emitted WASM kernel and the interpreter must agree DRAW-FOR-DRAW (counter keying makes
+    /// the streams bit-identical — the PLAN-PREGPU parity contract), plus a mean check over a
+    /// longer run to guard the host-side lane advance.
     fn assert_wasm_matches_interp(src: &str, seed: u64) {
         let (eng, id) = graph_of(src);
         let graph = eng.graph();
@@ -1120,8 +1174,23 @@ mod tests {
             supported(graph, id),
             "case must be codegen-supported: {src}"
         );
-        let (bytes, streams) = (emit(graph, id, STREAMS), STREAMS);
-        let (wasm_mean, count) = run_emitted(&bytes, streams, seed, 16);
+        let bytes = emit(graph, id);
+
+        // Bitwise: first batch, lane 0, against the interpreter oracle.
+        let mut ir = InterpBackend.compile(graph, id, ENOUGH_DRAWS).runner();
+        ir.position(seed, 0);
+        let interp_col: Vec<f64> = ir.next_batch(BATCH).to_vec();
+        let wasm0 = first_emitted(&bytes, seed);
+        assert_eq!(
+            interp_col[0].to_bits(),
+            wasm0.to_bits(),
+            "{src}: lane 0: interp {} ({:#018x}) != wasm {wasm0} ({:#018x})",
+            interp_col[0],
+            interp_col[0].to_bits(),
+            wasm0.to_bits()
+        );
+
+        let (wasm_mean, count) = run_emitted(&bytes, seed, 16);
         let interp_mean = moments(graph, id, count as usize, seed).mean;
         assert!(
             (wasm_mean - interp_mean).abs() < 0.05 + 0.05 * interp_mean.abs(),
@@ -1203,65 +1272,34 @@ mod tests {
         assert_wasm_matches_interp("use rand; X ~ unif(0,1); X + X", 13);
         // X - X must be exactly 0 everywhere — only true if both references are the same draw.
         let (eng, id) = graph_of("use rand; X ~ unif(0,1); X - X");
-        let (mean, _) = run_emitted(&emit(eng.graph(), id, STREAMS), STREAMS, 14, 8);
+        let (mean, _) = run_emitted(&emit(eng.graph(), id), 14, 8);
         assert_eq!(mean, 0.0, "X - X must be identically zero (shared draw)");
     }
 
-    /// The default policy ([`emit_for`]) picks the multi-stream kernel for a purely-inline RNG graph
-    /// and a 1-stream kernel for any graph carrying a transcendental (now inlined, but
-    /// throughput-bound) or a call — and all must match the interpreter's mean. With `ln`/`cos`
-    /// inlined, `normal` is now *emitted* (single-stream), not gated out as it was when it meant a
-    /// per-draw host call.
+    /// The gate-honoring [`emit_for`] emits every supported graph shape — RNG-bound, inlined
+    /// transcendentals, call-bearing `pow` — and each must match the interpreter's mean.
     #[test]
-    fn stream_choice_and_distribution() {
-        // RNG-bound, all inline → multi-stream.
-        let (eng, id) = graph_of("use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B");
-        let (bytes, streams) =
-            emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("inline graph should emit");
-        assert_eq!(streams, STREAMS, "inline graph should be multi-stream");
-        let (wasm_mean, count) = run_emitted(&bytes, streams, 0xABCDEF, 64);
-        let interp = moments(eng.graph(), id, count as usize, 0xABCDEF).mean;
-        assert!(
-            (wasm_mean - interp).abs() < 0.05,
-            "dice-sum: wasm={wasm_mean} interp={interp}"
-        );
-
-        // `normal` now emits (inlined `ln`/`cos`), but is throughput-bound → single-stream.
-        let (eng, id) = graph_of("use rand; X ~ normal(0,1); Y ~ normal(0,1); X + Y");
-        let (bytes, streams) =
-            emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("normal graph should now emit");
-        assert_eq!(streams, 1, "transcendental graph should be single-stream");
-        let (wasm_mean, count) = run_emitted(&bytes, streams, 0xABCDEF, 64);
-        let interp = moments(eng.graph(), id, count as usize, 0xABCDEF).mean;
-        assert!(
-            (wasm_mean - interp).abs() < 0.05,
-            "normal-sum: wasm={wasm_mean} interp={interp}"
-        );
-
-        // Arithmetic-dominated but carries a `pow` call (non-const exponent) → still profitable
-        // (fusible > libcalls), but choose_streams keeps it single-stream (the call won't overlap).
-        let (eng, id) = graph_of("use rand; A ~ unif(1,2); B ~ unif(1,2); A ^ B");
-        let (bytes, streams) =
-            emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("pow graph should emit");
-        assert_eq!(streams, 1, "call-bearing graph should be single-stream");
-        let (wasm_mean, count) = run_emitted(&bytes, streams, 0xABCDEF, 64);
-        let interp = moments(eng.graph(), id, count as usize, 0xABCDEF).mean;
-        assert!(
-            (wasm_mean - interp).abs() < 0.05,
-            "pow: wasm={wasm_mean} interp={interp}"
-        );
+    fn gate_and_distribution() {
+        for (label, src) in [
+            ("dice-sum", "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B"),
+            ("normal-sum", "use rand; X ~ normal(0,1); Y ~ normal(0,1); X + Y"),
+            ("pow", "use rand; A ~ unif(1,2); B ~ unif(1,2); A ^ B"),
+        ] {
+            let (eng, id) = graph_of(src);
+            let bytes = emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("graph should emit");
+            let (wasm_mean, count) = run_emitted(&bytes, 0xABCDEF, 64);
+            let interp = moments(eng.graph(), id, count as usize, 0xABCDEF).mean;
+            assert!(
+                (wasm_mean - interp).abs() < 0.05,
+                "{label}: wasm={wasm_mean} interp={interp}"
+            );
+        }
     }
 
-    /// Drive a multi-column joint kernel ([`emit_roots`]) through `wasmi`: seed once, run
-    /// `batches` batches, return the `k` concatenated columns. The kernel writes column `r` at
-    /// `out + r*BATCH*8` — the same layout `wasm_host::nz_kernel_run_cols` copies out.
-    fn run_emitted_joint(
-        bytes: &[u8],
-        streams: usize,
-        k: usize,
-        seed: u64,
-        batches: usize,
-    ) -> Vec<Vec<f64>> {
+    /// Drive a multi-column joint kernel ([`emit_roots`]) through `wasmi`: run `batches` batches
+    /// (advancing the lane cursor), return the `k` concatenated columns. The kernel writes column
+    /// `r` at `out + r*BATCH*8` — the same layout `wasm_host::nz_kernel_run_cols` copies out.
+    fn run_emitted_joint(bytes: &[u8], k: usize, seed: u64, batches: usize) -> Vec<Vec<f64>> {
         let engine = Engine::default();
         let module = WasmModule::new(&engine, bytes).expect("emitted module must validate");
         let mut store = Store::new(&engine, ());
@@ -1274,25 +1312,29 @@ mod tests {
         linker.func_wrap("m", "sin", |x: f64| x.sin()).unwrap();
         linker.func_wrap("m", "cos", |x: f64| x.cos()).unwrap();
         linker.func_wrap("m", "exp", |x: f64| x.exp()).unwrap();
+        linker.func_wrap("m", "sqrt", |x: f64| x.sqrt()).unwrap();
         let instance = linker.instantiate_and_start(&mut store, &module).unwrap();
         let memory = instance.get_memory(&store, "memory").unwrap();
         let kernel = instance
-            .get_typed_func::<(i32, i32, i32), ()>(&store, "kernel")
+            .get_typed_func::<(i32, i32, i32, i32, i32), ()>(&store, "kernel")
             .unwrap();
-        let (state_ptr, out_ptr) = (0i32, 4096i32);
-        let state = crate::kernel::seed_state(seed, streams);
-        let mut state_bytes = Vec::with_capacity(state.len() * 8);
-        for w in &state {
-            state_bytes.extend_from_slice(&w.to_le_bytes());
-        }
-        memory
-            .write(&mut store, state_ptr as usize, &state_bytes)
-            .unwrap();
+        let out_ptr = 4096i32;
+        let key = Key::from_seed(seed);
         let mut cols = vec![Vec::new(); k];
         let mut out_bytes = vec![0u8; k * BATCH * 8];
-        for _ in 0..batches {
+        for b in 0..batches {
+            let lane0 = (b * BATCH) as u32;
             kernel
-                .call(&mut store, (out_ptr, BATCH as i32, state_ptr))
+                .call(
+                    &mut store,
+                    (
+                        out_ptr,
+                        BATCH as i32,
+                        key.k0 as i32,
+                        key.k1 as i32,
+                        lane0 as i32,
+                    ),
+                )
                 .unwrap();
             memory
                 .read(&store, out_ptr as usize, &mut out_bytes)
@@ -1307,10 +1349,9 @@ mod tests {
     }
 
     /// THE joint invariant, on the emitted multi-column kernel: roots sharing a source read the
-    /// same per-lane draw. `[X, 2X]` is a pure-unif cone → multi-stream kernel, so this also pins
-    /// the stream-interleaved addressing of every column.
+    /// same per-lane draw.
     #[test]
-    fn joint_kernel_shares_draws_multi_stream() {
+    fn joint_kernel_shares_draws() {
         let mut g = RvGraph::default();
         let x = g.push(
             RvNode::Src(Source::Uniform(crate::dist::Uniform { lo: 0.0, hi: 1.0 })),
@@ -1318,13 +1359,9 @@ mod tests {
         );
         let two = g.push(RvNode::ConstNum(2.0), crate::dist::RvKind::Num);
         let x2 = g.push(RvNode::Binary(BinOp::Mul, x, two), crate::dist::RvKind::Num);
-        let (bytes, streams) =
+        let bytes =
             emit_for_roots(&g, &[x, x2], ENOUGH_DRAWS).expect("pure-unif joint cone should emit");
-        assert_eq!(
-            streams, STREAMS,
-            "pure-unif joint cone should be multi-stream"
-        );
-        let cols = run_emitted_joint(&bytes, streams, 2, 11, 4);
+        let cols = run_emitted_joint(&bytes, 2, 11, 4);
         for i in 0..cols[0].len() {
             let (a, b) = (cols[0][i], cols[1][i]);
             assert!(
@@ -1350,13 +1387,9 @@ mod tests {
         );
         let one = g.push(RvNode::ConstNum(1.0), crate::dist::RvKind::Num);
         let z1 = g.push(RvNode::Binary(BinOp::Add, z, one), crate::dist::RvKind::Num);
-        let (bytes, streams) =
+        let bytes =
             emit_for_roots(&g, &[z, z1], ENOUGH_DRAWS).expect("normal joint cone should emit");
-        assert_eq!(
-            streams, 1,
-            "transcendental joint cone should be single-stream"
-        );
-        let cols = run_emitted_joint(&bytes, streams, 2, 12, 32);
+        let cols = run_emitted_joint(&bytes, 2, 12, 32);
         let n = cols[0].len() as f64;
         let (m0, m1) = (
             cols[0].iter().sum::<f64>() / n,
@@ -1414,10 +1447,8 @@ mod tests {
         );
         // The counted cone (= the wasm value-slot pool) is just {gather, index}.
         assert_eq!(crate::kernel::cone_size(&g, root), 2);
-        let (bytes, streams) =
-            emit_for(&g, root, ENOUGH_DRAWS).expect("const-table gather should emit");
-        assert_eq!(streams, STREAMS, "gather cone stays latency-bound");
-        let (mean, _) = run_emitted(&bytes, streams, 42, 16);
+        let bytes = emit_for(&g, root, ENOUGH_DRAWS).expect("const-table gather should emit");
+        let (mean, _) = run_emitted(&bytes, 42, 16);
         // E over unif_int(0, 9999) of table[i] = i is 4999.5; fixed seed, generous tolerance.
         assert!((mean - 4999.5).abs() < 100.0, "mean={mean}");
     }
@@ -1443,21 +1474,8 @@ mod tests {
         let src = std::env::var("NOISE_KERNEL_SRC")
             .unwrap_or_else(|_| "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B".into());
         let (eng, id) = graph_of(&src);
-        let (bytes, streams) = emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("should emit");
+        let bytes = emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("should emit");
         std::fs::write(&path, &bytes).unwrap();
-        // streams alongside, so the JS side can seed the right state width.
-        std::fs::write(format!("{path}.streams"), streams.to_string()).unwrap();
-        eprintln!("wrote {} bytes ({streams} streams) to {path}", bytes.len());
-    }
-
-    /// Stream count must not change the distribution: 1-stream and STREAMS-stream kernels estimate
-    /// the same mean (each stream is an i.i.d. substream), mirroring `jit`'s invariant.
-    #[test]
-    fn stream_count_preserves_distribution() {
-        let (eng, id) = graph_of("use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B");
-        for streams in [1usize, STREAMS] {
-            let (mean, _) = run_emitted(&emit(eng.graph(), id, streams), streams, 99, 64);
-            assert!((mean - 7.0).abs() < 0.05, "@{streams} streams: mean={mean}");
-        }
+        eprintln!("wrote {} bytes to {path}", bytes.len());
     }
 }
