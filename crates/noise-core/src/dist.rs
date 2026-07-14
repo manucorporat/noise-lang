@@ -315,6 +315,41 @@ pub enum RvNode {
         arr: RvId,
         index: RvId,
     },
+    /// A **shaped draw** `~[n] recipe`: `n` iid draws from one scalar recipe, held as ONE node
+    /// (`RvKind::Arr(n)`) instead of `n` independent [`Src`](RvNode::Src) nodes.
+    ///
+    /// This node emits **no code on any backend**. Its whole job is to own a *contiguous block of
+    /// `n` source ordinals* (see [`crate::kernel::source_ordinals`]) that its [`ArrElem`](
+    /// RvNode::ArrElem) readers index into — element `k` draws from ordinal `base + k`, so the draw
+    /// stream is exactly what `n` separate `Src` nodes would have produced. The interpreter, JIT and
+    /// wasm emitters lower each `ArrElem` to the same scalar fill they lower a `Src` to, and never
+    /// see this node at all.
+    ///
+    /// **Why it exists: the WGSL emitter.** WGSL has no `u64`, so `squares64` must be emulated, and
+    /// each RNG source inlines ~150 ALU ops — which means shader *compile* time tracks the source
+    /// count, at ~6.5 ms each (PLAN-WEBGPU G0, `tools/gpu-spike/RESULTS.md`). Unrolled,
+    /// `barrier_option`'s 52 weekly normals cost **332 ms** of cold pipeline compile and the GPU
+    /// *loses* to the CPU end to end; emitted as one draw loop over a block of consecutive ordinals
+    /// — which is precisely what this node preserves — it costs **31 ms** and wins. The other three
+    /// backends compile orders of magnitude faster and keep unrolling, so they neither gain nor lose.
+    ///
+    /// Like any source it is **never CSE-merged**: two `~[n]` draws of the same recipe are
+    /// independent. Only scalar recipes are shaped this way — `permutation`/`rotation` are already
+    /// array-valued sources of their own, and `poisson` shapes fine but stays interpreter-only.
+    ArrDraw {
+        n: u32,
+        src: Source,
+    },
+    /// Element `k` of an [`ArrDraw`](RvNode::ArrDraw) — a **static** index fixed at build time, and
+    /// so nothing like [`ArrIndex`](RvNode::ArrIndex) (a per-lane *random* index) or
+    /// [`Gather`](RvNode::Gather). `arr` must be an `ArrDraw`; the result is `RvKind::Num`.
+    ///
+    /// Deterministic given `(arr, k)`, so unlike its parent it **is** CSE-able: `zs[3] + zs[3]` is
+    /// one draw doubled, exactly as it was when `zs[3]` was a plain `Src` handle.
+    ArrElem {
+        arr: RvId,
+        k: u32,
+    },
 }
 
 /// Append-only arena. Structural sharing is REQUIRED for correctness.

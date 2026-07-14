@@ -193,7 +193,7 @@ decision, not a surprise.
 
 - **G0 — spike. ✅ DONE (2026-07-14).** `tools/gpu-spike`; results above and in
   `tools/gpu-spike/RESULTS.md`. Verdict **GO**; three plan assumptions corrected.
-- **G½ — `ArrDraw`: keep the array in the IR.** *(New, and it comes first — G1 depends on it.)*
+- **G½ — `ArrDraw`: keep the array in the IR. ✅ LANDED (2026-07-14).**
 
   G0 says the emitter must loop. But it *can't*: `~[n] normal(0,1)` currently builds **n independent
   scalar `Src` nodes** (`eval::draw_lift::draw_shaped` calls `draw_if_recipe` n times), and the array
@@ -223,20 +223,41 @@ decision, not a surprise.
       does **not** spill: identical dispatch to a fully fused loop at n = 52/100/256, with compile
       down 7–29×.
 
-  **This is also the fix for `turboquant` and `prisoners` on the CPU**, and that is the part worth
-  noticing: both are slow today (22.2 s / 12.9 s) *because* their cones are 17.6k / 45k nodes, which
-  puts them over `MAX_CODEGEN_NODES` and drops them to the interpreter. Collapsing the source count
-  is what lets them reach a code generator at all. The GPU is the reason to do this; it is not the
-  only beneficiary.
+  **What shipped.** `RvNode::ArrDraw { n, src }` + `RvNode::ArrElem { arr, k }` in `dist.rs`;
+  `kernel::source_ordinals` as the one shared ordinal assignment all four backends call; the
+  redirection point is `Engine::push_src` (`eval/draw_lift.rs`) — *not* `draw_shaped`, which is why
+  every derived recipe shapes for free: `bernoulli` is a `Uniform` under a `<`, `normal_int` a
+  `Normal` under a `round`, the hierarchical `*Dyn` family a standard source under an affine map, and
+  all of them push their base sources through that one function. `~[3,4]` is a single 12-wide block,
+  so a matrix draw is one loop too (turboquant draws three `~[20,20]`: **1200 sources → 3**).
+  Measured: `~[52] normal` now puts **one** source node in the graph, not 52
+  (`kernel::shaped_tests`), and the example corpus is **3934.7 ms vs a 3938 ms baseline** — flat, as
+  intended. Tests: `tests/shaped_draws.rs` (leaves iid; two blocks independent; an element read twice
+  is one draw; derived + hierarchical recipes; survives the codegen gate) and the structural counts
+  in `kernel::shaped_tests`.
 
-  ⚠️ **It breaks the seed, and that has release timing attached.** Source ordinals are currently the
-  `RvId` itself (`bytecode.rs`: `Inst::Normal { src: id.0, .. }`). An `ArrDraw` is *one* node but
-  needs *n* ordinals for its elements, so ordinals must move to a dedicated sequential assignment —
-  which renumbers every source and changes every draw stream. Two consequences:
-    * It should land **before the numerics-v2 release cut**, so the new RNG, the f32 lanes and this
-      fold into one seed break rather than three.
-    * It is an improvement on its own: keying draws on `RvId` means *any* change to `simplify`
-      (a new CSE, a new fold) silently changes results. A dedicated ordinal is stable against that.
+  ❌ **A claim I made here was wrong, and the flat corpus is what caught it.** I wrote that this
+  would also fix `turboquant` (22.2 s) and `prisoners` (12.9 s) on the CPU, on the theory that their
+  17.6k / 45k-node cones exceed `MAX_CODEGEN_NODES` and drop them to the interpreter. They don't.
+  Those two fall to the interpreter because **`rotation` and `permutation` are interpreter-only**
+  (`kernel::walk_cost` returns `false` for them outright), and no amount of source collapsing changes
+  that — their "17,586 ops/draw" is the *cost-model charge* for Rotation's `2d³`, not a node count.
+  So G½ buys the CPU **nothing**, by construction: an `ArrElem` lowers to precisely the fill its
+  `Src` lowered to. It is a GPU-enabling change and CPU-neutral, and the corpus staying flat is the
+  evidence for both halves of that sentence. (Getting those two demos onto a code generator is a
+  real prize, but it is **G4's** — WGSL has array indexing and divergent loops, so it can lower
+  `Gather`/`Permutation`/`Rotation` that no CPU backend will.)
+
+  ⚠️ **It breaks the seed, and that has release timing attached.** Source ordinals *were* the `RvId`
+  itself (`Inst::Normal { src: id.0, .. }`). An `ArrDraw` is one node needing `n` ordinals for its
+  elements, so ordinals moved to a dedicated sequential assignment — which renumbers every source and
+  changes every draw stream. Two consequences:
+    * This must ship **in the numerics-v2 release cut**, so the new RNG, the f32 lanes and this fold
+      into one seed break rather than three. It is now the third unpublished break; there must not be
+      a fourth.
+    * It is an improvement on its own: keying draws on `RvId` made the draw stream a function of node
+      *numbering*, so any new rewrite in `simplify` (a fold, a CSE) silently changed results. Dense
+      ordinals depend only on which sources survive, in id order.
 
 - **G1 — emitter + conformance (native).** `wgsl_emit.rs`: post-order walk of the simplified cone,
   memoized `let vN: f32` per node, the shared **squares64** sources spelled in WGSL (the exact

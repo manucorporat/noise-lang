@@ -79,12 +79,47 @@ const MAX_DRAW_ELEMS: usize = 1 << 20;
 /// empty engine; drain buffered output with [`Engine::take_output`]. Program-tunable budgets
 /// (`engine::set_max_samples` / `set_max_opts` / `set_resolution`) are stored here too and likewise
 /// persist for the engine's lifetime.
+/// State of an in-progress shaped draw `~[n, …] recipe` — what turns `leaves` independent
+/// [`RvNode::Src`] nodes into ONE [`RvNode::ArrDraw`] block plus `leaves` cheap
+/// [`RvNode::ArrElem`] reads (PLAN-WEBGPU G½).
+///
+/// The redirection happens at the single point where a recipe's *base source* is pushed
+/// ([`Engine::push_src`]), rather than in `draw_shaped` — which is why it works for every recipe and
+/// not just the five obvious ones. A recipe is a little cone with one or more base sources under
+/// some deterministic transform (`normal_int` is a `Normal` under a `Round`; `bernoulli(p)` is a
+/// `Uniform` under a `Lt`; the hierarchical `*Dyn` family is a standard source under an affine map).
+/// All of them push their bases through `push_src`, in a fixed order, so:
+///
+///   * on **leaf 0**, each base source push allocates the next `ArrDraw` block (recording its
+///     recipe), and
+///   * on **leaves 1..n**, the same push finds that block already there and just reads element `k`.
+///
+/// `pos` resets per leaf, so base *j* of every leaf lands in block *j*. The blocks are `n` wide, so
+/// element `k` of block `j` gets draw ordinal `base_j + k` — exactly the stream the `n` separate
+/// `Src` nodes drew from before this existed.
+///
+/// The array-valued recipes (`rotation`, `permutation`) never touch `push_src`: they push their own
+/// whole-array source node and are already one node per leaf, which was never the problem.
+struct ShapedDraw {
+    /// Leaves in the whole shaped draw — the width of every block (`~[3,4]` is one 12-wide block,
+    /// not three 4-wide ones, so a matrix draw is a single loop on the GPU too).
+    leaves: u32,
+    /// Which leaf is being built (`0..leaves`) — the element index into every block.
+    k: u32,
+    /// One `ArrDraw` per base-source position in the recipe's cone, filled on leaf 0.
+    blocks: Vec<RvId>,
+    /// Base-source position within the current leaf; reset to 0 at each leaf.
+    pos: usize,
+}
+
 pub struct Engine {
     vars: HashMap<String, Value>,
     /// User functions live in their own namespace (a call resolves here before builtins).
     funcs: HashMap<String, Rc<UserFn>>,
     /// Append-only sample-DAG arena (Phase 2). Built during `run`; read-only when sampling.
     graph: RvGraph,
+    /// Active shaped draw, if we are inside one (`~[n] recipe`). See [`ShapedDraw`].
+    shaped: Option<ShapedDraw>,
     /// Current user-function call depth (guarded by `MAX_CALL_DEPTH`).
     call_depth: usize,
     /// Current [`Engine::eval`] expression-recursion depth (guarded by `MAX_EVAL_DEPTH`). Distinct
@@ -219,6 +254,7 @@ impl Default for Engine {
 impl Engine {
     pub fn new() -> Self {
         Engine {
+            shaped: None,
             vars: HashMap::new(),
             funcs: HashMap::new(),
             graph: RvGraph::default(),
@@ -884,11 +920,13 @@ fn ancestors(graph: &RvGraph, root: RvId) -> HashSet<RvId> {
                 stack.push(*arr);
                 stack.push(*index);
             }
+            RvNode::ArrElem { arr, .. } => stack.push(*arr),
             RvNode::Src(_)
             | RvNode::ConstNum(_)
             | RvNode::ConstBool(_)
             | RvNode::Permutation { .. }
-            | RvNode::Rotation { .. } => {}
+            | RvNode::Rotation { .. }
+            | RvNode::ArrDraw { .. } => {}
         }
     }
     seen

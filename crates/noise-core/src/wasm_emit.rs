@@ -167,6 +167,21 @@ struct Ctx<'g> {
     /// Absolute byte address of each const gather table ([`GatherClass::ConstTable`]) in linear
     /// memory — the data-segment region after the output columns (see [`collect_gather_tables`]).
     gather_tables: HashMap<RvId, u64>,
+    /// Draw ordinal per node ([`crate::kernel::source_ordinals`]) — the `source` the RNG counters
+    /// key on. Shared with every other backend, so the emitted kernel draws the interpreter's
+    /// stream. (It used to be the `RvId` itself; a shaped draw is one node owning `n` ordinals, so
+    /// it can't be.)
+    ords: Vec<u32>,
+}
+
+impl Ctx<'_> {
+    /// The draw ordinal of a source node — a scalar `Src`, or element `k` of a shaped `ArrDraw`.
+    fn ord(&self, id: RvId) -> u32 {
+        match self.graph.node(id) {
+            RvNode::ArrElem { arr, k } => crate::kernel::elem_ordinal(&self.ords, *arr, *k),
+            _ => self.ords[id.0 as usize],
+        }
+    }
 }
 
 /// Collect the const gather tables in the union cone of `roots`: absolute byte address per gather
@@ -203,7 +218,11 @@ fn collect_gather_tables(
                 }
                 stack.push(*index);
             }
-            RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+            RvNode::Src(_)
+            | RvNode::ConstNum(_)
+            | RvNode::ConstBool(_)
+            | RvNode::ArrDraw { .. }
+            | RvNode::ArrElem { .. } => {}
             RvNode::Unary(_, a) => stack.push(*a),
             RvNode::Binary(_, a, b) => {
                 stack.push(*a);
@@ -311,6 +330,7 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId]) -> Vec<u8> {
     let ti = LANE0 + 1 + N_I32_LOCALS; // i64 scratch (after the i32 block)
     let tf = ti + T_I64; // first f32 local (transcendental scratch)
     let ctx = Ctx {
+        ords: crate::kernel::source_ordinals(graph),
         graph,
         fbase: tf + T_F32,
         cone,
@@ -485,17 +505,17 @@ fn emit_node(
         RvNode::Src(Source::Uniform(u)) => {
             let (lo, hi) = (u.lo, u.hi);
             emit_paired(s, ctx, id, pair, |s, ctx, half| {
-                emit_uniform(s, ctx, id.0, lo, hi, half)
+                emit_uniform(s, ctx, ctx.ord(id), lo, hi, half)
             });
         }
-        RvNode::Src(Source::UniformInt { lo, hi }) => emit_uniform_int(s, ctx, id.0, *lo, *hi),
+        RvNode::Src(Source::UniformInt { lo, hi }) => emit_uniform_int(s, ctx, ctx.ord(id), *lo, *hi),
         RvNode::Src(Source::Normal { mu, sigma }) => match pair {
-            PairMode::Single => emit_normal_single(s, ctx, id.0, *mu, *sigma),
+            PairMode::Single => emit_normal_single(s, ctx, ctx.ord(id), *mu, *sigma),
             PairMode::Even { bank, next_bank } => {
                 let bank_local = *next_bank;
                 *next_bank += 1;
                 bank.insert(id, bank_local);
-                emit_normal_pair(s, ctx, id.0, *mu, *sigma, bank_local);
+                emit_normal_pair(s, ctx, ctx.ord(id), *mu, *sigma, bank_local);
             }
             PairMode::Odd(bank) => {
                 s.local_get(bank[&id]);
@@ -504,18 +524,59 @@ fn emit_node(
         RvNode::Src(Source::Exp { rate }) => {
             let rate = *rate;
             emit_paired(s, ctx, id, pair, |s, ctx, half| {
-                emit_exp(s, ctx, id.0, rate, half)
+                emit_exp(s, ctx, ctx.ord(id), rate, half)
             });
         }
         RvNode::Src(Source::Geometric { p }) => {
             let p = *p;
             emit_paired(s, ctx, id, pair, |s, ctx, half| {
-                emit_geometric(s, ctx, id.0, p, half)
+                emit_geometric(s, ctx, ctx.ord(id), p, half)
             });
         }
         RvNode::Src(Source::Poisson { .. }) => unreachable!("profitable() excludes Poisson"),
         RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => {
             unreachable!("profitable() excludes the array-valued draw nodes")
+        }
+        // A shaped draw emits nothing — it owns an ordinal block, and only its readers draw. It is
+        // never reached: `ArrElem` takes its recipe from the graph, not from an emitted parent.
+        RvNode::ArrDraw { .. } => unreachable!("ArrDraw emits no code; only its ArrElem readers do"),
+        // Element `k` of a shaped draw: emitted as EXACTLY the scalar source it replaced, at
+        // ordinal `base + k`. That is the whole point — `~[n] d` and n separate `~ d` draws produce
+        // the same kernel and the same bits; only the graph got smaller.
+        RvNode::ArrElem { arr, .. } => {
+            let ord = ctx.ord(id);
+            match crate::kernel::elem_source(ctx.graph, *arr) {
+                Source::Uniform(u) => {
+                    let (lo, hi) = (u.lo, u.hi);
+                    emit_paired(s, ctx, id, pair, |s, ctx, half| {
+                        emit_uniform(s, ctx, ord, lo, hi, half)
+                    });
+                }
+                Source::UniformInt { lo, hi } => emit_uniform_int(s, ctx, ord, lo, hi),
+                Source::Normal { mu, sigma } => match pair {
+                    PairMode::Single => emit_normal_single(s, ctx, ord, mu, sigma),
+                    PairMode::Even { bank, next_bank } => {
+                        let bank_local = *next_bank;
+                        *next_bank += 1;
+                        bank.insert(id, bank_local);
+                        emit_normal_pair(s, ctx, ord, mu, sigma, bank_local);
+                    }
+                    PairMode::Odd(bank) => {
+                        s.local_get(bank[&id]);
+                    }
+                },
+                Source::Exp { rate } => {
+                    emit_paired(s, ctx, id, pair, |s, ctx, half| {
+                        emit_exp(s, ctx, ord, rate, half)
+                    });
+                }
+                Source::Geometric { p } => {
+                    emit_paired(s, ctx, id, pair, |s, ctx, half| {
+                        emit_geometric(s, ctx, ord, p, half)
+                    });
+                }
+                Source::Poisson { .. } => unreachable!("profitable() excludes Poisson"),
+            }
         }
         RvNode::Gather { elems, index } => {
             let lx = emit_node(s, ctx, *index, memo, slot, pair);

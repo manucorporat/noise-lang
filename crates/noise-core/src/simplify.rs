@@ -57,6 +57,9 @@ enum Key {
     Unary(UnOp, RvId),
     Binary(BinOp, RvId, RvId),
     Select(RvId, RvId, RvId),
+    /// Element `k` of a shaped draw. Pure given `(arr, k)` — the parent `ArrDraw` is never interned,
+    /// so two independent `~[n]` draws have different `arr` ids and can never collide here.
+    ArrElem(RvId, u32),
 }
 
 #[derive(Default)]
@@ -100,7 +103,9 @@ impl Builder {
                         | RvNode::ConstNum(_)
                         | RvNode::ConstBool(_)
                         | RvNode::Permutation { .. }
-                        | RvNode::Rotation { .. } => {}
+                        | RvNode::Rotation { .. }
+                        | RvNode::ArrDraw { .. } => {}
+                        RvNode::ArrElem { arr, .. } => push_child(*arr),
                         RvNode::Unary(_, a) => push_child(*a),
                         RvNode::Binary(_, l, r) => {
                             push_child(*r);
@@ -172,6 +177,19 @@ impl Builder {
                             let (arr, index) = (self.done[arr], self.done[index]);
                             self.out.push(RvNode::ArrIndex { arr, index }, kind)
                         }
+                        // A shaped draw is a SOURCE: copied 1:1, never interned, so two `~[n]`
+                        // draws of the same recipe stay independent (exactly the rule that keeps
+                        // two `Src`s of one recipe independent).
+                        RvNode::ArrDraw { n, src } => {
+                            self.out.push(RvNode::ArrDraw { n: *n, src: *src }, kind)
+                        }
+                        // But an element READ is deterministic given `(arr, k)`, so it interns like
+                        // any pure node: `zs[3] + zs[3]` is one draw doubled — which is what it was
+                        // when `zs[3]` was a plain `Src` handle shared by both operands.
+                        RvNode::ArrElem { arr, k } => {
+                            let arr = self.done[arr];
+                            self.arr_elem(arr, *k, kind)
+                        }
                     };
                     self.done.insert(id, new);
                 }
@@ -198,6 +216,10 @@ impl Builder {
         let id = self.out.push(RvNode::ConstBool(b), RvKind::Bool);
         self.bools.insert(b, id);
         id
+    }
+
+    fn arr_elem(&mut self, arr: RvId, k: u32, kind: RvKind) -> RvId {
+        self.intern(Key::ArrElem(arr, k), RvNode::ArrElem { arr, k }, kind)
     }
 
     fn intern(&mut self, key: Key, node: RvNode, kind: RvKind) -> RvId {

@@ -158,6 +158,7 @@ pub fn compile(graph: &RvGraph, root: RvId) -> Program {
     let mut gathers: Vec<Box<[Reg]>> = Vec::new();
     let mut arrays: Vec<u32> = Vec::new();
     let mut streams = 0u32;
+    let ords = crate::kernel::source_ordinals(graph);
     let root_reg = lower(
         graph,
         root,
@@ -167,6 +168,7 @@ pub fn compile(graph: &RvGraph, root: RvId) -> Program {
         &mut gathers,
         &mut arrays,
         &mut streams,
+        &ords,
     );
     Program {
         n_regs: insts.len(),
@@ -193,6 +195,9 @@ pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
     let mut gathers: Vec<Box<[Reg]>> = Vec::new();
     let mut arrays: Vec<u32> = Vec::new();
     let mut streams = 0u32;
+    // One ordinal map for the whole joint program, so a source shared by two roots draws ONE stream
+    // — the property the joint drivers (`corr`, `scatter`) exist for.
+    let ords = crate::kernel::source_ordinals(graph);
     let regs: Vec<Reg> = roots
         .iter()
         .map(|&r| {
@@ -205,6 +210,7 @@ pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
                 &mut gathers,
                 &mut arrays,
                 &mut streams,
+                &ords,
             )
         })
         .collect();
@@ -246,6 +252,7 @@ fn lower(
     gathers: &mut Vec<Box<[Reg]>>,
     arrays: &mut Vec<u32>,
     streams: &mut u32,
+    ords: &[u32],
 ) -> Reg {
     if let Some(&reg) = memo.get(&id) {
         return reg;
@@ -270,7 +277,13 @@ fn lower(
                     | RvNode::ConstNum(_)
                     | RvNode::ConstBool(_)
                     | RvNode::Permutation { .. }
-                    | RvNode::Rotation { .. } => {}
+                    | RvNode::Rotation { .. }
+                    // A shaped draw emits NOTHING (see the Emit arm): it owns a block of source
+                    // ordinals, and its readers lower to ordinary scalar fills against that block.
+                    // So it is a leaf — and `ArrElem` is one too, taking its recipe and ordinal
+                    // straight from the graph rather than from an emitted parent.
+                    | RvNode::ArrDraw { .. }
+                    | RvNode::ArrElem { .. } => {}
                     RvNode::Unary(_, a) => push_child(&mut stack, *a),
                     RvNode::Binary(_, a, b) => {
                         push_child(&mut stack, *b);
@@ -304,27 +317,58 @@ fn lower(
                     RvNode::Src(Source::Uniform(u)) => {
                         insts.push(Inst::Uniform {
                             dst,
-                            src: id.0,
+                            src: ords[id.0 as usize],
                             lo: u.lo,
                             hi: u.hi,
                         });
                     }
                     RvNode::Src(Source::UniformInt { lo, hi }) => {
-                        insts.push(Inst::UniformInt { dst, src: id.0, lo, hi });
+                        insts.push(Inst::UniformInt { dst, src: ords[id.0 as usize], lo, hi });
                     }
                     RvNode::Src(Source::Normal { mu, sigma }) => {
-                        insts.push(Inst::Normal { dst, src: id.0, mu, sigma });
+                        insts.push(Inst::Normal { dst, src: ords[id.0 as usize], mu, sigma });
                     }
                     RvNode::Src(Source::Exp { rate }) => {
-                        insts.push(Inst::Exp { dst, src: id.0, rate })
+                        insts.push(Inst::Exp { dst, src: ords[id.0 as usize], rate })
                     }
                     RvNode::Src(Source::Poisson { lambda }) => {
                         let stream = *streams;
                         *streams += 1;
-                        insts.push(Inst::Poisson { dst, src: id.0, stream, lambda });
+                        insts.push(Inst::Poisson { dst, src: ords[id.0 as usize], stream, lambda });
                     }
                     RvNode::Src(Source::Geometric { p }) => {
-                        insts.push(Inst::Geometric { dst, src: id.0, p })
+                        insts.push(Inst::Geometric { dst, src: ords[id.0 as usize], p })
+                    }
+                    // The shaped-draw pair (PLAN-WEBGPU G-half). `ArrDraw` lowers to NOTHING: it is
+                    // a pure ordinal-block owner, so it never occupies an instruction slot and
+                    // never enters `memo` (nothing reads it — `ArrElem` gets its recipe and its
+                    // ordinal straight from the graph). `ArrElem` lowers to exactly the fill its
+                    // recipe's scalar `Src` lowers to, at ordinal `base + k` — so the interpreter's
+                    // hot loop is bit-for-bit what it was before this node existed, and `~[n] d` is
+                    // indistinguishable from n separate `~ d` draws.
+                    //
+                    // `continue` (not a pushed no-op): the `dst == insts.len()` register numbering
+                    // invariant only requires that every pushed inst take the next slot, so a node
+                    // that pushes nothing simply doesn't participate.
+                    RvNode::ArrDraw { .. } => continue,
+                    RvNode::ArrElem { arr, k } => {
+                        let src = crate::kernel::elem_ordinal(ords, arr, k);
+                        match crate::kernel::elem_source(graph, arr) {
+                            Source::Uniform(u) => insts.push(Inst::Uniform { dst, src, lo: u.lo, hi: u.hi }),
+                            Source::UniformInt { lo, hi } => {
+                                insts.push(Inst::UniformInt { dst, src, lo, hi })
+                            }
+                            Source::Normal { mu, sigma } => {
+                                insts.push(Inst::Normal { dst, src, mu, sigma })
+                            }
+                            Source::Exp { rate } => insts.push(Inst::Exp { dst, src, rate }),
+                            Source::Geometric { p } => insts.push(Inst::Geometric { dst, src, p }),
+                            Source::Poisson { lambda } => {
+                                let stream = *streams;
+                                *streams += 1;
+                                insts.push(Inst::Poisson { dst, src, stream, lambda });
+                            }
+                        }
                     }
                     RvNode::ConstNum(v) => insts.push(Inst::ConstNum { dst, val: v }),
                     RvNode::ConstBool(b) => insts.push(Inst::ConstBool {

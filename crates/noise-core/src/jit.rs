@@ -385,6 +385,9 @@ fn build_joint(graph: &RvGraph, roots: &[RvId]) -> Result<JitJointProgram, Strin
 /// its own BATCH-strided column at `out[r*BATCH + i]`. A single root (`roots == &[root]`) emits
 /// exactly the plain single-column kernel.
 fn build_kernel(graph: &RvGraph, roots: &[RvId]) -> Result<JitProgramInner, String> {
+    // One ordinal map for the whole kernel, computed from the graph — so every root, every stream
+    // and every other backend agree on which counter each source draws from.
+    let ords = crate::kernel::source_ordinals(graph);
     // --- ISA + module setup ---
     let mut flags = settings::builder();
     flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
@@ -499,7 +502,7 @@ fn build_kernel(graph: &RvGraph, roots: &[RvId]) -> Result<JitProgramInner, Stri
             let addr = fb.ins().iadd(out, off);
             for (r, &root) in roots.iter().enumerate() {
                 let result =
-                    emit_node(&mut fb, graph, root, even_ctx, &math, &mut memo, &mut tables, &mut pair);
+                    emit_node(&mut fb, graph, root, even_ctx, &math, &mut memo, &mut tables, &mut pair, &ords);
                 fb.ins()
                     .store(MemFlags::trusted(), result, addr, (r * BATCH * 4) as i32);
             }
@@ -513,7 +516,7 @@ fn build_kernel(graph: &RvGraph, roots: &[RvId]) -> Result<JitProgramInner, Stri
             let mut memo: HashMap<RvId, Value> = HashMap::new();
             for (r, &root) in roots.iter().enumerate() {
                 let result =
-                    emit_node(&mut fb, graph, root, odd_ctx, &math, &mut memo, &mut tables, &mut pair);
+                    emit_node(&mut fb, graph, root, odd_ctx, &math, &mut memo, &mut tables, &mut pair, &ords);
                 fb.ins()
                     .store(MemFlags::trusted(), result, addr, ((r * BATCH + 1) * 4) as i32);
             }
@@ -526,7 +529,7 @@ fn build_kernel(graph: &RvGraph, roots: &[RvId]) -> Result<JitProgramInner, Stri
             let addr = fb.ins().iadd(out, off);
             for (r, &root) in roots.iter().enumerate() {
                 let result =
-                    emit_node(&mut fb, graph, root, ctx, &math, &mut memo, &mut tables, &mut pair);
+                    emit_node(&mut fb, graph, root, ctx, &math, &mut memo, &mut tables, &mut pair, &ords);
                 fb.ins()
                     .store(MemFlags::trusted(), result, addr, (r * BATCH * 4) as i32);
             }
@@ -675,10 +678,19 @@ fn emit_node(
     memo: &mut HashMap<RvId, Value>,
     tables: &mut GatherTables,
     pair: &mut PairMode,
+    // `ords`: draw ordinal per node (`kernel::source_ordinals`) — shared with every other backend,
+    // so the JIT'd kernel draws the interpreter's stream. It used to be the `RvId` itself; a shaped
+    // draw is one node owning `n` ordinals, so it can no longer be.
+    ords: &[u32],
 ) -> Value {
     if let Some(v) = memo.get(&id) {
         return *v;
     }
+    // The draw ordinal of this node (a scalar `Src`, or element `k` of a shaped `ArrDraw`).
+    let ord = match graph.node(id) {
+        RvNode::ArrElem { arr, k } => crate::kernel::elem_ordinal(ords, *arr, *k),
+        _ => ords[id.0 as usize],
+    };
     let v = match graph.node(id) {
         RvNode::Src(Source::Uniform(u)) => {
             let (lo, hi) = (u.lo, u.hi);
@@ -686,19 +698,19 @@ fn emit_node(
                 fb,
                 id,
                 pair,
-                |fb| emit_uniform_pair(fb, ctx, id.0, lo, hi),
-                |fb| emit_uniform_single(fb, ctx, id.0, lo, hi),
+                |fb| emit_uniform_pair(fb, ctx, ord, lo, hi),
+                |fb| emit_uniform_single(fb, ctx, ord, lo, hi),
             )
         }
-        RvNode::Src(Source::UniformInt { lo, hi }) => emit_uniform_int(fb, ctx, id.0, *lo, *hi),
+        RvNode::Src(Source::UniformInt { lo, hi }) => emit_uniform_int(fb, ctx, ord, *lo, *hi),
         RvNode::Src(Source::Normal { mu, sigma }) => {
             let (mu, sigma) = (*mu, *sigma);
             emit_paired(
                 fb,
                 id,
                 pair,
-                |fb| emit_normal_pair(fb, ctx, id.0, mu, sigma),
-                |fb| emit_normal_single(fb, ctx, id.0, mu, sigma),
+                |fb| emit_normal_pair(fb, ctx, ord, mu, sigma),
+                |fb| emit_normal_single(fb, ctx, ord, mu, sigma),
             )
         }
         RvNode::Src(Source::Exp { rate }) => {
@@ -707,8 +719,8 @@ fn emit_node(
                 fb,
                 id,
                 pair,
-                |fb| emit_exp_pair(fb, ctx, id.0, rate),
-                |fb| emit_exp_single(fb, ctx, id.0, rate),
+                |fb| emit_exp_pair(fb, ctx, ord, rate),
+                |fb| emit_exp_single(fb, ctx, ord, rate),
             )
         }
         RvNode::Src(Source::Geometric { p }) => {
@@ -717,16 +729,56 @@ fn emit_node(
                 fb,
                 id,
                 pair,
-                |fb| emit_geometric_pair(fb, ctx, id.0, p),
-                |fb| emit_geometric_single(fb, ctx, id.0, p),
+                |fb| emit_geometric_pair(fb, ctx, ord, p),
+                |fb| emit_geometric_single(fb, ctx, ord, p),
             )
         }
         RvNode::Src(Source::Poisson { .. }) => unreachable!("profitable() excludes Poisson"),
         RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => {
             unreachable!("profitable() excludes the array-valued draw nodes")
         }
+        // A shaped draw emits nothing — it owns an ordinal block, and only its readers draw.
+        RvNode::ArrDraw { .. } => unreachable!("ArrDraw emits no code; only its ArrElem readers do"),
+        // Element `k` of a shaped draw: emitted as EXACTLY the scalar source it replaced, at
+        // ordinal `base + k`. `~[n] d` and n separate `~ d` draws produce the same machine code and
+        // the same bits — only the graph got smaller.
+        RvNode::ArrElem { arr, .. } => match crate::kernel::elem_source(graph, *arr) {
+            Source::Uniform(u) => {
+                let (lo, hi) = (u.lo, u.hi);
+                emit_paired(
+                    fb,
+                    id,
+                    pair,
+                    |fb| emit_uniform_pair(fb, ctx, ord, lo, hi),
+                    |fb| emit_uniform_single(fb, ctx, ord, lo, hi),
+                )
+            }
+            Source::UniformInt { lo, hi } => emit_uniform_int(fb, ctx, ord, lo, hi),
+            Source::Normal { mu, sigma } => emit_paired(
+                fb,
+                id,
+                pair,
+                |fb| emit_normal_pair(fb, ctx, ord, mu, sigma),
+                |fb| emit_normal_single(fb, ctx, ord, mu, sigma),
+            ),
+            Source::Exp { rate } => emit_paired(
+                fb,
+                id,
+                pair,
+                |fb| emit_exp_pair(fb, ctx, ord, rate),
+                |fb| emit_exp_single(fb, ctx, ord, rate),
+            ),
+            Source::Geometric { p } => emit_paired(
+                fb,
+                id,
+                pair,
+                |fb| emit_geometric_pair(fb, ctx, ord, p),
+                |fb| emit_geometric_single(fb, ctx, ord, p),
+            ),
+            Source::Poisson { .. } => unreachable!("profitable() excludes Poisson"),
+        },
         RvNode::Gather { elems, index } => {
-            let xv = emit_node(fb, graph, *index, ctx, math, memo, tables, pair);
+            let xv = emit_node(fb, graph, *index, ctx, math, memo, tables, pair, ords);
             match gather_class(graph, elems) {
                 Some(GatherClass::ConstTable) => {
                     let base = tables.base_ptr(graph, id, elems);
@@ -735,7 +787,7 @@ fn emit_node(
                 Some(GatherClass::SelectChain) => {
                     let evs: Vec<Value> = elems
                         .iter()
-                        .map(|&e| emit_node(fb, graph, e, ctx, math, memo, tables, pair))
+                        .map(|&e| emit_node(fb, graph, e, ctx, math, memo, tables, pair, ords))
                         .collect();
                     emit_gather_chain(fb, xv, &evs)
                 }
@@ -747,30 +799,30 @@ fn emit_node(
         RvNode::ConstNum(x) => fb.ins().f32const(*x as f32),
         RvNode::ConstBool(b) => fb.ins().f32const(if *b { 1.0 } else { 0.0 }),
         RvNode::Unary(op, a) => {
-            let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair);
+            let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair, ords);
             emit_unary(fb, math, *op, av)
         }
         RvNode::Binary(BinOp::Pow, a, b) => {
-            let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair);
+            let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair, ords);
             match const_int_exponent(graph, *b) {
                 // Small non-negative integer power → repeated multiply (no libcall).
                 Some(k) => emit_pow(fb, av, k),
                 // Any other exponent → a `pow` libcall over both operands.
                 None => {
-                    let bv = emit_node(fb, graph, *b, ctx, math, memo, tables, pair);
+                    let bv = emit_node(fb, graph, *b, ctx, math, memo, tables, pair, ords);
                     call2(fb, math.pow, av, bv)
                 }
             }
         }
         RvNode::Binary(op, a, b) => {
-            let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair);
-            let bv = emit_node(fb, graph, *b, ctx, math, memo, tables, pair);
+            let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair, ords);
+            let bv = emit_node(fb, graph, *b, ctx, math, memo, tables, pair, ords);
             emit_binary(fb, *op, av, bv)
         }
         RvNode::Select { cond, a, b } => {
-            let cv = emit_node(fb, graph, *cond, ctx, math, memo, tables, pair);
-            let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair);
-            let bv = emit_node(fb, graph, *b, ctx, math, memo, tables, pair);
+            let cv = emit_node(fb, graph, *cond, ctx, math, memo, tables, pair, ords);
+            let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair, ords);
+            let bv = emit_node(fb, graph, *b, ctx, math, memo, tables, pair, ords);
             let zero = fb.ins().f32const(0.0);
             let cb = fb.ins().fcmp(FloatCC::NotEqual, cv, zero);
             fb.ins().select(cb, av, bv)

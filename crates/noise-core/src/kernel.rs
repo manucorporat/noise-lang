@@ -62,6 +62,67 @@ pub fn seed_state(seed: u64, streams: usize) -> Vec<u64> {
     state
 }
 
+/// Assign every source node in `graph` its **draw ordinal** — the `source` argument the `rng::fill_*`
+/// functions key their counters on (`ctr = (source << 36) + lane`). Returned indexed by `RvId`, with
+/// `NO_SOURCE` for nodes that draw nothing.
+///
+/// One rule, and it is the whole cross-backend draw contract: **walk node ids in order and hand out
+/// ordinals sequentially.** A scalar [`RvNode::Src`] takes one; an [`RvNode::ArrDraw`] takes a
+/// *contiguous block of `n`*, so its element `k` draws from `base + k` — the same stream `n`
+/// separate `Src` nodes would have produced, which is what lets `ArrDraw` be a pure structural
+/// change rather than a numeric one.
+///
+/// Every backend calls this on the same (simplified) graph and therefore agrees bit for bit. That
+/// is the point: the ordinal must be a function of the *graph*, not of any backend's emission order,
+/// or the interpreter and the JIT would draw different numbers from the same program.
+///
+/// **This replaced keying draws on the `RvId` itself** (`Inst::Normal { src: id.0 }`), which had to
+/// go — one `ArrDraw` node cannot hand `n` distinct ordinals to its elements out of its single id.
+/// The old scheme was also quietly brittle in a way this one isn't: it made the draw stream a
+/// function of node *numbering*, so any new rewrite in `simplify` (a fold, a CSE) silently changed
+/// results. Ordinals are now dense and depend only on which sources survive, in id order.
+pub fn source_ordinals(graph: &RvGraph) -> Vec<u32> {
+    let mut ord = vec![NO_SOURCE; graph.len()];
+    let mut next: u32 = 0;
+    for i in 0..graph.len() {
+        let id = RvId(i as u32);
+        let take = match graph.node(id) {
+            RvNode::Src(_) => 1,
+            RvNode::ArrDraw { n, .. } => *n,
+            _ => 0,
+        };
+        if take > 0 {
+            ord[i] = next;
+            // The counter layout is `(source << 36) + lane`, so an ordinal past 2^28 would overflow
+            // the u64 counter and alias another source's stream. Construction is capped far below
+            // this (`eval::MAX_DRAW_LEAVES`), so this is insurance, not a live limit.
+            next = next
+                .checked_add(take)
+                .filter(|&n| n < (1 << 28))
+                .expect("source ordinals exceeded the 2^28 counter region");
+        }
+    }
+    ord
+}
+
+/// Ordinal of a node that draws nothing (see [`source_ordinals`]).
+pub const NO_SOURCE: u32 = u32::MAX;
+
+/// The draw ordinal of an [`RvNode::ArrElem`]: its parent block's base, plus the static index.
+pub fn elem_ordinal(ords: &[u32], arr: RvId, k: u32) -> u32 {
+    let base = ords[arr.0 as usize];
+    debug_assert_ne!(base, NO_SOURCE, "ArrElem's parent is not a source block");
+    base + k
+}
+
+/// The `Source` recipe an [`RvNode::ArrElem`] draws from — i.e. its parent [`RvNode::ArrDraw`]'s.
+pub fn elem_source(graph: &RvGraph, arr: RvId) -> Source {
+    match graph.node(arr) {
+        RvNode::ArrDraw { src, .. } => *src,
+        other => unreachable!("ArrElem's parent must be an ArrDraw, got {other:?}"),
+    }
+}
+
 /// If node `id` is a constant non-negative integer in `0..=64`, return it as an exponent count.
 /// Such `x ^ k` lower to repeated multiply (no `pow` call) on every backend.
 pub fn const_int_exponent(graph: &RvGraph, id: RvId) -> Option<u32> {
@@ -247,6 +308,20 @@ pub fn walk_cost(
             RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => {
                 return false
             }
+            // A shaped draw emits nothing (it owns an ordinal block — see `source_ordinals`), so it
+            // is free and a pure leaf. Its readers carry the whole cost.
+            RvNode::ArrDraw { .. } => {}
+            // An `ArrElem` IS a draw: it costs exactly what the equivalent scalar `Src` costs, and
+            // it is unsupported for exactly the same recipe (Poisson's Knuth loop).
+            RvNode::ArrElem { arr, .. } => {
+                match elem_source(graph, *arr) {
+                    Source::Poisson { .. } => return false,
+                    Source::Normal { .. } => charge(2, fusible, libcalls),
+                    Source::Exp { .. } | Source::Geometric { .. } => charge(1, fusible, libcalls),
+                    Source::Uniform(_) | Source::UniformInt { .. } => *fusible += 1,
+                }
+                stack.push(*arr); // free, but it must land in `seen` so the cone count is honest
+            }
             RvNode::Gather { elems, index } => match gather_class(graph, elems) {
                 // Const-table gather is a LEAF over its elems: the emitters materialize the table
                 // in memory and never emit the element nodes, so only the index cone is walked (a
@@ -344,6 +419,8 @@ pub fn supported(graph: &RvGraph, root: RvId) -> bool {
     match graph.node(root) {
         RvNode::Src(Source::Poisson { .. }) => false,
         RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => false, // interpreter-only
+        RvNode::ArrDraw { .. } => true, // emits nothing; only its ArrElem readers draw
+        RvNode::ArrElem { arr, .. } => !matches!(elem_source(graph, *arr), Source::Poisson { .. }),
         RvNode::Gather { elems, index } => match gather_class(graph, elems) {
             Some(GatherClass::ConstTable) => supported(graph, *index),
             Some(GatherClass::SelectChain) => {
@@ -405,6 +482,14 @@ pub fn cost_roots(graph: &RvGraph, roots: &[RvId]) -> NodeCost {
                 c.ops += extra;
             }
             RvNode::Src(_) => c.sources += 1,
+            // The shaped-draw pair. `ArrDraw` is free (it emits nothing — it owns an ordinal block);
+            // each `ArrElem` reader is one draw, exactly as the scalar `Src` it replaced. Charging
+            // the block's whole `n` here would over-count: an element nobody reads is never drawn.
+            RvNode::ArrDraw { .. } => {}
+            RvNode::ArrElem { arr, .. } => {
+                c.sources += 1;
+                stack.push(*arr);
+            }
             // A whole-array draw: the Fisher–Yates consumes exactly `n-1` bounded RNG draws per
             // lane (what `sources` means — the playground's "random numbers" readout) and does
             // ~2n per-lane work (n identity writes + n-1 swaps); charge n extra ops on top of the
@@ -477,7 +562,9 @@ pub fn cone_size_roots(graph: &RvGraph, roots: &[RvId]) -> usize {
             | RvNode::ConstNum(_)
             | RvNode::ConstBool(_)
             | RvNode::Permutation { .. }
-            | RvNode::Rotation { .. } => {}
+            | RvNode::Rotation { .. }
+            | RvNode::ArrDraw { .. } => {}
+            RvNode::ArrElem { arr, .. } => stack.push(*arr),
             RvNode::Unary(_, a) => stack.push(*a),
             RvNode::Binary(_, a, b) => {
                 stack.push(*a);
@@ -508,4 +595,80 @@ pub fn cone_size_roots(graph: &RvGraph, roots: &[RvId]) -> usize {
         }
     }
     seen.len()
+}
+
+#[cfg(test)]
+mod shaped_tests {
+    use super::*;
+    use crate::dist::{RvKind, RvNode, Uniform};
+    use crate::eval::Engine;
+
+    /// Count the source-ish nodes in an engine's graph after running `src`.
+    fn counts(src: &str) -> (usize, usize, usize) {
+        let mut eng = Engine::new();
+        eng.run(src).expect("program runs");
+        let g = eng.graph();
+        let (mut srcs, mut draws, mut elems) = (0, 0, 0);
+        for i in 0..g.len() {
+            match g.node(RvId(i as u32)) {
+                RvNode::Src(_) => srcs += 1,
+                RvNode::ArrDraw { .. } => draws += 1,
+                RvNode::ArrElem { .. } => elems += 1,
+                _ => {}
+            }
+        }
+        (srcs, draws, elems)
+    }
+
+    /// The structural claim of PLAN-WEBGPU G½, stated as a number: a shaped draw of 52 normals must
+    /// put **one** source node in the graph, not 52.
+    ///
+    /// This is the entire reason the node exists. Shader compile time tracks the *source* count —
+    /// each `squares64` inlines ~150 ALU ops in WGSL, at ~6.5 ms of pipeline compile apiece — so 52
+    /// sources is 332 ms of cold compile and one is 31 ms (`tools/gpu-spike/RESULTS.md`). If this
+    /// test ever reads 52 again, the WGSL emitter has silently lost its loop and the GPU backend is
+    /// slower than the CPU it was built to beat.
+    #[test]
+    fn a_shaped_draw_is_one_source_node_not_n() {
+        let (srcs, draws, elems) = counts("use rand;\nzs ~[52] normal(0, 1);\nzs[0]");
+        assert_eq!(draws, 1, "expected ONE ArrDraw block");
+        assert_eq!(elems, 52, "expected 52 element reads");
+        assert_eq!(srcs, 0, "a shaped draw must push no scalar Src nodes at all");
+    }
+
+    /// A `~[d, d]` matrix draw is likewise ONE block of `d²` — not `d` blocks of `d`. (turboquant
+    /// draws three of these at `d = 20`: 1200 sources collapsing to 3.)
+    #[test]
+    fn a_matrix_shaped_draw_is_a_single_block() {
+        let (srcs, draws, elems) = counts("use rand;\nm ~[4, 5] normal(0, 1);\nm[0][0]");
+        assert_eq!((srcs, draws, elems), (0, 1, 20));
+    }
+
+    /// Ordinals are handed out by walking node ids in order: a scalar source takes one, a shaped
+    /// draw takes a contiguous block of `n`. That contiguity is what lets the WGSL emitter turn a
+    /// block into `for (j) { draw(base + j) }`, and what makes element `k` draw exactly the stream
+    /// the `k`-th independent `Src` used to draw.
+    #[test]
+    fn source_ordinals_hand_a_shaped_draw_a_contiguous_block() {
+        let mut g = RvGraph::default();
+        let a = g.push(RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }), RvKind::Num);
+        let blk = g.push(
+            RvNode::ArrDraw { n: 4, src: Source::Uniform(Uniform { lo: 0.0, hi: 1.0 }) },
+            RvKind::Arr(4),
+        );
+        let e2 = g.push(RvNode::ArrElem { arr: blk, k: 2 }, RvKind::Num);
+        let z = g.push(RvNode::ConstNum(1.0), RvKind::Num);
+        let b = g.push(RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }), RvKind::Num);
+
+        let ords = source_ordinals(&g);
+        assert_eq!(ords[a.0 as usize], 0, "the first scalar source takes ordinal 0");
+        assert_eq!(ords[blk.0 as usize], 1, "the block's base follows it");
+        assert_eq!(elem_ordinal(&ords, blk, 2), 3, "element k draws from base + k");
+        assert_eq!(ords[z.0 as usize], NO_SOURCE, "a constant draws nothing");
+        assert_eq!(
+            ords[b.0 as usize], 5,
+            "the next scalar source resumes AFTER the whole block (1 + 4), so no two sources can \
+             ever share a counter"
+        );
+    }
 }

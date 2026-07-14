@@ -202,6 +202,16 @@ pub(crate) fn key(graph: &RvGraph, roots: &[RvId], gate: bool) -> Vec<u8> {
                 push_id(&mut out, *arr);
                 push_id(&mut out, *index);
             }
+            RvNode::ArrDraw { n, src } => {
+                out.push(10);
+                push_u32(&mut out, *n);
+                push_source(&mut out, src);
+            }
+            RvNode::ArrElem { arr, k } => {
+                out.push(11);
+                push_id(&mut out, *arr);
+                push_u32(&mut out, *k);
+            }
         }
     }
     push_u32(&mut out, roots.len() as u32);

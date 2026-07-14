@@ -159,20 +159,85 @@ impl Engine {
         self.draw_shaped(&dims, &v)
     }
 
-    /// Build a nested array of the given shape, drawing the recipe independently at every leaf
-    /// (`draw_if_recipe` instantiates fresh source nodes each call, so the leaves are iid). A
-    /// non-recipe operand is repeated as-is. Backs the shaped prefix draw `~[n, m, …] recipe`.
+    /// Build a nested array of the given shape, drawing the recipe independently at every leaf.
+    /// Backs the shaped prefix draw `~[n, m, …] recipe`.
+    ///
+    /// The leaves are still iid, and still draw exactly the stream they always did — but they now
+    /// share **one** [`RvNode::ArrDraw`] block per base source instead of pushing `leaves`
+    /// independent [`RvNode::Src`] nodes. `push_src` does the redirection; this just opens the
+    /// shaped context (with the total leaf count, so `~[3,4]` is a single 12-wide block) and walks
+    /// the leaves in row-major order.
     fn draw_shaped(&mut self, dims: &[usize], recipe: &Value) -> Result<Value> {
+        let leaves: usize = dims.iter().product(); // `eval_sample` capped this at MAX_DRAW_ELEMS
+        let outer = self.shaped.take(); // a shaped draw nested inside one is not a thing, but be total
+        self.shaped = Some(ShapedDraw {
+            leaves: leaves as u32,
+            k: 0,
+            blocks: Vec::new(),
+            pos: 0,
+        });
+        let out = self.draw_leaves(dims, recipe);
+        self.shaped = outer;
+        out
+    }
+
+    /// The row-major leaf walk of [`draw_shaped`], inside the open shaped context.
+    fn draw_leaves(&mut self, dims: &[usize], recipe: &Value) -> Result<Value> {
         let (n, rest) = (dims[0], &dims[1..]);
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             if rest.is_empty() {
+                // A fresh leaf: base-source position back to 0, so base `j` of this leaf lands in
+                // block `j` (the same block leaf 0 created for it).
+                if let Some(sh) = self.shaped.as_mut() {
+                    sh.pos = 0;
+                }
                 out.push(self.draw_if_recipe(recipe.clone())?);
+                if let Some(sh) = self.shaped.as_mut() {
+                    sh.k += 1;
+                }
             } else {
-                out.push(self.draw_shaped(rest, recipe)?);
+                out.push(self.draw_leaves(rest, recipe)?);
             }
         }
         Ok(Value::Array(Rc::new(out)))
+    }
+
+    /// Push a recipe's **base source** — the single point where a draw enters the sample-DAG, and
+    /// therefore the single point that a shaped draw (`~[n] recipe`) has to redirect.
+    ///
+    /// Outside a shaped draw this is just `graph.push(Src(src))`, exactly as before. Inside one it
+    /// returns `ArrElem { arr, k }` against the shaped draw's `ArrDraw` block instead — allocating
+    /// that block on the first leaf and reusing it on the rest (see [`crate::eval::ShapedDraw`]).
+    /// The draws are unchanged: element `k` of the block has ordinal `base + k`, which is the
+    /// ordinal the `k`-th independent `Src` would have been given.
+    pub(super) fn push_src(&mut self, src: Source) -> RvId {
+        let Some(sh) = self.shaped.as_ref() else {
+            return self.graph.push(RvNode::Src(src), RvKind::Num);
+        };
+        let (pos, k, leaves) = (sh.pos, sh.k, sh.leaves);
+        let arr = match self.shaped.as_ref().unwrap().blocks.get(pos) {
+            // Leaves 1..n: the block for this base-source position already exists.
+            Some(&arr) => {
+                debug_assert_eq!(
+                    self.graph.node(arr),
+                    &RvNode::ArrDraw { n: leaves, src },
+                    "a shaped draw's leaves must push the same base sources in the same order"
+                );
+                arr
+            }
+            // Leaf 0: allocate the block. `RvKind::Arr(leaves)` — it is an array-valued source, in
+            // the shape of `Permutation`/`Rotation`.
+            None => {
+                let arr = self
+                    .graph
+                    .push(RvNode::ArrDraw { n: leaves, src }, RvKind::Arr(leaves));
+                self.shaped.as_mut().unwrap().blocks.push(arr);
+                arr
+            }
+        };
+        self.shaped.as_mut().unwrap().pos += 1;
+        self.graph.push(RvNode::ArrElem { arr, k }, RvKind::Num)
     }
 
     /// Draw a fresh random variable from a recipe — the *only* place sampling-DAG source nodes
@@ -196,55 +261,29 @@ impl Engine {
         // A complex draw yields a `Value::Complex` (two independent real channels), not a scalar id.
         if let Recipe::NormalComplex { sigma } = r {
             let s = sigma / std::f64::consts::SQRT_2;
-            let re = self.graph.push(
-                RvNode::Src(Source::Normal { mu: 0.0, sigma: s }),
-                RvKind::Num,
-            );
-            let im = self.graph.push(
-                RvNode::Src(Source::Normal { mu: 0.0, sigma: s }),
-                RvKind::Num,
-            );
+            let re = self.push_src(Source::Normal { mu: 0.0, sigma: s });
+            let im = self.push_src(Source::Normal { mu: 0.0, sigma: s });
             return Ok(Value::complex(Value::Dist(re), Value::Dist(im)));
         }
         let id = match r {
-            Recipe::Uniform { lo, hi } => self.graph.push(
-                RvNode::Src(Source::Uniform(Uniform { lo, hi })),
-                RvKind::Num,
-            ),
-            Recipe::UniformInt { lo, hi } => self
-                .graph
-                .push(RvNode::Src(Source::UniformInt { lo, hi }), RvKind::Num),
-            Recipe::Normal { mu, sigma } => self
-                .graph
-                .push(RvNode::Src(Source::Normal { mu, sigma }), RvKind::Num),
-            Recipe::Exp { rate } => self
-                .graph
-                .push(RvNode::Src(Source::Exp { rate }), RvKind::Num),
-            Recipe::Poisson { lambda } => self
-                .graph
-                .push(RvNode::Src(Source::Poisson { lambda }), RvKind::Num),
-            Recipe::Geometric { p } => self
-                .graph
-                .push(RvNode::Src(Source::Geometric { p }), RvKind::Num),
+            Recipe::Uniform { lo, hi } => self.push_src(Source::Uniform(Uniform { lo, hi })),
+            Recipe::UniformInt { lo, hi } => self.push_src(Source::UniformInt { lo, hi }),
+            Recipe::Normal { mu, sigma } => self.push_src(Source::Normal { mu, sigma }),
+            Recipe::Exp { rate } => self.push_src(Source::Exp { rate }),
+            Recipe::Poisson { lambda } => self.push_src(Source::Poisson { lambda }),
+            Recipe::Geometric { p } => self.push_src(Source::Geometric { p }),
             // The `_int` family draws a continuous source then rounds each lane to an integer.
             Recipe::NormalInt { mu, sigma } => {
-                let z = self
-                    .graph
-                    .push(RvNode::Src(Source::Normal { mu, sigma }), RvKind::Num);
+                let z = self.push_src(Source::Normal { mu, sigma });
                 self.graph.push(RvNode::Unary(UnOp::Round, z), RvKind::Num)
             }
             Recipe::ExpInt { rate } => {
-                let z = self
-                    .graph
-                    .push(RvNode::Src(Source::Exp { rate }), RvKind::Num);
+                let z = self.push_src(Source::Exp { rate });
                 self.graph.push(RvNode::Unary(UnOp::Round, z), RvKind::Num)
             }
             Recipe::Bernoulli { p } => {
                 // bernoulli(p) ≡ (unif(0,1) < p): a bool-RV that is 1 with probability p.
-                let u = self.graph.push(
-                    RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
-                    RvKind::Num,
-                );
+                let u = self.push_src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 }));
                 let c = self.graph.push(RvNode::ConstNum(p), RvKind::Num);
                 self.graph
                     .push(RvNode::Binary(BinOp::Lt, u, c), RvKind::Bool)
@@ -256,10 +295,7 @@ impl Engine {
             //     are independent given `p`). The transform nodes simplify/CSE/lower like any other.
             Recipe::UniformDyn { lo, hi } => {
                 // lo + (hi − lo)·U,  U ~ unif(0,1).
-                let u = self.graph.push(
-                    RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
-                    RvKind::Num,
-                );
+                let u = self.push_src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 }));
                 let (lo, hi) = (self.arg_id(lo), self.arg_id(hi));
                 let width = self
                     .graph
@@ -277,10 +313,7 @@ impl Engine {
                 // clamp yields floored *negative* offsets and thus values *below* `lo` (out of any
                 // sensible range). Clamping the width to ≥ 1 degenerates that lane to a point mass
                 // at `lo` — the same well-defined behavior the constant path gives for `lo == hi`.
-                let u = self.graph.push(
-                    RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
-                    RvKind::Num,
-                );
+                let u = self.push_src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 }));
                 let (lo, hi) = (self.arg_id(lo), self.arg_id(hi));
                 let diff = self
                     .graph
@@ -312,13 +345,10 @@ impl Engine {
             }
             Recipe::NormalDyn { mu, sigma, int } => {
                 // mu + sigma·Z,  Z ~ N(0,1); `int` rounds each lane (normal_int).
-                let z = self.graph.push(
-                    RvNode::Src(Source::Normal {
+                let z = self.push_src(Source::Normal {
                         mu: 0.0,
                         sigma: 1.0,
-                    }),
-                    RvKind::Num,
-                );
+                    });
                 let (mu, sigma) = (self.arg_id(mu), self.arg_id(sigma));
                 let scaled = self
                     .graph
@@ -335,9 +365,7 @@ impl Engine {
             }
             Recipe::ExpDyn { rate, int } => {
                 // E / rate,  E ~ Exp(1) → Exp(rate); `int` rounds each lane (exponential_int).
-                let e = self
-                    .graph
-                    .push(RvNode::Src(Source::Exp { rate: 1.0 }), RvKind::Num);
+                let e = self.push_src(Source::Exp { rate: 1.0 });
                 let rate = self.arg_id(rate);
                 let val = self
                     .graph
@@ -351,10 +379,7 @@ impl Engine {
             }
             Recipe::BernoulliDyn { p } => {
                 // (U < p),  U ~ unif(0,1): a bool-RV true with the lane's probability p.
-                let u = self.graph.push(
-                    RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
-                    RvKind::Num,
-                );
+                let u = self.push_src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 }));
                 let p = self.arg_id(p);
                 self.graph
                     .push(RvNode::Binary(BinOp::Lt, u, p), RvKind::Bool)
