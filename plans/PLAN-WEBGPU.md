@@ -1,9 +1,22 @@
 # PLAN-WEBGPU — the GPU as a fourth lowering of the RvGraph
 
-**Date:** 2026-07-13 · **Status:** proposal (nothing started). G0 spike gates everything
-else. **Depends on PLAN-PREGPU** (async engine, f32 lanes in all modes, the pcg4d-3r
-counter RNG in all modes), which moves every cross-backend decision out of this plan —
-the GPU then lands as just another backend under one shared contract.
+**Date:** 2026-07-13 (deps updated 2026-07-14) · **Status:** proposal (nothing started). G0 spike
+gates everything else. **Depends on PLAN-PREGPU**, which moves every cross-backend decision out of
+this plan — the GPU then lands as just another backend under one shared contract.
+
+Dependency status (PREGPU is otherwise complete):
+
+| PREGPU gives us | status | needed by |
+|---|---|---|
+| f32 lanes in all modes | ✅ LANDED (Track B) | G1 — the GPU's numeric contract, unbent |
+| **squares64** counter RNG in all modes (not pcg4d-3r — C0's criterion 8 killed that family) | ✅ LANDED (Track C) | G1 — identical draw streams, bit for bit |
+| cancellation (native `CancelToken`, browser `AbortSignal`) | ✅ LANDED (Track A) | G3 — abort in-flight dispatches |
+| **async evaluator** (`run_async`, `sampler::*_async`) | ⏸ DEFERRED — *this plan is now its only consumer* | **G3 only** |
+
+**G0/G1/G2 need no async at all** — native `wgpu` polls synchronously, and that is the harness for
+all three. Async is a **G3** (browser host) requirement, which is exactly why PREGPU stopped short
+of building it: it would have been a speculative 400–800-line refactor of the evaluator spine with
+no consumer. Build it when G3 does.
 
 ## The thesis
 
@@ -87,14 +100,33 @@ per-chunk columns/partials, and absorbs them in chunk order. `Reducer` doesn't c
 graph or device failure falls back exactly like `wasm_host` does (correct-slow, never throw).
 
 **The async bridge (browser).** Evaluation is synchronous and queries force mid-eval, so
-`Engine::run` cannot await — **resolved upstream: PLAN-PREGPU Track A makes the evaluator
-async** (the async set, the one boxed recursion point in `eval`, sync wrappers via
-`exec::block_on`, and the `sampler::*_async` seam this backend routes into). The
-originally-sketched alternative — engine in a dedicated Web Worker blocking on
-`Atomics.wait` while the device-owning agent runs the async dispatch — still works and
-needs no evaluator changes, but it adds a second agent, a SAB protocol, and a deadlock
-surface permanently; async-first also buys cancellation and progress for free. (Native:
-`wgpu` + blocking poll, trivially sync — which is also our test harness either way.)
+`Engine::run` cannot await. Two ways out, and the choice must be **re-made here at G3** — one of the
+two arguments that originally settled it is now void:
+
+- **(a) Async evaluator** (PREGPU Track A's A1/A2, unbuilt): the async set, one boxed recursion
+  point in `eval`, sync wrappers via `exec::block_on`, and a `sampler::*_async` seam this backend
+  routes into. Cost: a 400–800-line mechanical refactor of the eval spine.
+- **(b) `Atomics.wait`**: the engine worker blocks while a device-owning agent runs the async
+  dispatch. Needs no evaluator changes at all.
+
+~~"async-first also buys cancellation and progress for free"~~ — **this argument is spent.**
+Cancellation shipped in PREGPU Track A *without* any async (native token; browser = terminate the
+worker), so it can no longer be put on async's side of the ledger.
+
+What survives, and now carries the decision on its own: **(b) needs `SharedArrayBuffer`, hence
+cross-origin isolation (COOP/COEP)** — which `packages/core/src/pool.ts` deliberately refuses
+because the requirement is *viral for every app that installs `@noiselang/core`*. It exists today
+only in the opt-in `wasm-mt` build. So (b) would mean **two different browser GPU bridges** (one for
+isolated pages, one for everyone else) plus a second agent, a SAB protocol, and a permanent deadlock
+surface. (a) is one bridge that works everywhere. **(a) still wins — for that reason, not the old
+one.** (Native: `wgpu` + blocking poll, trivially sync — which is also our test harness either way.)
+
+**A cost of the terminate-based cancel, to price at G3.** Browser cancellation kills the worker. If
+the worker owns the GPU device and the pipeline cache, an abort throws both away, and the
+replacement worker must re-acquire a device (async, and not cheap). Options to weigh then: keep
+device ownership on the main thread (worker holds only a proxy), or accept the re-acquire cost on
+the abort path (it is a user-initiated stop, so tens of ms is likely fine). Flagged now so it is a
+decision, not a surprise.
 
 ## Phases
 
@@ -115,11 +147,11 @@ surface permanently; async-first also buys cancellation and progress for free. (
   (bench the corpus, find where the fixed costs pay back), node-count cap from G0 data.
 - **G3 — browser host.** `nz_gpu_*` inline-JS shim (device ownership, content-addressed
   pipeline cache with the same LRU/liveness story as `nz_kernel_*`), the async engine's
-  `run_async` path (prerequisite: PLAN-PREGPU A1–A2), playground wiring, feature-detect +
-  silent fallback to today's wasm path. Cancellation comes for free from PLAN-PREGPU A3's
-  `CancelToken`/`AbortSignal` design: check the token before each dispatch submission and
-  abandon in-flight `mapAsync` readbacks (a dispatch already submitted can't be killed,
-  but nothing further is queued — abort latency is one chunk-range dispatch).
+  `run_async` path (**this is where PREGPU A1–A2 gets built — G3 is their only consumer**),
+  playground wiring, feature-detect + silent fallback to today's wasm path. Cancellation already
+  exists (PREGPU Track A): the native `CancelToken` gives "check before each dispatch submission and
+  abandon in-flight `mapAsync` readbacks", and the browser's `AbortSignal` already stops a run by
+  terminating the worker — see the device-ownership cost noted in the async-bridge section above.
 - **G4 — exceed the CPU codegen.** `Gather` is plain array indexing in WGSL — this
   unlocks `prisoners`, `empirical`, `block_bootstrap`, permutation programs that no CPU
   codegen path will ever take. Knuth `Poisson` is a legal (divergent) loop bounded by
