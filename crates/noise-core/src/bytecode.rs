@@ -53,6 +53,8 @@ pub enum Inst {
     Poisson {
         dst: Reg,
         src: u32,
+        /// Per-program cell-stream ordinal (the Knuth loop's counter region).
+        stream: u32,
         lambda: f64,
     },
     Geometric {
@@ -100,7 +102,8 @@ pub enum Inst {
     /// bounded draw `fill_uniform_int` uses.
     Permutation {
         dst: ArrReg,
-        src: u32,
+        /// Per-program cell-stream ordinal (see `rng::CellStream`).
+        stream: u32,
         n: u32,
     },
     /// Per-lane Haar rotation: fill array register `dst` (element count `d²`, row-major
@@ -111,7 +114,8 @@ pub enum Inst {
     /// odd; full batch, like every other source).
     Rotation {
         dst: ArrReg,
-        src: u32,
+        /// Per-program cell-stream ordinal (see `rng::CellStream`).
+        stream: u32,
         d: u32,
     },
     /// Per-lane read `dst = arr[round(clamp(index))]` of an array register — `Inst::Gather`'s
@@ -150,6 +154,7 @@ pub fn compile(graph: &RvGraph, root: RvId) -> Program {
     let mut insts: Vec<Inst> = Vec::new();
     let mut gathers: Vec<Box<[Reg]>> = Vec::new();
     let mut arrays: Vec<u32> = Vec::new();
+    let mut streams = 0u32;
     let root_reg = lower(
         graph,
         root,
@@ -158,6 +163,7 @@ pub fn compile(graph: &RvGraph, root: RvId) -> Program {
         &mut insts,
         &mut gathers,
         &mut arrays,
+        &mut streams,
     );
     Program {
         n_regs: insts.len(),
@@ -183,6 +189,7 @@ pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
     let mut insts: Vec<Inst> = Vec::new();
     let mut gathers: Vec<Box<[Reg]>> = Vec::new();
     let mut arrays: Vec<u32> = Vec::new();
+    let mut streams = 0u32;
     let regs: Vec<Reg> = roots
         .iter()
         .map(|&r| {
@@ -194,6 +201,7 @@ pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
                 &mut insts,
                 &mut gathers,
                 &mut arrays,
+                &mut streams,
             )
         })
         .collect();
@@ -225,6 +233,7 @@ enum Task {
 /// chain), which would overflow a recursive lowerer's call stack and abort (finding A4). The
 /// worklist models the same post-order — children emit before their parent, left operand before
 /// right — so register numbering and instruction order are identical to the old recursive lowerer.
+#[allow(clippy::too_many_arguments)] // the lowerer's full output state; a struct would just rename it
 fn lower(
     graph: &RvGraph,
     id: RvId,
@@ -233,6 +242,7 @@ fn lower(
     insts: &mut Vec<Inst>,
     gathers: &mut Vec<Box<[Reg]>>,
     arrays: &mut Vec<u32>,
+    streams: &mut u32,
 ) -> Reg {
     if let Some(&reg) = memo.get(&id) {
         return reg;
@@ -306,7 +316,9 @@ fn lower(
                         insts.push(Inst::Exp { dst, src: id.0, rate })
                     }
                     RvNode::Src(Source::Poisson { lambda }) => {
-                        insts.push(Inst::Poisson { dst, src: id.0, lambda });
+                        let stream = *streams;
+                        *streams += 1;
+                        insts.push(Inst::Poisson { dst, src: id.0, stream, lambda });
                     }
                     RvNode::Src(Source::Geometric { p }) => {
                         insts.push(Inst::Geometric { dst, src: id.0, p })
@@ -361,7 +373,9 @@ fn lower(
                             .expect("bytecode exceeded 2^32 array registers");
                         arrays.push(n);
                         arr_memo.insert(id, a);
-                        insts.push(Inst::Permutation { dst: a, src: id.0, n });
+                        let stream = *streams;
+                        *streams += 1;
+                        insts.push(Inst::Permutation { dst: a, stream, n });
                     }
                     RvNode::Rotation { d } => {
                         // Same array-valued-source shape as Permutation: one instruction slot (the
@@ -371,7 +385,9 @@ fn lower(
                             .expect("bytecode exceeded 2^32 array registers");
                         arrays.push(d * d);
                         arr_memo.insert(id, a);
-                        insts.push(Inst::Rotation { dst: a, src: id.0, d });
+                        let stream = *streams;
+                        *streams += 1;
+                        insts.push(Inst::Rotation { dst: a, stream, d });
                     }
                     RvNode::ArrIndex { arr, index } => {
                         let (a, ri) = (arr_memo[&arr], memo[&index]);
@@ -420,8 +436,13 @@ pub fn run_batch(
             Inst::Exp { dst, src, rate } => {
                 rng::fill_exp(key, src, lane0, rate, &mut regs[dst as usize]);
             }
-            Inst::Poisson { dst, src, lambda } => {
-                rng::fill_poisson(key, src, lane0, lambda, &mut regs[dst as usize]);
+            Inst::Poisson {
+                dst,
+                src,
+                stream,
+                lambda,
+            } => {
+                rng::fill_poisson(key, src, stream, lane0, lambda, &mut regs[dst as usize]);
             }
             Inst::Geometric { dst, src, p } => {
                 rng::fill_geometric(key, src, lane0, p, &mut regs[dst as usize]);
@@ -492,7 +513,7 @@ pub fn run_batch(
                 }
                 regs[dst as usize].copy_from_slice(&scratch);
             }
-            Inst::Permutation { dst, src, n } => {
+            Inst::Permutation { dst, stream, n } => {
                 // Per lane: identity, then Fisher–Yates high-to-low with the same Lemire
                 // multiply-high bounded draw `fill_uniform_int` uses (48 consumed bits, bias ≤
                 // count/2⁴⁸), drawing from the lane's `CellStream` chain. Lane-major
@@ -502,18 +523,18 @@ pub fn run_batch(
                 let n = n as usize;
                 let buf = &mut arrs[dst as usize];
                 for k in 0..BATCH {
-                    let mut stream = rng::CellStream::new(key, lane0.wrapping_add(k as u32), src);
+                    let mut draws = rng::CellStream::new(key, stream, lane0.wrapping_add(k as u32));
                     let lane = &mut buf[k * n..(k + 1) * n];
                     for (j, x) in lane.iter_mut().enumerate() {
                         *x = j as f64;
                     }
                     for j in (1..n).rev() {
-                        let i = stream.next_bounded(j as u64 + 1) as usize;
+                        let i = draws.next_bounded(j as u64 + 1) as usize;
                         lane.swap(i, j);
                     }
                 }
             }
-            Inst::Rotation { dst, src, d } => {
+            Inst::Rotation { dst, stream, d } => {
                 // Per lane: fill the lane's contiguous `d²` run (row-major, `m[r*d + c]`) with iid
                 // standard normals from the lane's `CellStream` chain (same cos-branch Box–Muller
                 // primitive every `Normal` source uses, so tails/quality match) — then modified
@@ -527,12 +548,11 @@ pub fn run_batch(
                 let d = d as usize;
                 let dd = d * d;
                 let buf = &mut arrs[dst as usize];
+                let mut u48s: Vec<u64> = Vec::new();
                 for k in 0..BATCH {
                     let m = &mut buf[k * dd..(k + 1) * dd];
-                    let mut stream = rng::CellStream::new(key, lane0.wrapping_add(k as u32), src);
-                    for x in m.iter_mut() {
-                        *x = stream.next_normal();
-                    }
+                    let mut draws = rng::CellStream::new(key, stream, lane0.wrapping_add(k as u32));
+                    draws.fill_normals(m, &mut u48s);
                     for r in 0..d {
                         for p in 0..r {
                             let mut dot = 0.0;

@@ -19,17 +19,18 @@ Three tracks, one contract:
   sample columns every backend fills) become `f32`; everything deterministic — scalar
   `Value::Num` math, reducer accumulation (Σx/Σx² already `f64`), final estimates — stays
   `f64`. `unif_int` and friends get much smaller (but honest) limits everywhere.
-- **C — counter-based RNG (pcg4d-3r) in all modes.** One generator — pcg4d-3r (C0
-  verdict; see Track C), keyed `(seed, lane, source)` — on the interpreter, the JIT, the
-  wasm emitter, and later the GPU, bit-identically.
+- **C — counter-based RNG (Squares) in all modes.** One generator — squares64
+  (Widynski; criterion-8 verdict, see Track C), a seeded construction-compliant key,
+  sequential per-source counters — on the interpreter, the JIT, the wasm emitter, and
+  later the GPU, bit-identically.
 
 What this buys:
 
-- **Draw-stream parity.** A uniform draw is `pcg4d_3r(key) → u32 → f32` — pure u32
-  arithmetic + one exactly-specified conversion, native in both Rust and WGSL — so the
-  *same seed produces the same draws, bit for bit, on every backend including the future
-  GPU*. The determinism story survives the GPU intact instead of degrading to "per
-  backend".
+- **Draw-stream parity.** A uniform draw is `squares64(ctr, key) → 48 consumed bits →
+  f64/f32` — pure integer arithmetic + one exactly-specified conversion — so the *same
+  seed produces the same draws, bit for bit, on every backend including the future GPU*
+  (WGSL pays u64-emulation ALU for it — measured at G0, see PLAN-WEBGPU). The
+  determinism story survives the GPU intact instead of degrading to "per backend".
 - **Near-bitwise conformance.** With identical draws and f32 lanes everywhere,
   cross-backend tests can assert bit-equality for add/mul/select graphs and tight-ULP
   equality elsewhere (WGSL guarantees correctly-rounded `+ − ×`; `÷`/`sqrt` are ≤2.5 ULP,
@@ -41,11 +42,11 @@ What this buys:
   explicitly, not stumble into.
 - **CPU upside, not a tax.** f32 doubles SIMD width (NEON: 4 lanes → 8) and halves memory
   traffic in every column; f32 polynomial approximations need fewer terms than the current
-  f64 ones in `approx.rs`; and the counter RNG deletes the entire multi-stream apparatus —
-  measured on this machine (tools/rng-cert bench, M4 Pro, keyed-batch shape): pcg4d-3r
-  942 M u32/s vs xoshiro256++×4-streams ~388 M u32/s single-threaded, i.e. independent
-  counters beat the ILP the 4-stream interleave was built to expose, by ~2.4×. The
-  **checkable f32 prediction** is the big-cone interpreter demos:
+  f64 ones in `approx.rs`; and the counter RNG deleted the entire multi-stream apparatus —
+  measured post-swap (M4 Pro, fill shape): squares64 at 540 M f64-uniforms/s vs the
+  xoshiro-era ~194 M/s serial ceiling, and the example corpus 5% FASTER than the
+  pre-Track-C baseline. The **checkable f32 prediction** is the big-cone interpreter
+  demos:
   the columnar VM's register file is `cone × 1024 × 8 B` — ~144 MB for `turboquant`
   (17.6k nodes), ~367 MB for `prisoners` (44.8k) — and they run at 50–80 M op-lanes/s
   today (locality-bound, not arithmetic-bound; measured 2026-07-13). Halving the footprint
@@ -180,15 +181,25 @@ keeps *accumulation* from being the place f32 actually hurts.
 
 ## Track C — pcg4d-3r counter RNG, everywhere
 
-**Generator (C0 verdict, owner-ratified 2026-07-14): pcg4d-3r** — pcg4d
-(Jarzynski–Olano, JCGT 2020) with one appended xorshift + dependent-product round
-(+12 ops). Pure u32 mul/add/xor/shift, 4×u32 in → 4×u32 out, native in both Rust and
-WGSL (no u64, no mulhi, nothing to emulate). One hash yields four u32s → up to four f32
-uniforms; `normal` takes its Box–Muller pair from a single hash. **Only bits 8..31 of a
-word are ever consumed** (`w >> 8` — a C0 finding promoted to contract: pcg-family low
-bits are structurally weak); the interim f64 uniform takes 24+24 bits from two words.
+**Generator (SWAPPED 2026-07-14, owner go): squares64** — Widynski's Squares, with a
+per-seed key from his key construction (distinct non-zero hex digits per half, odd LSD —
+`rng::Key::from_seed`; an arbitrary u64 is NOT a valid key, per C0 defect #3). Verdict
+trail in tools/rng-cert/RESULTS.md: pcg4d-3r and pcg4d-3rf both failed PractRand at
+256 GB (real low-consumed-bit sequential structure — pcg's LCG-fed counter mixing is
+too shallow at 10¹¹-sample depth, and bijective per-word finalizers can't remove
+cross-hash correlation); squares with a compliant key is **clean at 1 TB, zero
+anomalies**. Consumption as built: one squares64 per draw counter yielding the 48
+consumed bits `((w >> 40) << 24) | ((w >> 8) & 0xFFFFFF)` (never a u32's low byte —
+the C0 contract); scalar counters `(source << 36) + lane` (sequential per source, the
+certified regime); `normal` takes u1/u2 from the pair's even/odd counters, cos/sin by
+lane parity; `CellStream` (Knuth poisson, Permutation, Rotation) uses the dedicated
+region `(1 << 63) | (stream_ordinal << 49) | (lane << 17) | j` with per-program
+ordinals assigned at lowering. **Gate CLOSED: the corpus runs 4130 ms vs the 4351 ms
+pre-Track-C baseline (−5%)** — squares64's five 64-bit multiplies beat pcg's ~40 u32
+ops on wide multiply pipes (fill shape: 540 M f64-uniforms/s). GPU cost (~50–90
+emulated WGSL ALU ops/uniform) stays parked behind PLAN-WEBGPU G0's measurement.
 
-**Why pcg4d-3r and not published pcg4d/Squares/Philox.** C0's first battery
+**Why pcg4d-3r was tried first (historical — superseded by criterion 8 above).** C0's first battery
 (tools/rng-cert, 2026-07-14) **disqualified pcg4d as published**: u32 carries only
 propagate upward and its single `^= >>16` is the only downward path, giving it fully
 deterministic input-bit → output-bit relations *inside the consumed region under

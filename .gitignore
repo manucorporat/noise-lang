@@ -5,3 +5,4 @@
 # JS workspace deps (pnpm)
 node_modules/
 .DS_Store
+tools/rng-cert/target/

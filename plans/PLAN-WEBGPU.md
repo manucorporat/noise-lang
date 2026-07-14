@@ -13,15 +13,21 @@ compute model — lanes are invocations, the fold is a reduction. We already hav
 lowerings of the same IR (bytecode interpreter, Cranelift JIT, WASM emitter); WGSL is a
 fourth, and structurally the easiest one:
 
-- **No RNG state chain — and no RNG *decision* left.** PLAN-PREGPU Track C moves every
-  backend to the counter-based **pcg4d-3r** (C0 verdict, 2026-07-14 — published pcg4d failed avalanche; see tools/rng-cert), keyed
-  `(key_lo, key_hi, global_lane, source_offset)`, before this plan starts. The WGSL
-  emitter just spells the identical hash in WGSL — pcg4d-3r is pure u32 ops precisely so
-  it can be, ~10 ALU ops per uniform — so the GPU's draws are **bit-identical** to the CPU
-  backends', not merely equidistributed. No state upload, no streams, no
-  latency-vs-throughput policy; each source node's offset is a compile-time constant, so
-  every uniform in the kernel is an independent hash. (xoshiro couldn't have come along
-  anyway: WGSL has no `u64`.)
+- **No RNG state chain — but one RNG decision deferred to G0.** PLAN-PREGPU Track C
+  moves every backend to a counter-based keyed generator before this plan starts, and
+  the emitter spells the identical hash in WGSL for **bit-identical** draws. The C0
+  certification runs (2026-07-14, tools/rng-cert) forced a trade this plan must own:
+  every GPU-cheap u32-native hash tested (pcg4d, pcg4d-3r, pcg4d-3rf) shows real
+  sequential structure by 256 GB of PractRand, while the certified survivors (Squares,
+  Philox) are built on wide multiplies WGSL must emulate (no `u64`, no `mulhi`) at
+  **~70–90 ALU ops per uniform vs ~10** for the pcg family — enough to dominate a
+  normal-dense kernel whose transcendentals are hardware builtins. **G0 therefore also
+  measures a Squares-in-WGSL kernel on a real shape.** If RNG ALU is material there, the
+  owner chooses explicitly: accept the compressed (still large) GPU win; give the GPU a
+  local generator under statistical-only conformance (this plan's original stance); or
+  re-freeze C0's PractRand depth with a measured bound and re-admit a cheap hash. No
+  state upload, no streams either way; each source node's offset is a compile-time
+  constant, so every uniform in the kernel is an independent hash.
 - **No transcendental inlining.** WGSL has native `log`/`exp`/`sin`/`cos`/`atan`/`pow`.
   The entire `approx.rs` polynomial apparatus (built because `normal` costs ln+sincos per
   draw on CPU) is unnecessary: Box–Muller is four built-ins. The ops the CPU cost model
@@ -95,8 +101,10 @@ surface permanently; async-first also buys cancellation and progress for free. (
 - **G0 — spike (1–2 days, kills or scales the plan).** Hand-write WGSL for two kernels in
   a scratch page: `pi` (trivial) and a turboquant-scale one (~17k generated statements).
   Measure: pipeline-compile time vs statement count (Tint/Naga/Metal), samples/s,
-  dispatch+readback latency, and whether a 40k-statement shader compiles at all. These
-  are the only real unknowns; everything else in this plan is known-shape work.
+  dispatch+readback latency, whether a 40k-statement shader compiles at all — **and the
+  emulated-Squares RNG share on a normal-dense kernel (the deferred RNG decision above:
+  it only binds if this number is material)**. These are the only real unknowns;
+  everything else in this plan is known-shape work.
 - **G1 — emitter + conformance (native).** `wgsl_emit.rs`: post-order walk of the
   simplified cone, memoized `let vN: f32` per node, the shared pcg4d-3r sources spelled in
   WGSL, scope = the CPU-codegen subset (no `Poisson`, no `Gather`). `wgpu` as a

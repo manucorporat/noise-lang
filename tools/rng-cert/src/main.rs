@@ -53,6 +53,49 @@ fn pcg4d(mut v: [u32; 4]) -> [u32; 4] {
     v
 }
 
+/// squares64 (Widynski): the engine's production generator since the Squares swap —
+/// 5 rounds, 64-bit output, of which the engine consumes the top 24 bits of each u32
+/// half per draw.
+#[inline(always)]
+fn squares64(ctr: u64, key: u64) -> u64 {
+    let mut x = ctr.wrapping_mul(key);
+    let y = x;
+    let z = y.wrapping_add(key);
+    x = x.wrapping_mul(x).wrapping_add(y);
+    x = x.rotate_left(32);
+    x = x.wrapping_mul(x).wrapping_add(z);
+    x = x.rotate_left(32);
+    x = x.wrapping_mul(x).wrapping_add(y);
+    x = x.rotate_left(32);
+    let t = x.wrapping_mul(x).wrapping_add(z);
+    x = t.rotate_left(32);
+    t ^ (x.wrapping_mul(x).wrapping_add(y) >> 32)
+}
+
+/// The engine's exact consumption stream (criterion 8 paperwork for the swap): squares64
+/// at sequential counters within per-source blocks (`src << 36 | lane`), emitting the 48
+/// consumed bits per draw — top 24 of each u32 half — as 6 LE bytes. `key` is the
+/// engine's seed-0 key (rng::Key::from_seed(0)), construction-compliant.
+fn stream_sq64_engine(key: u64) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::with_capacity(1 << 20, stdout.lock());
+    const BATCHES_PER_BLOCK: u64 = 1 << 22;
+    let mut batch = 0u64;
+    loop {
+        let block = batch / BATCHES_PER_BLOCK;
+        let lane0 = (batch % BATCHES_PER_BLOCK) * 1024;
+        for s in 0..4u64 {
+            let src = block * 4 + s;
+            for l in 0..1024u64 {
+                let w = squares64((src << 36) | (lane0 + l), key);
+                out.write_all(&(w >> 40).to_le_bytes()[..3])?;
+                out.write_all(&((w >> 8) & 0xFF_FFFF).to_le_bytes()[..3])?;
+            }
+        }
+        batch += 1;
+    }
+}
+
 /// squares32 (Widynski, arXiv:2004.06278). The certified in-harness reference and
 /// contingency generator. Key from Widynski's key-construction procedure.
 #[inline(always)]
@@ -735,6 +778,14 @@ fn main() -> io::Result<()> {
                 avalanche_map(&*make_gen(name));
             }
             Ok(())
+        }
+        Some("stream-sq64-engine") => {
+            // Engine seed-0 key (rng::Key::from_seed(0)); regenerate via the crate's
+            // `print_kat_vectors` if the key construction ever changes.
+            match stream_sq64_engine(0x432A_B7DF_C618_529F) {
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+                r => r,
+            }
         }
         Some("stream") => {
             let g = make_gen(args.get(1).map(String::as_str).unwrap_or("pcg4d"));

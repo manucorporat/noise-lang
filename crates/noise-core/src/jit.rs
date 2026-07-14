@@ -34,7 +34,9 @@ use crate::ast::{BinOp, UnOp};
 use crate::backend::{Backend, InterpBackend, JointProgram, JointRunner, Program, Runner};
 use crate::bytecode::BATCH;
 use crate::dist::{RvGraph, RvId, RvNode, Source};
-use crate::kernel::{self, const_int_exponent, gather_class, profitable, GatherClass};
+use crate::kernel::{
+    self, cone_size_roots, const_int_exponent, gather_class, profitable, GatherClass,
+};
 use crate::rng::Key;
 
 /// `extern "C"` signature of a generated kernel: `kernel(out_ptr, n, key_lo, key_hi, lane0)` fills
@@ -446,8 +448,10 @@ fn build_kernel(graph: &RvGraph, roots: &[RvId]) -> Result<JitProgramInner, Stri
         let k0_64 = fb.block_params(entry)[2];
         let k1_64 = fb.block_params(entry)[3];
         let lane0_64 = fb.block_params(entry)[4];
-        let k0 = fb.ins().ireduce(types::I32, k0_64);
-        let k1 = fb.ins().ireduce(types::I32, k1_64);
+        // Reassemble the squares key: two u32 words (zero-extended into the i64 args) → one i64.
+        let k0m = fb.ins().band_imm(k0_64, 0xFFFF_FFFF);
+        let k1s = fb.ins().ishl_imm(k1_64, 32);
+        let key = fb.ins().bor(k1s, k0m);
         let lane0 = fb.ins().ireduce(types::I32, lane0_64);
 
         // Loop counter `i` (i64 sample index) and the current global lane (i32, wraps with the
@@ -465,25 +469,63 @@ fn build_kernel(graph: &RvGraph, roots: &[RvId]) -> Result<JitProgramInner, Stri
         let cond = fb.ins().icmp(IntCC::SignedLessThan, iv, n);
         fb.ins().brif(cond, body, &[], exit, &[]);
 
-        // body: emit the fused DAG for this lane (one shared memo across roots — joint draws) and
-        // store root `r` at out[r*BATCH + i] (the column stride is a constant store offset); then
-        // i += 1, lane += 1, loop.
+        // body: emit the fused DAG (one shared memo per lane across roots — joint draws) and
+        // store root `r` at out[r*BATCH + i] (the column stride is a constant store offset).
+        //
+        // Small cones PAIR-UNROLL: two lanes per iteration, so a `Normal`'s Box–Muller pair —
+        // hash, ln, both trig branches — is computed once and split cos/sin across the even/odd
+        // lane (PLAN-PERF-3 item 2; `n` is always the even BATCH from every runner). Cones past
+        // the cap keep the single-lane loop (parity-select normals) — same draws, bounded
+        // register pressure.
+        let unroll = cone_size_roots(graph, roots) <= PAIR_UNROLL_MAX_NODES;
         fb.switch_to_block(body);
         fb.seal_block(body);
         let iv = fb.use_var(i_var);
         let lane = fb.use_var(lane_var);
-        let ctx = DrawCtx { k0, k1, lane };
-        let mut memo: HashMap<RvId, Value> = HashMap::new();
-        let off = fb.ins().imul_imm(iv, 8);
-        let addr = fb.ins().iadd(out, off);
-        for (r, &root) in roots.iter().enumerate() {
-            let result = emit_node(&mut fb, graph, root, ctx, &math, &mut memo, &mut tables);
-            fb.ins()
-                .store(MemFlags::trusted(), result, addr, (r * BATCH * 8) as i32);
-        }
-        let inext = fb.ins().iadd_imm(iv, 1);
+        let step = if unroll {
+            let even_ctx = DrawCtx { key, lane };
+            let mut pair = PairMode::Even(HashMap::new());
+            let mut memo: HashMap<RvId, Value> = HashMap::new();
+            let off = fb.ins().imul_imm(iv, 8);
+            let addr = fb.ins().iadd(out, off);
+            for (r, &root) in roots.iter().enumerate() {
+                let result =
+                    emit_node(&mut fb, graph, root, even_ctx, &math, &mut memo, &mut tables, &mut pair);
+                fb.ins()
+                    .store(MemFlags::trusted(), result, addr, (r * BATCH * 8) as i32);
+            }
+            let sin_bank = match pair {
+                PairMode::Even(m) => m,
+                _ => unreachable!(),
+            };
+            let lane_odd = fb.ins().iadd_imm(lane, 1);
+            let odd_ctx = DrawCtx { key, lane: lane_odd };
+            let mut pair = PairMode::Odd(sin_bank);
+            let mut memo: HashMap<RvId, Value> = HashMap::new();
+            for (r, &root) in roots.iter().enumerate() {
+                let result =
+                    emit_node(&mut fb, graph, root, odd_ctx, &math, &mut memo, &mut tables, &mut pair);
+                fb.ins()
+                    .store(MemFlags::trusted(), result, addr, ((r * BATCH + 1) * 8) as i32);
+            }
+            2
+        } else {
+            let ctx = DrawCtx { key, lane };
+            let mut pair = PairMode::Single;
+            let mut memo: HashMap<RvId, Value> = HashMap::new();
+            let off = fb.ins().imul_imm(iv, 8);
+            let addr = fb.ins().iadd(out, off);
+            for (r, &root) in roots.iter().enumerate() {
+                let result =
+                    emit_node(&mut fb, graph, root, ctx, &math, &mut memo, &mut tables, &mut pair);
+                fb.ins()
+                    .store(MemFlags::trusted(), result, addr, (r * BATCH * 8) as i32);
+            }
+            1
+        };
+        let inext = fb.ins().iadd_imm(iv, step);
         fb.def_var(i_var, inext);
-        let lnext = fb.ins().iadd_imm(lane, 1);
+        let lnext = fb.ins().iadd_imm(lane, step);
         fb.def_var(lane_var, lnext);
         fb.ins().jump(header, &[]);
         fb.seal_block(header); // both preds (entry, body) now known
@@ -567,14 +609,32 @@ fn call2(
 /// compile-time `source_offset` (the node's `RvId` — the cross-backend keying contract).
 #[derive(Clone, Copy)]
 struct DrawCtx {
-    k0: Value,
-    k1: Value,
+    /// The full 64-bit squares key (`I64`), reassembled once in the entry block.
+    key: Value,
+    /// This lane's global index (`I32`).
     lane: Value,
+}
+
+/// Cones at most this many nodes pair-unroll the kernel loop (two lanes per iteration); larger
+/// ones would double an already-huge straight-line body for a fusion win the memory traffic
+/// dwarfs. Comfortably above every JIT-profitable normal-heavy example.
+const PAIR_UNROLL_MAX_NODES: usize = 2048;
+
+/// How this lane's `Normal` draws relate to the Box–Muller lane pairing (PLAN-PERF-3 item 2).
+/// The pair-unrolled loop emits two lanes per iteration: the even lane computes the pair once
+/// and banks the sin branch per node; the odd lane just reads it. Cones too large to unroll
+/// (register pressure) use `Single`: every lane hashes the pair's even lane and parity-selects
+/// a branch — same values, twice the transcendental work.
+enum PairMode {
+    Single,
+    Even(HashMap<RvId, Value>),
+    Odd(HashMap<RvId, Value>),
 }
 
 /// Emit the value of node `id` as an `f64` SSA value for the current lane, memoizing by `RvId` so
 /// a shared sub-RV (e.g. `X` in `X + X`) is emitted ONCE — the same CSE guarantee the interpreter
 /// gets (and, with counter keying, the same *draw*: one hash per node per lane).
+#[allow(clippy::too_many_arguments)] // the emitter's full walking state; a struct would just rename it
 fn emit_node(
     fb: &mut FunctionBuilder,
     graph: &RvGraph,
@@ -583,6 +643,7 @@ fn emit_node(
     math: &MathRefs,
     memo: &mut HashMap<RvId, Value>,
     tables: &mut GatherTables,
+    pair: &mut PairMode,
 ) -> Value {
     if let Some(v) = memo.get(&id) {
         return *v;
@@ -590,7 +651,15 @@ fn emit_node(
     let v = match graph.node(id) {
         RvNode::Src(Source::Uniform(u)) => emit_uniform(fb, ctx, id.0, u.lo, u.hi),
         RvNode::Src(Source::UniformInt { lo, hi }) => emit_uniform_int(fb, ctx, id.0, *lo, *hi),
-        RvNode::Src(Source::Normal { mu, sigma }) => emit_normal(fb, ctx, id.0, *mu, *sigma),
+        RvNode::Src(Source::Normal { mu, sigma }) => match pair {
+            PairMode::Single => emit_normal_single(fb, ctx, id.0, *mu, *sigma),
+            PairMode::Even(sin_bank) => {
+                let (even, odd) = emit_normal_pair(fb, ctx, id.0, *mu, *sigma);
+                sin_bank.insert(id, odd);
+                even
+            }
+            PairMode::Odd(sin_bank) => sin_bank[&id],
+        },
         RvNode::Src(Source::Exp { rate }) => emit_exp(fb, ctx, id.0, *rate),
         RvNode::Src(Source::Geometric { p }) => emit_geometric(fb, ctx, id.0, *p),
         RvNode::Src(Source::Poisson { .. }) => unreachable!("profitable() excludes Poisson"),
@@ -598,7 +667,7 @@ fn emit_node(
             unreachable!("profitable() excludes the array-valued draw nodes")
         }
         RvNode::Gather { elems, index } => {
-            let xv = emit_node(fb, graph, *index, ctx, math, memo, tables);
+            let xv = emit_node(fb, graph, *index, ctx, math, memo, tables, pair);
             match gather_class(graph, elems) {
                 Some(GatherClass::ConstTable) => {
                     let base = tables.base_ptr(graph, id, elems);
@@ -607,7 +676,7 @@ fn emit_node(
                 Some(GatherClass::SelectChain) => {
                     let evs: Vec<Value> = elems
                         .iter()
-                        .map(|&e| emit_node(fb, graph, e, ctx, math, memo, tables))
+                        .map(|&e| emit_node(fb, graph, e, ctx, math, memo, tables, pair))
                         .collect();
                     emit_gather_chain(fb, xv, &evs)
                 }
@@ -617,30 +686,30 @@ fn emit_node(
         RvNode::ConstNum(x) => fb.ins().f64const(*x),
         RvNode::ConstBool(b) => fb.ins().f64const(if *b { 1.0 } else { 0.0 }),
         RvNode::Unary(op, a) => {
-            let av = emit_node(fb, graph, *a, ctx, math, memo, tables);
+            let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair);
             emit_unary(fb, math, *op, av)
         }
         RvNode::Binary(BinOp::Pow, a, b) => {
-            let av = emit_node(fb, graph, *a, ctx, math, memo, tables);
+            let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair);
             match const_int_exponent(graph, *b) {
                 // Small non-negative integer power → repeated multiply (no libcall).
                 Some(k) => emit_pow(fb, av, k),
                 // Any other exponent → a `pow` libcall over both operands.
                 None => {
-                    let bv = emit_node(fb, graph, *b, ctx, math, memo, tables);
+                    let bv = emit_node(fb, graph, *b, ctx, math, memo, tables, pair);
                     call2(fb, math.pow, av, bv)
                 }
             }
         }
         RvNode::Binary(op, a, b) => {
-            let av = emit_node(fb, graph, *a, ctx, math, memo, tables);
-            let bv = emit_node(fb, graph, *b, ctx, math, memo, tables);
+            let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair);
+            let bv = emit_node(fb, graph, *b, ctx, math, memo, tables, pair);
             emit_binary(fb, *op, av, bv)
         }
         RvNode::Select { cond, a, b } => {
-            let cv = emit_node(fb, graph, *cond, ctx, math, memo, tables);
-            let av = emit_node(fb, graph, *a, ctx, math, memo, tables);
-            let bv = emit_node(fb, graph, *b, ctx, math, memo, tables);
+            let cv = emit_node(fb, graph, *cond, ctx, math, memo, tables, pair);
+            let av = emit_node(fb, graph, *a, ctx, math, memo, tables, pair);
+            let bv = emit_node(fb, graph, *b, ctx, math, memo, tables, pair);
             let zero = fb.ins().f64const(0.0);
             let cb = fb.ins().fcmp(FloatCC::NotEqual, cv, zero);
             fb.ins().select(cb, av, bv)
@@ -716,67 +785,46 @@ fn emit_gather_chain(fb: &mut FunctionBuilder, xv: Value, evs: &[Value]) -> Valu
     fb.ins().select(is_nan, nan, acc)
 }
 
-/// One pcg4d-3r round: the four dependent add-multiplies (`v0 += v1·v3; v1 += v2·v0; …`).
-fn emit_cell_round(fb: &mut FunctionBuilder, v: &mut [Value; 4]) {
-    let m = fb.ins().imul(v[1], v[3]);
-    v[0] = fb.ins().iadd(v[0], m);
-    let m = fb.ins().imul(v[2], v[0]);
-    v[1] = fb.ins().iadd(v[1], m);
-    let m = fb.ins().imul(v[0], v[1]);
-    v[2] = fb.ins().iadd(v[2], m);
-    let m = fb.ins().imul(v[1], v[2]);
-    v[3] = fb.ins().iadd(v[3], m);
-}
-
-/// Per-word xorshift `v ^= v >> 16` over the four words.
-fn emit_cell_xs(fb: &mut FunctionBuilder, v: &mut [Value; 4]) {
-    for x in v.iter_mut() {
-        let sh = fb.ins().ushr_imm(*x, 16);
-        *x = fb.ins().bxor(*x, sh);
+/// One squares64 draw for `(ctx.lane, src)`'s scalar counter — a straight-line
+/// transcription of `rng::draw48` (bit-identical draws): `ctr = (src << 36) + lane`, five
+/// middle-square rounds over `ctr * key` in native `I64` arithmetic, then the 48 consumed
+/// bits `((w >> 40) << 24) | ((w >> 8) & 0xFFFFFF)`.
+fn emit_draw48(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32) -> Value {
+    let lane64 = fb.ins().uextend(types::I64, ctx.lane);
+    let ctr = fb.ins().iadd_imm(lane64, ((src as u64) << 36) as i64);
+    let mut x = fb.ins().imul(ctr, ctx.key);
+    let y = x;
+    let z = fb.ins().iadd(x, ctx.key);
+    for w in [y, z, y] {
+        let xx = fb.ins().imul(x, x);
+        let a = fb.ins().iadd(xx, w);
+        x = fb.ins().rotl_imm(a, 32);
     }
+    let xx = fb.ins().imul(x, x);
+    let t = fb.ins().iadd(xx, z);
+    let xr = fb.ins().rotl_imm(t, 32);
+    let xx = fb.ins().imul(xr, xr);
+    let f = fb.ins().iadd(xx, y);
+    let fs = fb.ins().ushr_imm(f, 32);
+    let w = fb.ins().bxor(t, fs);
+    // bits48 = ((w >> 40) << 24) | ((w >> 8) & 0xFFFFFF)
+    let hi = fb.ins().ushr_imm(w, 40);
+    let hi = fb.ins().ishl_imm(hi, 24);
+    let lo = fb.ins().ushr_imm(w, 8);
+    let lo = fb.ins().band_imm(lo, 0xFF_FFFF);
+    fb.ins().bor(hi, lo)
 }
 
-/// The draw-cell hash for one `(lane, source)` — a straight-line transcription of
-/// [`crate::rng::cell`] (pcg4d-3r) in pure `I32` arithmetic, so the JIT's draws are bit-identical
-/// to the interpreter's.
-fn emit_cell(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32) -> [Value; 4] {
-    let srcv = fb.ins().iconst(types::I32, src as i32 as i64);
-    let mut v = [ctx.k0, ctx.k1, ctx.lane, srcv];
-    // LCG step per word (i32 mul/add wrap like the Rust `wrapping_*`).
-    for x in v.iter_mut() {
-        let m = fb.ins().imul_imm(*x, 1664525);
-        *x = fb.ins().iadd_imm(m, 1013904223);
-    }
-    emit_cell_round(fb, &mut v);
-    emit_cell_xs(fb, &mut v);
-    emit_cell_round(fb, &mut v);
-    emit_cell_xs(fb, &mut v);
-    emit_cell_round(fb, &mut v);
-    v
-}
-
-/// The consumed 48 bits of a word pair as an `I64` (`((w0 >> 8) << 24) | (w1 >> 8)`) — the
-/// integer the f64-uniform conversion and the Lemire bounded draw both start from.
-fn emit_bits48(fb: &mut FunctionBuilder, w0: Value, w1: Value) -> Value {
-    let a = fb.ins().ushr_imm(w0, 8);
-    let b = fb.ins().ushr_imm(w1, 8);
-    let a64 = fb.ins().uextend(types::I64, a);
-    let b64 = fb.ins().uextend(types::I64, b);
-    let hi = fb.ins().ishl_imm(a64, 24);
-    fb.ins().bor(hi, b64)
-}
-
-/// Uniform `f64` in `[0, 1)` from a word pair — mirrors `rng::unit_f64` (`bits · 2⁻⁴⁸`).
-fn emit_unit48(fb: &mut FunctionBuilder, w0: Value, w1: Value) -> Value {
-    let bits = emit_bits48(fb, w0, w1);
+/// Uniform `f64` in `[0, 1)` from a 48-bit draw — mirrors `bits · 2⁻⁴⁸`.
+fn emit_unit48(fb: &mut FunctionBuilder, bits: Value) -> Value {
     let f = fb.ins().fcvt_from_uint(types::F64, bits);
     let scale = fb.ins().f64const(1.0 / ((1u64 << 48) as f64));
     fb.ins().fmul(f, scale)
 }
 
 fn emit_uniform(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, lo: f64, hi: f64) -> Value {
-    let w = emit_cell(fb, ctx, src);
-    let u = emit_unit48(fb, w[0], w[1]);
+    let bits = emit_draw48(fb, ctx, src);
+    let u = emit_unit48(fb, bits);
     let loc = fb.ins().f64const(lo);
     let span = fb.ins().f64const(hi - lo);
     let scaled = fb.ins().fmul(span, u);
@@ -789,8 +837,7 @@ fn emit_uniform(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, lo: f64, hi: f
 /// `count >= 1`, so `count == 1` always gives `k == 0` (point mass at `lo`).
 fn emit_uniform_int(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, lo: f64, hi: f64) -> Value {
     let count = (hi - lo + 1.0).max(1.0) as u64;
-    let w = emit_cell(fb, ctx, src);
-    let bits = emit_bits48(fb, w[0], w[1]);
+    let bits = emit_draw48(fb, ctx, src);
     let bits_hi = fb.ins().ishl_imm(bits, 16);
     let count_c = fb.ins().iconst(types::I64, count as i64);
     let k = fb.ins().umulhi(bits_hi, count_c);
@@ -930,24 +977,30 @@ fn emit_trig_poly(fb: &mut FunctionBuilder, x: Value, is_cos: bool) -> Value {
     fb.ins().select(c3, q3, r2)
 }
 
-/// `N(mu, sigma^2)` via Box–Muller over lane pairs — a straight-line transcription of
-/// `rng::normal_pair` (bit-identical draws): hash the pair's EVEN lane (`lane & !1`), `u1` from
-/// words 0+1 offset by half a 48-bit-grid ulp (dodges `ln(0)`), `u2` from words 2+3; the even lane
-/// takes the cos branch, the odd lane the sin branch (selected by lane parity — both kernels are
-/// computed by the shared reduction anyway). `sqrt` is native; `ln`/trig are the shared inlined
-/// polynomials the interpreter also computes ([`emit_ln`]/[`emit_trig_poly`]).
-fn emit_normal(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, mu: f64, sigma: f64) -> Value {
+/// The Box–Muller pair for the lane pair whose EVEN lane is `even_ctx.lane` — a straight-line
+/// transcription of `rng::normal_pair` (bit-identical draws): one hash, `u1` from words 0+1
+/// offset by half a 48-bit-grid ulp (dodges `ln(0)`), `u2` from words 2+3; returns
+/// `(mu + sigma·r·cos θ, mu + sigma·r·sin θ)` — the even and odd lanes' values. `sqrt` is
+/// native; `ln`/trig are the shared inlined polynomials the interpreter also computes.
+fn emit_normal_pair(
+    fb: &mut FunctionBuilder,
+    even_ctx: DrawCtx,
+    src: u32,
+    mu: f64,
+    sigma: f64,
+) -> (Value, Value) {
     use std::f64::consts::TAU;
-    let even_lane = fb.ins().band_imm(ctx.lane, !1i64 & 0xFFFF_FFFF);
-    let pair_ctx = DrawCtx { lane: even_lane, ..ctx };
-    let w = emit_cell(fb, pair_ctx, src);
-    let bits1 = emit_bits48(fb, w[0], w[1]);
+    // u1 from the even lane's counter, u2 from the odd lane's — mirrors `rng::normal_pair`.
+    let bits1 = emit_draw48(fb, even_ctx, src);
     let f1 = fb.ins().fcvt_from_uint(types::F64, bits1);
     let half = fb.ins().f64const(0.5);
     let f1h = fb.ins().fadd(f1, half);
     let scale = fb.ins().f64const(1.0 / ((1u64 << 48) as f64));
     let u1 = fb.ins().fmul(f1h, scale); // (0, 1)
-    let u2 = emit_unit48(fb, w[2], w[3]);
+    let odd_lane = fb.ins().bor_imm(even_ctx.lane, 1);
+    let odd_ctx = DrawCtx { lane: odd_lane, ..even_ctx };
+    let bits2 = emit_draw48(fb, odd_ctx, src);
+    let u2 = emit_unit48(fb, bits2);
     let lnv = emit_ln(fb, u1);
     let neg2 = fb.ins().f64const(-2.0);
     let inner = fb.ins().fmul(neg2, lnv);
@@ -956,23 +1009,43 @@ fn emit_normal(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, mu: f64, sigma:
     let ang = fb.ins().fmul(tau, u2);
     // Argument is `TAU * u2 ∈ [0, 2π)` — always well inside the polynomial's range, so call it
     // directly (no range guard) to keep the hot Box–Muller draw lean.
+    let sig = fb.ins().f64const(sigma);
+    let mu_c = fb.ins().f64const(mu);
+    let scale_branch = |fb: &mut FunctionBuilder, b: Value| {
+        let rb = fb.ins().fmul(r, b);
+        let sb = fb.ins().fmul(sig, rb);
+        fb.ins().fadd(mu_c, sb)
+    };
     let c = emit_trig_poly(fb, ang, true);
+    let even = scale_branch(fb, c);
     let sn = emit_trig_poly(fb, ang, false);
+    let odd = scale_branch(fb, sn);
+    (even, odd)
+}
+
+/// `N(mu, sigma^2)` for a single-lane loop (cones too big to pair-unroll): hash the pair's EVEN
+/// lane (`lane & !1`), compute both branches via [`emit_normal_pair`], select by lane parity —
+/// the same values the unrolled loop computes, at twice the per-lane transcendental cost.
+fn emit_normal_single(
+    fb: &mut FunctionBuilder,
+    ctx: DrawCtx,
+    src: u32,
+    mu: f64,
+    sigma: f64,
+) -> Value {
+    let even_lane = fb.ins().band_imm(ctx.lane, !1i64 & 0xFFFF_FFFF);
+    let pair_ctx = DrawCtx { lane: even_lane, ..ctx };
+    let (even, odd) = emit_normal_pair(fb, pair_ctx, src, mu, sigma);
     let parity = fb.ins().band_imm(ctx.lane, 1);
     let is_odd = fb.ins().icmp_imm(IntCC::NotEqual, parity, 0);
-    let branch = fb.ins().select(is_odd, sn, c);
-    let rc = fb.ins().fmul(r, branch);
-    let sig = fb.ins().f64const(sigma);
-    let scaled = fb.ins().fmul(sig, rc);
-    let mu_c = fb.ins().f64const(mu);
-    fb.ins().fadd(mu_c, scaled)
+    fb.ins().select(is_odd, odd, even)
 }
 
 /// `Exp(rate)` via inverse-CDF `-ln(1 - u) / rate` — mirrors `rng::fill_exp` bit-for-bit
 /// (`1 - u ∈ [2⁻⁴⁸, 1]` keeps `ln` finite and in the polynomial's normal range).
 fn emit_exp(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, rate: f64) -> Value {
-    let w = emit_cell(fb, ctx, src);
-    let u = emit_unit48(fb, w[0], w[1]);
+    let bits = emit_draw48(fb, ctx, src);
+    let u = emit_unit48(fb, bits);
     let one = fb.ins().f64const(1.0);
     let om = fb.ins().fsub(one, u); // (0, 1]
     let lnv = emit_ln(fb, om);
@@ -986,8 +1059,8 @@ fn emit_exp(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, rate: f64) -> Valu
 /// `p == 1` makes it `-inf`, so every draw floors to `0`, matching the interpreter's point mass.
 fn emit_geometric(fb: &mut FunctionBuilder, ctx: DrawCtx, src: u32, p: f64) -> Value {
     let denom = (1.0 - p).ln();
-    let w = emit_cell(fb, ctx, src);
-    let u = emit_unit48(fb, w[0], w[1]);
+    let bits = emit_draw48(fb, ctx, src);
+    let u = emit_unit48(fb, bits);
     let one = fb.ins().f64const(1.0);
     let om = fb.ins().fsub(one, u); // (0, 1]
     let lnv = emit_ln(fb, om);

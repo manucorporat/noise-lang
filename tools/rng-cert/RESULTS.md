@@ -22,7 +22,14 @@ avalanche structure: `avmap` / `avrow`; throughput: `bench`.
 | pcg4d | 391 | 1563 | 4.0× | ~7 |
 | pcg4d-f | 325 | 1302 (976 if w0 dropped) | 3.4× | ~12 |
 | **pcg4d-3r** | 236 | 942 | 2.4× | ~10 |
-| squares32 | 211 | 211 | **0.54×** | ~70–90 (u64 mul emulation) |
+| squares32 | 211 | 211¹ | **0.54×**¹ | ~70–90 (u64 mul emulation) |
+
+¹ Understated ~4×: the bench's `words()` computed four squares32 calls per cell but the
+print counted one word (`out_words() = 1`), and serial-accumulator loops hide the M4's
+multiply-pipe overlap. Re-measured 2026-07-14 in independent per-lane fill shape:
+~850 M squares32 calls/s; f64 uniform via squares64 ≈ 652 M draws/s vs pcg4d-3r's 478 —
+CPU-neutral or better for the interim; ~0.68× on post-B f32 uniforms (876 vs 1290 M/s).
+See PLAN-PERF-3 item 5.
 
 ### Reading
 
@@ -107,13 +114,47 @@ avalanche structure: `avmap` / `avrow`; throughput: `bench`.
   the upper half); the round-2 Squares failure at 256 GB is attributed to it. Re-running
   with a construction-compliant key (`0xf7c3b1a9e6d5c8b3`).
 
-### Pending
+## 2026-07-14 — criterion 8 CLOSED
 
-- `squares` (good key) 1 TB run in flight. It doubles as the harness exoneration: a
-  certified generator through the exact packing/stream. Clean → **Squares is the
-  generator, per the ratified fallback protocol** (both custom candidates are out);
-  another 256 GB failure → the packing/harness is indicted instead and everything
-  re-runs.
-- The Track C integration (landed on pcg4d-3r) keeps the generator behind `rng::cell` /
-  the emitters' `emit_cell`; a swap to Squares touches those functions plus the
-  consumption schedule (one u32 per counter, sequential per source) and re-pins KATs.
+**squares32 (key `0xf7c3b1a9e6d5c8b3`, sequential counters, consumed-bit stream):
+1 TB, ZERO anomalies** — no FAIL, no suspicious, no unusual, across 401 test results
+(4512 s). The same harness and packing caught pcg4d-3r and pcg4d-3rf at 256 GB, so this
+simultaneously exonerates the instrument and confirms those failures. Final criterion-8
+standings:
+
+| generator | criterion 8 (PractRand, consumed stream) |
+|---|---|
+| pcg4d-3r | **FAIL** at 256 GB (`[Low1/32]` FPF/TMFn/DC6 — low consumed bits) |
+| pcg4d-3rf | **FAIL** at 256 GB (identical family; fmix32 relocates, can't remove) |
+| **squares32** (valid key) | **PASS — 1 TB clean, zero anomalies** |
+
+**Squares qualifies as the generator per the ratified fallback protocol.** The swap is
+NOT executed — owner decision pending (the tree remains on pcg4d-3r; the generator sits
+behind `rng::cell`/`CellStream` + the two `emit_cell`s + KATs).
+
+## 2026-07-14 — SWAP EXECUTED (owner go)
+
+The engine now runs **squares64** end-to-end (interpreter, JIT, wasm emitter), one call
+per draw counter, 48 consumed bits per call, per-seed construction-compliant keys
+(`rng::Key::from_seed` implements the key rules and a unit test asserts compliance for
+arbitrary seeds). Corpus gate re-run: **4130 ms vs 4351 pre-Track-C baseline (−5.1%)** —
+Track C's gate closes better-than-baseline. Cross-backend bitwise conformance green.
+
+Paperwork status:
+- Criteria 2–7 battery re-run under the valid key: **7/7 PASS** (the criterion-1 line
+  flags only ctr bits 58–63 — unreachable below 2⁵⁸ draws, clean under the amended
+  reachable-domain criterion; bits 32–57 worst 0.005).
+- Criterion-8 re-run over the **engine's exact consumption** (squares64, 48-of-64 bits,
+  sequential per-source counters, the engine's seed-0 key): `stream-sq64-engine` →
+  **1 TB PASS** (4092 s): zero FAIL, zero suspicious; three isolated `unusual` grades at
+  intermediate checkpoints (p ≈ 3e-3…3e-4 — the expected false-positive rate over ~2000
+  test evaluations), and the final 1 TB block reports **"no anomalies in 401 test
+  results"** — cleared under the frozen 4×-clearance rule.
+
+## C0 CLOSED — 2026-07-14
+
+Every criterion adjudicated; the engine ships **squares64** with seeded
+construction-compliant keys, certified over its exact consumption stream at 1 TB.
+The harness (this crate) stays as the re-certification instrument for any future
+generator or consumption-schedule change — with its three recorded defects as the
+cautionary tale for why the certified reference must always run alongside.

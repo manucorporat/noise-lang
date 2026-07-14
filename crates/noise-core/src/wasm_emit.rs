@@ -87,13 +87,7 @@ const K1: u32 = 3; // param: draw-key word 1
 const LANE0: u32 = 4; // param: first global lane index
 const I: u32 = 5; // loop counter (sample index)
 const LANE: u32 = 6; // current global lane
-// The four hash words of the cell being computed (i32) — scratch for `emit_cell`, shared by every
-// source (a cell is computed atomically: set from the key/lane/source, mixed in place, consumed).
-const V0: u32 = 7;
-const V1: u32 = 8;
-const V2: u32 = 9;
-const V3: u32 = 10;
-const N_I32_LOCALS: u32 = 6; // I, LANE, V0..V3
+const N_I32_LOCALS: u32 = 2; // I, LANE
 
 /// 8-byte aligned access (f64/i64) into memory 0 at an absolute address already on the stack.
 fn mem8(offset: u64) -> MemArg {
@@ -109,11 +103,32 @@ fn f64c(x: f64) -> Ieee64 {
     Ieee64::from(x)
 }
 
-/// Scratch locals the inlined transcendentals reuse: 2 i64 + 6 f64, shared across every `ln`/`sin`/
-/// `cos` evaluation (a transcendental is emitted atomically — it `local.set`s its input, computes
-/// from these, and leaves one result — so a single shared pool is safe, like the xoshiro scratch).
-const T_I64: u32 = 2;
-const T_F64: u32 = 6;
+/// Scratch locals: 3 i64 shared by the inlined squares64 draw and `ln`'s bit-surgery (both are
+/// emitted atomically, so one pool is safe) plus the persistent 64-bit key (`ti + 3`, set once in
+/// the prologue); 8 f64 — `ln`/trig scratch in `tf .. tf+5`, the Box–Muller radius at `tf + 6`
+/// and the Box–Muller angle at `tf + 7` (both must survive the pair's two trig evaluations,
+/// which consume their input local as the quadrant accumulator).
+const T_I64: u32 = 4;
+const T_F64: u32 = 8;
+
+/// Cones at most this many nodes pair-unroll the kernel loop (two lanes per iteration, so a
+/// `Normal`'s hash + ln + trig pair is computed once and split across the even/odd lane); larger
+/// ones keep the single-lane parity-select loop — the unroll doubles the value-slot local pool,
+/// and huge straight-line bodies are memory-bound anyway. Mirrors `jit::PAIR_UNROLL_MAX_NODES`.
+const PAIR_UNROLL_MAX_NODES: usize = 2048;
+
+/// How the lane being emitted relates to the Box–Muller lane pairing (PLAN-PERF-3 item 2).
+/// `Even` banks each `Normal` node's odd-lane value into a dedicated local (`bank[id]`); `Odd`
+/// reads it back; `Single` (the non-unrolled loop) hashes the pair's even lane and
+/// parity-selects a branch per lane — same values, twice the transcendental work.
+enum PairMode {
+    Single,
+    Even {
+        bank: HashMap<RvId, u32>,
+        next_bank: u32,
+    },
+    Odd(HashMap<RvId, u32>),
+}
 
 /// Per-emission constants shared across the whole kernel body.
 struct Ctx<'g> {
@@ -122,7 +137,7 @@ struct Ctx<'g> {
     fbase: u32,
     /// Distinct nodes per stream (each stream gets its own contiguous block of f64 slots).
     cone: u32,
-    /// Base index of the [`T_I64`] transcendental i64 scratch locals.
+    /// Base index of the [`T_I64`] i64 scratch locals (the persistent key sits at `ti + 3`).
     ti: u32,
     /// Base index of the [`T_F64`] transcendental f64 scratch locals.
     tf: u32,
@@ -253,16 +268,20 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId]) -> Vec<u8> {
     exports.export("kernel", ExportKind::Func, N_IMPORTS);
 
     // --- code: declare locals, then emit the loop body ---
-    let f64_count = cone; // one value slot per node
+    // Pair-unrolled kernels need two value-slot pools (even + odd lane memos) plus a bank pool
+    // for the odd lane's Normal values (≤ one per node) — 3×cone stays far under engine local
+    // limits at the unroll cap.
+    let unroll = (cone as usize) <= PAIR_UNROLL_MAX_NODES;
+    let f64_count = if unroll { 3 * cone } else { cone };
     let mut func = Function::new([
-        (N_I32_LOCALS, ValType::I32),      // I, LANE, V0..V3 (hash scratch)
-        (T_I64, ValType::I64),             // transcendental i64 scratch
+        (N_I32_LOCALS, ValType::I32),      // I, LANE
+        (T_I64, ValType::I64),             // draw/ln scratch + the persistent 64-bit key
         (T_F64 + f64_count, ValType::F64), // transcendental f64 scratch + node value slots
     ]);
-    // Layout (indices): params 0..4, then the i32 block (I, LANE, V0..V3), then `T_I64`
-    // transcendental i64 scratch, then the f64 block: `T_F64` transcendental scratch, then the
-    // node value slots. Each group is contiguous in declaration order.
-    let ti = LANE0 + 1 + N_I32_LOCALS; // transcendental i64 scratch (after the i32 block)
+    // Layout (indices): params 0..4, then the i32 block (I, LANE), then the i64 block (scratch +
+    // key), then the f64 block: `T_F64` transcendental scratch, then the node value slots. Each
+    // group is contiguous in declaration order.
+    let ti = LANE0 + 1 + N_I32_LOCALS; // i64 scratch (after the i32 block)
     let tf = ti + T_I64; // first f64 local (transcendental f64 scratch)
     let ctx = Ctx {
         graph,
@@ -274,7 +293,7 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId]) -> Vec<u8> {
     };
     {
         let mut s = func.instructions();
-        emit_kernel(&mut s, &ctx, roots);
+        emit_kernel(&mut s, &ctx, roots, unroll);
     }
 
     let mut code = CodeSection::new();
@@ -334,35 +353,77 @@ pub fn emit_for_roots(graph: &RvGraph, roots: &[RvId], draws: usize) -> Option<V
     Some(emit_roots(graph, roots))
 }
 
-/// The kernel skeleton: a counted loop emitting one lane per iteration (each lane computing every
-/// root from one shared memo — joint draws — into its BATCH-strided column). Stateless — nothing
-/// to load or store around the loop. Mirrors `jit::build_kernel`.
-fn emit_kernel(s: &mut InstructionSink, ctx: &Ctx, roots: &[RvId]) {
+/// The kernel skeleton: a counted loop (each lane computing every root from one shared memo —
+/// joint draws — into its BATCH-strided column). Stateless — nothing to load or store around the
+/// loop. Mirrors `jit::build_kernel`, including the pair-unroll: small cones emit TWO lanes per
+/// iteration so a `Normal`'s Box–Muller pair — hash, ln, both trig branches — is computed once
+/// and split cos/sin across the even/odd lane (`n` is always the even BATCH from every runner);
+/// large cones keep the single-lane loop with parity-select normals — same draws.
+fn emit_kernel(s: &mut InstructionSink, ctx: &Ctx, roots: &[RvId], unroll: bool) {
+    // Reassemble the squares key: two u32 params → one persistent i64 local.
+    let k64 = ctx.ti + 3;
+    s.local_get(K1)
+        .i64_extend_i32_u()
+        .i64_const(32)
+        .i64_shl()
+        .local_get(K0)
+        .i64_extend_i32_u()
+        .i64_or()
+        .local_set(k64);
     s.i32_const(0).local_set(I);
     s.local_get(LANE0).local_set(LANE);
+    let step = if unroll { 2 } else { 1 };
 
-    // block { loop { if I >= N: break; <body>; I += 1; LANE += 1; continue } }
+    // block { loop { if I >= N: break; <body>; I += step; LANE += step; continue } }
     s.block(BlockType::Empty);
     s.loop_(BlockType::Empty);
     s.local_get(I).local_get(N).i32_ge_s().br_if(1); // break to the block end
 
-    // One memo per lane, shared across all roots (joint draws).
-    let mut memo: HashMap<RvId, u32> = HashMap::new();
+    // Store this lane's roots: address of out[I + lane_off] pushed before the value so
+    // f64.store sees both; root `r`'s column stride is the constant store offset.
+    let emit_lane = |s: &mut InstructionSink,
+                     memo: &mut HashMap<RvId, u32>,
+                     slot: &mut u32,
+                     pair: &mut PairMode,
+                     lane_off: u64| {
+        for (r, &root) in roots.iter().enumerate() {
+            s.local_get(OUT)
+                .local_get(I)
+                .i32_const(8)
+                .i32_mul()
+                .i32_add();
+            let lroot = emit_node(s, ctx, root, memo, slot, pair);
+            s.local_get(lroot)
+                .f64_store(mem8((r * BATCH) as u64 * 8 + lane_off * 8));
+        }
+    };
+
     let mut slot = 0u32;
-    for (r, &root) in roots.iter().enumerate() {
-        // Address of out[I]: out + I * 8, pushed before the value so f64.store sees both; root
-        // `r`'s column stride is the constant store offset `r * BATCH * 8`.
-        s.local_get(OUT)
-            .local_get(I)
-            .i32_const(8)
-            .i32_mul()
-            .i32_add();
-        // Emit this root's draw (stack-neutral), leaving its value in a local.
-        let lroot = emit_node(s, ctx, root, &mut memo, &mut slot);
-        s.local_get(lroot).f64_store(mem8((r * BATCH * 8) as u64));
+    if unroll {
+        // Even lane: fresh memo; Normal nodes bank their sin branch (bank pool sits above the
+        // two value-slot pools).
+        let mut memo: HashMap<RvId, u32> = HashMap::new();
+        let mut pair = PairMode::Even {
+            bank: HashMap::new(),
+            next_bank: ctx.fbase + 2 * ctx.cone,
+        };
+        emit_lane(s, &mut memo, &mut slot, &mut pair, 0);
+        // Odd lane: LANE += 1, fresh memo (slots continue into the second pool), Normal nodes
+        // read the bank.
+        s.local_get(LANE).i32_const(1).i32_add().local_set(LANE);
+        let PairMode::Even { bank, .. } = pair else {
+            unreachable!()
+        };
+        let mut pair = PairMode::Odd(bank);
+        let mut memo: HashMap<RvId, u32> = HashMap::new();
+        emit_lane(s, &mut memo, &mut slot, &mut pair, 1);
+    } else {
+        let mut memo: HashMap<RvId, u32> = HashMap::new();
+        let mut pair = PairMode::Single;
+        emit_lane(s, &mut memo, &mut slot, &mut pair, 0);
     }
 
-    s.local_get(I).i32_const(1).i32_add().local_set(I);
+    s.local_get(I).i32_const(step).i32_add().local_set(I);
     s.local_get(LANE).i32_const(1).i32_add().local_set(LANE);
     s.br(0); // continue the loop
     s.end(); // end loop
@@ -375,21 +436,34 @@ fn emit_kernel(s: &mut InstructionSink, ctx: &Ctx, roots: &[RvId]) {
 /// *draw*: one hash per node per lane). Children are emitted first (each `local.set`s its slot and
 /// leaves the stack untouched); the parent then `local.get`s them. Returns the local index holding
 /// this node's value.
+#[allow(clippy::too_many_arguments)] // the emitter's full walking state; a struct would just rename it
 fn emit_node(
     s: &mut InstructionSink,
     ctx: &Ctx,
     id: RvId,
     memo: &mut HashMap<RvId, u32>,
     slot: &mut u32,
+    pair: &mut PairMode,
 ) -> u32 {
     if let Some(&l) = memo.get(&id) {
         return l;
     }
     // Each branch leaves exactly one f64 on the stack; we `local.set` it into this node's slot below.
     match ctx.graph.node(id) {
-        RvNode::Src(Source::Uniform(u)) => emit_uniform(s, id.0, u.lo, u.hi),
+        RvNode::Src(Source::Uniform(u)) => emit_uniform(s, ctx, id.0, u.lo, u.hi),
         RvNode::Src(Source::UniformInt { lo, hi }) => emit_uniform_int(s, ctx, id.0, *lo, *hi),
-        RvNode::Src(Source::Normal { mu, sigma }) => emit_normal(s, ctx, id.0, *mu, *sigma),
+        RvNode::Src(Source::Normal { mu, sigma }) => match pair {
+            PairMode::Single => emit_normal_single(s, ctx, id.0, *mu, *sigma),
+            PairMode::Even { bank, next_bank } => {
+                let bank_local = *next_bank;
+                *next_bank += 1;
+                bank.insert(id, bank_local);
+                emit_normal_pair(s, ctx, id.0, *mu, *sigma, bank_local);
+            }
+            PairMode::Odd(bank) => {
+                s.local_get(bank[&id]);
+            }
+        },
         RvNode::Src(Source::Exp { rate }) => emit_exp(s, ctx, id.0, *rate),
         RvNode::Src(Source::Geometric { p }) => emit_geometric(s, ctx, id.0, *p),
         RvNode::Src(Source::Poisson { .. }) => unreachable!("profitable() excludes Poisson"),
@@ -397,7 +471,7 @@ fn emit_node(
             unreachable!("profitable() excludes the array-valued draw nodes")
         }
         RvNode::Gather { elems, index } => {
-            let lx = emit_node(s, ctx, *index, memo, slot);
+            let lx = emit_node(s, ctx, *index, memo, slot, pair);
             match ctx.gather_tables.get(&id) {
                 // Const table (strategy A): round ties-away, clamp to [0, last], one indexed
                 // 8-byte load from the data segment — bit-identical to the interpreter's
@@ -440,7 +514,7 @@ fn emit_node(
                 None => {
                     let les: Vec<u32> = elems
                         .iter()
-                        .map(|&e| emit_node(s, ctx, e, memo, slot))
+                        .map(|&e| emit_node(s, ctx, e, memo, slot, pair))
                         .collect();
                     let last = les.len() - 1;
                     s.f64_const(f64c(f64::NAN)); // NaN-guard arm
@@ -462,28 +536,28 @@ fn emit_node(
             s.f64_const(f64c(if *b { 1.0 } else { 0.0 }));
         }
         RvNode::Unary(op, a) => {
-            let la = emit_node(s, ctx, *a, memo, slot);
+            let la = emit_node(s, ctx, *a, memo, slot, pair);
             emit_unary(s, ctx, *op, la);
         }
         RvNode::Binary(BinOp::Pow, a, b) => {
-            let la = emit_node(s, ctx, *a, memo, slot);
+            let la = emit_node(s, ctx, *a, memo, slot, pair);
             match const_int_exponent(ctx.graph, *b) {
                 Some(k) => emit_pow(s, la, k), // repeated multiply, no call
                 None => {
-                    let lb = emit_node(s, ctx, *b, memo, slot);
+                    let lb = emit_node(s, ctx, *b, memo, slot, pair);
                     s.local_get(la).local_get(lb).call(POW);
                 }
             }
         }
         RvNode::Binary(op, a, b) => {
-            let la = emit_node(s, ctx, *a, memo, slot);
-            let lb = emit_node(s, ctx, *b, memo, slot);
+            let la = emit_node(s, ctx, *a, memo, slot, pair);
+            let lb = emit_node(s, ctx, *b, memo, slot, pair);
             emit_binary(s, *op, la, lb);
         }
         RvNode::Select { cond, a, b } => {
-            let lc = emit_node(s, ctx, *cond, memo, slot);
-            let la = emit_node(s, ctx, *a, memo, slot);
-            let lb = emit_node(s, ctx, *b, memo, slot);
+            let lc = emit_node(s, ctx, *cond, memo, slot, pair);
+            let la = emit_node(s, ctx, *a, memo, slot, pair);
+            let lb = emit_node(s, ctx, *b, memo, slot, pair);
             // wasm `select` pops [a, b, cond_i32] → a if cond != 0 else b.
             s.local_get(la)
                 .local_get(lb)
@@ -500,83 +574,90 @@ fn emit_node(
     l
 }
 
-/// The draw-cell hash for one `(lane, source)` — the wasm transcription of [`crate::rng::cell`]
-/// (pcg4d-3r) in pure i32 arithmetic, mixed in the `V0..V3` locals: LCG per word, then three
-/// dependent-product rounds with a per-word xorshift between. Leaves the words in `V0..V3`.
-fn emit_cell(s: &mut InstructionSink, src: u32) {
-    emit_cell_at(s, src, false);
+/// Which lane's counter a draw uses: the lane itself (scalar fills), or the Box–Muller
+/// pair's even (`lane & !1`) / odd (`lane | 1`) member.
+#[derive(Clone, Copy, PartialEq)]
+enum LaneSel {
+    This,
+    Even,
+    Odd,
 }
 
-/// [`emit_cell`], hashing either this lane or the pair's even lane (`LANE & !1` — Box–Muller
-/// pairing, see [`emit_normal`]).
-fn emit_cell_at(s: &mut InstructionSink, src: u32, even_lane: bool) {
-    // v = {k0, k1, lane, src}, each through v*1664525 + 1013904223 (i32 ops wrap like Rust).
-    for (v, init) in [(V0, K0), (V1, K1), (V2, LANE)] {
-        s.local_get(init);
-        if v == V2 && even_lane {
+/// One squares64 draw — the wasm transcription of [`crate::rng::draw48`] (bit-identical):
+/// `ctr = (src << 36) + lane`, five middle-square rounds over `ctr * key` in native i64
+/// arithmetic, leaving the 48 consumed bits `((w >> 40) << 24) | ((w >> 8) & 0xFFFFFF)` on
+/// the stack as an i64. Computes through the `X/Y/Z` i64 scratch (`ti .. ti+2`).
+fn emit_draw48(s: &mut InstructionSink, ctx: &Ctx, src: u32, sel: LaneSel) {
+    let (x, y, z) = (ctx.ti, ctx.ti + 1, ctx.ti + 2);
+    let k64 = ctx.ti + 3;
+    // ctr = (src << 36) + (lane per sel), then x = ctr * key; y = x; z = x + key.
+    s.local_get(LANE);
+    match sel {
+        LaneSel::This => {}
+        LaneSel::Even => {
             s.i32_const(!1).i32_and();
         }
-        s.i32_const(1664525)
-            .i32_mul()
-            .i32_const(1013904223)
-            .i32_add()
-            .local_set(v);
-    }
-    s.i32_const(src as i32)
-        .i32_const(1664525)
-        .i32_mul()
-        .i32_const(1013904223)
-        .i32_add()
-        .local_set(V3);
-    for round in 0..3 {
-        if round > 0 {
-            for v in [V0, V1, V2, V3] {
-                s.local_get(v)
-                    .local_get(v)
-                    .i32_const(16)
-                    .i32_shr_u()
-                    .i32_xor()
-                    .local_set(v);
-            }
-        }
-        for (dst, a, b) in [(V0, V1, V3), (V1, V2, V0), (V2, V0, V1), (V3, V1, V2)] {
-            s.local_get(dst)
-                .local_get(a)
-                .local_get(b)
-                .i32_mul()
-                .i32_add()
-                .local_set(dst);
+        LaneSel::Odd => {
+            s.i32_const(1).i32_or();
         }
     }
-}
-
-/// The consumed 48 bits of a word pair as an i64 on the stack (`((w0 >> 8) << 24) | (w1 >> 8)`)
-/// — mirrors the integer `rng::unit_f64` / `jit::emit_bits48` start from.
-fn emit_bits48(s: &mut InstructionSink, w0: u32, w1: u32) {
-    s.local_get(w0)
-        .i32_const(8)
-        .i32_shr_u()
-        .i64_extend_i32_u()
+    s.i64_extend_i32_u()
+        .i64_const(((src as u64) << 36) as i64)
+        .i64_add();
+    s.local_get(k64).i64_mul().local_tee(x).local_set(y);
+    s.local_get(x).local_get(k64).i64_add().local_set(z);
+    // Three rounds: x = rotl32(x*x + {y, z, y}).
+    for w in [y, z, y] {
+        s.local_get(x)
+            .local_get(x)
+            .i64_mul()
+            .local_get(w)
+            .i64_add()
+            .i64_const(32)
+            .i64_rotl()
+            .local_set(x);
+    }
+    // t = x*x + z (stashed in z — its last use); x = rotl32(t); w = t ^ ((x*x + y) >> 32).
+    s.local_get(x)
+        .local_get(x)
+        .i64_mul()
+        .local_get(z)
+        .i64_add()
+        .local_set(z);
+    s.local_get(z).i64_const(32).i64_rotl().local_set(x);
+    s.local_get(z);
+    s.local_get(x)
+        .local_get(x)
+        .i64_mul()
+        .local_get(y)
+        .i64_add()
+        .i64_const(32)
+        .i64_shr_u()
+        .i64_xor();
+    // bits48 = ((w >> 40) << 24) | ((w >> 8) & 0xFFFFFF)   (w stashed in x)
+    s.local_tee(x)
+        .i64_const(40)
+        .i64_shr_u()
         .i64_const(24)
         .i64_shl()
-        .local_get(w1)
-        .i32_const(8)
-        .i32_shr_u()
-        .i64_extend_i32_u()
+        .local_get(x)
+        .i64_const(8)
+        .i64_shr_u()
+        .i64_const(0xFF_FFFF)
+        .i64_and()
         .i64_or();
 }
 
-/// Uniform `f64` in `[0, 1)` from a word pair — mirrors `rng::unit_f64` (`bits · 2⁻⁴⁸`).
-fn emit_unit48(s: &mut InstructionSink, w0: u32, w1: u32) {
-    emit_bits48(s, w0, w1);
+/// Uniform `f64` in `[0, 1)` from the 48-bit draw on the stack — `bits · 2⁻⁴⁸`.
+fn emit_unit48(s: &mut InstructionSink) {
     s.f64_convert_i64_u()
         .f64_const(f64c(1.0 / ((1u64 << 48) as f64)))
         .f64_mul();
 }
 
-fn emit_uniform(s: &mut InstructionSink, src: u32, lo: f64, hi: f64) {
-    emit_cell(s, src);
-    emit_unit48(s, V0, V1);
+fn emit_uniform(s: &mut InstructionSink, ctx: &Ctx, src: u32, lo: f64, hi: f64) {
+    emit_draw48(s, ctx, src, LaneSel::This);
+    emit_unit48(s);
     s.f64_const(f64c(hi - lo))
         .f64_mul()
         .f64_const(f64c(lo))
@@ -595,10 +676,10 @@ const LEMIRE_MAX_COUNT: u64 = 1 << 39;
 /// identity), and every term fits i64 for `count < 2^39`.
 fn emit_uniform_int(s: &mut InstructionSink, ctx: &Ctx, src: u32, lo: f64, hi: f64) {
     let count = (hi - lo + 1.0).max(1.0);
-    emit_cell(s, src);
     if (count as u64) < LEMIRE_MAX_COUNT {
-        let bits = ctx.ti; // i64 scratch
-        emit_bits48(s, V0, V1);
+        // The draw's own scratch (`ti..ti+2`) is free once the bits are on the stack.
+        let bits = ctx.ti;
+        emit_draw48(s, ctx, src, LaneSel::This);
         s.local_set(bits);
         s.local_get(bits)
             .i64_const(24)
@@ -619,7 +700,8 @@ fn emit_uniform_int(s: &mut InstructionSink, ctx: &Ctx, src: u32, lo: f64, hi: f
             .f64_const(f64c(lo))
             .f64_add();
     } else {
-        emit_unit48(s, V0, V1);
+        emit_draw48(s, ctx, src, LaneSel::This);
+        emit_unit48(s);
         s.f64_const(f64c(count))
             .f64_mul()
             .f64_floor()
@@ -775,47 +857,97 @@ fn emit_trig_poly(s: &mut InstructionSink, ctx: &Ctx, tx: u32, is_cos: bool) {
     s.local_get(tx);
 }
 
-/// `N(mu, sigma^2)` via Box–Muller over lane pairs — mirrors `rng::normal_pair` bit-for-bit:
-/// hash the pair's EVEN lane (`LANE & !1`), `u1` from words 0+1 offset by half a 48-bit-grid ulp,
-/// `u2` from words 2+3; even lane takes the cos branch, odd the sin branch (parity select).
-/// `ln`/trig are the shared inlined polynomials; `sqrt` is native.
-fn emit_normal(s: &mut InstructionSink, ctx: &Ctx, src: u32, mu: f64, sigma: f64) {
+/// The shared head of a Box–Muller pair — mirrors `rng::normal_pair` bit-for-bit: hash (the
+/// caller decides whether `LANE` is already even or must be masked), `u1` from words 0+1 offset
+/// by half a 48-bit-grid ulp, `u2` from words 2+3; leaves `r = sqrt(-2·ln u1)` in the `tf + 6`
+/// scratch and the angle `TAU·u2` in `ctx.tf` (ready for [`emit_trig_poly`]).
+fn emit_normal_head(s: &mut InstructionSink, ctx: &Ctx, src: u32) {
     use std::f64::consts::TAU;
-    emit_cell_at(s, src, true);
-    // r = sqrt(-2 * ln((bits48 + 0.5) * 2^-48))
-    emit_bits48(s, V0, V1);
+    // r = sqrt(-2 * ln((u1_bits + 0.5) * 2^-48)) — u1 from the pair's EVEN lane counter.
+    emit_draw48(s, ctx, src, LaneSel::Even);
     s.f64_convert_i64_u()
         .f64_const(f64c(0.5))
         .f64_add()
         .f64_const(f64c(1.0 / ((1u64 << 48) as f64)))
         .f64_mul();
     emit_ln(s, ctx);
-    s.f64_const(f64c(-2.0)).f64_mul().f64_sqrt();
-    // z = parity-selected Box–Muller branch of angle TAU * u2 ∈ [0, 2π) — always inside the
-    // polynomial's range, so call `emit_trig_poly` directly (skip the range guard).
-    emit_unit48(s, V2, V3);
-    s.f64_const(f64c(TAU)).f64_mul().local_set(ctx.tf);
-    // wasm select pops [t1, t2, cond] and picks t1 when cond != 0: push cos (even) first.
-    // `emit_trig_poly` consumes its input local as the quadrant accumulator, so recompute the
-    // angle (the cell words are still live in V2/V3) before the sin call.
-    emit_trig_poly(s, ctx, ctx.tf, true); // cos branch (even lanes)
-    emit_unit48(s, V2, V3);
-    s.f64_const(f64c(TAU)).f64_mul().local_set(ctx.tf);
-    emit_trig_poly(s, ctx, ctx.tf, false); // sin branch (odd lanes)
-    s.local_get(LANE).i32_const(1).i32_and().i32_eqz();
-    s.select(); // (lane even) ? cos : sin
-    s.f64_mul()
+    s.f64_const(f64c(-2.0)).f64_mul().f64_sqrt().local_set(BM_R(ctx));
+    // Angle TAU * u2 ∈ [0, 2π) — u2 from the ODD lane's counter; banked in the ANG local
+    // (`emit_trig_poly` consumes its input local, and the pair needs the angle twice).
+    // Always inside the polynomial's range, so callers use `emit_trig_poly` directly.
+    emit_draw48(s, ctx, src, LaneSel::Odd);
+    emit_unit48(s);
+    s.f64_const(f64c(TAU)).f64_mul().local_set(BM_ANG(ctx));
+    s.local_get(BM_ANG(ctx)).local_set(ctx.tf);
+}
+
+/// Re-stage the banked Box–Muller angle into the trig input local (`emit_trig_poly`
+/// consumes its input as the quadrant accumulator).
+fn emit_restage_angle(s: &mut InstructionSink, ctx: &Ctx) {
+    s.local_get(BM_ANG(ctx)).local_set(ctx.tf);
+}
+
+/// `mu + sigma * (r * <branch on stack>)` — the tail both branches share.
+fn emit_normal_tail(s: &mut InstructionSink, ctx: &Ctx, mu: f64, sigma: f64) {
+    s.local_get(BM_R(ctx))
+        .f64_mul()
         .f64_const(f64c(sigma))
         .f64_mul()
         .f64_const(f64c(mu))
         .f64_add();
 }
 
+/// The Box–Muller radius scratch local (survives both trig evaluations).
+#[allow(non_snake_case)]
+fn BM_R(ctx: &Ctx) -> u32 {
+    ctx.tf + 6
+}
+
+/// The Box–Muller angle scratch local (same lifetime story as the radius).
+#[allow(non_snake_case)]
+fn BM_ANG(ctx: &Ctx) -> u32 {
+    ctx.tf + 7
+}
+
+/// `N(mu, sigma^2)` for the single-lane loop (cones too big to pair-unroll): hash the pair's
+/// EVEN lane (`LANE & !1`), compute both branches, select by lane parity — the same values the
+/// unrolled loop computes, at twice the per-lane transcendental cost.
+fn emit_normal_single(s: &mut InstructionSink, ctx: &Ctx, src: u32, mu: f64, sigma: f64) {
+    emit_normal_head(s, ctx, src);
+    // wasm select pops [t1, t2, cond] and picks t1 when cond != 0: push cos (even) first.
+    emit_trig_poly(s, ctx, ctx.tf, true); // cos branch (even lanes)
+    emit_restage_angle(s, ctx);
+    emit_trig_poly(s, ctx, ctx.tf, false); // sin branch (odd lanes)
+    s.local_get(LANE).i32_const(1).i32_and().i32_eqz();
+    s.select(); // (lane even) ? cos : sin
+    emit_normal_tail(s, ctx, mu, sigma);
+}
+
+/// `N(mu, sigma^2)` for the pair-unrolled loop's EVEN phase: `LANE` is already the pair's even
+/// lane, so hash it directly, bank the odd lane's finished value (`mu + sigma·r·sin θ`) into
+/// `bank_local`, and leave the even lane's (`… cos θ`) on the stack.
+fn emit_normal_pair(
+    s: &mut InstructionSink,
+    ctx: &Ctx,
+    src: u32,
+    mu: f64,
+    sigma: f64,
+    bank_local: u32,
+) {
+    emit_normal_head(s, ctx, src);
+    emit_trig_poly(s, ctx, ctx.tf, false); // sin branch → the odd lane's value, banked
+    emit_normal_tail(s, ctx, mu, sigma);
+    s.local_set(bank_local);
+    emit_restage_angle(s, ctx);
+    emit_trig_poly(s, ctx, ctx.tf, true); // cos branch → the even lane's value, left on stack
+    emit_normal_tail(s, ctx, mu, sigma);
+}
+
 /// `Exp(rate)` via inverse-CDF `-ln(1 - u) / rate` — mirrors `rng::fill_exp` bit-for-bit.
 fn emit_exp(s: &mut InstructionSink, ctx: &Ctx, src: u32, rate: f64) {
-    emit_cell(s, src);
     s.f64_const(f64c(1.0));
-    emit_unit48(s, V0, V1);
+    emit_draw48(s, ctx, src, LaneSel::This);
+    emit_unit48(s);
     s.f64_sub();
     emit_ln(s, ctx);
     s.f64_neg().f64_const(f64c(rate)).f64_div();
@@ -826,9 +958,9 @@ fn emit_exp(s: &mut InstructionSink, ctx: &Ctx, src: u32, rate: f64) {
 /// (the point mass).
 fn emit_geometric(s: &mut InstructionSink, ctx: &Ctx, src: u32, p: f64) {
     let denom = (1.0 - p).ln();
-    emit_cell(s, src);
     s.f64_const(f64c(1.0));
-    emit_unit48(s, V0, V1);
+    emit_draw48(s, ctx, src, LaneSel::This);
+    emit_unit48(s);
     s.f64_sub();
     emit_ln(s, ctx);
     s.f64_const(f64c(denom)).f64_div().f64_floor();
@@ -1029,6 +1161,13 @@ mod tests {
     /// Instantiate an emitted kernel in `wasmi`, run one batch at lane 0, and return `out[0]`. For
     /// an RNG-free graph every lane is identical, so `[0]` fully characterizes the backend's output.
     fn first_emitted(bytes: &[u8], seed: u64) -> f64 {
+        first_batch_emitted(bytes, seed)[0]
+    }
+
+    /// Full first batch of an emitted kernel (lane 0), for whole-column bitwise parity checks —
+    /// the even/odd lanes take different paths in the pair-unrolled loop, so `out[0]` alone
+    /// would only ever exercise the cos branch.
+    fn first_batch_emitted(bytes: &[u8], seed: u64) -> Vec<f64> {
         let engine = Engine::default();
         let module = WasmModule::new(&engine, bytes).expect("emitted module must validate");
         let mut store = Store::new(&engine, ());
@@ -1055,9 +1194,11 @@ mod tests {
                 (out_ptr, BATCH as i32, key.k0 as i32, key.k1 as i32, 0),
             )
             .unwrap();
-        let mut b = [0u8; 8];
+        let mut b = vec![0u8; BATCH * 8];
         memory.read(&store, out_ptr as usize, &mut b).unwrap();
-        f64::from_le_bytes(b)
+        b.chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect()
     }
 
     /// **Const-graph exact-equality suite (finding C2).** For every RNG-free program the emitted WASM
@@ -1176,19 +1317,21 @@ mod tests {
         );
         let bytes = emit(graph, id);
 
-        // Bitwise: first batch, lane 0, against the interpreter oracle.
+        // Bitwise: the whole first batch against the interpreter oracle (both branches of the
+        // pair-unrolled loop get exercised, not just lane 0's cos arm).
         let mut ir = InterpBackend.compile(graph, id, ENOUGH_DRAWS).runner();
         ir.position(seed, 0);
         let interp_col: Vec<f64> = ir.next_batch(BATCH).to_vec();
-        let wasm0 = first_emitted(&bytes, seed);
-        assert_eq!(
-            interp_col[0].to_bits(),
-            wasm0.to_bits(),
-            "{src}: lane 0: interp {} ({:#018x}) != wasm {wasm0} ({:#018x})",
-            interp_col[0],
-            interp_col[0].to_bits(),
-            wasm0.to_bits()
-        );
+        let wasm_col = first_batch_emitted(&bytes, seed);
+        for (lane, (a, b)) in interp_col.iter().zip(wasm_col.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "{src}: lane {lane}: interp {a} ({:#018x}) != wasm {b} ({:#018x})",
+                a.to_bits(),
+                b.to_bits()
+            );
+        }
 
         let (wasm_mean, count) = run_emitted(&bytes, seed, 16);
         let interp_mean = moments(graph, id, count as usize, seed).mean;
