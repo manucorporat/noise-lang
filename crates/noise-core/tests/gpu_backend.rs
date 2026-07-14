@@ -71,8 +71,8 @@ fn a_shaped_draw_loop_on_the_gpu() {
 
 /// Cones the GPU can't lower must still produce correct answers — it declines and a CPU backend
 /// takes over. This is the fallback promise, and it is the one that decides whether the feature is
-/// safe to ship: a `permutation` (interpreter-only), a `poisson` (Knuth loop), and an explicit `sin`
-/// (G1's correctness cut — no f64 for the large-argument reduction).
+/// safe to ship: a `poisson` (a Knuth loop) and a `permutation` (an array-valued source, and
+/// interpreter-only on every backend).
 #[test]
 fn declined_cones_still_give_the_right_answer() {
     force();
@@ -81,15 +81,31 @@ fn declined_cones_still_give_the_right_answer() {
     let (m, se) = est("use rand; K ~ poisson(4.5); E(K, 500000)");
     assert!((m - 4.5).abs() < 6.0 * se, "poisson mean = {m} +- {se}");
 
-    // Explicit trig, past the range where WGSL's built-in is even defined — the GPU must NOT take
-    // this, and the CPU's answer must come through unharmed.
-    let (m, _) = est("use rand; use math; X ~ unif(0,1); E(math::sin(1000000 * X), 500000)");
-    assert!(m.abs() < 0.01, "sin of a large argument = {m}, want ~0");
-
-    // Permutation (an array-valued source, interpreter-only): box 0 holds card 0 with probability
-    // 1/20 in a uniform permutation of 20.
+    // Permutation: box 0 holds card 0 with probability 1/20 in a uniform permutation of 20.
     let (p, se) = est("use rand; d ~ rand::permutation(20); P(d[0] == 0, 500000)");
     assert!((p - 0.05).abs() < 6.0 * se, "P(perm[0] == 0) = {p} +- {se}, want 0.05");
+}
+
+/// Large-argument trig, end to end and now **on** the GPU (G1b) — this cone used to be declined.
+///
+/// `E[sin(1e6 · X)]` over `X ~ unif(0,1)` is ~0 because the argument sweeps ~159,000 whole periods.
+/// Getting that right requires actually resolving where in its period each argument falls, which is
+/// exactly what no f32-representable multiple of π/2 can tell you: WGSL's built-in `sin` returns a
+/// flat 0 out here, and an `x % TAU` reduction returns noise. Only the exact integer reduction lands.
+#[test]
+fn large_argument_trig_on_the_gpu() {
+    let (m, se) = est("use rand; use math; X ~ unif(0,1); E(math::sin(1000000 * X), 500000)");
+    assert!(m.abs() < 6.0 * se.max(1e-3), "E[sin(1e6 X)] = {m} +- {se}, want ~0");
+
+    // The sharper probe: E[sin²] = 1/2 exactly, and unlike the mean it cannot be faked by a
+    // backend that returns 0 everywhere — which is precisely what the built-in does here.
+    let (v, _) = est(
+        "use rand; use math; X ~ unif(0,1); E(math::sin(1000000 * X) * math::sin(1000000 * X), 500000)",
+    );
+    assert!(
+        (v - 0.5).abs() < 0.01,
+        "E[sin²(1e6 X)] = {v}, want 0.5 — a backend whose `sin` collapses to 0 out here scores 0.0"
+    );
 }
 
 /// The GPU's answer must not depend on how the work was split into dispatches — the same

@@ -138,23 +138,6 @@ fn plan_blocks(graph: &RvGraph, roots: &[RvId]) -> Result<Plan, Unsupported> {
                 *readers.entry(*arr).or_default() += 1;
                 stack.push(*arr);
             }
-            // **Explicit `sin`/`cos` are declined — G1's one scope cut, and it is a correctness
-            // cut, not a performance one.** The engine's contract for large arguments is "compute in
-            // f64 and round to f32": past `approx::TRIG_MAX_F32` the 2-term Cody-Waite reduction
-            // falls apart, so all three CPU backends hand off to the f64 library (finding C3).
-            // **WGSL has no f64**, so that fallback cannot be reproduced — and WGSL only *guarantees*
-            // its built-in `sin`/`cos` on [-pi, pi] anyway. Measured, `sin(1e12 * X)` returns 0 on
-            // Metal against the interpreter's 0.0056: not a rounding gap, a wrong answer.
-            //
-            // Declining is the safe answer (the cone falls back to a correct backend, exactly as
-            // `wasm_host` does for what it can't emit) and it is *tested*, so it cannot rot into a
-            // silent divergence. The fix is an exact integer Payne-Hanek range reduction in the
-            // shader, which would close this and hand `am_vs_fm` to the GPU — that is G1b.
-            //
-            // Note this does NOT block the normal draw: Box-Muller's `sin`/`cos` live inside the
-            // prelude's `src_normal` with theta in [0, 2pi), always inside the built-in's guaranteed
-            // range. `barrier_option` and every Gaussian model still lower.
-            RvNode::Unary(UnOp::Sin | UnOp::Cos, _) => return Err(Unsupported("trig")),
             RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
             RvNode::Unary(_, a) => stack.push(*a),
             RvNode::Binary(_, a, b) => {
@@ -296,9 +279,12 @@ impl Emitter<'_> {
                     // ULP bound would catch — so it is spelled out.
                     UnOp::Round => format!("(sign({x}) * floor(abs({x}) + 0.5))"),
                     UnOp::Sqrt => format!("sqrt({x})"),
-                    // Declined in `plan_blocks` — see the note there. (`src_normal`'s Box-Muller
-                    // trig is in the prelude, not a graph node, and is unaffected.)
-                    UnOp::Sin | UnOp::Cos => unreachable!("plan_blocks declines explicit trig"),
+                    // NOT WGSL's `sin`/`cos`: those are only *guaranteed* on [-pi, pi], and Metal's
+                    // return 0 for sin(1e12) — a wrong answer, not a rounding gap. `nz_sin`/`nz_cos`
+                    // reduce with integer Payne-Hanek and run the engine's own kernels, so they hold
+                    // for every f32 argument (G1b).
+                    UnOp::Sin => format!("nz_sin({x})"),
+                    UnOp::Cos => format!("nz_cos({x})"),
                     UnOp::Exp => format!("exp({x})"),
                     UnOp::Atan => format!("atan({x})"),
                     // WGSL `log` is the natural log. Its domain guards already match
@@ -533,6 +519,153 @@ fn src_unif_int(key: vec2<u32>, source: u32, lane: u32, loc: f32, count: u32) ->
     let k = (s.x >> 24u) | (s.y << 8u);
     return loc + f32(k);
 }
+
+// ---------------------------------------------------------------------------
+// Explicit sin/cos (PLAN-WEBGPU G1b).
+//
+// The engine's contract is: below `approx::TRIG_MAX_F32` (1024), a 2-term Cody-Waite reduction and
+// an inline poly; at or above it, compute in **f64** and round to f32. WGSL has no f64, so the
+// fallback half cannot be reproduced literally -- which is why G1 declined this node outright.
+//
+// The reason it can't just be `x % TAU` is worth stating, because it is the whole design: the
+// quotient `x / (pi/2)` at x = 1e12 is ~6.4e11, which needs 40 bits of mantissa. f32 has 24. So the
+// quotient is rounded *before* the subtraction, and `x - k*(pi/2)` then cancels two nearly-equal
+// large numbers whose difference is dominated by that rounding -- the reduced argument comes out
+// wrong by ~x*2^-24 radians, i.e. it carries no information at all. (Metal's built-in `sin` gives up
+// the same way: it returns 0 for sin(1e12*X) against the engine's 0.0056.)
+//
+// **Payne-Hanek** is the answer, and it is an INTEGER algorithm -- which is exactly why it is
+// reachable here: the wide-multiply machinery it needs is already in this prelude, built for
+// squares64 because WGSL has no u64 either. An f32 is `mant * 2^e2` with a 24-bit integer mantissa,
+// so `x * 2/pi` is an exact integer product against the bits of 2/pi -- provided you have enough of
+// them, and take the right window. No f64 anywhere, and exact for EVERY f32 argument, not just the
+// ones below some threshold.
+//
+// Bits of 2/pi, most significant first. TWO_OVER_PI[0] is a zero pad: 2/pi < 1, so every bit before
+// the binary point is zero, and the pad lets a small (even negative) exponent index the table
+// without a special case. Word k>=1 holds fraction bits 32(k-1)+1 ..= 32k. (These are fdlibm's
+// `two_over_pi`, regrouped from 24-bit to 32-bit limbs.)
+const TWO_OVER_PI: array<u32, 13> = array<u32, 13>(
+    0x00000000u,
+    0xa2f9836eu, 0x4e441529u, 0xfc2757d1u, 0xf534ddc0u, 0xdb629599u, 0x3c439041u,
+    0xfe5163abu, 0xdebbc561u, 0xb7246e3au, 0x424dd2e0u, 0x06492eeau, 0x09d1921cu,
+);
+
+// pi/2, split so that `k * PIO2_HI` is exact in f32 for every k the small path admits (the high part
+// carries only 8 significant mantissa bits). Same split as `approx::PIO2_{HI,LO}_F32`.
+const PIO2_HI: f32 = 0x1.92p+0;
+const PIO2_LO: f32 = 0x1.fb5444p-12;
+const PI_4: f32 = 0x1.921fb6p-1;
+const NAN_BITS: u32 = 0x7fc00000u;
+
+// Reduce |x| to (r, k) with r in [-pi/4, pi/4] and x ~ r + k*(pi/2). `ax` must be finite and >= 0.
+//
+// **There is no Cody-Waite fast path here, and that is deliberate.** The obvious structure -- cheap
+// 2-term reduction below `approx::TRIG_MAX_F32`, exact reduction above -- was written, measured, and
+// removed: it is off by 1e-5 at x = 1000, a hundred times its budget. The reason is that Cody-Waite
+// depends on `(ax - k*HI) - k*LO` being evaluated *in that order*, with HI carrying only 8 mantissa
+// bits so `k*HI` is exact. Fast-math is permitted to reassociate, and Metal does, collapsing it into
+// `ax - k*(HI + LO)` -- which rounds HI+LO back to a single f32 pi/2 and throws away precisely the
+// bits the split exists to protect. The error is then `k * ulp(pi/2)`, which is what was measured.
+//
+// It is the same lesson as `nz_isnan`: a float identity the optimizer is allowed to "simplify" is
+// not a thing you can build a contract on. State it in integers, where there is nothing to exploit.
+// So every argument takes the exact path, and there is one code path instead of two.
+fn trig_reduce(ax: f32) -> vec2<f32> {
+    // Already reduced: |x| < pi/4 means k = 0 and r = x, which is what the engine's own reduction
+    // yields there too. This also keeps `ax` normal and bounds the exponent below, so the table
+    // index cannot run off the front (see `p0`).
+    if (ax < PI_4) { return vec2<f32>(ax, 0.0); }
+
+    // Payne-Hanek. Write ax = mant * 2^e2, mant a 24-bit integer. Then
+    //
+    //     ax * 2/pi = mant * sum_i TP[i] * 2^(e2 - i)          (TP[i] = bit i of 2/pi's fraction)
+    //
+    // Terms with e2 - i >= 2 are integer multiples of 4, so they vanish mod 4 -- and mod 4 is all a
+    // quadrant needs. Terms below the window are under 2^-38 of the fraction. So only a 96-bit
+    // window of 2/pi matters, starting at fraction bit i0 = e2 - 1, and within it
+    //
+    //     ax * 2/pi  ==  mant * F / 2^94   (mod 4),   F = those 96 bits as an integer.
+    //
+    // That product is 120 bits; we want bits 94 (the quadrant) and just below (the fraction).
+    let bits = bitcast<u32>(ax);
+    let mant = (bits & 0x007fffffu) | 0x00800000u;
+    let e2 = i32((bits >> 23u) & 0xffu) - 127 - 23;
+
+    // Extract the 96-bit window. `p0` is the padded bit offset of i0; the pad word is what keeps it
+    // non-negative for the small exponents (ax >= pi/4 gives e2 >= -24, so p0 >= 6).
+    let p0 = u32(e2 + 30);
+    let wi = p0 >> 5u;
+    let sh = p0 & 31u;
+    // A 32-bit shift is undefined in WGSL, so splice with a select rather than `>> (32 - sh)`.
+    let w0 = TWO_OVER_PI[wi]; let w1 = TWO_OVER_PI[wi + 1u];
+    let w2 = TWO_OVER_PI[wi + 2u]; let w3 = TWO_OVER_PI[wi + 3u];
+    let f2 = (w0 << sh) | select(w1 >> (32u - sh), 0u, sh == 0u);
+    let f1 = (w1 << sh) | select(w2 >> (32u - sh), 0u, sh == 0u);
+    let f0 = (w2 << sh) | select(w3 >> (32u - sh), 0u, sh == 0u);
+
+    // mant * F, keeping the two high partial products. Dropping mant*f0 costs < 2^56 out of a 2^94
+    // scale -- 2^-38 of the fraction, ~1e-11 radians in r.
+    let a = mul_wide(mant, f2);   // weight 2^64
+    let b = mul_wide(mant, f1);   // weight 2^32
+    // S = (mant*F) >> 32. Only its low two words are ever read: the quadrant lives at bits 62,63 and
+    // everything at bit 64 and above is a multiple of 4, so the whole high word (and the carry out of
+    // s1, which WGSL wraps away for free) vanishes mod 4. That is the point of working mod 4.
+    let s0 = b.x;
+    let s1 = a.x + b.y;
+
+    // Quadrant = bits 62,63 of S = bits 30,31 of s1. Fraction = the rest, over 2^62.
+    let q = f32(s1 >> 30u);
+    var frac = f32(s1 & 0x3fffffffu) * 0x1p-30 + f32(s0) * 0x1p-62;
+
+    // Fold to (-1/2, 1/2] so r lands in [-pi/4, pi/4], exactly as the Cody-Waite branch does.
+    var k = q;
+    if (frac > 0.5) { frac = frac - 1.0; k = k + 1.0; }
+    return vec2<f32>(frac * PIO2_HI + frac * PIO2_LO, k);
+}
+
+// approx::{SIN,COS}_COEFFS_F32, Horner'd. Written as exact hex floats: a decimal literal is a
+// request for the compiler to round, and these must be the same f32s the CPU kernels hold.
+fn sin_kernel(r: f32) -> f32 {
+    let z = r * r;
+    let p = ((0x1.71de3ap-19 * z - 0x1.a01a02p-13) * z + 0x1.111112p-7) * z - 0x1.555556p-3;
+    return r + r * z * p;
+}
+
+fn cos_kernel(r: f32) -> f32 {
+    let z = r * r;
+    let p = ((-0x1.27e4fcp-22 * z + 0x1.a01a02p-16) * z - 0x1.6c16c2p-10) * z + 0x1.555556p-5;
+    return 1.0 - 0.5 * z + z * z * p;
+}
+
+// Pick the kernel and sign for quadrant k mod 4 (approx::quadrant_f32).
+fn trig_quadrant(kq: u32, s: f32, c: f32, is_cos: bool) -> f32 {
+    let q0 = select(s, c, is_cos);
+    let q1 = select(c, -s, is_cos);
+    let q2 = select(-s, -c, is_cos);
+    let q3 = select(-c, s, is_cos);
+    var res = q0;
+    if (kq == 1u) { res = q1; }
+    if (kq == 2u) { res = q2; }
+    if (kq == 3u) { res = q3; }
+    return res;
+}
+
+// sin(+-inf) and sin(NaN) are NaN. Screened by bits, for the same fast-math reason as `nz_isnan`.
+fn nz_sin(x: f32) -> f32 {
+    if ((bitcast<u32>(x) & 0x7f800000u) == 0x7f800000u) { return bitcast<f32>(NAN_BITS); }
+    let rk = trig_reduce(abs(x));
+    let kq = u32(rk.y) & 3u;
+    let v = trig_quadrant(kq, sin_kernel(rk.x), cos_kernel(rk.x), false);
+    return select(v, -v, x < 0.0);   // sin is odd; the reduction ran on |x|
+}
+
+fn nz_cos(x: f32) -> f32 {
+    if ((bitcast<u32>(x) & 0x7f800000u) == 0x7f800000u) { return bitcast<f32>(NAN_BITS); }
+    let rk = trig_reduce(abs(x));
+    let kq = u32(rk.y) & 3u;
+    return trig_quadrant(kq, sin_kernel(rk.x), cos_kernel(rk.x), true);   // cos is even
+}
 "#;
 
 #[cfg(test)]
@@ -617,12 +750,15 @@ mod tests {
             g.push(RvNode::Binary(BinOp::Mod, r, three), RvKind::Num)
         });
         let src = emit(&g, &[root]).expect("lowers");
+        // Scoped to the kernel body: the prelude is prose as well as code, and a `%` inside a comment
+        // is not a use of WGSL's `%`.
+        let b = body(&src);
         // ties-AWAY, not WGSL's ties-to-even `round`.
-        assert!(src.contains("floor(abs("), "round must be ties-away: {src}");
-        assert!(!src.contains("round("), "must not call WGSL's round: {src}");
+        assert!(b.contains("floor(abs("), "round must be ties-away: {src}");
+        assert!(!b.contains("round("), "must not call WGSL's round: {src}");
         // FLOORED mod, not WGSL's truncated `%`.
-        assert!(src.contains("floor(v"), "mod must be floored: {src}");
-        assert!(!src.contains(" % "), "must not use WGSL's truncated %: {src}");
+        assert!(b.contains("floor(v"), "mod must be floored: {src}");
+        assert!(!b.contains(" % "), "must not use WGSL's truncated %: {src}");
     }
 
     /// The cones this backend can't lower are declined, not mis-emitted — the caller falls back to a
@@ -662,17 +798,14 @@ mod tests {
         );
     }
 
-    /// Explicit `sin`/`cos` are declined — G1's one scope cut, and a *correctness* one.
+    /// Explicit `sin`/`cos` must NOT lower to WGSL's built-ins (G1b).
     ///
-    /// The engine's large-argument trig computes in f64 and rounds (finding C3). WGSL has no f64, so
-    /// that cannot be reproduced, and the built-in is only guaranteed on [-pi, pi]: measured,
-    /// `sin(1e12 * X)` returns 0 on Metal against the interpreter's 0.0056. Declining sends the cone
-    /// to a correct backend; the fix is an exact Payne-Hanek reduction in the shader (G1b).
-    ///
-    /// It must NOT take the normal draw with it: Box-Muller's trig lives in the prelude with theta in
-    /// [0, 2pi), so every Gaussian model still lowers. That is the second half of this test.
+    /// The built-in is only *guaranteed* on [-pi, pi], and past that it is not merely imprecise:
+    /// Metal returns 0 for `sin(1e12)` against the engine's 0.0056. `nz_sin`/`nz_cos` reduce with
+    /// integer Payne-Hanek — exact for every f32 — and then run the engine's own kernels. This test
+    /// pins the substitution; `payne_hanek_holds_where_the_builtin_gives_up` proves it on device.
     #[test]
-    fn explicit_trig_is_declined_but_the_normal_draw_is_not() {
+    fn explicit_trig_lowers_to_the_exact_reduction_not_the_builtin() {
         let (g, root) = g_with(|g| {
             let u = g.push(
                 RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
@@ -680,15 +813,23 @@ mod tests {
             );
             g.push(RvNode::Unary(UnOp::Sin, u), RvKind::Num)
         });
-        assert_eq!(emit(&g, &[root]), Err(Unsupported("trig")));
+        let src = emit(&g, &[root]).expect("explicit trig lowers");
+        let b = body(&src);
+        assert!(b.contains("nz_sin("), "must call the exact reduction:\n{src}");
+        assert!(
+            !b.contains(" sin(") && !b.contains("=sin("),
+            "must not call WGSL's built-in `sin` — it is wrong past [-pi, pi]:\n{src}"
+        );
 
+        // The Gaussian draw's trig is different: it lives inside the prelude's `src_normal` with
+        // theta in [0, 2pi), always inside the built-in's guaranteed range. It stays a built-in.
         let (g, root) = g_with(|g| {
             g.push(
                 RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }),
                 RvKind::Num,
             )
         });
-        let src = emit(&g, &[root]).expect("a Gaussian draw must still lower — its trig is internal");
+        let src = emit(&g, &[root]).expect("a Gaussian draw lowers");
         assert!(body(&src).contains("src_normal("));
     }
 
@@ -941,6 +1082,44 @@ mod gpu_tests {
             }
         }
         assert!(checked > 10, "only {checked} corpus cases reached the GPU — the gate is too tight");
+    }
+
+    /// **Payne-Hanek, on device, exactly where the built-in gives up (G1b).**
+    ///
+    /// This is the test the reduction exists for. `sin`/`cos` are only *guaranteed* on [-pi, pi];
+    /// past that a vendor may do anything, and Metal does the worst thing — it returns a confident
+    /// wrong answer (0, for `sin(1e12)`). The naive fix, `x % TAU`, cannot work either: at 1e12 the
+    /// quotient `x/(pi/2)` needs 40 mantissa bits and f32 has 24, so the reduced argument is pure
+    /// rounding noise. Only an exact integer reduction survives here.
+    ///
+    /// So: sweep the decades, well past f32's ability to even *represent* the neighbouring multiple
+    /// of pi/2, and demand agreement with the interpreter (which computes in f64 and rounds — the
+    /// engine's stated contract). A backend that quietly used the built-in fails at 1e12; one that
+    /// used `%` fails around 1e5.
+    #[test]
+    fn payne_hanek_holds_where_the_builtin_gives_up() {
+        let Some(gpu) = gpu() else {
+            eprintln!("no GPU adapter — skipping");
+            return;
+        };
+        // Straddle TRIG_MAX (1024) so both reduction branches run, and go up to 1e30 — where a
+        // single f32 ulp is ~1e23, vastly wider than a period.
+        for mag in ["1e3", "1e5", "1e7", "1e12", "1e18", "1e24", "1e30"] {
+            for f in ["sin", "cos"] {
+                // `unif(0,1)` spreads the arguments across the decade, so this is thousands of
+                // distinct large arguments per case, not one lucky point.
+                let src = format!("use rand; use math; X ~ unif(0,1); math::{f}({mag} * X)");
+                let (g, c) = both(&gpu, &src, 7).expect("explicit trig must lower now, not decline");
+                for (i, (&a, &b)) in g.iter().zip(&c).enumerate() {
+                    assert!(
+                        (a - b).abs() <= 1e-6,
+                        "{f}({mag} * X), lane {i}: gpu {a} vs interp {b} — the reduction lost the \
+                         argument (|Δ| {:e})",
+                        (a - b).abs()
+                    );
+                }
+            }
+        }
     }
 
     /// The RNG half of the corpus: the emitted kernel must agree with the interpreter *in

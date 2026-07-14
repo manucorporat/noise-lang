@@ -1,10 +1,13 @@
 # PLAN-WEBGPU — the GPU as a fourth lowering of the RvGraph
 
-**Date:** 2026-07-13 · **Status: G0–G2 LANDED (2026-07-14). The GPU works.**
+**Date:** 2026-07-13 · **Status: G0–G2 + G1b LANDED (2026-07-15). The GPU works, with no
+semantic holes left in it.**
 Native corpus **3935.6 ms → 2999.2 ms (1.31×)** with `--features gpu`; `barrier_option` 4.3×,
-`secretary` 12.2×, `birthday` 2.1×, `am_vs_fm` 2.0×, and no regressions. Remaining: **G1b** (exact
-trig range reduction), **G3** (browser host), **G4** (`Gather`/`Permutation`/`Rotation` — which is
-where `turboquant` and `prisoners`, still the two heaviest, finally move).
+`secretary` 12.2×, `birthday` 2.1×, `am_vs_fm` 2.0×, and no regressions. Every node the emitter
+*accepts* is now conformant for its whole domain — G1b closed the last exception (large-argument
+trig). Remaining: **G3** (browser host), **G4** (`Gather`/`Permutation`/`Rotation` — which is where
+`turboquant` and `prisoners`, still the two heaviest, finally move, and which is most of the
+remaining headroom).
 **Depends on PLAN-PREGPU** (complete), which moved every cross-backend decision out of this plan —
 the GPU lands as just another backend under one shared contract.
 
@@ -284,22 +287,51 @@ decision, not a surprise.
       asks "is X in the domain", and the fold silently turned a 0.6 into a 1.0. Comparisons now screen
       operands with an integer `nz_isnan` bit test, which has no float identity to exploit.
 
-  ⚠️ **G1's one scope cut, and it is a correctness cut: explicit `sin`/`cos` are declined.** The
+  ⚠️ **G1 shipped with one scope cut, a correctness cut: explicit `sin`/`cos` were declined.** The
   engine's contract past `approx::TRIG_MAX_F32` is "compute in f64, round to f32" — the 2-term
   Cody–Waite reduction falls apart there, so all three CPU backends hand off to the f64 library
   (finding C3). **WGSL has no f64**, so that fallback cannot be reproduced, and WGSL only *guarantees*
   its `sin`/`cos` on `[-π, π]` anyway: measured, `sin(1e12 · X)` returns **0** on Metal against the
-  interpreter's 0.0056. Not a rounding gap — a wrong answer. The cone is declined (falling back to a
-  correct backend, exactly as `wasm_host` does) and the decline is *tested*, so it cannot rot into a
-  silent divergence. **This does not touch the normal draw**: Box–Muller's trig lives inside the
-  prelude's `src_normal` with `θ ∈ [0, 2π)`, so `barrier_option` and every Gaussian model still lower.
-  It does, for now, cost us `am_vs_fm`.
+  interpreter's 0.0056. Not a rounding gap — a wrong answer. **Closed by G1b, below.**
 
-- **G1b — exact trig range reduction (new).** Close the cut above with an integer **Payne–Hanek**
-  reduction in the shader (a fixed-point multiply of the f32 mantissa against a multi-word `2/π`),
-  which needs no f64 and is exact for every f32 argument. That restores one numeric contract across
-  all four backends and hands `am_vs_fm` — the trig-heavy demo, and one of the four the plan's win is
-  built on — to the GPU.
+- **G1b — exact trig range reduction. ✅ LANDED (2026-07-15).** `nz_sin`/`nz_cos` in the prelude:
+  an integer **Payne–Hanek** reduction, then the engine's own f32 kernels and quadrant select. No
+  f64, and exact for *every* f32 argument rather than for those under a threshold. Conformant on
+  device from 1e3 to 1e30, sin and cos, against the interpreter oracle
+  (`payne_hanek_holds_where_the_builtin_gives_up`), and the corpus's `sin_huge`/`cos_huge`/
+  `sin_neg_huge` cases — which the harness had been *silently skipping*, since it skips declined
+  cones — now actually run.
+
+  **Why `x % 2π` is not the fix**, since it is the first thing anyone reaches for: the quotient
+  `x/(π/2)` at `x = 1e12` needs 40 mantissa bits and f32 has 24. The quotient is therefore rounded
+  *before* the subtraction, and `x − k·(π/2)` then cancels two nearly-equal large numbers whose
+  difference is dominated by that rounding. The reduced argument comes out wrong by ~`x·2⁻²⁴`
+  radians — it carries no information at all. Payne–Hanek sidesteps this by never forming the
+  quotient in floating point: an f32 is `mant · 2^e`, with `mant` a 24-bit *integer*, so `x · 2/π`
+  is an exact integer product against the bits of `2/π` — take a 96-bit window of them (chosen by
+  the exponent), keep the result mod 4, and the quadrant and fraction fall out exactly. It is
+  reachable here only because the wide-multiply machinery it needs was **already in the prelude**,
+  built for `squares64` — WGSL has no `u64` either.
+
+  🔬 **And the finding, which cost the most time: fast-math reassociation silently destroys
+  Cody–Waite.** The natural shape is a cheap 2-term reduction below `TRIG_MAX_F32` and the exact one
+  above. Written that way, it was off by **1e-5 at x = 1000** — a hundred times its budget, and in
+  the *easy* range. Cody–Waite works by evaluating `(x − k·HI) − k·LO` **in that order**, with `HI`
+  carrying only 8 mantissa bits so that `k·HI` is exact. The compiler is permitted to reassociate,
+  and Metal does — collapsing it to `x − k·(HI + LO)`, which rounds `HI + LO` back to a single f32
+  `π/2` and discards precisely the bits the split exists to protect. The residual error is
+  `k · ulp(π/2)`, which is what was measured. So the fast path was **deleted**: every argument takes
+  the exact integer path, and there is one code path instead of two. This is the same lesson as
+  `nz_isnan` (`x == x` folding to `true`), arriving from a different direction — *a float identity
+  the optimizer is allowed to "simplify" cannot carry a contract; state it in integers, where there
+  is nothing to exploit.*
+
+  Cost: **nothing.** Corpus 3023 ms vs 2999 ms — inside run-to-run noise; the driver dead-strips the
+  reduction from the kernels that don't call it. And it corrects a claim made here earlier: this does
+  **not** "hand `am_vs_fm` to the GPU". `am_vs_fm` already lowers and already wins 2.0× — its sine
+  lives in the *signal generator*, not as a graph `Sin` node. The only example with an explicit `sin`
+  is `buffon` (1.3 ms), which the gate declines on cost anyway. **G1b buys no speed at all; it closes
+  the backend's one semantic hole**, which is the whole reason to do it.
 - **G2 — reduce-driver integration + gate. ✅ LANDED (2026-07-14).** `src/gpu.rs`, behind
   `--features gpu` (native, off by default). Hooks into `reduce::run_reduction`, *not* `Runner`: a
   dispatch wants ≥256k lanes to be worth its ~1.2 ms floor where a `Runner` pulls 1024, so the GPU
