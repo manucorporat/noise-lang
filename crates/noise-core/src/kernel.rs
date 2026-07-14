@@ -656,7 +656,7 @@ mod shaped_tests {
             RvNode::ArrDraw { n: 4, src: Source::Uniform(Uniform { lo: 0.0, hi: 1.0 }) },
             RvKind::Arr(4),
         );
-        let e2 = g.push(RvNode::ArrElem { arr: blk, k: 2 }, RvKind::Num);
+        let _e2 = g.push(RvNode::ArrElem { arr: blk, k: 2 }, RvKind::Num);
         let z = g.push(RvNode::ConstNum(1.0), RvKind::Num);
         let b = g.push(RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }), RvKind::Num);
 

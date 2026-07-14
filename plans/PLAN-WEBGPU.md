@@ -259,18 +259,43 @@ decision, not a surprise.
       *numbering*, so any new rewrite in `simplify` (a fold, a CSE) silently changed results. Dense
       ordinals depend only on which sources survive, in id order.
 
-- **G1 — emitter + conformance (native).** `wgsl_emit.rs`: post-order walk of the simplified cone,
-  memoized `let vN: f32` per node, the shared **squares64** sources spelled in WGSL (the exact
-  `vec2<u32>` emulation the spike validated), **WGSL built-in** `log`/`sin`/`cos`, `ArrDraw` as a
-  draw loop, scope = the CPU-codegen subset (no `Poisson`, no `Gather`). `wgpu` as a dev-dependency.
-  Departures from `wasm_emit`, both G0-driven:
-    * **`ArrDraw` lowers to a loop, not n inlined hashes** (see G½). Optionally unrolled ×4 to
-      recover the instruction-level parallelism the fully-rolled loop gives up (G0 finding 6).
-    * **Emitted-instruction budget, not a node budget.** The cap counts `nodes + ~150 × sources`,
-      because the emulated hash is what actually feeds the compiler.
-  Conformance, in the two tiers G0 established: **bitwise** for the draws (assert equality with
-  `noise_core::rng`, exactly as the spike does), **ULP-bounded** (≤1e-6 abs) for lane arithmetic,
-  asserted per device rather than trusting WGSL's loose spec floor on `sin`/`cos`.
+- **G1 — emitter + conformance (native). ✅ LANDED (2026-07-14).** `src/wgsl_emit.rs`: post-order
+  walk of the simplified cone, memoized `let vN` per node, one column per root, the shared
+  **squares64** sources spelled in WGSL, **WGSL built-ins** for the transcendentals, `ArrDraw` as a
+  draw loop. `wgpu` is a **native dev-dependency** — the conformance harness *runs* the shaders it
+  generates against the interpreter oracle over the shared cross-backend corpus
+  (`conformance::{CONST_CASES, RNG_CASES}`), because a shader that merely parses proves nothing.
+  Both tiers hold, on device:
+    * **Tier 1 — the draws are bit-identical** to the interpreter (4096/4096 lanes, scalar and
+      shaped). This is what carries C0's certification onto the GPU.
+    * **Tier 2 — lane arithmetic is ULP-close**, ≤1e-6 absolute, over the whole corpus.
+
+  Three things the emitter must NOT borrow from WGSL's same-named built-ins, all found by running the
+  corpus rather than by reading the spec:
+    * **`round` is ties-AWAY** in this engine, WGSL's is ties-to-even. **`%` is FLOORED** here
+      (`-1 mod 3 == 2`), WGSL's is truncated. Both would disagree by a *whole unit* — invisible to a
+      ULP bound. Lowered explicitly.
+    * **NaN must be screened by BITS.** The vendors enable fast-math by default, which assumes NaNs
+      don't exist: on Metal `x == x` folds to `true`. `log(X) == log(X)` is precisely how the language
+      asks "is X in the domain", and the fold silently turned a 0.6 into a 1.0. Comparisons now screen
+      operands with an integer `nz_isnan` bit test, which has no float identity to exploit.
+
+  ⚠️ **G1's one scope cut, and it is a correctness cut: explicit `sin`/`cos` are declined.** The
+  engine's contract past `approx::TRIG_MAX_F32` is "compute in f64, round to f32" — the 2-term
+  Cody–Waite reduction falls apart there, so all three CPU backends hand off to the f64 library
+  (finding C3). **WGSL has no f64**, so that fallback cannot be reproduced, and WGSL only *guarantees*
+  its `sin`/`cos` on `[-π, π]` anyway: measured, `sin(1e12 · X)` returns **0** on Metal against the
+  interpreter's 0.0056. Not a rounding gap — a wrong answer. The cone is declined (falling back to a
+  correct backend, exactly as `wasm_host` does) and the decline is *tested*, so it cannot rot into a
+  silent divergence. **This does not touch the normal draw**: Box–Muller's trig lives inside the
+  prelude's `src_normal` with `θ ∈ [0, 2π)`, so `barrier_option` and every Gaussian model still lower.
+  It does, for now, cost us `am_vs_fm`.
+
+- **G1b — exact trig range reduction (new).** Close the cut above with an integer **Payne–Hanek**
+  reduction in the shader (a fixed-point multiply of the f32 mantissa against a multi-word `2/π`),
+  which needs no f64 and is exact for every f32 argument. That restores one numeric contract across
+  all four backends and hands `am_vs_fm` — the trig-heavy demo, and one of the four the plan's win is
+  built on — to the GPU.
 - **G2 — reduce-driver integration + gate (native, `gpu` feature).** Chunk-range
   dispatch, chunk-ordered fold, `MIN_WORK_GPU` measured the way `MIN_DRAWS_WASM` was
   (bench the corpus, find where the fixed costs pay back). The gate now has **two** fixed costs to

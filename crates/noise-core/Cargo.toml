@@ -42,6 +42,14 @@ wasmi = "1.1"
 # Assembles the hand-written SIMD probe kernel (tests/simd_probe.wat) — see tests/simd_probe.rs.
 wat = "1"
 
+# The WGSL emitter's conformance harness (PLAN-WEBGPU G1) actually RUNS the shaders it generates and
+# compares them against the interpreter oracle — a shader that merely *parses* proves nothing. Native
+# only (there is no wgpu on the wasm32 test target), and dev-only: the emitter itself is pure text
+# generation and takes no GPU dependency, so the library stays as light as it was.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+wgpu = "26"
+pollster = "0.4"
+
 # Sampler throughput benchmarks (Phase 4 baseline). `harness = false` hands the binary to
 # Criterion. Run with `cargo bench -p noise-core`.
 [[bench]]

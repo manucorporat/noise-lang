@@ -76,6 +76,14 @@ pub(crate) mod simplify;
 pub mod stats;
 pub mod value;
 pub(crate) mod wasm_emit;
+// The WGSL emitter (PLAN-WEBGPU G1) is pure text generation with no GPU dependency, so it builds on
+// every target; `internals` exposes it to `tools/gpu-spike`, which owns the wgpu harness that runs
+// the generated shaders against the interpreter oracle.
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod wgsl_emit;
+#[cfg(not(feature = "internals"))]
+pub(crate) mod wgsl_emit;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod wasm_host;
 
