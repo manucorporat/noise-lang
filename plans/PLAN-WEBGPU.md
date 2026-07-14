@@ -1,6 +1,10 @@
 # PLAN-WEBGPU — the GPU as a fourth lowering of the RvGraph
 
-**Date:** 2026-07-13 (G0 landed 2026-07-14) · **Status: G0 DONE — verdict GO.** G1 next.
+**Date:** 2026-07-13 · **Status: G0–G2 LANDED (2026-07-14). The GPU works.**
+Native corpus **3935.6 ms → 2999.2 ms (1.31×)** with `--features gpu`; `barrier_option` 4.3×,
+`secretary` 12.2×, `birthday` 2.1×, `am_vs_fm` 2.0×, and no regressions. Remaining: **G1b** (exact
+trig range reduction), **G3** (browser host), **G4** (`Gather`/`Permutation`/`Rotation` — which is
+where `turboquant` and `prisoners`, still the two heaviest, finally move).
 **Depends on PLAN-PREGPU** (complete), which moved every cross-backend decision out of this plan —
 the GPU lands as just another backend under one shared contract.
 
