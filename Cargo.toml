@@ -1,7 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["crates/noise-core", "crates/noise-cli", "crates/noise-wasm"]
-exclude = ["packages/legacy", "crates/noise-core/fuzz", "tools/rng-cert"]
+# `tools/*` are measurement harnesses, not shipped crates: they carry heavy, target-specific deps
+# (rng-cert's PractRand driver; gpu-spike's wgpu) that must not enter the workspace lockfile or a
+# `cargo build` of the library. Each is its own workspace, run on demand from its own directory.
+exclude = ["packages/legacy", "crates/noise-core/fuzz", "tools/rng-cert", "tools/gpu-spike"]
 
 [workspace.package]
 edition = "2021"

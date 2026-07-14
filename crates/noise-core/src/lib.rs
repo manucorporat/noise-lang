@@ -30,6 +30,15 @@
 //! assert!(matches!(value, Value::Num(n) if (n - 2.0).abs() < 1e-9));
 //! ```
 
+// `approx` and `rng` are the *numeric contract* every backend transcribes, so the measurement
+// harnesses under `tools/` have to reach them: `gpu-spike` proves its WGSL draws are bit-for-bit
+// the engine's by linking the real generator, and a transcribed copy that silently drifted would
+// make every number it reports a claim about a hash we don't ship. The `internals` feature is that
+// door, and only that: off by default, `#[doc(hidden)]`, no semver promise.
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod approx;
+#[cfg(not(feature = "internals"))]
 pub(crate) mod approx;
 pub(crate) mod ast;
 pub(crate) mod backend;
@@ -56,6 +65,10 @@ pub(crate) mod lexer;
 pub(crate) mod num;
 pub(crate) mod parser;
 pub(crate) mod reduce;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod rng;
+#[cfg(not(feature = "internals"))]
 pub(crate) mod rng;
 pub(crate) mod sampler;
 pub(crate) mod signal;

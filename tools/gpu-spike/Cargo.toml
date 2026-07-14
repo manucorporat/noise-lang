@@ -1,0 +1,19 @@
+[package]
+name = "gpu-spike"
+edition = "2021"
+version = "0.1.0"
+publish = false
+
+# Its own workspace (excluded from the root one): wgpu pulls ~90 crates that have no business in
+# the library's lockfile. Run from this directory: `cargo run --release`.
+[workspace]
+
+[dependencies]
+wgpu = "26"
+pollster = "0.4"
+
+# The spike's whole point is proving the WGSL draws match the engine's, bit for bit — so it links
+# the real generator rather than transcribing it. `internals` is the harness-only door onto `rng`.
+# `jit` too: the CPU baseline the GPU has to beat is the *fast* one (Cranelift, multicore), not the
+# interpreter. Comparing against a handicapped CPU would flatter every number in this spike.
+noise-core = { path = "../../crates/noise-core", features = ["internals", "jit"] }

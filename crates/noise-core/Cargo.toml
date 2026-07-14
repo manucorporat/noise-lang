@@ -61,6 +61,10 @@ harness = false
 # interpreter for any graph it can't yet emit, so it never changes results.
 jit = ["dep:cranelift", "dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-native"]
 
+# Expose `rng`/`approx` under `noise_core::internals` for the measurement harnesses in `tools/`
+# (see the module docs in lib.rs). Off by default; carries no semver promise.
+internals = []
+
 # Parallel Monte-Carlo reduction in the browser: fans `reduce`'s chunks out over rayon (a Web Worker
 # pool sharing one linear memory). Requires the wasm threads proposal — atomics + shared memory — so
 # the crate must be built with `-C target-feature=+atomics,+bulk-memory` and a std rebuilt for it
