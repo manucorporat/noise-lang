@@ -80,11 +80,44 @@ mechanism. So it shipped first, as its own low-risk cut:
   vacuous: the default op budget silently clamped the query to 0.3 s, so "prompt cancellation" would
   have passed even if cancellation did nothing. The test now raises `max_opts` on purpose.)
 
-**Still open — the async spine (A1b/A2/A3).** Everything below. What it adds that the token alone
-can't: (1) the *browser* can't set the flag while Rust is running — `abort()` is JS, and JS only
-runs when the engine returns to the event loop — so the web path needs a real cooperative yield;
-(2) a forcing can `await` an async backend, which is what PLAN-WEBGPU G3 routes through. The
-`CancelToken` plumbing A3 needs is already in place; A3 wires it to `AbortSignal`.
+### ⚠️ Plan correction: the browser did NOT need the async spine
+
+This plan justified A3's cooperative event-loop yield with: *"on the single-threaded web build
+nothing can set the flag while Rust runs — `abort()` is JS, and JS only executes when the engine
+returns to the event loop."* That analysis is correct **and it does not apply**, because it assumed
+the engine runs on the main thread. It doesn't. `@noiselang/core` has always run every program in a
+**Web Worker** (`packages/core/src/worker.ts`: *"Nothing in this package executes the engine on the
+main thread"*), with an ordinary non-shared wasm instance per worker.
+
+That collapses two of the three reasons for the async spine:
+
+- **Responsive tab — already true.** The main thread never ran the engine, so it was never frozen.
+  A3 would have been fixing a problem that didn't exist.
+- **Browser cancellation — needs no yield.** With no `SharedArrayBuffer` (deliberately: the pool
+  header explains that COOP/COEP isolation is viral for every app that installs the package) there
+  is no flag a busy worker could poll *and no need for one*: the main thread can simply
+  **terminate the worker**. The run is gone, not asked to leave — a harder guarantee than a
+  cooperative check, and it costs only the replacement worker's spawn (tens of ms, off the main
+  thread). Losing that worker's engine scope is precisely the semantics the core already documents
+  for a cancelled engine: *treat it as stale and rebuild*.
+
+So browser cancellation shipped **without any async** (2026-07-14):
+
+- ✅ `run(src, { signal })` in `@noiselang/core` — standard `AbortSignal`, `fetch` semantics
+  (already-aborted rejects immediately; mid-run abort rejects with `signal.reason`, an
+  `AbortError`). Implemented in `pool.ts` by terminating the slot's worker and respawning.
+- ✅ Verified end to end (`packages/core/bench/abort.mjs`, self-checking): a query that takes
+  **7.2 s** uncancelled aborts in **101 ms (72×)**, a pre-aborted signal rejects immediately, and
+  the pool recovers — the next run completes in 2 ms.
+- The recovery check earned its keep: it caught a real bug where `drain()` dispatched the next job
+  to the *terminated* worker before its replacement existed, hanging that job forever with no error.
+
+**Still open — the async spine (A1/A2).** Its remaining justification is now exactly one thing: a
+forcing must be able to `await` an async backend, which is what **PLAN-WEBGPU G3** routes through.
+That is a real requirement, but it is a *GPU* requirement, not a UX one — so the spine can be built
+when G3 needs it, against a design that is by then better informed, rather than speculatively now.
+The `CancelToken` (native) and the `AbortSignal` (browser) paths are both done and need nothing
+from it.
 
 Scope and design are unchanged from the former PLAN-ASYNC (full call-graph walk,
 2026-07-13). Summary; the detail that matters is the inventory and the traps.
@@ -161,12 +194,10 @@ stale — the playground's introspection sidecar, which relies on scope persisti
 `run()`, must rebuild from a fresh `Engine` after a cancel rather than trust partial
 state.
 
-**Steps:** ~~A0 cancellation core~~ (LANDED 2026-07-14 — token, `Cancelled` error, both check
-tiers, `Result`-threaded forcing paths, native end-to-end tests) · A1 spine (~400–800 mechanical
-lines; proof: an `exec` test drives a pending-once future through `block_on`) · A2 `run_async` wasm
-export + playground `await` · A3 cooperative event-loop yield (statement boundaries + the ~50 ms
-timer in the async chunk driver) + wire the existing `CancelToken` to `AbortSignal` — real
-suspension *and* browser abort exercised end-to-end before any GPU code exists.
+**Steps:** ~~A0 cancellation core~~ (LANDED — native token, `Cancelled` error, both check tiers,
+`Result`-threaded forcing paths) · ~~A3 browser abort~~ (LANDED — `AbortSignal` via worker
+termination; **no async spine required**, see the correction above) · A1 spine + A2 `run_async`
+export — **deferred to PLAN-WEBGPU G3**, which is now their only consumer.
 
 ## Track B — f32 lanes, f64 aggregation, everywhere — **LANDED 2026-07-14**
 
@@ -418,10 +449,10 @@ Order (owner's call, 2026-07-13): **C → B → A**, releasing after B.
    spread-vs-location limit, the exp/geometric tail cap).
    **→ NEXT: cut the numerics-v2 release here.** Both internal seed-breaks (new RNG, new lane
    type) publish as one. Nothing else is queued in front of it.
-3. **A (async)** — cancellation core ✅ LANDED (native abort works today); the async spine
-   remains. It touches the eval spine while B/C touched the backends, overlapping only in
-   `sampler.rs`/`builtins.rs`. It gates nothing until PLAN-WEBGPU G3; the *browser's* half of the
-   cancellation payoff (a Stop button, a responsive tab) needs A3's cooperative yield.
+3. ✅ **A (cancellation)** — LANDED 2026-07-14, native *and* browser. The async spine turned out
+   not to be a prerequisite for either (the engine already runs in a Web Worker — see the
+   correction in Track A), so it is **deferred to PLAN-WEBGPU G3**, its only remaining consumer.
+   Nothing in PREGPU is blocked on it.
 4. **Then PLAN-WEBGPU** G0–G4, now inheriting: identical draw streams, an already-async
    engine, and a numeric contract the GPU doesn't bend. (G0, being dependency-free, can
    run any time earlier for its compile-time answers.)

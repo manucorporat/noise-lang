@@ -132,12 +132,105 @@ export function start(size = defaultSize()): Promise<void> {
   return starting;
 }
 
-/** Dispatch one job to a free worker (queueing if all are busy) and resolve with its reply. */
-export async function call(req: Omit<WorkerRequest, 'id'>): Promise<WorkerResponse> {
+/**
+ * The `AbortError` the platform throws — same shape `fetch` rejects with, so a caller's existing
+ * `err.name === 'AbortError'` check works unchanged. `DOMException` exists in browsers and in Node
+ * ≥17; the fallback keeps the name right on anything older.
+ */
+function abortError(reason: unknown): Error {
+  if (reason instanceof Error) return reason;
+  if (typeof DOMException === 'function') {
+    return new DOMException('The operation was aborted.', 'AbortError');
+  }
+  const e = new Error('The operation was aborted.');
+  e.name = 'AbortError';
+  return e;
+}
+
+/**
+ * Cancel the job `id`: drop it if it hasn't started, otherwise **terminate the worker running it**
+ * and put a fresh one in its place.
+ *
+ * Terminating is not a blunt instrument here — it is the only instrument. A Noise run is a tight
+ * Monte-Carlo loop inside wasm; while it runs, that worker's event loop never turns, so a
+ * `postMessage` asking it to stop would simply sit in the queue until the run it was meant to
+ * cancel had already finished. Without `SharedArrayBuffer` (which this package deliberately does
+ * not require — see the header) there is no flag the worker could poll either. So we kill the
+ * thread.
+ *
+ * That is also why the engine's own `CancelToken` (noise-core `exec::CancelToken`) is not what runs
+ * this path: it is the *native* mechanism, for embedders that can set a flag from another thread.
+ * In the browser the worker boundary already gives us a harder guarantee — the run is gone, not
+ * asked to leave.
+ *
+ * The cost is the replacement worker's spawn + wasm instantiate (tens of ms, off the main thread)
+ * and the loss of that worker's engine scope — which is exactly the semantics the core documents
+ * for a cancelled engine: **treat it as stale and rebuild**. Other workers, and every other
+ * in-flight job, are untouched.
+ */
+function cancelJob(id: number, reason: unknown): void {
+  const p = pending.get(id);
+  const queued = queue.findIndex((q) => q.req.id === id);
+  if (queued >= 0) {
+    // Never dispatched: no worker to kill, just drop it.
+    const [job] = queue.splice(queued, 1);
+    job.p.reject(abortError(reason));
+    return;
+  }
+  if (!p) return; // already settled — abort arrived too late, which is fine
+  pending.delete(id);
+
+  const slot = slots?.find((s) => s.jobId === id);
+  if (!slot) {
+    p.reject(abortError(reason));
+    return;
+  }
+  // REMOVE the slot before terminating, don't just mark it idle. A slot with `jobId === null` is
+  // one `drain()` will post the next job to — and for the moments between `terminate()` and the
+  // replacement arriving (`spawn()` is async: a worker spawn + wasm instantiate), that worker is
+  // dead. Posting to it drops the message on the floor and the job hangs forever with no error.
+  // (Found by the test that runs a program *after* an abort — see `pool.abort.test`.)
+  const i = slots?.indexOf(slot) ?? -1;
+  if (i >= 0) slots?.splice(i, 1);
+  slot.worker.terminate();
+  p.reject(abortError(reason));
+  // Bring a replacement up, then let anything queued flow into it.
+  void spawn().then((w) => {
+    slots?.push({ worker: w, jobId: null });
+    drain();
+  });
+}
+
+/**
+ * Dispatch one job to a free worker (queueing if all are busy) and resolve with its reply.
+ *
+ * `signal` follows the platform convention (`fetch`-style): an already-aborted signal rejects
+ * immediately; otherwise an `'abort'` listener cancels the job (see [`cancelJob`]) and the promise
+ * rejects with `signal.reason` — the standard `AbortError`. The listener is removed when the job
+ * settles either way, so a long-lived signal doesn't accumulate listeners.
+ */
+export async function call(
+  req: Omit<WorkerRequest, 'id'>,
+  signal?: AbortSignal,
+): Promise<WorkerResponse> {
+  if (signal?.aborted) throw abortError(signal.reason);
   await start();
+  const id = nextId++;
   return new Promise<WorkerResponse>((resolve, reject) => {
-    const full: WorkerRequest = { ...req, id: nextId++ };
-    queue.push({ req: full, p: { resolve, reject } });
+    const onAbort = () => cancelJob(id, signal?.reason);
+    const done = <T,>(f: (v: T) => void) => (v: T) => {
+      signal?.removeEventListener('abort', onAbort);
+      f(v);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    // Aborted between the `await start()` above and here — the listener would never fire.
+    if (signal?.aborted) {
+      signal.removeEventListener('abort', onAbort);
+      reject(abortError(signal.reason));
+      return;
+    }
+    const full: WorkerRequest = { ...req, id };
+    queue.push({ req: full, p: { resolve: done(resolve), reject: done(reject) } });
     drain();
   });
 }

@@ -221,6 +221,18 @@ export type InputOverrides = Record<string, InputValue>;
 export interface RunOpts {
   /** Override inline `input::…` parameters by name. */
   inputs?: InputOverrides;
+  /**
+   * Cancel the run. Standard `AbortSignal`, same semantics as `fetch`: an already-aborted signal
+   * rejects immediately, and aborting mid-run rejects with `signal.reason` — an `AbortError`, so
+   * an `err.name === 'AbortError'` check works as usual.
+   *
+   * Cancellation is immediate, not cooperative: the engine worker running the program is
+   * *terminated* (a Monte-Carlo run never yields its thread, so there is nothing to politely ask —
+   * see `pool.ts`). A replacement worker spawns in the background. The practical consequence is
+   * that the cancelled run's engine scope is gone — which is exactly what the core documents for a
+   * cancelled engine: treat it as stale and rebuild. Other in-flight runs are unaffected.
+   */
+  signal?: AbortSignal;
 }
 
 /** Serialize `RunOpts` to the JSON the WASM boundary expects (or `undefined` when empty). */
@@ -233,7 +245,7 @@ function optsToJson(opts?: RunOpts): string | undefined {
  * — failures come back in `error`. */
 export async function run(src: string, opts?: RunOpts): Promise<NoiseResult> {
   // `elapsedMs` is measured inside the worker: it's engine time, not queueing + postMessage latency.
-  const res = await call({ op: 'run', src, optsJson: optsToJson(opts) });
+  const res = await call({ op: 'run', src, optsJson: optsToJson(opts) }, opts?.signal);
   const doc = JSON.parse(unwrap(res)) as NoiseDocument;
   return enrich(doc, res.elapsedMs ?? 0);
 }
