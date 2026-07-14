@@ -603,6 +603,20 @@ fn main() {
     }
     println!();
 
+    // barrier_option's real shape: 52 weekly normals. What does a COLD compile of it cost, unrolled
+    // vs looped? (Section 5's compile column is a warm cache hit and must not be read as the price.)
+    println!("== 4c. barrier_option's real cone (52 sources), COLD ==");
+    for (label, s) in [
+        ("unrolled (52 srcs)", shapes::barrier(52)),
+        ("looped   (1 src)  ", shapes::sum_normals_looped(52)),
+    ] {
+        let src = wgsl::shader_salted(Rng::Squares, Trans::Native, &s.body, &s.root, fresh_salt());
+        if let Ok((_, c)) = gpu.compile(&src) {
+            println!("  {label}  {:>7.1} ms cold compile", (c.naga + c.backend).as_secs_f64() * 1e3);
+        }
+    }
+    println!();
+
     println!("== 6. HEAD TO HEAD: same kernel, same draws, CPU vs GPU ==");
     head_to_head(&gpu);
     println!();
