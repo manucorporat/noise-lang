@@ -77,6 +77,8 @@ pub fn emit(graph: &RvGraph, roots: &[RvId]) -> Result<String, Unsupported> {
         plan,
         memo: HashMap::new(),
         arrays_emitted: HashSet::new(),
+        taint: crate::simplify::taint_set(graph),
+        scan_finals: HashMap::new(),
         body: String::new(),
     };
 
@@ -170,13 +172,18 @@ fn plan_blocks(graph: &RvGraph, roots: &[RvId]) -> Result<Plan, Unsupported> {
                 stack.push(*a);
                 stack.push(*b);
             }
-            // G4c: a Scan will roll into a WGSL loop (wired in the next step). For now decline so the
-            // GPU falls back to the interpreter — safe, and behaviourally identical to today since no
-            // Scan is produced yet.
-            RvNode::Scan { .. } | RvNode::ScanOut { .. } => return Err(Unsupported("scan")),
-            RvNode::Placeholder { .. } => {
-                unreachable!("Placeholder appears only inside a ScanBody sub-graph")
+            // G4c: a Scan rolls into a real WGSL loop. Walk its body (inits + the nexts cone) so any
+            // unsupported node in the loop declines the whole cone; placeholders are leaves.
+            RvNode::Scan { body } => {
+                for &init in body.inits.iter() {
+                    stack.push(init);
+                }
+                for &nx in body.nexts.iter() {
+                    stack.push(nx);
+                }
             }
+            RvNode::ScanOut { scan, .. } => stack.push(*scan),
+            RvNode::Placeholder { .. } => {}
         }
     }
 
@@ -202,6 +209,11 @@ struct Emitter<'g> {
     /// Array-valued nodes already materialized as a `var … : array<f32, n>` in the body — a
     /// `Permutation` read by several `ArrIndex`es is filled once, not once per read.
     arrays_emitted: HashSet<RvId>,
+    /// Ids whose value depends on a loop placeholder (rebuilt inside a loop, not hoisted) — G4c.
+    taint: HashSet<RvId>,
+    /// A rolled `Scan`'s final per-slot `var` names, cached so its several `ScanOut` readers roll the
+    /// loop once.
+    scan_finals: HashMap<RvId, Vec<String>>,
     body: String,
 }
 
@@ -280,6 +292,8 @@ impl Emitter<'_> {
                 c.push(*index);
                 c
             }
+            // A `ScanOut`'s Scan is rolled on demand by `emit_scan` (it emits a `var`/loop, not a
+            // scalar `let`), so it is not a scalar child. `Scan`/`Placeholder` are never children.
             _ => vec![],
         }
     }
@@ -377,6 +391,138 @@ impl Emitter<'_> {
             "select({name}[min(u32(clamp(sign({idx}) * floor(abs({idx}) + 0.5), 0.0, {last}.0)), \
              {last}u)], bitcast<f32>(NAN_BITS), nz_isnan({idx}))"
         )
+    }
+
+    /// Roll a `Scan` into a real WGSL `for` loop and return the final `var` name of each carried slot
+    /// (G4c). This is what keeps `prisoners` off the pathological unrolled shader — its cycle-following
+    /// becomes one loop of a handful of statements, not ~15,000 dependent reads.
+    ///
+    /// The shape: a `var` per carried slot from the inits, then a `for` over `trip`. Loop-*invariant*
+    /// dependencies — above all the permutation array, a *source* that must be drawn once — are hoisted
+    /// before the loop. The carried placeholders are bound to the slot `var`s and the index to the
+    /// counter by injecting them into `memo`, so the body's index/carried-dependent nodes emit as
+    /// ordinary `let`s inside the loop. A nested loop rolls recursively when its `ScanOut` is reached,
+    /// landing inside the enclosing loop.
+    fn emit_scan(&mut self, scan_id: RvId) -> Result<Vec<String>, Unsupported> {
+        if let Some(f) = self.scan_finals.get(&scan_id) {
+            return Ok(f.clone());
+        }
+        let RvNode::Scan { body } = self.graph.node(scan_id).clone() else {
+            unreachable!("emit_scan on a non-Scan")
+        };
+        // Slot vars, initialised from the carried inits (emitted before the loop — an init is either a
+        // hoisted invariant or, when nested, an enclosing loop's `var`/counter already bound in memo).
+        let mut slots = Vec::with_capacity(body.inits.len());
+        for (s, &init) in body.inits.iter().enumerate() {
+            let init = self.emit_node(init)?;
+            let v = format!("sc{}_{}", scan_id.0, s);
+            let _ = writeln!(self.body, "    var {v} = {init};");
+            slots.push(v);
+        }
+        // Hoist every loop-invariant node the body reads to BEFORE the loop, so it is computed once —
+        // and a permutation/rotation source is *drawn* once, not re-drawn per iteration.
+        for id in self.body_invariants(&body.nexts) {
+            if matches!(self.graph.node(id), RvNode::Permutation { .. } | RvNode::Rotation { .. }) {
+                self.ensure_array(id)?;
+            } else {
+                self.emit_node(id)?;
+            }
+        }
+        let j = format!("sj{}", scan_id.0);
+        let _ = writeln!(
+            self.body,
+            "    for (var {j} = 0u; {j} < {}u; {j} = {j} + 1u) {{",
+            body.trip
+        );
+        // Bind placeholders → slot vars, index → the counter (as f32), by injecting into `memo`.
+        let mut injected: Vec<RvId> = Vec::new();
+        for (s, &ph) in body.placeholders.iter().enumerate() {
+            self.memo.insert(ph, slots[s].clone());
+            injected.push(ph);
+        }
+        if let Some(iph) = body.index_ph {
+            self.memo.insert(iph, format!("f32({j})"));
+            injected.push(iph);
+        }
+        // Snapshot AFTER injecting: the memo keys added while emitting *this* loop's body are exactly
+        // its own dynamic `let`s, which are the only ones to drop at the end (a nested loop cleans up
+        // its own — dropping *all* tainted nodes globally would wipe an enclosing loop's live locals).
+        let before: HashSet<RvId> = self.memo.keys().copied().collect();
+        // Emit the recurrence: the body's dynamic nodes land as `let`s inside the loop.
+        let mut nexts = Vec::with_capacity(body.nexts.len());
+        for &nx in body.nexts.iter() {
+            nexts.push(self.emit_node(nx)?);
+        }
+        for (s, nx) in nexts.iter().enumerate() {
+            let _ = writeln!(self.body, "        {} = {};", slots[s], nx);
+        }
+        let _ = writeln!(self.body, "    }}");
+        // The loop's `let`s and its placeholder bindings are scoped to the loop; drop them from `memo`
+        // (this loop's additions only) so nothing outside references an out-of-scope local.
+        let added: Vec<RvId> = self
+            .memo
+            .keys()
+            .copied()
+            .filter(|id| !before.contains(id) && self.taint.contains(id))
+            .collect();
+        for id in added.into_iter().chain(injected) {
+            self.memo.remove(&id);
+        }
+        self.scan_finals.insert(scan_id, slots.clone());
+        Ok(slots)
+    }
+
+    /// The loop-invariant nodes reachable from `roots` that a loop must hoist — descend *through*
+    /// tainted (loop-dependent) nodes to find the invariant sub-expressions they read, and stop at each
+    /// invariant (its whole cone is invariant, so the normal emitter handles it).
+    fn body_invariants(&self, roots: &[RvId]) -> Vec<RvId> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        let mut stack: Vec<RvId> = roots.to_vec();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if self.taint.contains(&id) {
+                self.push_operands(id, &mut stack);
+            } else {
+                out.push(id);
+            }
+        }
+        out
+    }
+
+    /// All direct operand ids of a node (including an `ArrIndex`/`Scan`'s array/loop inputs, unlike
+    /// `children`). Used to walk a loop body for hoisting.
+    fn push_operands(&self, id: RvId, stack: &mut Vec<RvId>) {
+        match self.graph.node(id) {
+            RvNode::Unary(_, a) | RvNode::ArrElem { arr: a, .. } => stack.push(*a),
+            RvNode::Binary(_, a, b) | RvNode::ArrIndex { arr: a, index: b } => {
+                stack.push(*a);
+                stack.push(*b);
+            }
+            RvNode::Select { cond, a, b } => {
+                stack.push(*cond);
+                stack.push(*a);
+                stack.push(*b);
+            }
+            RvNode::Gather { elems, index } => {
+                stack.extend(elems.iter().copied());
+                stack.push(*index);
+            }
+            RvNode::Scan { body } => {
+                stack.extend(body.inits.iter().copied());
+                stack.extend(body.nexts.iter().copied());
+            }
+            RvNode::ScanOut { scan, .. } => stack.push(*scan),
+            RvNode::Src(_)
+            | RvNode::ConstNum(_)
+            | RvNode::ConstBool(_)
+            | RvNode::Permutation { .. }
+            | RvNode::Rotation { .. }
+            | RvNode::ArrDraw { .. }
+            | RvNode::Placeholder { .. } => {}
+        }
     }
 
     /// The WGSL expression for one node, over its already-emitted children.
@@ -515,6 +661,9 @@ impl Emitter<'_> {
                 }
                 Self::arr_read(&name, len, &idx)
             }
+
+            // A read of a rolled loop's final carried value: roll the loop (once) and name the slot.
+            RvNode::ScanOut { scan, slot } => self.emit_scan(scan)?[slot as usize].clone(),
 
             other => unreachable!("plan_blocks rejects {other:?} before we get here"),
         })

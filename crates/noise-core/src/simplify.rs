@@ -93,7 +93,7 @@ pub fn unroll_scans_roots(graph: &RvGraph, roots: &[RvId]) -> Option<(RvGraph, V
 /// Ids whose value depends on a loop [`Placeholder`](RvNode::Placeholder) — a carried slot or the
 /// iteration counter — and so must be rebuilt *per iteration* rather than shared. Computed in one
 /// ascending pass because a node's operands always have smaller ids (append-only arena).
-fn taint_set(graph: &RvGraph) -> std::collections::HashSet<RvId> {
+pub(crate) fn taint_set(graph: &RvGraph) -> std::collections::HashSet<RvId> {
     let mut taint = std::collections::HashSet::new();
     let t = |taint: &std::collections::HashSet<RvId>, id: &RvId| taint.contains(id);
     for i in 0..graph.len() {

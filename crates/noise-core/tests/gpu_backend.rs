@@ -165,3 +165,27 @@ fn the_answer_does_not_depend_on_the_dispatch_split() {
     assert!((b - 1.0 / 3.0).abs() < 6.0 * sb, "3M (spans 3 dispatches): {b} +- {sb}");
 }
 
+
+/// **G4c: a rolled loop on the GPU** — prisoners' pointer-chase, the whole reason the Scan IR exists.
+/// The loop rolls to a WGSL `for`, and its answer must still be the interpreter's (analytic 0.3118).
+#[test]
+fn prisoners_on_the_gpu() {
+    let (p, _se) = est(
+        "use rand; n = 100; boxes ~ permutation(n); all = true; \
+         for prisoner in 0..n { box = prisoner; found = false; \
+           for hop in 0..50 { box = boxes[box]; found = found || (box == prisoner) }; \
+           all = all && found }; P(all, 200000)",
+    );
+    assert!((p - 0.3118).abs() < 0.01, "prisoners on GPU = {p}, want ~0.3118");
+}
+
+/// A single rolled loop on the GPU (pointer-chase over a permutation), forced onto the backend.
+#[test]
+fn a_rolled_loop_on_the_gpu() {
+    let (p, se) = est(
+        "use rand; boxes ~ permutation(20); box = 0; found = false; \
+         for hop in 0..12 { box = boxes[box]; found = found || (box == 0) }; P(found, 500000)",
+    );
+    // A cycle of length <=12 through 0 in a random permutation of 20: analytic P = 12/20 = 0.6.
+    assert!((p - 0.6).abs() < 6.0 * se.max(1e-3), "P(found) = {p} +- {se}, want 0.6");
+}
