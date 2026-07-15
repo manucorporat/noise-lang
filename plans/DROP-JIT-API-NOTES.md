@@ -43,7 +43,11 @@ So `prefer_runtime` amortizes compile across re-runs **of the same shader** (re-
 program, an introspection pass forcing a root several times) — real wins — but **not** yet across an
 input sweep, because each value is a different shader.
 
-### The fix (future work): lower inputs as shader **uniforms**, not baked constants
+### The fix: lower inputs as shader **uniforms**, not baked constants — now planned in full
+
+**See `plans/PLAN-UNIFORM-INPUTS.md`** for the complete design (symbolic scalar values on the
+`Value::Signal` model, the `RvNode::Input` node, both emitters + dispatch plumbing, phasing, and the
+structural-vs-value boundary). The sketch below is the seed that plan grew from.
 
 Make an `input::real(…)` a distinguished graph node ("input parameter i") that the emitters lower to a
 **uniform** read (`P.inputs[i]`) rather than a literal, and pass the current input values in the params
