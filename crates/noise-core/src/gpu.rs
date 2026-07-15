@@ -69,11 +69,18 @@ const MAX_WGSL_INSTRS: usize = 8_000;
 /// That is exactly the plan's thesis, arrived at from the other end: a fat cone is a lane's worth of
 /// independent ALU work, which is what a GPU is *for*, and it amortizes the dispatch + compile over
 /// the cone rather than over the draw count. A thin cone (`kelly`: six ops and a couple of uniforms)
-/// is pure RNG-and-memory, where a warmed-up multicore JIT is simply hard to beat and the pipeline
+/// is pure RNG-and-memory, where a warmed-up multicore CPU is simply hard to beat and the pipeline
 /// compile can never be earned back.
 ///
-/// Sits at 100 — comfortably inside the empty band between 58 and 124.
-const MIN_CONE_OPS: u64 = 100;
+/// **Recalibrated against the interpreter floor** (PLAN-DROP-JIT D4a). The gate was tuned against the
+/// retired multicore JIT, whose floor was ~1.18× faster; against the interpreter the GPU wins on
+/// *thinner* cones than 100. The measured band (M4 Pro, gated-vs-`NOISE_FORCE_GPU` confusion matrix,
+/// per forcing at n=1M): `bootstrap` tops out at 41 ops/draw and loses on the GPU (its CPU reduce is
+/// ~1–3.5 ms — cheap gathers), while `beta_bernoulli` starts at 47 and wins (~8 ms CPU reduce —
+/// transcendental-heavy, so its true per-op cost is higher than the node count shows). 45 sits in
+/// that empty band, recovering `beta_bernoulli` (−22 ms) without accepting `bootstrap`/`kelly`/
+/// `conditional_bayes`/`dithering` (all ≤ 41 ops/draw). The `MIN_WORK_GPU` term still guards small-n.
+const MIN_CONE_OPS: u64 = 45;
 
 /// …and enough total work to pay for the pipeline compile at all. `noise_colors` is the tightest
 /// winner (2,035 ops/draw but only 3,000 draws per forcing → 6.1e6) and still returns 1.65×.
