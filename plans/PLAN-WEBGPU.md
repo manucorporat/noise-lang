@@ -182,11 +182,31 @@ So the honest trade at G3 is a straight one, with no free lunch on either side:
 | permanent hazards | none | SAB protocol + a deadlock surface |
 | also enables | progress reporting; a GPU backend that can simply be `await`ed | — |
 
-**Undecided, deliberately.** (b) is a real contender now — it needs *zero* changes to the
-evaluator, and the flagship deployment already has the isolation it wants. (a) buys a cleaner
-long-term architecture and GPU for embedders who never set COOP/COEP. Decide at G3 with G0's cost
-data in hand, not here. (Native: `wgpu` + blocking poll, trivially sync — which is also our test
-harness either way, under both options.)
+**DECIDED at G3 (2026-07-15): (b) `Atomics.wait`, with the device on the MAIN THREAD.** The trade
+came down clean once the whole native backend existed:
+- **(a)'s core cost is no longer worth its benefit.** G4c just landed a large change to the eval
+  spine; a second 400–800-line refactor of the *same* code to make it async — purely to reach a
+  browser dispatch — is risk with no native payoff (native stays blocking-poll either way). Its one
+  remaining unique win is GPU for embedders who never set COOP/COEP, which is a nice-to-have, not the
+  flagship.
+- **(b) needs zero evaluator changes**, and the flagship playground is *already* cross-origin
+  isolated (`netlify.toml`, site-wide) and *already* loads the `wasm-mt/` build with SAB. So
+  `Atomics.wait` is available exactly where the GPU is wanted; everyone else falls back to today's
+  wasm path — the same isolation tier the package already ships for threads (`pool.ts`), not a new one.
+- **Device on the main thread, not a second worker.** The engine worker blocks on a SAB flag, so it
+  cannot run its own `mapAsync`; the main thread is never blocked, so it owns the device and runs the
+  async dispatch. This also answers the terminate-cancel cost above — an aborted worker no longer
+  throws away the device/pipeline cache, because it never held them; the replacement worker re-attaches
+  to the main thread's device with no async re-acquire. One agent owns the device for the page's life.
+
+**The protocol.** The engine worker's wasm hits `nz_gpu_dispatch` mid-forcing (sync, as `nz_kernel_*`
+is). The shim writes the shader + params into a `SharedArrayBuffer`, `postMessage`s the main thread,
+then `Atomics.wait`s on a done flag. The main thread's handler runs the async WebGPU dispatch
+(content-addressed pipeline cache, same LRU/liveness as `nz_kernel_*`), writes the result columns back
+into the SAB, and `Atomics.notify`s. The worker wakes, reads the columns, and folds them with the
+ordinary reducer — so the *fold* stays in wasm and the answer is bit-identical to native. Local dev
+needs a COOP/COEP header shim on `astro dev` (production has them); non-isolated pages never take this
+path (feature-detect `crossOriginIsolated` + `navigator.gpu`, else the wasm kernel).
 
 **A cost of the terminate-based cancel, to price at G3.** Browser cancellation kills the worker. If
 the worker owns the GPU device and the pipeline cache, an abort throws both away, and the
