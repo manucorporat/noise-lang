@@ -170,10 +170,12 @@ pub fn compile(graph: &RvGraph, root: RvId) -> Program {
         &stream_ords,
         &ords,
     );
+    // Reuse dead columns (PLAN-DROP-JIT D3b): shrink `n_regs` from one-per-node to the live-set peak.
+    let (n_regs, remap) = reuse_registers(&mut insts, &mut gathers, &[root_reg]);
     Program {
-        n_regs: insts.len(),
+        n_regs,
         insts,
-        root: root_reg,
+        root: remap[root_reg as usize],
         gathers,
         arrays,
     }
@@ -214,10 +216,13 @@ pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
             )
         })
         .collect();
+    // Reuse dead columns (PLAN-DROP-JIT D3b), keeping EVERY root's column live to the reducer.
+    let (n_regs, remap) = reuse_registers(&mut insts, &mut gathers, &regs);
+    let regs: Vec<Reg> = regs.iter().map(|&r| remap[r as usize]).collect();
     let root = regs.first().copied().unwrap_or(0);
     (
         Program {
-            n_regs: insts.len(),
+            n_regs,
             insts,
             root,
             gathers,
@@ -225,6 +230,148 @@ pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
         },
         regs,
     )
+}
+
+/// Reuse a scalar column once its value is dead — a linear-scan register allocation over the finished
+/// instruction stream (PLAN-DROP-JIT D3b).
+///
+/// First-cut lowering gives one column per graph node — hundreds on a wide plot/signal cone, most
+/// dead long before the root. Here a column is freed after the **last** instruction that reads it and
+/// handed to a later instruction's `dst`, so `n_regs` drops from the node count to the live-set peak
+/// (tens). The interpreter's working set shrinks with it — a value written by one instruction stays in
+/// cache for the next reader instead of being one of hundreds of columns streamed per batch.
+///
+/// **Values are unchanged.** The draw stream is keyed on the graph, not the register
+/// ([`crate::kernel::source_ordinals`]); every elementwise op reads its operands (into locals, or via a
+/// scratch column for gather) before writing `dst`, so a `dst` that reuses a just-freed operand's
+/// column computes in place, correctly. The bit-exact conformance suite (interp vs wasm) pins it.
+///
+/// Returns `(new_n_regs, remap)` with `remap[old] == new`; the caller remaps its root(s). Columns that
+/// are never read (a shaped source's phantom scalar slot) are simply never allocated.
+fn reuse_registers(insts: &mut [Inst], gathers: &mut [Box<[Reg]>], roots: &[Reg]) -> (usize, Vec<Reg>) {
+    let n = insts.len();
+    // last_use[r] = last instruction that reads column r; a root is never freed (it must survive to
+    // the reducer). Default `r` (defined at inst r, dead there if never read).
+    let mut last_use: Vec<usize> = (0..n).collect();
+    let mut ops: Vec<Reg> = Vec::new();
+    for (j, inst) in insts.iter().enumerate() {
+        ops.clear();
+        scalar_operands(inst, gathers, &mut ops);
+        for &r in &ops {
+            last_use[r as usize] = j; // r < j: operands are lowered before their parent
+        }
+    }
+    for &root in roots {
+        last_use[root as usize] = usize::MAX;
+    }
+
+    // Linear scan: free an instruction's dead operands BEFORE allocating its `dst`, so `dst` can reuse
+    // one in place. Builds `remap` without touching the instructions.
+    let mut remap: Vec<Reg> = vec![Reg::MAX; n];
+    let mut free: Vec<Reg> = Vec::new();
+    let mut next: Reg = 0;
+    let mut freed: Vec<Reg> = Vec::new();
+    for i in 0..n {
+        ops.clear();
+        scalar_operands(&insts[i], gathers, &mut ops);
+        freed.clear();
+        for &r in &ops {
+            // last-use here, and not already freed this instruction (an op read twice, e.g. `X*X`).
+            if last_use[r as usize] == i && !freed.contains(&r) {
+                freed.push(r);
+                free.push(remap[r as usize]);
+            }
+        }
+        if produces_scalar(&insts[i]) {
+            remap[i] = free.pop().unwrap_or_else(|| {
+                let p = next;
+                next += 1;
+                p
+            });
+        }
+    }
+
+    // Apply the remap: every instruction's dst + scalar operands, and every gather table's elements.
+    for inst in insts.iter_mut() {
+        apply_remap(inst, &remap);
+    }
+    for tbl in gathers.iter_mut() {
+        for e in tbl.iter_mut() {
+            *e = remap[*e as usize];
+        }
+    }
+    (next as usize, remap)
+}
+
+/// Whether `inst` writes a **scalar** column (all but the array-valued sources, whose `dst` is an
+/// [`ArrReg`]). A shaped source occupies an instruction slot but leaves its scalar column unwritten,
+/// so it gets no physical column.
+fn produces_scalar(inst: &Inst) -> bool {
+    !matches!(inst, Inst::Permutation { .. } | Inst::Rotation { .. })
+}
+
+/// Push the **scalar** columns `inst` reads as operands (for a gather, the index plus every element
+/// column of its table). Sources, constants, and the array-valued sources read none.
+fn scalar_operands(inst: &Inst, gathers: &[Box<[Reg]>], out: &mut Vec<Reg>) {
+    match inst {
+        Inst::Un { a, .. } => out.push(*a),
+        Inst::Bin { a, b, .. } => {
+            out.push(*a);
+            out.push(*b);
+        }
+        Inst::Select { cond, a, b, .. } => {
+            out.push(*cond);
+            out.push(*a);
+            out.push(*b);
+        }
+        Inst::Gather { table, index, .. } => {
+            out.push(*index);
+            out.extend_from_slice(&gathers[*table as usize]);
+        }
+        Inst::ArrIndex { index, .. } => out.push(*index),
+        _ => {}
+    }
+}
+
+/// Rewrite `inst`'s scalar register fields (dst + operands) through `remap`. A gather's table elements
+/// live in `gathers`, remapped separately; a shaped source's [`ArrReg`] `dst` and an `ArrIndex`'s
+/// `arr` are a different namespace and untouched.
+fn apply_remap(inst: &mut Inst, remap: &[Reg]) {
+    let m = |r: &mut Reg| *r = remap[*r as usize];
+    match inst {
+        Inst::Uniform { dst, .. }
+        | Inst::UniformInt { dst, .. }
+        | Inst::Normal { dst, .. }
+        | Inst::Exp { dst, .. }
+        | Inst::Poisson { dst, .. }
+        | Inst::Geometric { dst, .. }
+        | Inst::ConstNum { dst, .. }
+        | Inst::ConstBool { dst, .. } => m(dst),
+        Inst::Un { dst, a, .. } => {
+            m(a);
+            m(dst);
+        }
+        Inst::Bin { dst, a, b, .. } => {
+            m(a);
+            m(b);
+            m(dst);
+        }
+        Inst::Select { dst, cond, a, b } => {
+            m(cond);
+            m(a);
+            m(b);
+            m(dst);
+        }
+        Inst::Gather { dst, index, .. } => {
+            m(index);
+            m(dst);
+        }
+        Inst::ArrIndex { dst, index, .. } => {
+            m(index);
+            m(dst);
+        }
+        Inst::Permutation { .. } | Inst::Rotation { .. } => {}
+    }
 }
 
 /// A worklist item for the iterative post-order lowering (below).
