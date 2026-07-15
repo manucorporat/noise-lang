@@ -178,6 +178,12 @@ pub struct Engine {
     /// value. First evaluation of a name registers here; later mentions reuse it. Drives host
     /// discovery (`Document.result.inputs`) and dedup / redeclaration checks (PLAN-INPUTS §3).
     input_manifest: Vec<ResolvedInput>,
+    /// The run's **runtime input values**, one f32 per manifest slot (`value as f32`; bool → 0/1),
+    /// parallel to `input_manifest` (PLAN-UNIFORM-INPUTS). Populated as `input::` declarations
+    /// resolve, and *installed* thread-locally around each forcing region so the free forcing
+    /// functions (`sampler`/`reduce`) can hand `RvNode::Input` its slot value at run time without an
+    /// engine parameter. Owned here (like the compile cache) so it drops with the engine.
+    inputs: crate::input_rt::Inputs,
     /// Per-engine run-time counters (finding B8). Owned here — not a thread-local global — so two
     /// engines on one thread (the playground sidecar pattern) keep independent stats and reading
     /// them doesn't couple to whichever thread last forced. Installed as the thread's active
@@ -274,6 +280,7 @@ impl Engine {
             datasets: Vec::new(),
             input_overrides: Vec::new(),
             input_manifest: Vec::new(),
+            inputs: crate::input_rt::new_inputs(),
             stats: crate::stats::new_counters(),
             compile_cache: crate::compile_cache::new_cache(),
             cancel: crate::exec::CancelToken::new(),
@@ -448,10 +455,12 @@ impl Engine {
         let _rec = crate::stats::install(&self.stats);
         let _cache = crate::compile_cache::install(&self.compile_cache);
         let _cancel = crate::exec::install(&self.cancel);
+        let _inputs = crate::input_rt::install(&self.inputs);
         self.stats.set(crate::stats::RunStats::default());
         self.dropped = 0;
         self.first_dropped_span = None;
         self.input_manifest.clear();
+        self.inputs.borrow_mut().clear();
         let program = parse(src)?;
         let mut last = Value::Unit;
         for stmt in &program.stmts {
@@ -464,7 +473,21 @@ impl Engine {
             last = self.eval_top(stmt)?;
         }
         self.check_input_overrides()?;
-        Ok(last)
+        // A program whose result is a bare tunable input (`sides = input::real(…); sides`) evaluates
+        // to a symbolic value; realize it to its current number for the host now, while the input
+        // values are still installed (PLAN-UNIFORM-INPUTS). Intermediate `Sym`s stay symbolic — only
+        // the returned value is concretized.
+        Ok(self.realize_result(last))
+    }
+
+    /// Concretize a top-level `Value::Sym` to its current `Value::Num` (folded against the installed
+    /// input values); every other value passes through. Applied to a run's final result so a host
+    /// sees a number, not a symbolic handle whose value is only defined while inputs are installed.
+    fn realize_result(&self, v: Value) -> Value {
+        match v {
+            Value::Sym(s) => Value::Num(self.force_sym(&s)),
+            other => other,
+        }
     }
 
     /// Like [`run`](Engine::run), but with host-supplied **input overrides** (PLAN-INPUTS §5). Sets
@@ -523,10 +546,12 @@ impl Engine {
         let _rec = crate::stats::install(&self.stats);
         let _cache = crate::compile_cache::install(&self.compile_cache);
         let _cancel = crate::exec::install(&self.cancel);
+        let _inputs = crate::input_rt::install(&self.inputs);
         self.stats.set(crate::stats::RunStats::default());
         self.dropped = 0;
         self.first_dropped_span = None;
         self.input_manifest.clear();
+        self.inputs.borrow_mut().clear();
 
         // Frontmatter first — a malformed fence still yields a shaped document (no meta, spanned error).
         let fm = match crate::frontmatter::parse(src) {
@@ -565,6 +590,9 @@ impl Engine {
                 error = Some(e);
             }
         }
+        // Realize a bare tunable-input result to its number while inputs are still installed (see
+        // `realize_result`).
+        let last = self.realize_result(last);
         let emissions = self.take_output();
         let inputs = std::mem::take(&mut self.input_manifest);
         let truncated = self.first_dropped_span.map(|span| (self.dropped, span));
@@ -757,6 +785,7 @@ impl Engine {
         let _rec = crate::stats::install(&self.stats);
         let _cache = crate::compile_cache::install(&self.compile_cache);
         let _cancel = crate::exec::install(&self.cancel);
+        let _inputs = crate::input_rt::install(&self.inputs);
         sampler::sample_n(&self.graph, id, n, seed)
     }
 
@@ -766,6 +795,7 @@ impl Engine {
         let _rec = crate::stats::install(&self.stats);
         let _cache = crate::compile_cache::install(&self.compile_cache);
         let _cancel = crate::exec::install(&self.cancel);
+        let _inputs = crate::input_rt::install(&self.inputs);
         sampler::moments(&self.graph, id, n, seed)
     }
 }
@@ -871,6 +901,8 @@ fn matrix_of(rows: impl IntoIterator<Item = Vec<f64>>) -> Value {
 fn introspect_count(v: &Value, span: Span) -> Result<usize> {
     let n = match v {
         Value::Num(n) | Value::Est { val: n, .. } => *n,
+        // A tunable input as a sample count is a structural use — fold to its current value.
+        Value::Sym(s) => sym_current(s),
         other => {
             return Err(NoiseError::runtime(
                 format!("sample count must be a number, got {}", other.type_name()),
@@ -950,6 +982,7 @@ fn ancestors(graph: &RvGraph, root: RvId) -> HashSet<RvId> {
             RvNode::Src(_)
             | RvNode::ConstNum(_)
             | RvNode::ConstBool(_)
+            | RvNode::Input { .. }
             | RvNode::Permutation { .. }
             | RvNode::Rotation { .. }
             | RvNode::ArrDraw { .. } => {}
@@ -1185,8 +1218,18 @@ fn scalar_const(v: &Value) -> Option<f64> {
     match v {
         Value::Num(n) => Some(*n),
         Value::Est { val, .. } => Some(*val),
+        // A symbolic input meeting a signal folds to its current value here (P0 fallback: the value
+        // bakes into the signal `Konst`, so a signal-param input still recompiles on change —
+        // signal-uniform lowering is PLAN-UNIFORM-INPUTS P2). Uses the installed input values.
+        Value::Sym(s) => Some(sym_current(s)),
         _ => None,
     }
+}
+
+/// Fold a symbolic input against the thread-installed runtime input values (PLAN-UNIFORM-INPUTS).
+/// The free-function counterpart of `Engine::force_sym`, for helpers with no `&self`.
+fn sym_current(s: &crate::sym::SymExpr) -> f64 {
+    s.force_scalar(&crate::input_rt::current())
 }
 
 /// Tensor rank for the `@` operator: `0` = scalar, `1` = vector (array of non-arrays), `2` =
@@ -1218,6 +1261,9 @@ fn sig_operand(v: &Value, span: Span) -> Result<Rc<SigExpr>> {
         Value::Signal(s) => Ok(s.clone()),
         Value::Num(n) => Ok(Rc::new(SigExpr::Konst(*n))),
         Value::Est { val, .. } => Ok(Rc::new(SigExpr::Konst(*val))),
+        // A symbolic input folds to its current value as a signal `Konst` (P0 fallback — see
+        // `scalar_const`).
+        Value::Sym(s) => Ok(Rc::new(SigExpr::Konst(sym_current(s)))),
         other => Err(NoiseError::runtime(
             format!(
                 "cannot combine a signal with {} — `signal::sample(sig, n)` it to an array first",
@@ -1248,7 +1294,7 @@ fn unop_name(op: UnOp) -> &'static str {
 
 /// Deterministic scalar evaluation of a transcendental unary op (the `Num` fast path; the RV path
 /// uses the identical kernel in `bytecode::apply_un`).
-fn apply_unop_f64(op: UnOp, x: f64) -> f64 {
+pub(crate) fn apply_unop_f64(op: UnOp, x: f64) -> f64 {
     match op {
         UnOp::Neg => -x,
         UnOp::Sin => x.sin(),

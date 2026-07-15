@@ -429,6 +429,9 @@ pub fn walk_cost(
             // uniform / uniform_int: cheap inline draw everywhere.
             RvNode::Src(Source::Uniform(_) | Source::UniformInt { .. }) => *fusible += 1,
             RvNode::ConstNum(_) | RvNode::ConstBool(_) => {} // neutral
+            // A host input uniform: the WASM/GPU emit is P1. For P0 the codegen backends decline any
+            // cone that carries one (the interpreter, which reads `input_values`, takes it instead).
+            RvNode::Input { .. } => return false,
             RvNode::Unary(op, a) => {
                 match op {
                     // Inlined on both backends (trig/ln polynomials). `Sqrt` rides the same
@@ -518,7 +521,7 @@ pub fn supported(graph: &RvGraph, root: RvId) -> bool {
             None => false,
         },
         RvNode::Src(_) => true,
-        RvNode::ConstNum(_) | RvNode::ConstBool(_) => true,
+        RvNode::ConstNum(_) | RvNode::ConstBool(_) | RvNode::Input { .. } => true,
         RvNode::Unary(_, a) => supported(graph, *a),
         RvNode::Binary(_, a, b) => supported(graph, *a) && supported(graph, *b),
         RvNode::Select { cond, a, b } => {
@@ -601,7 +604,7 @@ pub fn cost_roots(graph: &RvGraph, roots: &[RvId]) -> NodeCost {
                 c.sources += d * d;
                 c.ops += 2 * d * d * d;
             }
-            RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+            RvNode::ConstNum(_) | RvNode::ConstBool(_) | RvNode::Input { .. } => {}
             RvNode::Unary(_, a) => stack.push(*a),
             RvNode::Binary(_, a, b) => {
                 stack.push(*a);
@@ -671,6 +674,7 @@ pub fn cone_size_roots(graph: &RvGraph, roots: &[RvId]) -> usize {
             RvNode::Src(_)
             | RvNode::ConstNum(_)
             | RvNode::ConstBool(_)
+            | RvNode::Input { .. }
             | RvNode::Permutation { .. }
             | RvNode::Rotation { .. }
             | RvNode::ArrDraw { .. } => {}

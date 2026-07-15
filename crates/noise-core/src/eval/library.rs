@@ -167,6 +167,9 @@ impl Engine {
     fn noise_sigma(&self, v: &Value, span: Span) -> Result<f64> {
         let n = match v {
             Value::Num(n) | Value::Est { val: n, .. } => *n,
+            // A tunable input as a noise strength folds to its current value (P0 fallback: signal
+            // params bake and recompile; signal-uniform lowering is PLAN-UNIFORM-INPUTS P2).
+            Value::Sym(s) => self.force_sym(s),
             other => {
                 return Err(NoiseError::runtime(
                     format!("noise strength must be a number, got {}", other.type_name()),

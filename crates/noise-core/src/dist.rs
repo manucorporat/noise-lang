@@ -267,6 +267,17 @@ pub enum RvNode {
     Src(Source),
     /// A folded deterministic numeric operand.
     ConstNum(f64),
+    /// A **host input** (`input::real`) as a shader/kernel UNIFORM (PLAN-UNIFORM-INPUTS). A numeric
+    /// leaf structurally like [`ConstNum`](RvNode::ConstNum) but **keyed on the slot index, never the
+    /// value** — the value is supplied at *run* time (the interpreter's `input_values` slice, a GPU
+    /// uniform), so a program is a pure function of its structure and stays cache-stable across input
+    /// *values*: drag a slider, dispatch again, no recompile. Deterministic and **draws nothing** (a
+    /// leaf like `ConstNum`), so the draw stream / source ordinals are untouched. It must stay
+    /// **opaque to constant folding** (folding it back to a `ConstNum` would re-bake the value); the
+    /// simplifier's `as_num` only recognizes `ConstNum`, so this holds by construction.
+    Input {
+        idx: u32,
+    },
     /// A folded deterministic boolean operand.
     ConstBool(bool),
     Unary(UnOp, RvId),

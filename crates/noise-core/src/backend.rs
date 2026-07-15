@@ -184,8 +184,10 @@ pub fn compile_roots(
 /// An immutable compiled program. `Send + Sync` so a single compilation is shared by reference
 /// across all worker threads; each worker calls [`runner`](Program::runner) for its own state.
 pub trait Program: Send + Sync {
-    /// Create a fresh per-worker [`Runner`] (own scratch + RNG). Cheap — no recompilation.
-    fn runner(&self) -> Box<dyn Runner>;
+    /// Create a fresh per-worker [`Runner`] (own scratch + RNG). Cheap — no recompilation. `inputs`
+    /// is the forcing's snapshot of host input values (PLAN-UNIFORM-INPUTS) — a shared `Arc` so every
+    /// worker's runner reads the same slot values; empty for an input-free program.
+    fn runner(&self, inputs: Arc<[f64]>) -> Box<dyn Runner>;
 }
 
 /// Per-worker execution state. Used by exactly one thread, so it need not be `Send`/`Sync`.
@@ -230,7 +232,7 @@ struct InterpProgram {
 }
 
 impl Program for InterpProgram {
-    fn runner(&self) -> Box<dyn Runner> {
+    fn runner(&self, inputs: Arc<[f64]>) -> Box<dyn Runner> {
         // Allocate this worker's column file once; reused across its batches. Array registers
         // (`Inst::Permutation`) get their own `n × BATCH` buffers, sized by `Program::arrays`.
         let regs = (0..self.inner.n_regs)
@@ -242,6 +244,7 @@ impl Program for InterpProgram {
             prog: self.inner.clone(),
             regs,
             arrs,
+            inputs,
             key: Key::from_seed(0),
             lane: 0,
         })
@@ -263,6 +266,8 @@ struct InterpRunner {
     prog: Arc<ByteProgram>,
     regs: Vec<Box<[f32]>>,
     arrs: Vec<Box<[f32]>>,
+    /// This forcing's host input values (`Inst::Input` reads a slot by index). Shared across workers.
+    inputs: Arc<[f64]>,
     key: Key,
     lane: u32,
 }
@@ -275,7 +280,7 @@ impl Runner for InterpRunner {
 
     fn next_batch(&mut self, len: usize) -> &[f32] {
         // Fill the full BATCH (lane consumption is constant per call), then slice to `len`.
-        run_batch(&self.prog, &mut self.regs, &mut self.arrs, self.key, self.lane);
+        run_batch(&self.prog, &mut self.regs, &mut self.arrs, self.key, self.lane, &self.inputs);
         self.lane = self.lane.wrapping_add(BATCH as u32);
         &self.regs[self.prog.root as usize][..len]
     }
@@ -289,7 +294,8 @@ impl Runner for InterpRunner {
 /// *column per root* per batch, with all roots drawn jointly on shared lanes.
 pub trait JointProgram: Send + Sync {
     /// Create a fresh per-worker [`JointRunner`] (own scratch + RNG). Cheap — no recompilation.
-    fn runner(&self) -> Box<dyn JointRunner>;
+    /// `inputs` is the forcing's host-input-values snapshot (see [`Program::runner`]).
+    fn runner(&self, inputs: Arc<[f64]>) -> Box<dyn JointRunner>;
 }
 
 /// Per-worker execution state of a [`JointProgram`]. Used by exactly one thread.
@@ -319,7 +325,7 @@ struct InterpJointProgram {
 }
 
 impl JointProgram for InterpJointProgram {
-    fn runner(&self) -> Box<dyn JointRunner> {
+    fn runner(&self, inputs: Arc<[f64]>) -> Box<dyn JointRunner> {
         let buf = (0..self.inner.n_regs)
             .map(|_| vec![0.0f32; BATCH].into_boxed_slice())
             .collect();
@@ -330,6 +336,7 @@ impl JointProgram for InterpJointProgram {
             regs: self.regs.clone(),
             buf,
             arrs,
+            inputs,
             key: Key::from_seed(0),
             lane: 0,
         })
@@ -342,6 +349,7 @@ struct InterpJointRunner {
     regs: Vec<usize>,
     buf: Vec<Box<[f32]>>,
     arrs: Vec<Box<[f32]>>,
+    inputs: Arc<[f64]>,
     key: Key,
     lane: u32,
 }
@@ -353,7 +361,7 @@ impl JointRunner for InterpJointRunner {
     }
 
     fn next_batch(&mut self) {
-        run_batch(&self.prog, &mut self.buf, &mut self.arrs, self.key, self.lane);
+        run_batch(&self.prog, &mut self.buf, &mut self.arrs, self.key, self.lane, &self.inputs);
         self.lane = self.lane.wrapping_add(BATCH as u32);
     }
 

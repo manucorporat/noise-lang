@@ -162,6 +162,9 @@ fn plan_blocks(graph: &RvGraph, roots: &[RvId]) -> Result<Plan, Unsupported> {
                 stack.push(*arr);
             }
             RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
+            // Host input uniforms lower to a WGSL uniform read in P1; for now the GPU declines any
+            // cone that carries one and falls back to the interpreter (PLAN-UNIFORM-INPUTS P0).
+            RvNode::Input { .. } => return Err(Unsupported("input")),
             RvNode::Unary(_, a) => stack.push(*a),
             RvNode::Binary(_, a, b) => {
                 stack.push(*a);
@@ -518,6 +521,7 @@ impl Emitter<'_> {
             RvNode::Src(_)
             | RvNode::ConstNum(_)
             | RvNode::ConstBool(_)
+            | RvNode::Input { .. }
             | RvNode::Permutation { .. }
             | RvNode::Rotation { .. }
             | RvNode::ArrDraw { .. }
@@ -1387,7 +1391,7 @@ mod gpu_tests {
     fn interp_col(eng: &Engine, root: RvId, seed: u64, n: usize) -> Vec<f32> {
         let g = eng.graph();
         let prog = InterpBackend.compile(g, root, n);
-        let mut r = prog.runner();
+        let mut r = prog.runner(std::sync::Arc::from(&[] as &[f64]));
         let mut out = Vec::with_capacity(n);
         let cap = r.batch_cap();
         let mut lane = 0u32;

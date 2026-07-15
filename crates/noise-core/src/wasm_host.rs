@@ -208,7 +208,7 @@ struct WasmProgram {
 }
 
 impl Program for WasmProgram {
-    fn runner(&self) -> Box<dyn Runner> {
+    fn runner(&self, inputs: Arc<[f64]>) -> Box<dyn Runner> {
         // Instantiate in *this* thread's host registry (see the type docs). A negative handle means
         // this thread can't run the kernel (e.g. the main-thread sync-compile size limit) — the
         // interpreter fallback keeps it correct. Nothing to seed: the kernel is stateless, so a
@@ -216,7 +216,7 @@ impl Program for WasmProgram {
         // seeding hazard, now structurally gone).
         let handle = nz_kernel_new(&self.bytes);
         if handle < 0 {
-            return self.fallback.runner();
+            return self.fallback.runner(inputs);
         }
         Box::new(WasmRunner {
             handle,
@@ -225,6 +225,7 @@ impl Program for WasmProgram {
             seed: 0,
             buf: vec![0.0f32; BATCH],
             fallback: self.fallback.clone(),
+            inputs,
             fell_back: None,
         })
     }
@@ -242,6 +243,8 @@ struct WasmRunner {
     seed: u64,
     buf: Vec<f32>,
     fallback: Arc<dyn Program>,
+    /// This forcing's host input values, forwarded to the interpreter fallback if it engages.
+    inputs: Arc<[f64]>,
     fell_back: Option<Box<dyn Runner>>,
 }
 
@@ -249,7 +252,7 @@ impl WasmRunner {
     /// Switch to the interpreter fallback, positioned at (`seed`, `lane`), for this and every
     /// subsequent batch.
     fn switch_to_fallback(&mut self) {
-        let mut r = self.fallback.runner();
+        let mut r = self.fallback.runner(self.inputs.clone());
         r.position(self.seed, self.lane);
         self.fell_back = Some(r);
     }
@@ -302,12 +305,12 @@ struct WasmJointProgram {
 }
 
 impl JointProgram for WasmJointProgram {
-    fn runner(&self) -> Box<dyn JointRunner> {
+    fn runner(&self, inputs: Arc<[f64]>) -> Box<dyn JointRunner> {
         // Same instantiate-on-the-driving-thread story as `WasmProgram::runner` (stateless kernel:
         // nothing to seed).
         let handle = nz_kernel_new(&self.bytes);
         if handle < 0 {
-            return self.fallback.runner();
+            return self.fallback.runner(inputs);
         }
         Box::new(WasmJointRunner {
             handle,
@@ -316,6 +319,7 @@ impl JointProgram for WasmJointProgram {
             seed: 0,
             buf: vec![0.0f32; self.k * BATCH],
             fallback: self.fallback.clone(),
+            inputs,
             fell_back: None,
         })
     }
@@ -332,12 +336,13 @@ struct WasmJointRunner {
     seed: u64,
     buf: Vec<f32>,
     fallback: Arc<dyn JointProgram>,
+    inputs: Arc<[f64]>,
     fell_back: Option<Box<dyn JointRunner>>,
 }
 
 impl WasmJointRunner {
     fn switch_to_fallback(&mut self) {
-        let mut r = self.fallback.runner();
+        let mut r = self.fallback.runner(self.inputs.clone());
         r.position(self.seed, self.lane);
         self.fell_back = Some(r);
     }

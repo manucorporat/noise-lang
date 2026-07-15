@@ -205,6 +205,10 @@ pub struct ResolvedInput {
     pub spec: InputSpec,
     pub value: InputValue,
     pub stmt_span: Span,
+    /// Declaration-order slot (position in the manifest / the runtime `input_values` slice). A value
+    /// input (`input::real`) lowers to `RvNode::Input { idx }`, keyed on this and never the value
+    /// (PLAN-UNIFORM-INPUTS).
+    pub idx: u32,
 }
 
 impl ResolvedInput {

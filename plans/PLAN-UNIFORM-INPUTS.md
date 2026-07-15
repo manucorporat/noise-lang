@@ -1,6 +1,6 @@
 # PLAN-UNIFORM-INPUTS — inputs as shader uniforms via symbolic scalar values
 
-**Date:** 2026-07-15 · **Status: DRAFT.** Grounded by a full seam map (file:line below).
+**Date:** 2026-07-15 · **Status: P0 LANDED** (interpreter + cache); P1–P3 pending. Grounded by a full seam map (file:line below).
 **Depends on** the landed PLAN-DROP-JIT cost model (`set_prefer_runtime`) — this plan is what makes
 that cost model *pay* for input-driven interactivity.
 
@@ -129,6 +129,127 @@ than folding. **Gate:** `am_vs_fm`'s `fm_swing` (a signal param) and `noise_stre
 re-eval where the graph is unchanged (the JS/playground slider loop); confirm the pipeline cache
 survives across `run` calls on a held engine; the profiler surfaces the HIT. This is where the
 interactive story becomes real for the browser.
+
+## P0 implementation design (grounded — 2026-07-15)
+
+A full seam pass confirmed the plan and pinned the concrete moves. Recording them here so the
+implementation is reproducible.
+
+### The runtime channel: how input values reach the interpreter (the load-bearing decision)
+
+The compiled `Program` is the **cached, shared** artifact keyed on structure (idx, not value) — so the
+values *cannot* live in it, or a second forcing at a new value would hit the cache and read stale
+values. They must be supplied **downstream of the cache lookup**, at run time. Chosen mechanism (mirrors
+`compile_cache` / `exec` token exactly):
+
+- A new `crate::input_rt` module: a thread-local holding the engine's `Rc<RefCell<Vec<f32>>>`, installed
+  by an RAII guard (`input_rt::install(&self.inputs)`) alongside `stats`/`compile_cache`/`exec` installs
+  in `Engine::run`/`run_to_document` (`eval.rs:448`).
+- `Engine` gains an `inputs: Rc<RefCell<Vec<f32>>>` field, **parallel to `input_manifest`** — one f32 per
+  manifest entry (`value as f32`; bool → 0/1), pushed in `eval_arms.rs:905` right where the `ResolvedInput`
+  is pushed. `idx = input_manifest.len()` at declaration ⇒ `inputs[idx]` is always aligned. Unused slots
+  for int/bool inputs are free and keep idx = manifest position (no separate counter).
+- The forcing drivers (`reduce::run_reduction`, `sampler::for_each_batch`, `for_each_joint_batch`) snapshot
+  `input_rt::current()` **once on the driver thread** into an `Arc<[f32]>` and pass it to each `Runner`.
+  `Send` `Arc` ⇒ correct under `thread::scope`/rayon fan-out (the CancelToken precedent).
+- **Runner creation carries the values:** `Program::runner(&self, inputs: Arc<[f32]>)` (+ the joint twin).
+  The `InterpRunner` stores the `Arc<[f32]>`; `run_batch(…, inputs)` reads it. 5 `.runner()` call sites,
+  2 trait impls each — bounded. (An input-free forcing passes an empty `Arc`.)
+
+### `RvNode::Input { idx: u32 }` — the exhaustive-match checklist
+
+`RvNode` is matched exhaustively in many places; the compiler enumerates them. Each arm for `Input` treats
+it as a **deterministic, draw-free leaf, structurally like `ConstNum` but keyed on `idx`**:
+- `dist.rs` — enum variant (`RvKind::Num`).
+- `kernel.rs` — `source_ordinals` → 0; `cell_stream_ordinals` → `NO_STREAM`; `walk_cost` → neutral (like
+  `ConstNum`) + `supported` → true; `cost` → neutral.
+- `simplify.rs` — taint walk → `false` (no placeholder dep); rewrite `Visit` → no children; rewrite `Emit`
+  → intern by idx (`Key::Input(idx)`, new `Key` variant); unroll walk arms likewise. **Opacity is free:**
+  `as_num`/`as_bool` only recognize `ConstNum`/`ConstBool`, so `Input` never const-folds; the identity
+  rewrites (`Input+0 → Input`, `Input*1 → Input`) are sound and desirable.
+- `compile_cache.rs::key` — new tag byte + `push_u32(idx)`, **no value** ⇒ two forcings differing only in
+  input values produce the identical key.
+- `bytecode.rs` — lower stack walk → no children; lower emit → `Inst::Input { dst, idx }`; `produces_scalar`
+  → true; `scalar_operands` → none; `apply_remap` → remap `dst`. `run_batch` fills the column with
+  `inputs[idx] as f32` (the SAME `val as f32` the old `ConstNum` lane held ⇒ **bit-identical**).
+- `wgsl_emit.rs` / `wasm_emit.rs` — P0 only needs them to **compile**; the GPU/wasm emit of `Input` is P1.
+  For P0 they get an arm that is unreachable in the interpreter path.
+- `gpu.rs` — **decline** (return `None`, fall back to interpreter) for any cone containing an `Input`
+  node in P0, so `--features gpu` stays correct before P1 wires the uniform buffer.
+
+### `Value::Sym(Rc<SymExpr>)` — the eval integration (the `Value::Signal` playbook, scalar)
+
+- New `crate::sym` module: `SymExpr { Input(u32), Const(f64), Unary(UnOp, Rc<SymExpr>), Binary(BinOp,
+  Rc<SymExpr>, Rc<SymExpr>) }`, with `force_scalar(&[f32]) -> f64` (fold with current values; `Input(i)`
+  reads `values[i]`). `Value::Sym` added to the `#[non_exhaustive]` enum; `type_name` → `"number"`;
+  `Display` → `force_scalar(current values)` so `${my_stake}` interpolation and `Print` show the value.
+- **Scope decision (matches the user's "focus on value inputs"):** only **`input::real`** becomes
+  `Value::Sym(Input(idx))`. `input::int`/`bool` stay concrete `Num`/`Bool` (they are structural/control;
+  recompiling on their change is correct and they are out of the interactive-slider target set). This
+  slashes the ripple — the corpus's value sliders are all `input::real`.
+- `ResolvedInput` gains `idx: u32`; the dedup arm (`eval_arms.rs:892`) returns the existing input's
+  `Value::Sym(Input(idx))` for a real input (concrete value for int/bool).
+- **Arithmetic keeps it symbolic** (`ops.rs::binop`, before the deterministic `eval_binary`): `Sym∘Num` /
+  `Sym∘Sym` → `Sym`; `Sym∘Dist` (either order) → lower the `Sym` to an `Input` node, then the existing
+  `lift_binary` path. Unary on a `Sym` → `Sym`. A new `binop_sym` mirrors `binop_signal`.
+- **`operand_to_rv` (`draw_lift.rs:564`) lowers `Sym` → Input node** (`self.lower_sym(&s)` walks the
+  SymExpr, pushing `Input`/`Unary`/`Binary`). This is the entry point for **thresholds & arithmetic-with-RV**
+  — `path < barrier`, `loss > deductible`, `loss - deductible`. Covers `barrier`, `deductible`, kelly's
+  `my_stake`.
+- **Source params** (`unif(-dither, dither)`, `unif(0, max_loss)`): `dist_arg` (`builtins.rs:928`) reads an
+  **immutable** graph, so it cannot push an `Input` node. Fix: **pre-lower `Sym` args to
+  `Value::Dist(input_node)` in `dispatch_call` (`eval_arms.rs:714`), only for the distribution-constructor
+  base names** (`unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `normal_complex`, `exponential`,
+  `exponential_int`, `poisson`, `geometric`). A `Sym` param there is *always* a value ⇒ lowering to an
+  Input `Dist` is always correct, and the existing `DistArg::Rv` + `*Dyn` recipe path then reads the bound
+  from the uniform. Covers `dither`, insurance's `max_loss`.
+- **Structural sites force to scalar** (`ops.rs::count_arg`, `array_index`; `eval.rs::introspect_count`;
+  `set_max_samples`/`set_resolution` via `count_arg`): a `Sym` folds via `force_scalar(current values)`.
+  A real input used as an array size / loop bound / index legitimately recompiles on change (structural).
+- `scalar_const` (`eval.rs:1184`) / `sig_operand` (`eval.rs:1216`): P0 fallback folds a `Sym` via
+  `force_scalar` so a signal `Konst` still works (bakes the value ⇒ recompiles). True signal-uniform
+  lowering (`fm_swing`, `noise_strength`) is **P2**.
+
+### What P0 does NOT cover (explicit, deferred)
+- Signal params (`fm_swing`, `noise_strength`), complex channels, array elements as uniforms → **P2**.
+- WGSL/WASM emit of `Input` + the dispatch buffers → **P1** (P0 declines GPU, falls back to interp; on
+  wasm the interpreter fallback carries it).
+
+### P0 landed — what shipped and the deviations from the draft
+
+Everything above is implemented on branch `drop-jit-d0-d4`. Full suite green (lib 200, every
+integration suite, CLI, corpus end-to-end). Deviations worth recording:
+
+- **Runtime values are `f64`, not `f32`** (the draft said f32). The `input_rt` cell / `Arc<[f64]>` /
+  `run_batch` slice carry the resolved f64; `Inst::Input` narrows with `val as f32` **at the lane
+  fill**, exactly as `Inst::ConstNum` does. This is strictly better: lanes stay bit-identical to the
+  baked const, *and* `Display` / structural `force_scalar` fold against the exact f64 — so `${my_stake}`
+  prints `0.2`, not the f32-rounded `0.20000000298` an f32 store produced (caught in testing).
+- **`Program::runner(&self, inputs: Arc<[f64]>)`** carries the snapshot (the draft floated
+  `position(…, inputs)`); runner creation is the natural home since values are constant per forcing.
+  Drivers snapshot `input_rt::current()` once and clone the `Arc` to each worker (the CancelToken
+  precedent); `run_parallel` gained an `inputs` param + `let (next, …) = (&next, …)` reborrows so the
+  `move` worker closures capture the shared counter by reference and only *move* their `inputs` clone.
+- **Top-level `Sym` result is realized to `Num`** at the end of `run`/`run_to_document` (while inputs
+  are still installed) via `realize_result`, so a program that evaluates to a bare input still returns a
+  number to the host (`sides * 2 → 12`), preserving the old contract. Intermediate `Sym`s stay symbolic.
+- **`simplify` opacity is free**, as predicted: `as_num` only matches `ConstNum`, so `Input` never
+  const-folds; it interns by idx (`Key::Input`) and the sound identities (`Input+0 → Input`) still fire.
+- **Source-param pre-lower** is exactly the `is_dist_ctor` + `Sym → Dist(lower_sym(s))` map in
+  `dispatch_call` — `unif(-dither, dither)` and `unif(0, max_loss)` become uniform-bounded `*Dyn`
+  recipes. Confirmed on `dithering` and `insurance`.
+- **Signals/complex meeting a `Sym` fall back to force-to-scalar** (bake + recompile) in
+  `scalar_const`/`sig_operand`/`noise_sigma`/the complex branch — so `am_vs_fm` (`fm_swing`,
+  `noise_strength`) runs correctly today; its signal-uniform lowering is the P2 win.
+
+**Gate (proven by tests):**
+- `compile_cache::tests::value_input_change_hits_cache_and_matches_baked_const` — forcing `P(X < d)` at
+  `d=0.5` then `d=0.25` on a held engine **adds zero compiles** (cache HIT), the answer tracks `d`, and
+  each result is **bit-identical** to the baked-const program (`P(X < 0.5)` / `P(X < 0.25)`).
+- `simplify::tests::input_is_opaque_to_constant_folding` — `Input * 2` stays `Binary(Mul, Input,
+  Const(2))`; the value never re-bakes.
+- CLI: `barrier_option --input barrier=90` → 49% knocked out vs 19% at 80 vs 0.6% at 60 — the uniform is
+  read at dispatch through the parallel forcing path, no recompile.
 
 ## Determinism / the two-tier contract
 

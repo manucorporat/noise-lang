@@ -221,6 +221,9 @@ fn collect_gather_tables(
             RvNode::Src(_)
             | RvNode::ConstNum(_)
             | RvNode::ConstBool(_)
+            // A host input never reaches the wasm emitter in P0 — `kernel::walk_cost` declines any
+            // cone carrying one — but keep this table-collection walk total (it draws no table).
+            | RvNode::Input { .. }
             | RvNode::ArrDraw { .. }
             | RvNode::ArrElem { .. } => {}
             RvNode::Unary(_, a) => stack.push(*a),
@@ -655,6 +658,9 @@ fn emit_node(
         RvNode::ConstBool(b) => {
             s.f32_const(f32c(if *b { 1.0 } else { 0.0 }));
         }
+        // The WASM emit of a host input uniform is P1; for P0 `walk_cost` declines any cone with one,
+        // so this backend never sees it (the interpreter, reading `input_values`, takes it instead).
+        RvNode::Input { .. } => unreachable!("walk_cost excludes Input cones from wasm codegen (P0)"),
         RvNode::Unary(op, a) => {
             let la = emit_node(s, ctx, *a, memo, slot, pair);
             emit_unary(s, ctx, *op, la);
@@ -1422,7 +1428,7 @@ mod tests {
         for (label, src) in conformance::CONST_CASES {
             let (eng, id) = graph_of(src);
             let g = eng.graph();
-            let mut ir = InterpBackend.compile(g, id, ENOUGH_DRAWS).runner();
+            let mut ir = InterpBackend.compile(g, id, ENOUGH_DRAWS).runner(std::sync::Arc::from(&[] as &[f64]));
             ir.position(0, 0);
             let cap = ir.batch_cap();
             let interp = ir.next_batch(cap)[0];
@@ -1530,7 +1536,7 @@ mod tests {
 
         // Bitwise: the whole first batch against the interpreter oracle (both branches of the
         // pair-unrolled loop get exercised, not just lane 0's cos arm).
-        let mut ir = InterpBackend.compile(graph, id, ENOUGH_DRAWS).runner();
+        let mut ir = InterpBackend.compile(graph, id, ENOUGH_DRAWS).runner(std::sync::Arc::from(&[] as &[f64]));
         ir.position(seed, 0);
         let interp_col: Vec<f32> = ir.next_batch(BATCH).to_vec();
         let wasm_col = first_batch_emitted(&bytes, seed);

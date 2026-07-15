@@ -106,6 +106,7 @@ pub(crate) fn taint_set(graph: &RvGraph) -> std::collections::HashSet<RvId> {
             RvNode::Src(_)
             | RvNode::ConstNum(_)
             | RvNode::ConstBool(_)
+            | RvNode::Input { .. }
             | RvNode::Permutation { .. }
             | RvNode::Rotation { .. }
             | RvNode::ArrDraw { .. } => false,
@@ -156,6 +157,7 @@ impl Unroller<'_> {
             RvNode::Src(s) => self.out.push(RvNode::Src(s), kind),
             RvNode::ConstNum(x) => self.out.push(RvNode::ConstNum(x), kind),
             RvNode::ConstBool(b) => self.out.push(RvNode::ConstBool(b), kind),
+            RvNode::Input { idx } => self.out.push(RvNode::Input { idx }, kind),
             RvNode::Permutation { n } => self.out.push(RvNode::Permutation { n }, kind),
             RvNode::Rotation { d } => self.out.push(RvNode::Rotation { d }, kind),
             RvNode::ArrDraw { n, src } => self.out.push(RvNode::ArrDraw { n, src }, kind),
@@ -242,6 +244,8 @@ enum Key {
     Unary(UnOp, RvId),
     Binary(BinOp, RvId, RvId),
     Select(RvId, RvId, RvId),
+    /// A host input uniform, deduped by slot index — two `Input { idx }` leaves are the same value.
+    Input(u32),
     /// Element `k` of a shaped draw. Pure given `(arr, k)` — the parent `ArrDraw` is never interned,
     /// so two independent `~[n]` draws have different `arr` ids and can never collide here.
     ArrElem(RvId, u32),
@@ -287,6 +291,7 @@ impl Builder {
                         RvNode::Src(_)
                         | RvNode::ConstNum(_)
                         | RvNode::ConstBool(_)
+                        | RvNode::Input { .. }
                         | RvNode::Permutation { .. }
                         | RvNode::Rotation { .. }
                         | RvNode::ArrDraw { .. } => {}
@@ -350,6 +355,9 @@ impl Builder {
                         RvNode::Rotation { d } => self.out.push(RvNode::Rotation { d: *d }, kind),
                         RvNode::ConstNum(x) => self.num(*x),
                         RvNode::ConstBool(b) => self.boolean(*b),
+                        // A uniform input: interned by idx (deduped), NEVER folded to a constant —
+                        // the whole point is that the value is not baked (PLAN-UNIFORM-INPUTS).
+                        RvNode::Input { idx } => self.input(*idx),
                         RvNode::Unary(op, a) => {
                             let a = self.done[a];
                             self.unary(*op, a, kind)
@@ -447,6 +455,10 @@ impl Builder {
         let id = self.out.push(RvNode::ConstBool(b), RvKind::Bool);
         self.bools.insert(b, id);
         id
+    }
+
+    fn input(&mut self, idx: u32) -> RvId {
+        self.intern(Key::Input(idx), RvNode::Input { idx }, RvKind::Num)
     }
 
     fn arr_elem(&mut self, arr: RvId, k: u32, kind: RvKind) -> RvId {
@@ -641,6 +653,32 @@ mod tests {
 
     fn out_has_mul(g: &RvGraph) -> bool {
         (0..g.len() as u32).any(|i| matches!(g.node(RvId(i)), RvNode::Binary(BinOp::Mul, ..)))
+    }
+
+    /// PLAN-UNIFORM-INPUTS' load-bearing invariant: an `Input` uniform is **opaque to constant
+    /// folding**. `Input * 2` must stay `Binary(Mul, Input, Const(2))` — folding it back to a
+    /// `ConstNum` would re-bake the input value and defeat the whole feature. (A deduping intern and
+    /// the sound identities like `Input + 0 → Input` are fine; only value-folding is forbidden, and
+    /// it's forbidden by construction because `as_num` never recognizes an `Input`.)
+    #[test]
+    fn input_is_opaque_to_constant_folding() {
+        let mut g = RvGraph::default();
+        let inp = g.push(RvNode::Input { idx: 0 }, RvKind::Num);
+        let two = num(&mut g, 2.0);
+        let root = bin(&mut g, BinOp::Mul, inp, two);
+        let (out, r) = simplify(&g, root);
+        match out.node(r) {
+            RvNode::Binary(BinOp::Mul, a, b) => {
+                assert_eq!(out.node(*a), &RvNode::Input { idx: 0 }, "the Input leaf must survive");
+                assert_eq!(out.node(*b), &RvNode::ConstNum(2.0));
+            }
+            other => panic!("Input*2 must stay a Mul over the Input, got {other:?}"),
+        }
+        // No ConstNum ever stands in for the Input (that would be a re-bake).
+        let input_count = (0..out.len() as u32)
+            .filter(|&i| matches!(out.node(RvId(i)), RvNode::Input { idx: 0 }))
+            .count();
+        assert_eq!(input_count, 1, "exactly one Input leaf, deduped, never folded");
     }
 
     #[test]

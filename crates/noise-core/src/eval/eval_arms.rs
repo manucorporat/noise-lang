@@ -711,6 +711,22 @@ impl Engine {
             self.emit(Output::Text(line));
             Ok(Value::Unit)
         } else {
+            // A distribution constructor with a tunable-input parameter (`unif(-dither, dither)`,
+            // `unif(0, max_loss)`): lower each `Sym` arg to an `RvNode::Input` uniform and hand it in
+            // as a `Value::Dist`, so `dist_arg` takes the existing RV-parameter (`*Dyn` recipe) path
+            // and the bound reads from the uniform rather than baking the value (PLAN-UNIFORM-INPUTS).
+            // A `Sym` param to one of these is *always* a value, so this lowering is always correct.
+            let arg_vals = if is_dist_ctor(base) {
+                arg_vals
+                    .into_iter()
+                    .map(|v| match v {
+                        Value::Sym(s) => Value::Dist(self.lower_sym(&s)),
+                        other => other,
+                    })
+                    .collect()
+            } else {
+                arg_vals
+            };
             builtins::call(base, &arg_vals, &self.query_ctx(span))
         }
     }
@@ -889,7 +905,9 @@ impl Engine {
                     span,
                 ));
             }
-            return Ok(input_value_to_value(existing.value));
+            // Reuse the existing slot — a real input hands back the SAME symbolic leaf (`Input(idx)`),
+            // so a value used in several places lowers to one uniform.
+            return Ok(self.input_value(existing.idx, existing.value));
         }
 
         let over = self
@@ -902,12 +920,34 @@ impl Engine {
             spec: spec.clone(),
             value,
         });
+        // The slot index is the manifest position; the runtime `inputs` slice runs parallel to it
+        // (one f32 per slot), so `RvNode::Input { idx }` reads `inputs[idx]` at forcing time.
+        let idx = self.input_manifest.len() as u32;
         self.input_manifest.push(ResolvedInput {
             spec,
             value,
             stmt_span: self.current_stmt_span,
+            idx,
         });
-        Ok(input_value_to_value(value))
+        self.inputs.borrow_mut().push(match value {
+            InputValue::Num(n) => n,
+            InputValue::Bool(b) => b as u8 as f64,
+        });
+        Ok(self.input_value(idx, value))
+    }
+
+    /// The [`Value`] an `input::` call evaluates to. A **`real`** input is a symbolic uniform
+    /// (`Value::Sym(Input(idx))`) — it stays symbolic through arithmetic and lowers to an
+    /// `RvNode::Input` uniform when it enters the RV graph as a value, so a slider drag re-dispatches
+    /// without recompiling (PLAN-UNIFORM-INPUTS). `int`/`bool` inputs stay concrete point masses:
+    /// they are structural / control, and recompiling when they change is correct.
+    fn input_value(&self, idx: u32, value: InputValue) -> Value {
+        match value {
+            InputValue::Num(_) if matches!(self.input_manifest.get(idx as usize).map(|r| r.spec.kind), Some(crate::input::InputKind::Real)) => {
+                Value::Sym(crate::sym::SymExpr::input(idx))
+            }
+            other => input_value_to_value(other),
+        }
     }
 
     /// Evaluate an `input::` spec field expected to be a number (`min`/`max`/`step`).
@@ -1050,6 +1090,25 @@ fn cone_contains(graph: &crate::dist::RvGraph, roots: &[crate::dist::RvId], targ
     false
 }
 
+/// Whether `base` is a distribution constructor whose numeric parameters are *values* (so a
+/// symbolic-input parameter lowers to a uniform, PLAN-UNIFORM-INPUTS). Excludes `rotation` /
+/// `permutation`, whose size argument is structural (handled by `count_arg`).
+fn is_dist_ctor(base: &str) -> bool {
+    matches!(
+        base,
+        "unif"
+            | "unif_int"
+            | "bernoulli"
+            | "normal"
+            | "normal_int"
+            | "normal_complex"
+            | "exponential"
+            | "exponential_int"
+            | "poisson"
+            | "geometric"
+    )
+}
+
 /// Push a node's operand ids (its direct graph children) onto `stack`. Total over every `RvNode`.
 fn push_operands(graph: &crate::dist::RvGraph, id: crate::dist::RvId, stack: &mut Vec<crate::dist::RvId>) {
     match graph.node(id) {
@@ -1075,6 +1134,7 @@ fn push_operands(graph: &crate::dist::RvGraph, id: crate::dist::RvId, stack: &mu
         RvNode::Src(_)
         | RvNode::ConstNum(_)
         | RvNode::ConstBool(_)
+        | RvNode::Input { .. }
         | RvNode::Permutation { .. }
         | RvNode::Rotation { .. }
         | RvNode::ArrDraw { .. }

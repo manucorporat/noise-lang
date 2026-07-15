@@ -38,6 +38,10 @@ impl Engine {
         } else if let Value::Signal(s) = v {
             // A prefix op on a lazy signal defers into the tree (`-sine(3)` stays a signal).
             Ok(Value::Signal(Rc::new(SigExpr::Unary(SigUnOp::Un(op), s))))
+        } else if let Value::Sym(s) = v {
+            // A prefix op on a symbolic input defers, staying symbolic (`-barrier` is still a uniform
+            // expression); it lowers to graph nodes only when it enters the RV graph as a value.
+            Ok(Value::Sym(Rc::new(crate::sym::SymExpr::Unary(op, s))))
         } else if is_dist(&v) {
             self.lift_unary(op, v, span)
         } else {
@@ -135,9 +139,21 @@ impl Engine {
         }
         // A complex operand (either a constant `2 + 3i` or a complex RV) routes through the
         // complex arithmetic path: `* / ^` are true complex operations, a real operand promotes
-        // to `re + 0i`, and ordering (`< > <= >=`) is a type error (no total order on ℂ).
+        // to `re + 0i`, and ordering (`< > <= >=`) is a type error (no total order on ℂ). A tunable
+        // input meeting a complex value folds to its current value first (P0 fallback — complex
+        // signal params are PLAN-UNIFORM-INPUTS P2).
         if matches!(l, Value::Complex { .. }) || matches!(r, Value::Complex { .. }) {
+            let l = self.force_sym_value(l);
+            let r = self.force_sym_value(r);
             return self.binop_complex(op, l, r, span);
+        }
+        // A symbolic input (`input::real`) keeps the op symbolic against another scalar/symbolic
+        // operand — `barrier * 2` stays a `Sym` so it later lowers as one uniform — and lowers to an
+        // RV `Input` node when it meets a random variable (`path < barrier`). Handle it after the
+        // Signal/Array/Complex paths (they force the Sym to a scalar) and before the plain scalar/RV
+        // paths (which would otherwise reject or bake it).
+        if matches!(l, Value::Sym(_)) || matches!(r, Value::Sym(_)) {
+            return self.binop_sym(op, l, r, span);
         }
         // Algebraic identity folds before lifting: `0*x → 0`, `1*x → x`, `x+0/0+x → x`, `x-0 → x`.
         // These keep an RV out of the graph where it (mostly) doesn't matter — and, crucially, let
@@ -286,6 +302,23 @@ impl Engine {
             // matches; this keeps the match exhaustive.
             _ => unreachable!("binop_signal called without a signal operand"),
         }
+    }
+
+    /// Combine two operands where at least one is a **symbolic input** (`Value::Sym`,
+    /// PLAN-UNIFORM-INPUTS). Two rules, mirroring `binop_signal`:
+    ///   * against a **random variable** (`Value::Dist`, either order) the `Sym` lowers to an
+    ///     `RvNode::Input` node and the op lifts (`operand_to_rv` does the lowering) — this is how a
+    ///     threshold `path < barrier` becomes a per-lane compare against a uniform;
+    ///   * against another **scalar/symbolic** operand (`Num`/`Est`/`Sym`) the op stays symbolic
+    ///     (`Sym`), so `barrier * 2` defers and later lowers as a single uniform expression.
+    fn binop_sym(&mut self, op: BinOp, l: Value, r: Value, span: Span) -> Result<Value> {
+        // Either side an RV ⇒ lift (the Sym operand lowers to an Input node in `operand_to_rv`).
+        if is_dist(&l) || is_dist(&r) {
+            return self.lift_binary(op, l, r, span);
+        }
+        // Otherwise fold symbolically: both operands must be scalar-ish (a Sym, or a plain number).
+        let (a, b) = (sym_operand(&l, span)?, sym_operand(&r, span)?);
+        Ok(Value::Sym(Rc::new(crate::sym::SymExpr::Binary(op, a, b))))
     }
 
     /// Combine two operands where at least one is **complex** (PLAN-COMPLEX §3). Every complex op
@@ -609,6 +642,9 @@ impl Engine {
         let n = match v {
             Value::Num(n) => *n,
             Value::Est { val, .. } => *val,
+            // A tunable input used as an index is a STRUCTURAL use — fold it to its current value
+            // (the program legitimately recompiles when the index changes).
+            Value::Sym(s) => self.force_sym(s),
             Value::Dist(_) => {
                 return Err(NoiseError::runtime(
                     "array index must be a constant integer, not a random variable".to_string(),
@@ -658,11 +694,32 @@ impl Engine {
         }
     }
 
+    /// Fold a symbolic input to its **current** value (PLAN-UNIFORM-INPUTS) — the structural
+    /// materialization, against this engine's live input values. Used where a concrete scalar is
+    /// required (array sizes, sample counts, loop bounds, indices): the structure depends on the
+    /// value, so this legitimately bakes it and the program recompiles on change.
+    pub(super) fn force_sym(&self, s: &crate::sym::SymExpr) -> f64 {
+        s.force_scalar(&self.inputs.borrow())
+    }
+
+    /// Fold a `Value::Sym` to its current `Value::Num`, passing every other value through unchanged
+    /// — the P0 fallback where a tunable input meets a context that can't yet carry it symbolically
+    /// (a complex value; see [`Self::force_sym`]).
+    fn force_sym_value(&self, v: Value) -> Value {
+        match v {
+            Value::Sym(s) => Value::Num(self.force_sym(&s)),
+            other => other,
+        }
+    }
+
     /// Resolve a non-negative integer count argument (a `~[shape]` dimension, a `rotation` size).
     pub(super) fn count_arg(&self, name: &str, v: &Value, span: Span) -> Result<usize> {
         let n = match v {
             Value::Num(n) => *n,
             Value::Est { val, .. } => *val,
+            // A tunable input used as a count/size/bound is a STRUCTURAL use — fold to its current
+            // value (a different size is a genuinely different program, so it recompiles; correct).
+            Value::Sym(s) => self.force_sym(s),
             other => {
                 return Err(NoiseError::runtime(
                     format!("{name} count must be a number, got {}", other.type_name()),
@@ -677,6 +734,22 @@ impl Engine {
             ));
         }
         Ok(n as usize)
+    }
+}
+
+/// Coerce a scalar operand to a symbolic-tree leaf: a `Sym` hands over its tree, a plain number
+/// promotes to a `Const` leaf. Backs [`Engine::binop_sym`]. A non-scalar (a bool, an array, …) is a
+/// spanned type error — the same shape the deterministic evaluator would give for the mixed op.
+fn sym_operand(v: &Value, span: Span) -> Result<Rc<crate::sym::SymExpr>> {
+    use crate::sym::SymExpr;
+    match v {
+        Value::Sym(s) => Ok(s.clone()),
+        Value::Num(n) => Ok(Rc::new(SymExpr::Const(*n))),
+        Value::Est { val, .. } => Ok(Rc::new(SymExpr::Const(*val))),
+        other => Err(NoiseError::type_mismatch(
+            format!("cannot combine a tunable input with {}", other.type_name()),
+            span,
+        )),
     }
 }
 

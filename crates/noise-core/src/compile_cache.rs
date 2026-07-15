@@ -248,6 +248,13 @@ pub(crate) fn key(graph: &RvGraph, roots: &[RvId], gate: bool) -> Vec<u8> {
                 out.push(14);
                 push_u32(&mut out, *slot);
             }
+            // A host input uniform keys on its slot INDEX, never the value (PLAN-UNIFORM-INPUTS) —
+            // so two forcings that differ only in input *values* produce the identical key and share
+            // one compiled artifact: drag a slider, hit the cache, no recompile.
+            RvNode::Input { idx } => {
+                out.push(15);
+                push_u32(&mut out, *idx);
+            }
         }
     }
     push_u32(&mut out, roots.len() as u32);
@@ -350,6 +357,43 @@ mod tests {
             probe::compiles() > c1,
             "a different constant is a different cone — no false hit"
         );
+    }
+
+    /// The PLAN-UNIFORM-INPUTS P0 gate: an `input::real` used as a *value* (a threshold) lowers to a
+    /// uniform, so forcing the same program at two **different** input values compiles **once** — the
+    /// second forcing hits the cache (its cone keys on the input's slot index, not the value). And the
+    /// answer must be bit-identical to the equivalent **baked constant** program, proving the uniform
+    /// reads the same `val as f32` the old `ConstNum` lane held.
+    #[test]
+    fn value_input_change_hits_cache_and_matches_baked_const() {
+        use crate::input::InputValue;
+        // `d = input::real(default 0.5); P(X < d)` — d is a threshold (a value use → uniform).
+        let prog = "use rand; X ~ unif(0, 1); d = input::real(default: 0.5, name: \"d\"); P(X < d)";
+        let mut eng = Engine::new();
+        let at_default = est(eng.run(prog).unwrap());
+        let c1 = probe::compiles();
+        // Re-run with a DIFFERENT value for `d`. A baked-const program would recompile here; a uniform
+        // must not — same structure, same key, cache HIT.
+        eng.set_input_overrides(vec![("d".into(), InputValue::Num(0.25))]);
+        let at_025 = est(eng.run(prog).unwrap());
+        assert_eq!(
+            probe::compiles(),
+            c1,
+            "a value-input change must NOT recompile — the kernel is stable across input values"
+        );
+        // The answer tracks the value (P(X < 0.25) ≈ 0.25, distinct from ≈ 0.5), so the uniform is
+        // actually being read, not stuck at the compiled-in default.
+        assert!(
+            (at_default - 0.5).abs() < 0.05 && (at_025 - 0.25).abs() < 0.05,
+            "P(X < d) must follow d: got {at_default} at 0.5 and {at_025} at 0.25"
+        );
+        // Bit-identical to the baked-const equivalents (same seed, same draws): the uniform lane is
+        // exactly the `val as f32` a `ConstNum(d)` lane would have held.
+        let mut baked = Engine::new();
+        let baked_05 = est(baked.run("use rand; X ~ unif(0, 1); P(X < 0.5)").unwrap());
+        let baked_025 = est(baked.run("use rand; X ~ unif(0, 1); P(X < 0.25)").unwrap());
+        assert_eq!(at_default.to_bits(), baked_05.to_bits(), "uniform != baked const at 0.5");
+        assert_eq!(at_025.to_bits(), baked_025.to_bits(), "uniform != baked const at 0.25");
     }
 
     /// Caching must be observationally invisible: a cache hit (second query, same engine) and a

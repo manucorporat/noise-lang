@@ -13,6 +13,7 @@ use std::rc::Rc;
 use crate::dist::{Recipe, RvId, RvKind};
 use crate::introspect::Summary;
 use crate::signal::{NoiseSpec, SigExpr};
+use crate::sym::SymExpr;
 
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive] // gains a variant nearly every plan cycle; hosts must keep a wildcard arm (E2)
@@ -84,6 +85,13 @@ pub enum Value {
     /// `Display`s as its one-line text card (`crate::flint`, which also turns it into chart specs).
     /// `Rc` keeps it cheap to clone.
     Summary(Rc<Summary>),
+    /// A **symbolic scalar** — a host `input::real` that stays symbolic until its context forces it
+    /// (PLAN-UNIFORM-INPUTS). It behaves like a `number`: arithmetic keeps it a `Sym`, a structural
+    /// context folds it to its current value ([`SymExpr::force_scalar`](crate::sym::SymExpr::force_scalar)),
+    /// and entering the RV graph as a *value* lowers it to `RvNode::Input` uniform leaves — so a
+    /// slider drag re-dispatches without recompiling. `Display`s as its current value. Mirrors
+    /// `Value::Signal`'s lazy-`Rc`-DAG shape, one dimension simpler.
+    Sym(Rc<SymExpr>),
     /// The **`continue` control sentinel** (PLAN-COMPLEX §8). Produced by evaluating `continue`; it
     /// short-circuits the enclosing `{ block }` (the evaluator stops at the statement that yields
     /// it) and signals the surrounding loop to skip — a `for` discards the iteration, a
@@ -118,6 +126,7 @@ impl Value {
             Value::Dist(_) => "dist",
             Value::Est { .. } => "number",
             Value::Array(_) => "array",
+            Value::Sym(_) => "number",
             Value::Signal(_) => "signal",
             Value::Noise(_) => "noise",
             Value::Complex { .. } => "complex",
@@ -205,6 +214,9 @@ impl fmt::Display for Value {
                 }
                 write!(f, "]")
             }
+            // A symbolic input renders as its *current* value (so `${slider}` interpolation and
+            // `Print` show the number a reader expects), folded against the installed input values.
+            Value::Sym(s) => write!(f, "{}", format_num(s.force_scalar(&crate::input_rt::current()))),
             Value::Signal(s) => write!(f, "{s}"),
             // An undrawn generator prints as its recipe, like `Value::Recipe`.
             Value::Noise(spec) => write!(f, "{spec}"),

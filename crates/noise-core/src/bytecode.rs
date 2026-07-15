@@ -73,6 +73,13 @@ pub enum Inst {
         dst: Reg,
         val: f64,
     }, // 0.0 / 1.0
+    /// Fill `dst` with host input slot `idx` — `input_values[idx] as f32` per lane. A uniform
+    /// (PLAN-UNIFORM-INPUTS): the value is NOT baked into the program (so the compiled artifact is
+    /// stable across input values), it is read from the runner's `input_values` slice at run time.
+    Input {
+        dst: Reg,
+        idx: u32,
+    },
     Un {
         dst: Reg,
         op: UnOp,
@@ -347,7 +354,8 @@ fn apply_remap(inst: &mut Inst, remap: &[Reg]) {
         | Inst::Poisson { dst, .. }
         | Inst::Geometric { dst, .. }
         | Inst::ConstNum { dst, .. }
-        | Inst::ConstBool { dst, .. } => m(dst),
+        | Inst::ConstBool { dst, .. }
+        | Inst::Input { dst, .. } => m(dst),
         Inst::Un { dst, a, .. } => {
             m(a);
             m(dst);
@@ -424,6 +432,7 @@ fn lower(
                     RvNode::Src(_)
                     | RvNode::ConstNum(_)
                     | RvNode::ConstBool(_)
+                    | RvNode::Input { .. }
                     | RvNode::Permutation { .. }
                     | RvNode::Rotation { .. }
                     // A shaped draw emits NOTHING (see the Emit arm): it owns a block of source
@@ -522,6 +531,7 @@ fn lower(
                         }
                     }
                     RvNode::ConstNum(v) => insts.push(Inst::ConstNum { dst, val: v }),
+                    RvNode::Input { idx } => insts.push(Inst::Input { dst, idx }),
                     RvNode::ConstBool(b) => insts.push(Inst::ConstBool {
                         dst,
                         val: if b { 1.0 } else { 0.0 },
@@ -622,6 +632,7 @@ pub fn run_batch(
     arrs: &mut [Box<[f32]>],
     key: crate::rng::Key,
     lane0: u32,
+    inputs: &[f64],
 ) {
     use crate::rng;
     for inst in &program.insts {
@@ -660,6 +671,19 @@ pub fn run_batch(
             Inst::ConstBool { dst, val } => {
                 for x in regs[dst as usize].iter_mut() {
                     *x = val as f32;
+                }
+            }
+            // A host input uniform: fill the column with the current value of slot `idx`, read from
+            // the runner's `input_values` slice (PLAN-UNIFORM-INPUTS). The value is `input::real`'s
+            // resolved f64 rounded to f32 — the SAME `val as f32` the old baked `ConstNum` lane held,
+            // so results are bit-identical to the baked-const behavior. An out-of-range idx (a stale
+            // program run against a shorter values slice) degrades to 0.0 rather than panicking.
+            Inst::Input { dst, idx } => {
+                // `val as f32` — the SAME narrowing `Inst::ConstNum` applies to a baked constant, so
+                // the lane is bit-identical to the old baked-const behavior (PLAN-UNIFORM-INPUTS).
+                let v = inputs.get(idx as usize).copied().unwrap_or(0.0) as f32;
+                for x in regs[dst as usize].iter_mut() {
+                    *x = v;
                 }
             }
             Inst::Un { dst, op, a } => {
@@ -948,7 +972,7 @@ mod tests {
         let mut buf: Vec<Box<[f32]>> = (0..prog.n_regs)
             .map(|_| vec![0.0f32; BATCH].into_boxed_slice())
             .collect();
-        run_batch(&prog, &mut buf, &mut [], crate::rng::Key::from_seed(0), 0);
+        run_batch(&prog, &mut buf, &mut [], crate::rng::Key::from_seed(0), 0, &[]);
         let out = &buf[prog.root as usize];
         assert!(
             out.iter().all(|x| x.is_nan()),
@@ -977,7 +1001,7 @@ mod tests {
         let mut buf: Vec<Box<[f32]>> = (0..prog.n_regs)
             .map(|_| vec![0.0f32; BATCH].into_boxed_slice())
             .collect();
-        run_batch(&prog, &mut buf, &mut [], crate::rng::Key::from_seed(0), 0);
+        run_batch(&prog, &mut buf, &mut [], crate::rng::Key::from_seed(0), 0, &[]);
         assert!(buf[prog.root as usize].iter().all(|&x| x == 20.0));
     }
 
@@ -1025,7 +1049,7 @@ mod tests {
         let batches = 100;
         let mut counts = [[0u64; N]; N]; // counts[position][value]
         for b in 0..batches {
-            run_batch(&prog, &mut buf, &mut arrs, key, (b * BATCH) as u32);
+            run_batch(&prog, &mut buf, &mut arrs, key, (b * BATCH) as u32, &[]);
             for k in 0..BATCH {
                 let mut seen = [false; N];
                 let mut sum = 0.0f32;
@@ -1074,7 +1098,7 @@ mod tests {
         let roots = [first, last, neg, tie, huge, nan];
         let (prog, regs) = compile_roots(&g, &roots);
         let (mut buf, mut arrs) = reg_files(&prog);
-        run_batch(&prog, &mut buf, &mut arrs, crate::rng::Key::from_seed(11), 0);
+        run_batch(&prog, &mut buf, &mut arrs, crate::rng::Key::from_seed(11), 0, &[]);
         let col = |r: Reg| &buf[r as usize];
         for k in 0..BATCH {
             assert_eq!(col(regs[2])[k], col(regs[0])[k], "negative index → element 0");
@@ -1122,7 +1146,7 @@ mod tests {
         let key = crate::rng::Key::from_seed(13);
         let (mut sumsq, mut count, mut worst) = (0.0f64, 0u64, 0.0f64);
         for b in 0..20u32 {
-            run_batch(&prog, &mut buf, &mut arrs, key, b * BATCH as u32);
+            run_batch(&prog, &mut buf, &mut arrs, key, b * BATCH as u32, &[]);
             for k in 0..BATCH {
                 let q = |r: usize, c: usize| buf[regs[r * D + c] as usize][k];
                 for r1 in 0..D {
@@ -1157,7 +1181,7 @@ mod tests {
         let batches = 20;
         let (mut sum, mut sum_sq) = (0.0f64, 0.0f64);
         for b in 0..batches {
-            run_batch(&prog, &mut buf, &mut arrs, key, (b * BATCH) as u32);
+            run_batch(&prog, &mut buf, &mut arrs, key, (b * BATCH) as u32, &[]);
             for k in 0..BATCH {
                 let q00 = buf[regs[0] as usize][k] as f64;
                 sum += q00;

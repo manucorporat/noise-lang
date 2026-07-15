@@ -148,16 +148,20 @@ pub fn run_reduction<R: Reducer>(
     crate::profile::note("backend=cpu (gpu declined or absent)");
     let _reduce = crate::profile::span("reduce");
 
+    // Snapshot this forcing's host input values ONCE, on the driver thread (like `token`); the shared
+    // `Arc` travels to each worker's runner (PLAN-UNIFORM-INPUTS).
+    let inputs = crate::input_rt::current();
+
     #[cfg(threaded)]
     {
         let threads = chosen_threads(n, n_chunks);
         if threads > 1 {
-            return run_parallel(&*program, n, seed, r, n_chunks, threads, token.as_ref());
+            return run_parallel(&*program, n, seed, r, n_chunks, threads, token.as_ref(), inputs);
         }
     }
 
     // Sequential: one runner, every chunk in order.
-    let mut runner = program.runner();
+    let mut runner = program.runner(inputs);
     let mut indexed: Vec<(usize, R::Acc)> = Vec::with_capacity(n_chunks);
     for i in 0..n_chunks {
         if is_cancelled(&token) {
@@ -204,15 +208,20 @@ fn run_parallel<R: Reducer>(
     n_chunks: usize,
     threads: usize,
     token: Option<&CancelToken>,
+    inputs: std::sync::Arc<[f64]>,
 ) -> Result<R::Acc> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let next = AtomicUsize::new(0);
+    // Borrow the shared work counter so each `move` worker closure captures the reference (Copy),
+    // not the counter itself (the `inputs` clone is what each worker moves).
+    let next = &next;
     let per_thread: Vec<Vec<(usize, R::Acc)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
-                scope.spawn(|| {
+                let inputs = inputs.clone();
+                scope.spawn(move || {
                     // Cheap per-worker runner (scratch + RNG) over the SHARED compiled program.
-                    let mut runner = program.runner();
+                    let mut runner = program.runner(inputs);
                     let mut local: Vec<(usize, R::Acc)> = Vec::new();
                     loop {
                         // Every worker drops out on cancel, so the scope joins promptly instead of
@@ -262,6 +271,7 @@ fn run_parallel<R: Reducer>(
     n_chunks: usize,
     threads: usize,
     token: Option<&CancelToken>,
+    inputs: std::sync::Arc<[f64]>,
 ) -> Result<R::Acc> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -270,12 +280,16 @@ fn run_parallel<R: Reducer>(
     // `rayon::scope`'s spawns return `()`, so workers deposit their local runs here. Contended only
     // once per worker (at the end), not per chunk.
     let collected: Mutex<Vec<(usize, R::Acc)>> = Mutex::new(Vec::with_capacity(n_chunks));
+    // Borrow the shared counter/sink so each `move` worker captures references (the per-worker
+    // `inputs` clone is what it moves).
+    let (next, collected) = (&next, &collected);
 
     rayon::scope(|scope| {
         for _ in 0..threads {
-            scope.spawn(|_| {
+            let inputs = inputs.clone();
+            scope.spawn(move |_| {
                 // Cheap per-worker runner (scratch + RNG) over the SHARED compiled program.
-                let mut runner = program.runner();
+                let mut runner = program.runner(inputs);
                 let mut local: Vec<(usize, R::Acc)> = Vec::new();
                 loop {
                     if token.is_some_and(CancelToken::is_cancelled) {
@@ -537,11 +551,11 @@ mod tests {
 
         // Compile once, share the program across all the thread-count variations.
         let (program, _cost) = compile_root(g, id, n);
-        let base = run_parallel(&*program, n, seed, &r, n_chunks, 1, None)
+        let base = run_parallel(&*program, n, seed, &r, n_chunks, 1, None, std::sync::Arc::from(&[] as &[f64]))
             .unwrap()
             .into_moments();
         for t in [2usize, 3, 5, 8] {
-            let m = run_parallel(&*program, n, seed, &r, n_chunks, t, None)
+            let m = run_parallel(&*program, n, seed, &r, n_chunks, t, None, std::sync::Arc::from(&[] as &[f64]))
                 .unwrap()
                 .into_moments();
             assert_eq!(
@@ -633,10 +647,10 @@ mod tests {
         let r = CollectReducer { skip_nan: false };
 
         let (program, _cost) = compile_root(g, id, n);
-        let base = run_parallel(&*program, n, seed, &r, n_chunks, 1, None).unwrap();
+        let base = run_parallel(&*program, n, seed, &r, n_chunks, 1, None, std::sync::Arc::from(&[] as &[f64])).unwrap();
         assert_eq!(base.len(), n);
         for t in [2usize, 3, 5, 8] {
-            let v = run_parallel(&*program, n, seed, &r, n_chunks, t, None).unwrap();
+            let v = run_parallel(&*program, n, seed, &r, n_chunks, t, None, std::sync::Arc::from(&[] as &[f64])).unwrap();
             assert!(
                 v.len() == n && v.iter().zip(&base).all(|(a, b)| a.to_bits() == b.to_bits()),
                 "collected draws differ at {t} threads"
@@ -714,9 +728,9 @@ mod tests {
         let (program, _cost) = compile_root(g, id, n); // compile ONCE, shared across thread counts
 
         let drive = |threads: usize| {
-            let _ = run_parallel(&*program, n, seed, &r, n_chunks, threads, None); // warm up
+            let _ = run_parallel(&*program, n, seed, &r, n_chunks, threads, None, std::sync::Arc::from(&[] as &[f64])); // warm up
             let t = Instant::now();
-            let m = run_parallel(&*program, n, seed, &r, n_chunks, threads, None).unwrap();
+            let m = run_parallel(&*program, n, seed, &r, n_chunks, threads, None, std::sync::Arc::from(&[] as &[f64])).unwrap();
             std::hint::black_box(m);
             n as f64 / t.elapsed().as_secs_f64() / 1e6
         };

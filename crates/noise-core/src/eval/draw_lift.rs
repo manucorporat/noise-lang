@@ -409,6 +409,35 @@ impl Engine {
         }
     }
 
+    /// Lower a symbolic input scalar to sample-DAG nodes: an `Input` leaf per input slot (value read
+    /// at run time, never baked), and ordinary `Unary`/`Binary`/`ConstNum` nodes for the arithmetic
+    /// around it (PLAN-UNIFORM-INPUTS). The mirror of `SigExpr` materialization, scalar. Every op is
+    /// pure and deterministic, so simplify/CSE fold the arithmetic while keeping the `Input` leaves
+    /// opaque — the value never re-bakes.
+    pub(super) fn lower_sym(&mut self, s: &crate::sym::SymExpr) -> RvId {
+        use crate::sym::SymExpr;
+        match s {
+            SymExpr::Input(idx) => self.graph.push(RvNode::Input { idx: *idx }, RvKind::Num),
+            SymExpr::Const(c) => self.graph.push(RvNode::ConstNum(*c), RvKind::Num),
+            SymExpr::Unary(op, a) => {
+                let a = self.lower_sym(a);
+                self.graph.push(RvNode::Unary(*op, a), RvKind::Num)
+            }
+            SymExpr::Binary(op, a, b) => {
+                let (a, b) = (self.lower_sym(a), self.lower_sym(b));
+                let kind = if matches!(
+                    op,
+                    BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne
+                ) {
+                    RvKind::Bool
+                } else {
+                    RvKind::Num
+                };
+                self.graph.push(RvNode::Binary(*op, a, b), kind)
+            }
+        }
+    }
+
     /// Lift a unary op over a random variable. The operand is a `Value::Dist` (the caller's
     /// pre-check guarantees it). Type-checked by `RvKind` with spanned errors before sampling.
     pub(super) fn lift_unary(&mut self, op: UnOp, v: Value, span: Span) -> Result<Value> {
@@ -568,6 +597,9 @@ impl Engine {
                 self.graph.push(RvNode::ConstNum(n), RvKind::Num),
                 RvKind::Num,
             )),
+            // A symbolic input entering the RV graph as a *value*: lower to `RvNode::Input` uniform
+            // leaves (never baked), so the compiled kernel is stable across input values.
+            Value::Sym(s) => Ok((self.lower_sym(&s), RvKind::Num)),
             // An estimate folds in as its central value (its error is dropped inside the RV).
             Value::Est { val, .. } => Ok((
                 self.graph.push(RvNode::ConstNum(val), RvKind::Num),

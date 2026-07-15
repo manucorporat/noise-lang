@@ -44,7 +44,7 @@ pub fn for_each_batch(
     crate::stats::record(n, cost.ops, cost.sources);
     crate::profile::set_ops(cost.ops);
     let _sample = crate::profile::span("sample");
-    let mut runner = program.runner();
+    let mut runner = program.runner(crate::input_rt::current());
     runner.position(seed, 0);
     let cap = runner.batch_cap();
 
@@ -203,7 +203,7 @@ fn for_each_joint_batch(
     // results) reaches here as k constant roots, which the interpreter would otherwise re-evaluate
     // `n × k` times (200k draws × 60 elements in `birthday`). One batch fully characterizes the
     // result (quantiles, moments, correlations of a constant are that constant), so clamp to it.
-    let mut runner = prog.runner();
+    let mut runner = prog.runner(crate::input_rt::current());
     runner.position(seed, 0);
     let cap = runner.batch_cap();
     let n = if cost.sources == 0 { n.min(cap) } else { n };
