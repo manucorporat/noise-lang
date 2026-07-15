@@ -21,10 +21,15 @@ const BIG: &str = "use rand; engine::set_max_opts(1000000000000); \
                    X ~ unif(0,1); Y ~ unif(0,1); Z ~ normal(0,1); \
                    P(X*X + Y*Y + math::sin(Z) * math::cos(Z) < 1.5, 2000000000)";
 
-/// How long a cancelled run may take before we call the per-chunk check broken. Generous against
-/// the 8.2 s the query would otherwise need — a regression that stopped checking the token would
-/// blow through this by ~10×.
-const ABORT_BUDGET: Duration = Duration::from_millis(1500);
+/// How long a cancelled run may take before we call the per-chunk check broken. A cancel normally
+/// lands in ~35 ms (one chunk past the 30 ms trip), so this is enormous headroom — but it is
+/// **wall-clock**, and this test binary runs inside the full parallel suite (heavier since the CI leg
+/// moved to `--features gpu` in PLAN-DROP-JIT D1: the GPU integration tests contend for cores). Under
+/// that contention the forcing/killer threads can be descheduled for a second or two, inflating the
+/// measured wall-clock even though the abort itself was prompt. 4 s absorbs that jitter while staying
+/// far below the 8.4 s the query needs uncancelled (measured on both the CPU and GPU builds) — a
+/// regression that stopped checking the token would still blow through it by ~2×.
+const ABORT_BUDGET: Duration = Duration::from_millis(4000);
 
 #[test]
 fn cancelling_mid_forcing_aborts_promptly_with_a_cancelled_error() {
