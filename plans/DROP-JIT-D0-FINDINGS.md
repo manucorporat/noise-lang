@@ -99,7 +99,31 @@ and a cold pipeline-compile tax on heavy programs (D4e).
 loses on GPU; beta_bernoulli starts at 47 and wins). Corpus 936.8 → 909.7 ms. beta_bernoulli −24.3,
 noise_colors −5.8, st_petersburg −2.4, barrier_option −1.2; no real regression. See the D4a commit.
 
-## D3a — L1-tiling: **attempted, measured a regression, reverted**
+## D3b — register liveness reuse: **landed, −75 ms on the interp floor**
+
+A linear-scan register allocation post-pass (`bytecode::reuse_registers`) frees a scalar column after
+its last read and reuses it, shrinking `n_regs` from one-per-node (hundreds on a wide cone) to the
+live-set peak (tens). Bit-identical (conformance interp-vs-wasm stays byte-exact; draws are keyed on
+the graph, not the register; ops read operands before writing `dst`). Interp floor 3868 → 3793 ms
+(turboquant −25, birthday −23, noise_colors −10, barrier −8, prisoners −8). Only the interpreter
+consumes the bytecode, so the blast radius is one backend.
+
+## D3a — L1-tiling: **attempted TWICE (before and after D3b), both regressed, reverted both**
+
+First attempt (before D3b): +28 ms on the gpu corpus — the wide cones' 3.5 MB working set didn't fit
+L1 even tiled. **Second attempt (on top of D3b's small register file): +200 ms on the interp floor**
+(barrier +52, turboquant +36, st_petersburg +15, am_vs_fm +18). So tiling regresses **even after the
+working set fits L2** — the definitive finding:
+
+**The columnar interpreter is dispatch-bound, not memory-bound.** Re-walking the instruction list per
+tile multiplies the per-instruction cost (the `match` on `Inst`, the register bounds-checks, and — for
+`Rotation` — a `vec` allocation per arm entry) by the tile count, and that overhead dwarfs the L1
+locality win once D3b has shrunk the working set. Tiling can only pay for a backend that has *no*
+per-instruction dispatch (a JIT/codegen). For the interpreter the real levers are **dispatch
+reduction** — D3c (verify the hot arms autovectorize) and D3d (superinstructions fusing draw→affine,
+compare→accumulate) — not tiling. D3a is retired for the interpreter; D3c/D3d are the open follow-ups.
+
+### (historical) D3a first attempt detail
 
 Implemented `run_batch` tiling (TILE=256, bit-identical — the wasm-vs-interp conformance stayed
 byte-exact) and measured it: **+28.7 ms on the gpu-build corpus** (am_vs_fm +6.6, noise_colors +7.6,
