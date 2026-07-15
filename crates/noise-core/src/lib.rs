@@ -66,6 +66,7 @@ pub(crate) mod kernel;
 pub(crate) mod lexer;
 pub(crate) mod num;
 pub(crate) mod parser;
+pub(crate) mod profile;
 pub(crate) mod reduce;
 #[cfg(feature = "internals")]
 #[doc(hidden)]

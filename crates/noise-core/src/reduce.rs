@@ -116,6 +116,8 @@ pub fn run_reduction<R: Reducer>(
     if n == 0 {
         return Ok(r.identity());
     }
+    // Per-forcing phase timing (NOISE_PROFILE=1, PLAN-DROP-JIT D0). Inert otherwise.
+    let _prof = crate::profile::forcing("run_reduction", n);
     let n_chunks = n.div_ceil(CHUNK_SAMPLES);
 
     // Read the token ONCE here, on the driver thread: `exec`'s thread-local is invisible inside
@@ -137,8 +139,14 @@ pub fn run_reduction<R: Reducer>(
 
     // Compile ONCE; the resulting program is shared (by reference) across all workers. Record the
     // run-time counters here on the driver thread (before fan-out) so workers stay lock-free.
-    let (program, cost) = compile_root(graph, root, n);
+    let (program, cost) = {
+        let _s = crate::profile::span("compile");
+        compile_root(graph, root, n)
+    };
     crate::stats::record(n, cost.ops, cost.sources);
+    crate::profile::set_ops(cost.ops);
+    crate::profile::note("backend=cpu (gpu declined or absent)");
+    let _reduce = crate::profile::span("reduce");
 
     #[cfg(threaded)]
     {

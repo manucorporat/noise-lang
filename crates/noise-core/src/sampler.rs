@@ -34,8 +34,16 @@ pub fn for_each_batch(
     if n == 0 {
         return Ok(());
     }
-    let (program, cost) = compile_root(graph, root, n);
+    // Per-forcing phase timing (NOISE_PROFILE=1, PLAN-DROP-JIT D0). This sequential path is the
+    // plot/introspect collector — it never touches the GPU, which D0 wants to make visible.
+    let _prof = crate::profile::forcing("for_each_batch", n);
+    let (program, cost) = {
+        let _s = crate::profile::span("compile");
+        compile_root(graph, root, n)
+    };
     crate::stats::record(n, cost.ops, cost.sources);
+    crate::profile::set_ops(cost.ops);
+    let _sample = crate::profile::span("sample");
     let mut runner = program.runner();
     runner.position(seed, 0);
     let cap = runner.batch_cap();
@@ -171,7 +179,13 @@ fn for_each_joint_batch(
     if n == 0 {
         return Ok(());
     }
-    let (prog, cost) = compile_roots(graph, roots, n);
+    // Per-forcing phase timing (NOISE_PROFILE=1, PLAN-DROP-JIT D0). The joint introspection passes
+    // (describe/hist/corr/fan/scatter) take THIS path, never the GPU — the residue D0 must expose.
+    let _prof = crate::profile::forcing("joint", n);
+    let (prog, cost) = {
+        let _s = crate::profile::span("compile");
+        compile_roots(graph, roots, n)
+    };
     // A union cone with zero RNG sources is *deterministic*: every lane of every batch is the same
     // value, so drawing the full budget is pure waste — and it is common, not a corner case. A plot
     // of an already-computed vector (`plot::line(signal::sample(...))`, a curve of forced `P()`
@@ -183,6 +197,8 @@ fn for_each_joint_batch(
     let cap = runner.batch_cap();
     let n = if cost.sources == 0 { n.min(cap) } else { n };
     crate::stats::record(n, cost.ops, cost.sources);
+    crate::profile::set_ops(cost.ops);
+    let _sample = crate::profile::span("sample");
     let mut remaining = n;
     while remaining > 0 {
         if crate::exec::cancelled() {

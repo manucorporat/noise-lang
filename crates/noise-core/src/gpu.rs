@@ -99,6 +99,24 @@ fn profitable(instrs: usize, ops_per_draw: u64, n: usize) -> bool {
         && (n as f64 * ops_per_draw as f64) >= MIN_WORK_GPU
 }
 
+/// The gate decision with the reason the failing term (for `NOISE_PROFILE=1`, PLAN-DROP-JIT D0): the
+/// D4a recalibration needs to see *which* of the three terms declines each forcing, not just that one
+/// did. Mirrors [`profitable`] exactly.
+fn gate_reason(instrs: usize, ops_per_draw: u64, n: usize) -> String {
+    if instrs > MAX_WGSL_INSTRS {
+        format!("gate: DECLINE — cone too big ({instrs} instrs > {MAX_WGSL_INSTRS})")
+    } else if ops_per_draw < MIN_CONE_OPS {
+        format!("gate: DECLINE — cone too thin ({ops_per_draw} ops/draw < {MIN_CONE_OPS})")
+    } else if (n as f64 * ops_per_draw as f64) < MIN_WORK_GPU {
+        format!(
+            "gate: DECLINE — work too small ({:.2e} < {MIN_WORK_GPU:.0e})",
+            n as f64 * ops_per_draw as f64
+        )
+    } else {
+        format!("gate: ACCEPT — {instrs} instrs, {ops_per_draw} ops/draw, {n} draws")
+    }
+}
+
 /// Force the GPU regardless of the gate — for the benchmark harness, which needs to measure what the
 /// GPU *would* do on cones the gate declines on cost grounds. Never set in normal operation.
 static FORCE: OnceLock<bool> = OnceLock::new();
@@ -148,6 +166,12 @@ fn device() -> Option<&'static Device> {
 }
 
 impl Device {
+    /// Whether the pipeline for `wgsl` is already compiled (for the `NOISE_PROFILE=1` hit/miss note,
+    /// PLAN-DROP-JIT D0). A pure probe — it never compiles.
+    fn pipeline_cached(&self, wgsl: &str) -> bool {
+        self.pipelines.lock().is_ok_and(|p| p.contains_key(wgsl))
+    }
+
     /// Compile (or reuse) the pipeline for `wgsl`. `None` if the driver rejects the shader — which
     /// would be our bug, but is still a fallback rather than a crash in a user's face.
     fn pipeline(&self, wgsl: &str) -> Option<wgpu::ComputePipeline> {
@@ -221,12 +245,17 @@ impl Device {
             pass.dispatch_workgroups(n.div_ceil(wgsl_emit::WORKGROUP), 1, 1);
         }
         enc.copy_buffer_to_buffer(&out, 0, &staging, 0, bytes);
-        self.queue.submit([enc.finish()]);
+        {
+            let _s = crate::profile::span("gpu.dispatch");
+            self.queue.submit([enc.finish()]);
+        }
 
+        // Readback: map + blocking poll + copy out. Native uses a blocking poll — this is why G0–G2
+        // need no async at all; the browser host (G3) is the only thing that can't block, and the only
+        // consumer of an async spine.
+        let _s = crate::profile::span("gpu.readback");
         let slice = staging.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        // Native: a blocking poll. This is why G0–G2 need no async at all — the browser host (G3) is
-        // the only thing that can't block, and it is the only consumer of an async spine.
         let _ = self.device.poll(wgpu::PollType::Wait);
         let data = slice.get_mapped_range();
         let col: Vec<f32> = data
@@ -255,23 +284,48 @@ pub fn try_reduce<R: Reducer>(
     r: &R,
     token: Option<&CancelToken>,
 ) -> Result<Option<R::Acc>> {
-    let Some(dev) = device() else { return Ok(None) };
+    let Some(dev) = device() else {
+        crate::profile::note("gpu: no adapter → cpu");
+        return Ok(None);
+    };
 
     // The same simplify the other backends get, so the cone — and therefore the draw ordinals — are
     // identical to what the interpreter would compute.
-    let (g, root) = crate::simplify::simplify(graph, root);
-    let Ok(wgsl) = wgsl_emit::emit(&g, &[root]) else {
+    let (g, root) = {
+        let _s = crate::profile::span("gpu.simplify");
+        crate::simplify::simplify(graph, root)
+    };
+    let emitted = {
+        let _s = crate::profile::span("gpu.emit");
+        wgsl_emit::emit(&g, &[root])
+    };
+    let Ok(wgsl) = emitted else {
+        crate::profile::note("gpu: cone unsupported (Poisson/Rotation) → cpu");
         return Ok(None); // Poisson / Rotation (f64 Gram–Schmidt) → CPU; see wgsl_emit::plan_blocks
     };
 
     let cost = crate::kernel::cost(&g, root);
+    crate::profile::set_ops(cost.ops);
     let instrs = emitted_instrs(&wgsl);
     if !forced() && !profitable(instrs, cost.ops, n) {
+        crate::profile::note(gate_reason(instrs, cost.ops, n));
         return Ok(None);
     }
-    let Some(pipe) = dev.pipeline(&wgsl) else {
+    crate::profile::note(gate_reason(instrs, cost.ops, n));
+    let (pipe, hit) = {
+        let _s = crate::profile::span("gpu.pipeline");
+        let hit = dev.pipeline_cached(&wgsl);
+        (dev.pipeline(&wgsl), hit)
+    };
+    let Some(pipe) = pipe else {
+        crate::profile::note("gpu: driver rejected shader → cpu");
         return Ok(None); // a shader the driver rejected: fall back rather than fail the program
     };
+    crate::profile::note(if hit {
+        "gpu.pipeline: cache HIT"
+    } else {
+        "gpu.pipeline: cache MISS (compiled)"
+    });
 
     // Same counters the CPU path records, and off the same simplified cone — so the playground's
     // ops / random-numbers readout doesn't change just because the GPU took the query.
@@ -293,6 +347,7 @@ pub fn try_reduce<R: Reducer>(
         // Fold on the reducer's OWN chunk boundaries, in order — so the accumulation is the same
         // sequence of `absorb`/`merge` calls the CPU reducer would have made, and the answer doesn't
         // depend on how big a dispatch happened to be.
+        let _s = crate::profile::span("gpu.fold");
         for slice in col.chunks(CHUNK_SAMPLES) {
             let mut acc = r.identity();
             r.absorb(&mut acc, slice);
