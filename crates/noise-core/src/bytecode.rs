@@ -149,8 +149,9 @@ pub struct Program {
 /// Lower the transitive cone of `root` to flat bytecode.
 ///
 /// Post-order DFS with a `HashMap<RvId, Reg>` memo: a shared `RvId` compiles to ONE register
-/// and ONE instruction (CSE). First cut allocates one register per distinct node, no reuse —
-/// register-liveness reuse is deferred to Phase 4 (BATCH×n_regs memory is fine here).
+/// and ONE instruction (CSE). Lowering allocates one register per distinct node; [`reuse_registers`]
+/// then coalesces dead columns (PLAN-DROP-JIT D3b), so `n_regs` is the live-set peak, not the node
+/// count.
 pub fn compile(graph: &RvGraph, root: RvId) -> Program {
     let mut memo: HashMap<RvId, Reg> = HashMap::new();
     let mut arr_memo: HashMap<RvId, ArrReg> = HashMap::new();
@@ -562,10 +563,10 @@ fn lower(
                     }
                     RvNode::Permutation { n } => {
                         // An array-valued source: its result lives in an ARRAY register, but it
-                        // still occupies one instruction slot, so the `dst == inst index` register
-                        // numbering invariant (`n_regs == insts.len()`) holds — the scalar column
-                        // at `dst` is simply never written. `arr_memo` maps the node to its array
-                        // register for the ArrIndex readers.
+                        // still occupies one instruction slot, so the `dst == inst index` numbering
+                        // that lowering relies on holds — the scalar column at `dst` is simply never
+                        // written (and `reuse_registers` then gives it no physical column at all).
+                        // `arr_memo` maps the node to its array register for the ArrIndex readers.
                         let a = ArrReg::try_from(arrays.len())
                             .expect("bytecode exceeded 2^32 array registers");
                         arrays.push(n);
@@ -575,8 +576,8 @@ fn lower(
                     }
                     RvNode::Rotation { d } => {
                         // Same array-valued-source shape as Permutation: one instruction slot (the
-                        // scalar column at `dst` stays unwritten, keeping `n_regs == insts.len()`),
-                        // result in a fresh `d²`-element array register.
+                        // scalar column at `dst` stays unwritten, so `reuse_registers` gives it no
+                        // physical column), result in a fresh `d²`-element array register.
                         let a = ArrReg::try_from(arrays.len())
                             .expect("bytecode exceeded 2^32 array registers");
                         arrays.push(d * d);
@@ -883,7 +884,7 @@ mod tests {
 
     #[test]
     fn cse_shares_a_repeated_subexpression() {
-        // X + X: the shared `X` must compile to ONE register, so total = 2 (X, the Add) not 3.
+        // X + X: the shared `X` must compile to ONE draw (CSE), not two.
         let mut g = RvGraph::default();
         let x = g.push(
             RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
@@ -891,7 +892,15 @@ mod tests {
         );
         let sum = g.push(RvNode::Binary(BinOp::Add, x, x), RvKind::Num);
         let prog = compile(&g, sum);
-        assert_eq!(prog.n_regs, 2, "X must be shared (CSE), not duplicated");
+        let draws = prog
+            .insts
+            .iter()
+            .filter(|i| matches!(i, Inst::Uniform { .. }))
+            .count();
+        assert_eq!(draws, 1, "X must be shared (CSE): one draw, not two");
+        // Register liveness reuse (D3b) then collapses the whole `X + X` to a single in-place column:
+        // X is dead after the Add reads it, so the Add reuses X's column (`regs[0] = regs[0]+regs[0]`).
+        assert_eq!(prog.n_regs, 1, "the Add reuses X's dead column in place");
     }
 
     #[test]
