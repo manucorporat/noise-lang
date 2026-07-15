@@ -68,7 +68,7 @@ pub(crate) mod lexer;
 // and `wasm_emit`; git history keeps `jit.rs` whole if a CPU codegen backend is ever wanted again.)
 pub(crate) mod num;
 pub(crate) mod parser;
-pub(crate) mod profile;
+pub mod profile;
 pub(crate) mod reduce;
 #[cfg(feature = "internals")]
 #[doc(hidden)]

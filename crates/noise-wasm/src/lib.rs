@@ -24,24 +24,36 @@ use wasm_bindgen::prelude::*;
 #[cfg(feature = "wasm-threads")]
 pub use wasm_bindgen_rayon::init_thread_pool;
 
-/// Run options a host may pass: input overrides (`{ "inputs": { name: value, … } }`), sample
-/// budget/seed later. Absent or empty → each input uses its declared default.
+/// Run options a host may pass: input overrides (`{ "inputs": { name: value, … } }`), a `profile`
+/// flag to capture per-phase timings into the document, sample budget/seed later. Absent or empty →
+/// each input uses its declared default and profiling is off.
 #[derive(Deserialize, Default)]
 struct Opts {
     #[serde(default)]
     inputs: serde_json::Map<String, serde_json::Value>,
+    /// When `true`, the engine times each forcing's phases and returns them in `result.profile`.
+    #[serde(default)]
+    profile: bool,
 }
 
-/// Parse the optional `opts_json` into engine input overrides. Returns an error string (surfaced as
-/// a failed document) if the JSON or an input value is malformed. Takes `&str` (borrowed) rather
-/// than an owned `Option<String>` so the host's JSON isn't copied just to be parsed (finding G4).
-fn parse_opts(opts_json: Option<&str>) -> Result<Vec<(String, InputValue)>, String> {
+/// The engine-facing options parsed out of `opts_json`: the input overrides and whether to profile.
+#[derive(Debug, Default, PartialEq)]
+struct ParsedOpts {
+    overrides: Vec<(String, InputValue)>,
+    profile: bool,
+}
+
+/// Parse the optional `opts_json` into engine options (input overrides + the profile flag). Returns
+/// an error string (surfaced as a failed document) if the JSON or an input value is malformed. Takes
+/// `&str` (borrowed) rather than an owned `Option<String>` so the host's JSON isn't copied just to be
+/// parsed (finding G4).
+fn parse_opts(opts_json: Option<&str>) -> Result<ParsedOpts, String> {
     let json = match opts_json {
         Some(j) if !j.trim().is_empty() => j,
-        _ => return Ok(Vec::new()),
+        _ => return Ok(ParsedOpts::default()),
     };
     let opts: Opts = serde_json::from_str(json).map_err(|e| format!("invalid opts JSON: {e}"))?;
-    let mut out = Vec::new();
+    let mut overrides = Vec::new();
     for (name, v) in opts.inputs {
         let iv = match v {
             serde_json::Value::Bool(b) => InputValue::Bool(b),
@@ -51,9 +63,12 @@ fn parse_opts(opts_json: Option<&str>) -> Result<Vec<(String, InputValue)>, Stri
             ),
             _ => return Err(format!("input `{name}` override must be a number or bool")),
         };
-        out.push((name, iv));
+        overrides.push((name, iv));
     }
-    Ok(out)
+    Ok(ParsedOpts {
+        overrides,
+        profile: opts.profile,
+    })
 }
 
 /// A `Document`-shaped error payload for a failure *before* running (bad opts) — same shape hosts
@@ -69,6 +84,7 @@ fn doc_error(message: String) -> serde_json::Value {
             // A pre-run failure has no source location, so it points at the start of the file.
             "error": { "message": message, "span": { "start": 0, "end": 0 }, "line": 1, "col": 1, "code": "runtime_error" },
             "stats": { "forcings": 0, "samples": 0, "ops": 0, "rng_draws": 0 },
+            "profile": null,
             "truncated": null,
             "inputs": [],
         },
@@ -78,7 +94,7 @@ fn doc_error(message: String) -> serde_json::Value {
 /// The hand-written last-resort document returned if serializing a real `Document` ever fails. It
 /// must stay shape-compatible with [`doc_error`] (asserted by a test) so the host never receives an
 /// unreadable payload.
-const SERIALIZATION_FALLBACK: &str = r#"{"meta":{"tags":[],"extra":{}},"blocks":[],"comments":[],"result":{"value":null,"error":{"message":"internal serialization error","span":{"start":0,"end":0},"line":1,"col":1,"code":"runtime_error"},"stats":{"forcings":0,"samples":0,"ops":0,"rng_draws":0},"truncated":null,"inputs":[]}}"#;
+const SERIALIZATION_FALLBACK: &str = r#"{"meta":{"tags":[],"extra":{}},"blocks":[],"comments":[],"result":{"value":null,"error":{"message":"internal serialization error","span":{"start":0,"end":0},"line":1,"col":1,"code":"runtime_error"},"stats":{"forcings":0,"samples":0,"ops":0,"rng_draws":0},"profile":null,"truncated":null,"inputs":[]}}"#;
 
 fn to_json_string(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| SERIALIZATION_FALLBACK.into())
@@ -108,12 +124,13 @@ pub fn run(src: &str, opts_json: Option<String>) -> String {
 }
 
 fn run_impl(src: &str, opts_json: Option<String>) -> String {
-    let overrides = match parse_opts(opts_json.as_deref()) {
+    let opts = match parse_opts(opts_json.as_deref()) {
         Ok(o) => o,
         Err(e) => return to_json_string(&doc_error(e)),
     };
     let mut engine = Engine::new();
-    engine.set_input_overrides(overrides);
+    engine.set_input_overrides(opts.overrides);
+    engine.set_profiling(opts.profile);
     let document = engine.run_to_document(src);
     to_json_string(&document.to_json())
 }
@@ -266,7 +283,7 @@ fn run_with_introspection_impl(
     requests_json: &str,
     opts_json: Option<String>,
 ) -> String {
-    let overrides = match parse_opts(opts_json.as_deref()) {
+    let opts = match parse_opts(opts_json.as_deref()) {
         Ok(o) => o,
         Err(e) => {
             let payload = serde_json::json!({ "document": doc_error(e), "bindings": [], "introspections": [] });
@@ -274,7 +291,8 @@ fn run_with_introspection_impl(
         }
     };
     let mut engine = Engine::new();
-    engine.set_input_overrides(overrides);
+    engine.set_input_overrides(opts.overrides);
+    engine.set_profiling(opts.profile);
     let document = engine.run_to_document(src);
     let ran_ok = document.result.error.is_none();
 
@@ -329,13 +347,29 @@ mod tests {
 
     #[test]
     fn parse_opts_reads_numbers_and_bools() {
-        // absent / empty → no overrides
-        assert_eq!(parse_opts(None).unwrap(), vec![]);
-        assert_eq!(parse_opts(Some("   ")).unwrap(), vec![]);
+        // absent / empty → no overrides, profiling off
+        assert_eq!(parse_opts(None).unwrap(), ParsedOpts::default());
+        assert_eq!(parse_opts(Some("   ")).unwrap(), ParsedOpts::default());
         // a well-formed opts object → typed overrides
         let got = parse_opts(Some(r#"{"inputs":{"n":6,"flag":true}}"#)).unwrap();
-        assert!(got.contains(&("n".to_string(), InputValue::Num(6.0))));
-        assert!(got.contains(&("flag".to_string(), InputValue::Bool(true))));
+        assert!(got.overrides.contains(&("n".to_string(), InputValue::Num(6.0))));
+        assert!(got
+            .overrides
+            .contains(&("flag".to_string(), InputValue::Bool(true))));
+        assert!(!got.profile, "profile defaults off when absent");
+    }
+
+    #[test]
+    fn parse_opts_reads_the_profile_flag() {
+        // `profile: true` opts the run into per-phase timing (surfaced as `result.profile`); the
+        // inputs map may be absent alongside it.
+        let got = parse_opts(Some(r#"{"profile":true}"#)).unwrap();
+        assert!(got.profile);
+        assert!(got.overrides.is_empty());
+        // still off when explicitly false
+        assert!(!parse_opts(Some(r#"{"inputs":{"n":1},"profile":false}"#))
+            .unwrap()
+            .profile);
     }
 
     #[test]

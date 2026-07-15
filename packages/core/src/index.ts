@@ -45,6 +45,25 @@ export interface NoiseStats {
 
 const ZERO_STATS: NoiseStats = { forcings: 0, samples: 0, ops: 0, rng_draws: 0 };
 
+/** One phase's accumulated wall time, summed across every forcing in the run. */
+export interface NoiseProfilePhase {
+  /** Phase name, e.g. `compile`, `reduce`, `sample`, `gpu.dispatch`. */
+  name: string;
+  /** Total wall time spent in this phase, in milliseconds. */
+  ms: number;
+  /** How many forcings timed this phase (a run with several `P`s compiles several times). */
+  count: number;
+}
+
+/** Per-phase timing breakdown of a run — present only when profiling was requested
+ *  (`RunOpts.profile`), else `null`. The engine measures this; the frontend renders it. */
+export interface NoiseProfile {
+  /** Per-phase wall times, most-expensive first is not guaranteed — sort in the UI if needed. */
+  phases: NoiseProfilePhase[];
+  /** Free-text notes the engine emitted (gate decisions, chosen backend, cache hit/miss). */
+  notes: string[];
+}
+
 // --- the Document contract (PLAN-LITERATE §D5) -----------------------------------------------
 //
 // A run returns exactly one `Document`: meta (frontmatter) + a flat, ordered array of typed
@@ -120,6 +139,8 @@ export interface DocResult {
   value: DocValue | null;
   error: DocError | null;
   stats: NoiseStats;
+  /** Per-phase timing breakdown — only when the run was profiled (`RunOpts.profile`), else `null`. */
+  profile: NoiseProfile | null;
   truncated: Truncated | null;
   /** The run's **input manifest** (PLAN-INPUTS §3): every `input::` declared, resolved, in
    *  declaration order. A host reads this to render controls and prune stale overrides. */
@@ -161,6 +182,8 @@ export interface NoiseResult extends NoiseDocument {
   error: string | null;
   /** Engine run-time counters. */
   stats: NoiseStats;
+  /** Per-phase timing breakdown when the run was profiled (`RunOpts.profile`), else `null`. */
+  profile: NoiseProfile | null;
   /** Notes + plots in emission order, in the legacy `LogItem` shape (a filter over `blocks`). */
   log: LogItem[];
   /** Wall-clock time of the run, in milliseconds (measured here, not in Rust). */
@@ -186,6 +209,7 @@ function enrich(doc: NoiseDocument, elapsedMs: number): NoiseResult {
     output: outputLines.join('\n'),
     error: doc.result.error?.message ?? null,
     stats: doc.result.stats ?? ZERO_STATS,
+    profile: doc.result.profile ?? null,
     log,
     elapsedMs,
   };
@@ -222,6 +246,12 @@ export interface RunOpts {
   /** Override inline `input::…` parameters by name. */
   inputs?: InputOverrides;
   /**
+   * Capture a per-phase timing breakdown of the run, returned as `result.profile` (and the
+   * convenience `profile` field on the result). Off by default — enabling it makes the engine time
+   * each forcing's phases (`compile`/`reduce`/`sample`/`gpu.*`). Cheap, but off unless asked for.
+   */
+  profile?: boolean;
+  /**
    * Cancel the run. Standard `AbortSignal`, same semantics as `fetch`: an already-aborted signal
    * rejects immediately, and aborting mid-run rejects with `signal.reason` — an `AbortError`, so
    * an `err.name === 'AbortError'` check works as usual.
@@ -237,8 +267,12 @@ export interface RunOpts {
 
 /** Serialize `RunOpts` to the JSON the WASM boundary expects (or `undefined` when empty). */
 function optsToJson(opts?: RunOpts): string | undefined {
-  if (!opts?.inputs || Object.keys(opts.inputs).length === 0) return undefined;
-  return JSON.stringify({ inputs: opts.inputs });
+  const hasInputs = opts?.inputs && Object.keys(opts.inputs).length > 0;
+  if (!hasInputs && !opts?.profile) return undefined;
+  const json: { inputs?: InputOverrides; profile?: boolean } = {};
+  if (hasInputs) json.inputs = opts!.inputs;
+  if (opts?.profile) json.profile = true;
+  return JSON.stringify(json);
 }
 
 /** Parse + evaluate a Noise program. `opts.inputs` tunes inline `input::…` parameters. Never throws

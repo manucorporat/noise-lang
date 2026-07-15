@@ -197,6 +197,17 @@ pub struct Engine {
     /// [`crate::compile_cache`]). Purely an optimization: results are bit-identical with or
     /// without a hit.
     compile_cache: crate::compile_cache::Cache,
+    /// Per-engine readable **phase-timing accumulator** (the profiler's document path). Owned here
+    /// like `stats`/`compile_cache`; installed as the thread's active accumulator around a run *only
+    /// when* [`profile_enabled`](Engine::set_profiling) is set, so ordinary runs pay nothing. Each
+    /// forcing folds its per-phase wall times (`compile`/`reduce`/`sample`/`gpu.*`) and notes in;
+    /// [`run_to_document`](Engine::run_to_document) snapshots it into `DocResult.profile` for a host
+    /// (the playground) to render. See [`crate::profile`].
+    profile: crate::profile::Profile,
+    /// Whether this engine captures timings into `profile` for the document. Off by default — the
+    /// native `NOISE_PROFILE=1` stderr path is independent of this. A host opts in with
+    /// [`set_profiling`](Engine::set_profiling) (the playground passes `profile: true` in run opts).
+    profile_enabled: bool,
     /// This engine's cancellation token (PLAN-PREGPU Track A), installed as the thread's active
     /// token for the duration of every run so the reducer's per-chunk check can see it. A host
     /// clones it ([`Engine::cancel_token`]) and trips it from anywhere — another thread natively,
@@ -283,8 +294,19 @@ impl Engine {
             inputs: crate::input_rt::new_inputs(),
             stats: crate::stats::new_counters(),
             compile_cache: crate::compile_cache::new_cache(),
+            profile: crate::profile::new_profile(),
+            profile_enabled: false,
             cancel: crate::exec::CancelToken::new(),
         }
+    }
+
+    /// Opt this engine into **phase profiling** for the document (PLAN-DROP-JIT D0 profiler, made
+    /// readable). When on, [`run_to_document`](Engine::run_to_document) times each forcing's phases
+    /// (`compile`/`reduce`/`sample`/`gpu.*`) and returns them in `DocResult.profile` for a host to
+    /// render. Off by default and cheap when off (no clock reads). Independent of the native
+    /// `NOISE_PROFILE=1` stderr path.
+    pub fn set_profiling(&mut self, on: bool) {
+        self.profile_enabled = on;
     }
 
     /// Bundle the current engine knobs into a [`builtins::QueryCtx`] for a builtin/query dispatch at
@@ -547,6 +569,15 @@ impl Engine {
         let _cache = crate::compile_cache::install(&self.compile_cache);
         let _cancel = crate::exec::install(&self.cancel);
         let _inputs = crate::input_rt::install(&self.inputs);
+        // Profiling is opt-in (`set_profiling`): only then do we reset + install the accumulator,
+        // which is what turns per-phase timing on for this run. Off → the guard is `None` and every
+        // `profile::span` stays inert.
+        if self.profile_enabled {
+            *self.profile.borrow_mut() = crate::profile::Timings::default();
+        }
+        let _profile = self
+            .profile_enabled
+            .then(|| crate::profile::install(&self.profile));
         self.stats.set(crate::stats::RunStats::default());
         self.dropped = 0;
         self.first_dropped_span = None;
@@ -596,6 +627,12 @@ impl Engine {
         let emissions = self.take_output();
         let inputs = std::mem::take(&mut self.input_manifest);
         let truncated = self.first_dropped_span.map(|span| (self.dropped, span));
+        // Snapshot the accumulated phase timings (only when profiling was on; `None` otherwise, so
+        // `DocResult.profile` is absent for ordinary runs). Drop the guard first isn't needed — the
+        // cell is an `Rc`, we just read it.
+        let profile = self
+            .profile_enabled
+            .then(|| self.profile.borrow().clone());
         crate::doc::assemble(
             src,
             fm,
@@ -607,6 +644,7 @@ impl Engine {
             error,
             self.stats(),
             truncated,
+            profile,
         )
     }
 

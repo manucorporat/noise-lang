@@ -77,6 +77,11 @@ pub struct DocResult {
     /// A lex/parse/runtime failure, spanned. The blocks up to the failure are still present.
     pub error: Option<DocError>,
     pub stats: RunStats,
+    /// Per-phase wall-time breakdown of the run (`compile`/`reduce`/`sample`/`gpu.*`), present only
+    /// when the host opted into profiling via [`Engine::set_profiling`](crate::Engine::set_profiling)
+    /// — `None` for ordinary runs. A host (the playground) renders it as a timing readout. See
+    /// [`crate::profile`].
+    pub profile: Option<crate::profile::Timings>,
     /// Set when the run hit the emission cap: how many blocks were dropped and where it first hit.
     pub truncated: Option<Truncated>,
     /// The run's **input manifest** (PLAN-INPUTS §3): every `input::` declared, resolved, in
@@ -153,6 +158,7 @@ impl Document {
                 value: None,
                 error: Some(DocError::from_error(&error, src)),
                 stats,
+                profile: None,
                 truncated: None,
                 inputs: Vec::new(),
             },
@@ -372,6 +378,7 @@ pub fn assemble(
     error: Option<NoiseError>,
     stats: RunStats,
     truncated: Option<(usize, Span)>,
+    profile: Option<crate::profile::Timings>,
 ) -> Document {
     // Emissions in order; each consumed by the first segment whose span contains its stmt_span.
     let mut used = vec![false; emissions.len()];
@@ -458,6 +465,7 @@ pub fn assemble(
             value,
             error: doc_error,
             stats,
+            profile,
             truncated,
             inputs,
         },
@@ -595,10 +603,22 @@ impl DocResult {
                 "ops": self.stats.ops,
                 "rng_draws": self.stats.rng_draws,
             },
+            "profile": self.profile.as_ref().map(profile_json),
             "truncated": truncated,
             "inputs": inputs,
         })
     }
+}
+
+/// Serialize a profiling snapshot to `{ phases: [{ name, ms, count }], notes: [...] }` — the payload
+/// a host renders as a per-phase timing readout. Absent (`null`) when the run wasn't profiled.
+fn profile_json(t: &crate::profile::Timings) -> serde_json::Value {
+    let phases: Vec<serde_json::Value> = t
+        .phases
+        .iter()
+        .map(|(name, ms, count)| serde_json::json!({ "name": name, "ms": ms, "count": count }))
+        .collect();
+    serde_json::json!({ "phases": phases, "notes": t.notes })
 }
 
 #[cfg(test)]
@@ -846,5 +866,42 @@ mod tests {
         // Ends in a plot (unit) → no echoed value, same as the CLI's no-echo rule.
         let d = doc("X ~ rand::unif_int(1,6)\nplot::histogram(X)");
         assert!(d.result.value.is_none());
+    }
+
+    // --- profiling (opt-in, in the document) ---
+
+    #[test]
+    fn profiling_off_by_default_leaves_no_profile() {
+        // An ordinary run carries no `profile` — the field is absent and serializes to `null`.
+        let d = doc("use rand; X ~ unif(0, 1)\nP(X < 0.5)");
+        assert!(d.result.profile.is_none());
+        assert!(d.to_json()["result"]["profile"].is_null());
+    }
+
+    #[test]
+    fn profiling_on_captures_phase_timings_in_the_document() {
+        // With profiling opted in, a forcing (`P`) records per-phase wall times into the document,
+        // and they reach the JSON wire format as `{ phases: [{ name, ms, count }], notes }`.
+        let mut eng = Engine::new();
+        eng.set_profiling(true);
+        let d = eng.run_to_document("use rand; X ~ unif(0, 1)\nP(X < 0.5)");
+        let profile = d.result.profile.as_ref().expect("profiling was enabled");
+        assert!(
+            !profile.is_empty(),
+            "a P-forcing should time at least one phase"
+        );
+        // Every phase row is a named, non-negative duration timed at least once.
+        assert!(profile
+            .phases
+            .iter()
+            .all(|(name, ms, count)| !name.is_empty() && *ms >= 0.0 && *count >= 1));
+
+        let json = &d.to_json()["result"]["profile"];
+        assert!(json["phases"].is_array());
+        assert!(json["notes"].is_array());
+        assert_eq!(
+            json["phases"].as_array().unwrap().len(),
+            profile.phases.len()
+        );
     }
 }

@@ -31,6 +31,10 @@ wasm-bindgen.workspace = true
 # Workers over one shared linear memory — the JS host bootstraps it (see `noise-wasm`), because wasm
 # has no instruction that creates a thread.
 rayon = { version = "1.10", optional = true }
+# A drop-in `Instant` for the profiler on wasm32: `std::time::Instant::now()` panics on
+# `wasm32-unknown-unknown` (no clock), so `web-time` reads the browser's monotonic `performance.now()`
+# there. Lets the playground surface per-phase timings (`profile`); native uses `std::time` directly.
+web-time = "1"
 
 # The native WebGPU backend (PLAN-WEBGPU G2), behind `--features gpu`. Optional and native-only, so
 # the default build stays wasm-clean and dependency-light exactly as it was.

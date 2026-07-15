@@ -296,6 +296,10 @@
   .pg-metric .m-val { color: var(--ink); font-weight: 700; }
   .pg-metric.m-rate .m-val { color: var(--accent); }
   .m-sep { color: var(--ink-faint); opacity: 0.6; }
+  /* The profile phase breakdown: a second, dimmer tier under the primary metrics. */
+  .m-phase-row { display: block; margin-top: 0.15rem; opacity: 0.85; }
+  .pg-metric.m-phase .m-key { color: var(--ink-dim); }
+  .pg-metric.m-phase .m-val { font-weight: 600; color: var(--ink-dim); }
 
   /* The right cluster of the Render header: the engine readout + the Share pill. */
   .pg-head-right { display: inline-flex; align-items: center; gap: 0.6rem; min-width: 0; }
@@ -802,7 +806,10 @@
     if (!lastResult) outEl.innerHTML = '<span class="muted">running…</span>';
     metricsEl.hidden = true;
     try {
-      const res = await runNoiseWithIntrospection(editor.getValue(), [], { inputs: inputValues });
+      const res = await runNoiseWithIntrospection(editor.getValue(), [], {
+        inputs: inputValues,
+        profile: true,
+      });
       lastResult = res;
       renderActive();
       renderMetrics(res);
@@ -1179,13 +1186,25 @@
     if (s.ops > 0 && res.elapsedMs > 0) {
       chips.push(['ops/sec', fmtCount(Math.round(s.ops / (res.elapsedMs / 1000))), 'm-rate']);
     }
-    metricsEl.innerHTML = chips
-      .map(
-        ([key, val, cls]) =>
-          `<span class="pg-metric ${cls ?? ''}"><span class="m-key">${key}</span> ` +
-          `<span class="m-val">${val}</span></span>`,
-      )
-      .join('<span class="m-sep"> · </span>');
+    // Per-phase timing breakdown (only present when the run was profiled). Show the phases that
+    // actually took time, most-expensive first, as their own tier of chips.
+    const phases = (res.profile?.phases ?? [])
+      .filter((p) => p.ms >= 0.05)
+      .sort((a, b) => b.ms - a.ms);
+    const phaseChips = phases.map(
+      (p): [string, string, string?] => [p.name, fmtMs(p.ms), 'm-phase'],
+    );
+    const render = (cs: Array<[string, string, string?]>) =>
+      cs
+        .map(
+          ([key, val, cls]) =>
+            `<span class="pg-metric ${cls ?? ''}"><span class="m-key">${key}</span> ` +
+            `<span class="m-val">${val}</span></span>`,
+        )
+        .join('<span class="m-sep"> · </span>');
+    metricsEl.innerHTML =
+      render(chips) +
+      (phaseChips.length ? `<span class="m-phase-row">${render(phaseChips)}</span>` : '');
     metricsEl.hidden = false;
   }
 
