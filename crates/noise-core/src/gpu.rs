@@ -29,6 +29,22 @@ use crate::wgsl_emit;
 /// what the CPU reducer would have produced. 1M lanes is a 4 MB readback.
 const GPU_DISPATCH: usize = 1 << 20;
 
+/// Output-buffer element ceiling for the **joint** driver (D4b): a joint dispatch reads back `k × n`
+/// f32 (one column per root), so with many roots the per-dispatch lane count must shrink to keep the
+/// readback bounded. 8 M elements is a 32 MB readback — comfortable, and the joint introspection/plot
+/// passes have moderate `n` (40k–200k), so a `k`-column forcing is usually one or a few dispatches.
+const GPU_JOINT_ELEMS: usize = 8 << 20;
+
+/// The **joint** gate's extra term (D4b), on top of the shared [`profitable`] one. A joint forcing
+/// reads back and folds `k × n` f32 (one column per root), a cost the single-root gate never sees; the
+/// GPU only wins when the per-lane *compute* it saves (∝ `ops × n`) dominates that readback+fold
+/// (∝ `k × n`) — i.e. when the **per-root** cone is fat, `ops / k` large. Measured on the corpus:
+/// the winners are fat plots (am_vs_fm `plot::line` at ops/draw 567–882 over k≈64 → ~9–14 ops/root;
+/// barrier `plot::fan` 315 over k≈52 → ~6), the losers are wide-but-thin passes (nyquist/birthday at
+/// ops/draw ~60 over k≈60 → ~1 op/root) whose ~30–40 ms readback+fold buried a <5 ms CPU pass. 4 sits
+/// cleanly between. Below it the joint pass declines to the (batch-streaming, no-readback) interpreter.
+const JOINT_MIN_OPS_PER_ROOT: u64 = 4;
+
 /// The reducer's chunk size — mirrored from `reduce` so the GPU folds on exactly the same boundaries
 /// (`combine_in_order`'s determinism guarantee is about *chunks*, not threads).
 const CHUNK_SAMPLES: usize = 16 * crate::bytecode::BATCH;
@@ -210,9 +226,12 @@ impl Device {
         Some(pipeline)
     }
 
-    /// Dispatch lanes `lane0 .. lane0 + n` and read the column back.
-    fn dispatch(&self, pipe: &wgpu::ComputePipeline, key: crate::rng::Key, lane0: u32, n: u32) -> Vec<f32> {
-        let bytes = u64::from(n) * 4;
+    /// Dispatch lanes `lane0 .. lane0 + n` and read back `cols` columns (root `j`'s lane `i` at
+    /// `out[j*n + i]` — the layout [`wgsl_emit::emit`] writes). `cols == 1` is the single-root reducer
+    /// path; `cols > 1` is the joint driver (D4b). One thread per lane writes all `cols` outputs, so
+    /// the workgroup count is unchanged — only the output buffer widens to `cols × n`.
+    fn dispatch(&self, pipe: &wgpu::ComputePipeline, key: crate::rng::Key, lane0: u32, n: u32, cols: u32) -> Vec<f32> {
+        let bytes = u64::from(cols) * u64::from(n) * 4;
         let params: [u32; 4] = [key.k0, key.k1, lane0, n];
         // SAFETY: `[u32; 4]` is 16 contiguous bytes, no padding; every bit pattern is a valid `u8`.
         let pbytes = unsafe { std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), 16) };
@@ -349,7 +368,7 @@ pub fn try_reduce<R: Reducer>(
         // One u32 of lane index caps a forcing at 2^32 draws — the same documented boundary the CPU
         // reducer has.
         let lane0 = u32::try_from(done).expect("forcing exceeds 2^32 lanes");
-        let col = dev.dispatch(&pipe, key, lane0, take as u32);
+        let col = dev.dispatch(&pipe, key, lane0, take as u32, 1);
 
         // Fold on the reducer's OWN chunk boundaries, in order — so the accumulation is the same
         // sequence of `absorb`/`merge` calls the CPU reducer would have made, and the answer doesn't
@@ -368,4 +387,95 @@ pub fn try_reduce<R: Reducer>(
         acc = r.merge(acc, a);
     }
     Ok(Some(acc))
+}
+
+/// Try to run a **joint** forcing (several roots drawn together) on the GPU — the D4b driver behind
+/// the introspection/plot passes (`describe`/`corr`/`hist`/`fan`/`scatter`, `plot::line`/`plot::fan`)
+/// that `sampler::for_each_joint_batch` otherwise runs on the CPU interpreter. Those passes were the
+/// single biggest CPU pool the corpus profile surfaced (am_vs_fm's two `plot::line` = 200 ms,
+/// barrier_option's `plot::fan` = 96 ms), and never touched the GPU before this.
+///
+/// `wgsl_emit::emit` already lowers several roots into ONE shader writing `out[j*n + i]` (root `j`,
+/// lane `i`) with shared draws, so this is the same dispatch as [`try_reduce`] with a `k`-column
+/// output: one pipeline compile, one dispatch stream for all roots, folded through the caller's
+/// `sink` per chunk in lane order. `Ok(None)` (thin/unsupported cone, no adapter, gate decline) falls
+/// back to the CPU exactly like [`try_reduce`]; the result stays under the two-tier contract (tier-1
+/// draws bit-identical, tier-2 f32 stats ULP-close), and the fold is single-threaded and in lane
+/// order, so it is deterministic across runs — matching the (also single-threaded) CPU joint loop.
+///
+/// `sink(cols, take)` is called with `cols[j]` = root `j`'s column for a chunk of `take` lanes, the
+/// same contract `for_each_joint_batch`'s CPU loop uses — so the two paths share the accumulation
+/// code verbatim.
+pub fn try_joint<F: FnMut(&[&[f32]], usize)>(
+    graph: &RvGraph,
+    roots: &[RvId],
+    n: usize,
+    seed: u64,
+    mut sink: F,
+    token: Option<&CancelToken>,
+) -> Result<Option<()>> {
+    let Some(dev) = device() else {
+        crate::profile::note("gpu(joint): no adapter → cpu");
+        return Ok(None);
+    };
+    // Same simplify the CPU joint path gets (union cone, cross-root sharing preserved), so the draw
+    // ordinals — and thus the joint pairing — are identical to what the interpreter would compute.
+    let (g, roots) = {
+        let _s = crate::profile::span("gpu.simplify");
+        crate::simplify::simplify_roots(graph, roots)
+    };
+    let emitted = {
+        let _s = crate::profile::span("gpu.emit");
+        wgsl_emit::emit(&g, &roots)
+    };
+    let Ok(wgsl) = emitted else {
+        crate::profile::note("gpu(joint): cone unsupported → cpu");
+        return Ok(None);
+    };
+    let cost = crate::kernel::cost_roots(&g, &roots);
+    crate::profile::set_ops(cost.ops);
+    let instrs = emitted_instrs(&wgsl);
+    let k = roots.len();
+    // The shared single-root gate, PLUS the joint-only per-root fatness term (see
+    // [`JOINT_MIN_OPS_PER_ROOT`]): a wide-but-thin joint pass (many roots, tiny per-element cone)
+    // reads back `k × n` f32 and folds it on the CPU, which costs more than the fast interpreter it
+    // would replace — so it declines even though the *union* cone clears the single-root gate.
+    let per_root_ok = cost.ops >= JOINT_MIN_OPS_PER_ROOT * k as u64;
+    if !forced() && (!profitable(instrs, cost.ops, n) || !per_root_ok) {
+        crate::profile::note(if per_root_ok {
+            gate_reason(instrs, cost.ops, n)
+        } else {
+            format!(
+                "gate: DECLINE — joint cone too thin per root ({} ops / {k} roots < {JOINT_MIN_OPS_PER_ROOT})",
+                cost.ops
+            )
+        });
+        return Ok(None);
+    }
+    crate::profile::note(gate_reason(instrs, cost.ops, n));
+    let Some(pipe) = dev.pipeline(&wgsl) else {
+        crate::profile::note("gpu(joint): driver rejected shader → cpu");
+        return Ok(None);
+    };
+    crate::stats::record(n, cost.ops, cost.sources);
+
+    let key = crate::rng::Key::from_seed(seed);
+    // Fewer lanes per dispatch when there are more columns, so the `k × take` readback stays bounded.
+    let max_lanes = (GPU_JOINT_ELEMS / k.max(1)).max(wgsl_emit::WORKGROUP as usize);
+    let mut done = 0usize;
+    while done < n {
+        if token.is_some_and(CancelToken::is_cancelled) {
+            return Err(NoiseError::cancelled());
+        }
+        let take = max_lanes.min(n - done);
+        let lane0 = u32::try_from(done).expect("forcing exceeds 2^32 lanes");
+        let buf = dev.dispatch(&pipe, key, lane0, take as u32, k as u32);
+        // `buf[j*take + i]` is root `j`, lane `i` — present the k columns for this chunk (lane order
+        // preserved), and hand them to the caller's fold exactly as the CPU batch loop would.
+        let _s = crate::profile::span("gpu.fold");
+        let cols: Vec<&[f32]> = (0..k).map(|j| &buf[j * take..(j + 1) * take]).collect();
+        sink(&cols, take);
+        done += take;
+    }
+    Ok(Some(()))
 }

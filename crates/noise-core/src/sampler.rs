@@ -179,9 +179,20 @@ fn for_each_joint_batch(
     if n == 0 {
         return Ok(());
     }
-    // Per-forcing phase timing (NOISE_PROFILE=1, PLAN-DROP-JIT D0). The joint introspection passes
-    // (describe/hist/corr/fan/scatter) take THIS path, never the GPU — the residue D0 must expose.
+    // Per-forcing phase timing (NOISE_PROFILE=1, PLAN-DROP-JIT D0).
     let _prof = crate::profile::forcing("joint", n);
+    // GPU joint driver (PLAN-DROP-JIT D4b): dispatch every root in ONE multi-column shader and fold
+    // per column — the introspection/plot passes (describe/hist/corr/fan/scatter, plot::line/fan)
+    // were the biggest CPU pool the corpus profile surfaced, and never touched the GPU before this. A
+    // decline (thin/unsupported cone, no adapter, gate) falls through to the CPU interpreter below, so
+    // this only ever changes speed. `try_joint` records its own run stats off the simplified cone.
+    #[cfg(feature = "gpu")]
+    {
+        let token = crate::exec::current();
+        if crate::gpu::try_joint(graph, roots, n, seed, &mut sink, token.as_ref())?.is_some() {
+            return Ok(());
+        }
+    }
     let (prog, cost) = {
         let _s = crate::profile::span("compile");
         compile_roots(graph, roots, n)
@@ -490,6 +501,55 @@ mod tests {
             (ms[0].variance - 1.0 / 12.0).abs() < 0.01,
             "Var[X]≈1/12, got {}",
             ms[0].variance
+        );
+    }
+
+    /// The joint driver on a **fat** cone — one that clears the GPU joint gate (PLAN-DROP-JIT D4b), so
+    /// `--features gpu` exercises `gpu::try_joint` (multi-column shader → per-column fold) and the
+    /// default build the CPU joint loop; both must agree with the analytic truth. Two properties a
+    /// column-layout, stride, or pairing bug would break: (1) each element's mean equals its **distinct**
+    /// offset `i` (a swapped/mislaid column would read the wrong offset), and (2) the elements are
+    /// independent, so every off-diagonal correlation is ~0 (a shared-stride bug would fabricate
+    /// correlation). Each root is `i + z_i + 0.1·z_i³` over its own `N(0,1)` — a fat odd cone (mean `i`),
+    /// fat enough (≈7 ops/root, union ≈70) that the joint gate accepts it where a GPU is present.
+    #[test]
+    fn joint_driver_matches_analytic_on_a_fat_iid_cone() {
+        use crate::dist::RvKind;
+        let k = 10usize;
+        let mut g = RvGraph::default();
+        let tenth = g.push(RvNode::ConstNum(0.1), RvKind::Num);
+        let roots: Vec<RvId> = (0..k)
+            .map(|i| {
+                let z = g.push(RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }), RvKind::Num);
+                let z2 = g.push(RvNode::Binary(BinOp::Mul, z, z), RvKind::Num);
+                let z3 = g.push(RvNode::Binary(BinOp::Mul, z2, z), RvKind::Num);
+                let sc = g.push(RvNode::Binary(BinOp::Mul, z3, tenth), RvKind::Num);
+                let sum = g.push(RvNode::Binary(BinOp::Add, z, sc), RvKind::Num); // z + 0.1 z³, mean 0
+                let off = g.push(RvNode::ConstNum(i as f64), RvKind::Num);
+                g.push(RvNode::Binary(BinOp::Add, sum, off), RvKind::Num) // i + z + 0.1 z³, mean i
+            })
+            .collect();
+
+        let n = 300_000;
+        let ms = grid_moments(&g, &roots, n, 7).unwrap();
+        for (i, m) in ms.iter().enumerate() {
+            assert!(
+                (m.mean - i as f64).abs() < 0.05,
+                "element {i}: mean {} should be ~{i} (a column-layout bug reads the wrong element)",
+                m.mean
+            );
+        }
+        // Independence: every off-diagonal correlation ~0. Monte-Carlo SE ~1/√n ≈ 0.002, so the max
+        // over 90 pairs sits comfortably under 0.03; a stride/pairing bug would blow this up.
+        let corr = corr_matrix(&g, &roots, n, 7).unwrap();
+        let max_off = (0..k)
+            .flat_map(|i| (0..k).map(move |j| (i, j)))
+            .filter(|(i, j)| i != j)
+            .map(|(i, j)| corr[i * k + j].abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            max_off < 0.03,
+            "off-diagonal |corr| max = {max_off} — independent elements must not correlate"
         );
     }
 
