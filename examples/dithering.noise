@@ -13,7 +13,6 @@ extra:
 use rand;   # unif
 use math;   # sign
 
-engine::set_max_samples(200000);   # Monte Carlo budget for every E() below — set once, not per query
 
 # A 1-bit quantizer reports only the SIGN (+1 / -1) of its input. Ask it about a fixed level v and
 # it's useless: it answers "+1" for any positive v, telling you nothing about HOW big v is.

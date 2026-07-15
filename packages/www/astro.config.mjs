@@ -15,6 +15,29 @@ const noiseGrammar = {
   name: 'noise',
 };
 
+// Cross-origin isolation for the dev + preview servers. Production sets these in netlify.toml; the
+// local servers don't, so without this the browser withholds `SharedArrayBuffer` and the engine runs
+// its single-threaded build — and the WebGPU host (which needs the same isolation as the SAB bridge)
+// never activates. A tiny dev-only middleware mirrors the two production headers so `pnpm dev`
+// exercises the same threaded + GPU path a deploy does. See PLAN-WEBGPU G3.
+const crossOriginIsolation = {
+  name: 'noise-cross-origin-isolation',
+  configureServer(server) {
+    server.middlewares.use((_req, res, next) => {
+      res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+      res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+      next();
+    });
+  },
+  configurePreviewServer(server) {
+    server.middlewares.use((_req, res, next) => {
+      res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+      res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+      next();
+    });
+  },
+};
+
 // Static site. The playground (Monaco + the WASM engine) runs entirely client-side, so no
 // adapter/SSR is needed. `vite.server.fs.allow` lets us `?raw`-import the .noise example files
 // that live in the repo's top-level `examples/` directory (outside this site root).
@@ -25,6 +48,7 @@ export default defineConfig({
     shikiConfig: { theme: 'github-light', langs: [noiseGrammar] },
   },
   vite: {
+    plugins: [crossOriginIsolation],
     server: {
       fs: { allow: ['..'] },
     },

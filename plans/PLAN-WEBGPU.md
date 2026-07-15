@@ -440,6 +440,86 @@ decision, not a surprise.
 
   **Cancellation** already exists (PREGPU Track A, terminate the worker); with the device on the main
   thread the abort no longer discards it.
+
+  **Research note (2026-07-15) — why the bridge, not "just call WebGPU".** Confirmed the difficulty
+  is *not* WebGPU and *not* wgpu-on-wasm (both are easy and fully supported on `wasm32` in every major
+  browser, ~85% global). It is the impedance mismatch between Noise's **synchronous, run-to-completion
+  forcing** (shared with native, never yields) and WebGPU being **async-only, with no synchronous
+  readback**:
+    - `mapSync`-on-workers, the one thing that would let sync wasm read a buffer back inline, was
+      proposed in **2021 and is still open / unshipped / unowned** (gpuweb/gpuweb#2217). There is no
+      synchronous GPU readback path, now or imminently.
+    - `Atomics.wait` is banned on the main thread and, in a worker, freezes *that worker's* event
+      loop — so a worker that owns the device and blocks on its own `mapAsync` **self-deadlocks** (a
+      documented wgpu-on-wasm failure, gfx-rs/wgpu#5279). This is exactly why bridge (b) puts the
+      device on a **different agent** (the main thread, event loop live) and only the engine worker
+      blocks: a shared `GPUDevice` across agents is explicitly allowed (gpuweb "Multi Explainer").
+    - The async-engine alternative (bridge (a) / PREGPU `run_async`) is "normal WebGPU" but needs an
+      async fork of the whole sync forcing/reduce stack on wasm; rejected for that reason — bridge (b)
+      reuses the already-present cross-origin isolation (`netlify.toml`) + blockable `wasm-mt` worker.
+    - **Net:** scope is not inflated, but it is *irreducibly browser-only to verify* (SAB protocol,
+      `mapAsync` timing, main-thread device, feature-detect + fallback) — the Rust half mirrors the
+      native-tested `gpu::try_reduce`. A future session with live Chrome + WebGPU (browser automation
+      available) can build and verify it end-to-end.
+
+  **DECISION (2026-07-15) — keep the engine synchronous; do NOT make forcing async.** Considered
+  making the forcing path `async` so it could `await` the GPU the "normal WebGPU" way (bridge (a)).
+  Rejected, because in this codebase async is *more* invasive than the sync bridge, not less:
+    - Forcing is sync top-to-bottom (`run_to_document → eval → P()/E() → reduce::run_reduction →
+      dispatch`) and **shared with native**. A forcing sits anywhere in an expression and its result
+      flows back up through the sync tree-walking evaluator, so `async` is viral upward — it infects
+      the *entire* evaluator (`eval`/`ops`/`eval_arms`), not just the GPU leaf. That means either
+      async-everywhere (native pays for nothing; the sync correctness-reference is lost) or a
+      sync/async fork of the evaluator (two copies to keep bit-identical). Both worse than (b).
+    - The one clean-ish async variant is **Asyncify** (`wasm-opt --asyncify`): keep Rust sync-looking,
+      instrument the module so the dispatch call suspends to the JS event loop. But (1) this is
+      `wasm32-unknown-unknown` + wasm-bindgen, not Emscripten, so Asyncify is a bolt-on that
+      instruments the call path to the suspending import — i.e. the **Monte-Carlo hot loop**, taxing
+      the very throughput the GPU is meant to raise; (2) GPU runs in the `wasm-mt` rayon build, and
+      **Asyncify + shared-memory threads is notoriously fragile**; (3) whole-module size/speed cost.
+    - Bridge (b) instead **quarantines** the async: one `#[cfg(wasm32)] gpu::try_reduce` shim (mirrors
+      the native-tested one; evaluator + native path untouched, lanes bit-identical) and ~100 lines of
+      **JS** host where async is native and easy. That is where "WebGPU is easy on the web" actually
+      cashes out — on the JS side of the wall. The only thing that would justify async-native forcing
+      is a *second* motivation (streaming partial results, cooperative cancellation) — but
+      cancellation already works by terminating the worker, so nothing else pulls that way.
+
+  **Status: BUILDING (started 2026-07-15).** Bridge (A) — JS host on the main thread — chosen and
+  built: `gpu.rs` split into a backend seam (`available`/`prepare`/`dispatch`), native keeps `wgpu`,
+  wasm calls `nz_gpu_*` inline_js shims → `globalThis.__noiseGpu` (installed by `worker.ts`) → SAB +
+  `Atomics.wait` → main-thread `gpu-host.ts` (device + pipeline cache + async dispatch). Dev COOP/COEP
+  via an astro Vite plugin. Verified live in Chrome (browser automation), and the verification
+  immediately earned its keep:
+
+  **FINDING (2026-07-15) — Tint rejects const NaN/Inf; naga accepts it.** The first live run declined
+  every GPU forcing: `createComputePipelineAsync` rejected the shader with *"value nan cannot be
+  represented as 'f32'"*. WGSL forbids a **const-expression** that evaluates to NaN or ±Inf, and Tint
+  (Chrome/Dawn) enforces it — but `naga` (native wgpu) does **not**, so every native GPU test compiled
+  the same shader fine and never caught it. This is the concrete proof of why G3 is browser-only
+  verifiable. Fix (shared emitter, `wgsl_emit.rs`): route non-finite bit patterns through a runtime
+  zero — `bitcast<f32>(BITS | (P.n & 0u))` — so the expression is non-const (Tint accepts) while the
+  runtime NaN/Inf is identical on both backends. Touched `NAN_BITS` uses (sin/cos/arr-read inf-screen)
+  and the general `f32c` constant emitter. Native GPU conformance tests still bit-identical after.
+  Per user (2026-07-15): browser-vs-CPU numeric differences (NaN encoding, sin/cos ULP, f32 precision)
+  are acceptable **as long as they're documented** — this one is a compile fix, not a precision change,
+  and the two-tier contract already covers the rest.
+
+  **G3 — LANDED + verified live in Chrome (2026-07-15).** End-to-end proof across every code path:
+  `secretary`/`birthday` (single-root `cols=1`), `barrier_option`'s `plot::fan` (**joint `cols=52`**,
+  4M f32 read back), `turboquant` (rotation, 163 KB shaders) — all compile, dispatch through the SAB
+  bridge, and return correct results (secretary 38–39% ≈ 1/e). No CPU fallback on accepted forcings
+  (profile shows `gpu.dispatch`/`gpu.fold`, no `reduce`); the gate still correctly declines thin cones
+  (`kelly` → cpu, "gate: DECLINE — cone too thin"). Verified `crossOriginIsolated` via the dev Vite
+  plugin, and that a WebGPU device is acquired on the main thread.
+
+  **Diagnostics (this session).** `result.profile` (Rust: phase timings + gate notes) is now joined by
+  `result.diagnostics` (JS: `crossOriginIsolated`, `threaded`, `workers`, and per-run GPU-host facts —
+  `dispatches`/`lanes`/`shaderFailures`/`lastShaderError`). The playground shows a compact headline
+  (`time · samples · backend`) with the full breakdown — throughput, phases, execution, engine notes —
+  in a hover card. Two gotchas cost real time and are worth remembering: **(1)** Web Workers don't
+  hot-reload — after editing `worker.ts`/`gpu-host.ts` you must restart `astro dev` or you get stale
+  worker code (looked like an intermittent GPU deadlock). **(2)** Astro scoped `<style>` does NOT reach
+  JS-created (innerHTML) nodes — runtime-built chips/tooltip must go in `<style is:global>`.
 - **G4a — `Permutation` / `Gather` / `ArrIndex`, bit-identical. ✅ LANDED (2026-07-15).** All three
   are integer draws (Fisher–Yates swaps, Lemire bounded draws, clamped index reads), so they lower
   **bit-identically** to the interpreter — verified on device. `kernel::cell_stream_ordinals` is the

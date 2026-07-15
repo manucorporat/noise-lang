@@ -12,7 +12,6 @@ extra:
   category: "Games & risk"
   analytic: "vanilla = 10.4506 (Black-Scholes)"
 ---
-engine::set_max_samples(200000);
 use rand;   # normal
 use math;   # exp, sqrt
 use vec;    # cumsum, cummax, any, min

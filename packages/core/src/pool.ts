@@ -10,12 +10,58 @@
 // Workers are persistent because spawning one and instantiating the module costs tens of
 // milliseconds — fine once, absurd per keystroke in a playground.
 
-import type { WorkerRequest, WorkerResponse } from './worker.js';
+import type { WorkerRequest, WorkerResponse, RunDiagnostics } from './worker.js';
+import {
+  acquireGpuHost,
+  serviceGpuRequest,
+  newGpuHostStats,
+  type GpuHost,
+  type GpuHostStats,
+} from './gpu-host.js';
+import { makeGpuSab } from './gpu-protocol.js';
 
 /** A worker plus the id of the job it's running (`null` when idle). */
 interface Slot {
   worker: BrowserLikeWorker;
   jobId: number | null;
+}
+
+// === browser GPU host (PLAN-WEBGPU G3) ===========================================================
+//
+// On the cross-origin-isolated (threaded) path the main thread owns the WebGPU device — the engine
+// worker can't, since its event loop freezes during a synchronous forcing. Acquired once, lazily, on
+// pool start. Each worker gets its own control `SharedArrayBuffer`; when it posts `{ type: 'gpu' }`
+// mid-forcing (blocked on `Atomics.wait`), we run the async dispatch and notify it back. Null host
+// (no WebGPU / not isolated) → the worker's bridge reports unavailable and every forcing uses wasm.
+
+let gpuHost: GpuHost | null = null;
+let gpuHostTried = false;
+
+/** GPU-host stat snapshot taken when a job is posted, so the reply can report the delta THIS run
+ *  caused. Keyed by job id (the threaded path serializes on one worker, but keying is robust). */
+const jobGpuBaseline = new Map<number, GpuHostStats>();
+
+/** Assemble the run's diagnostics: static environment (isolation, threads, worker count, GPU
+ *  availability) plus the GPU-host delta since the job was posted. */
+function buildDiag(id: number): RunDiagnostics {
+  const base = jobGpuBaseline.get(id) ?? newGpuHostStats();
+  jobGpuBaseline.delete(id);
+  const s = gpuHost?.stats;
+  return {
+    crossOriginIsolated:
+      typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated === true,
+    threaded: canUseThreads,
+    workers: slots?.length ?? 0,
+    gpu: {
+      supported: typeof navigator !== 'undefined' && !!(navigator as { gpu?: unknown }).gpu,
+      deviceAcquired: !!gpuHost,
+      dispatches: s ? s.dispatches - base.dispatches : 0,
+      lanes: s ? s.lanes - base.lanes : 0,
+      elements: s ? s.elements - base.elements : 0,
+      shaderFailures: s ? s.shaderFailures - base.shaderFailures : 0,
+      lastShaderError: s?.lastShaderError ?? null,
+    },
+  };
 }
 
 /** The subset of the Worker API we use — satisfied by both `Worker` and Node's `worker_threads`. */
@@ -81,8 +127,21 @@ async function spawn(): Promise<BrowserLikeWorker> {
     return w as unknown as BrowserLikeWorker;
   }
   const w = new Worker(url, { type: 'module' });
-  w.onmessage = (ev: MessageEvent<WorkerResponse>) => settle(ev.data);
+  // When the GPU host is up, give THIS worker its own control buffer and route its mid-forcing GPU
+  // requests to the host. The SAB is per-worker so concurrent workers never collide on one (the
+  // threaded path runs a single engine worker anyway, but a cancel-replacement spawns a fresh one).
+  const sab = gpuHost ? makeGpuSab() : null;
+  w.onmessage = (ev: MessageEvent<WorkerResponse | { type: 'gpu' }>) => {
+    if (gpuHost && sab && (ev.data as { type?: string }).type === 'gpu') {
+      void serviceGpuRequest(gpuHost, sab);
+      return;
+    }
+    settle(ev.data as WorkerResponse);
+  };
   w.onerror = (ev) => failAll(new Error(ev.message ?? 'worker error'));
+  if (gpuHost && sab) {
+    w.postMessage({ type: 'gpu-init', sab, ready: true });
+  }
   return w;
 }
 
@@ -93,6 +152,8 @@ function settle(res: WorkerResponse): void {
   // Free the slot that ran *this* job — matched by id, since replies can land out of order.
   const slot = slots?.find((s) => s.jobId === res.id);
   if (slot) slot.jobId = null;
+  // Attach execution diagnostics (environment + this run's GPU-host delta) before resolving.
+  res.diag = buildDiag(res.id);
   p.resolve(res);
   drain();
 }
@@ -112,6 +173,8 @@ function drain(): void {
     const job = queue.shift()!;
     slot.jobId = job.req.id;
     pending.set(job.req.id, job.p);
+    // Snapshot GPU-host stats so the reply can report just THIS run's dispatch delta.
+    if (gpuHost) jobGpuBaseline.set(job.req.id, { ...gpuHost.stats });
     slot.worker.postMessage(job.req);
   }
 }
@@ -124,10 +187,18 @@ let starting: Promise<void> | null = null;
  */
 export function start(size = defaultSize()): Promise<void> {
   if (!starting) {
-    starting = Promise.all(Array.from({ length: size }, spawn)).then((workers) => {
+    starting = (async () => {
+      // Acquire the WebGPU device once, before spawning, so each worker's `spawn()` can hand it a
+      // control buffer. Only on the threaded path (the SAB bridge needs cross-origin isolation, and
+      // the design needs a blockable worker). A null host is normal — forcing then uses wasm.
+      if (canUseThreads && !gpuHostTried) {
+        gpuHostTried = true;
+        gpuHost = await acquireGpuHost();
+      }
+      const workers = await Promise.all(Array.from({ length: size }, spawn));
       slots = workers.map((worker) => ({ worker, jobId: null }));
       drain();
-    });
+    })();
   }
   return starting;
 }

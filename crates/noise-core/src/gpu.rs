@@ -14,9 +14,21 @@
 //!
 //! Every failure path falls back to a CPU backend rather than erroring: no adapter, an unsupported
 //! cone, a shader that won't compile, a device loss. The GPU may only ever change *speed*.
+//!
+//! **Two backends behind one driver (G3).** Everything above the dispatch — simplify, WGSL emit, the
+//! cost gate, the chunk-ordered fold — is portable and shared. Only the three primitives that touch a
+//! real device differ by target: [`available`], [`prepare`] (compile/cache a pipeline), and
+//! [`dispatch`] (run a lane range, read back `cols × n` f32). Native drives `wgpu` directly and blocks
+//! on a poll (G0–G2). wasm can't block on the GPU — WebGPU is async and a worker that waits on its own
+//! `mapAsync` self-deadlocks — so the wasm backend hands the shader + params to the **main thread**
+//! over a `SharedArrayBuffer` and blocks on `Atomics.wait` until it writes the result column back
+//! (G3). The fold stays in wasm either way, so the answer is bit-identical to native.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
 
 use crate::dist::{RvGraph, RvId};
 use crate::error::{NoiseError, Result};
@@ -161,10 +173,11 @@ fn forced() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Device + pipeline cache (process-wide: acquiring a device is slow, and a compiled pipeline is
-// exactly the thing G0 says we must not pay for twice).
+// Native backend: `wgpu` device + pipeline cache (process-wide: acquiring a device is slow, and a
+// compiled pipeline is exactly the thing G0 says we must not pay for twice).
 // ---------------------------------------------------------------------------
 
+#[cfg(not(target_arch = "wasm32"))]
 struct Device {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -174,6 +187,7 @@ struct Device {
 }
 
 /// `None` on a machine with no usable adapter — the caller then simply uses a CPU backend.
+#[cfg(not(target_arch = "wasm32"))]
 fn device() -> Option<&'static Device> {
     static DEV: OnceLock<Option<Device>> = OnceLock::new();
     DEV.get_or_init(|| {
@@ -194,6 +208,7 @@ fn device() -> Option<&'static Device> {
     .as_ref()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Device {
     /// Whether the pipeline for `wgsl` is already compiled (for the `NOISE_PROFILE=1` hit/miss note,
     /// PLAN-DROP-JIT D0). A pure probe — it never compiles.
@@ -300,6 +315,93 @@ impl Device {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Backend seam. `try_reduce` / `try_joint` below are target-agnostic; these three primitives are the
+// only device-touching operations, implemented once per target.
+// ---------------------------------------------------------------------------
+
+/// A compiled, ready-to-dispatch pipeline. Native carries the `wgpu` object; wasm carries the shader
+/// text (the main-thread host is keyed on it — a content-addressed pipeline cache lives over there).
+#[cfg(not(target_arch = "wasm32"))]
+struct Prepared(wgpu::ComputePipeline);
+#[cfg(target_arch = "wasm32")]
+struct Prepared(String);
+
+/// Is a GPU backend usable on this thread? Native: an adapter exists. wasm: the JS host installed a
+/// device (`crossOriginIsolated && navigator.gpu`, main-thread device acquired) — 0 on a rayon
+/// sub-worker or a non-isolated page, which then declines to the CPU.
+#[cfg(not(target_arch = "wasm32"))]
+fn available() -> bool {
+    device().is_some()
+}
+#[cfg(target_arch = "wasm32")]
+fn available() -> bool {
+    nz_gpu_available() == 1
+}
+
+/// Compile (or reuse) the pipeline for `wgsl`, returning it plus whether it was already cached (for
+/// the profile hit/miss note). `None` when the driver rejects the shader — a decline, never a fail.
+#[cfg(not(target_arch = "wasm32"))]
+fn prepare(wgsl: &str) -> Option<(Prepared, bool)> {
+    let dev = device()?;
+    let hit = dev.pipeline_cached(wgsl);
+    Some((Prepared(dev.pipeline(wgsl)?), hit))
+}
+#[cfg(target_arch = "wasm32")]
+fn prepare(wgsl: &str) -> Option<(Prepared, bool)> {
+    // The host compiles + caches the pipeline on the main thread; a shader it rejects declines here,
+    // before the fold loop — the same "decline, never fail" contract as native. The hit/miss bit is
+    // the host's, not ours; report miss (the browser profile path doesn't rely on it).
+    (nz_gpu_prepare(wgsl) == 1).then(|| (Prepared(wgsl.to_string()), false))
+}
+
+/// Dispatch lanes `lane0 .. lane0 + n` and read back `cols × n` f32 (root `j`'s lane `i` at `j*n+i`,
+/// the layout [`wgsl_emit::emit`] writes). `cols == 1` is the single-root path; `cols > 1` is joint.
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch(prep: &Prepared, key: crate::rng::Key, lane0: u32, n: u32, cols: u32) -> Vec<f32> {
+    device()
+        .expect("available() was true")
+        .dispatch(&prep.0, key, lane0, n, cols)
+}
+#[cfg(target_arch = "wasm32")]
+fn dispatch(prep: &Prepared, key: crate::rng::Key, lane0: u32, n: u32, cols: u32) -> Vec<f32> {
+    // One span covers the whole round-trip — write request, wake the main thread, block on
+    // `Atomics.wait`, copy the column back — since the worker is blocked for all of it (the native
+    // path splits this into `gpu.dispatch` + `gpu.readback`, which don't exist as phases here).
+    let _s = crate::profile::span("gpu.dispatch");
+    let mut out = vec![0.0f32; cols as usize * n as usize];
+    let ok = nz_gpu_dispatch(&prep.0, &mut out, n, cols, key.k0, key.k1, lane0);
+    debug_assert_eq!(ok, 1, "nz_gpu_dispatch failed after prepare succeeded (device loss?)");
+    out
+}
+
+/// The wasm bridge to the main-thread WebGPU host. A tiny `inline_js` shim forwards each call to
+/// `globalThis.__noiseGpu`, which `worker.ts` installs on the engine worker (and leaves unset on the
+/// rayon sub-workers, so `available()` is 0 there). Keeping the SAB / `postMessage` / `Atomics.wait`
+/// dance in TS (not here) is deliberate: the browser-only, iterate-in-devtools half stays in JS.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(inline_js = r#"
+export function nz_gpu_available() { const g = globalThis.__noiseGpu; return g ? g.available() : 0; }
+export function nz_gpu_prepare(wgsl) { const g = globalThis.__noiseGpu; return g ? g.prepare(wgsl) : 0; }
+export function nz_gpu_dispatch(wgsl, out, n, cols, k0, k1, lane0) {
+  const g = globalThis.__noiseGpu;
+  return g ? g.dispatch(wgsl, out, n, cols, k0, k1, lane0) : 0;
+}
+"#)]
+extern "C" {
+    fn nz_gpu_available() -> i32;
+    fn nz_gpu_prepare(wgsl: &str) -> i32;
+    fn nz_gpu_dispatch(
+        wgsl: &str,
+        out: &mut [f32],
+        n: u32,
+        cols: u32,
+        k0: u32,
+        k1: u32,
+        lane0: u32,
+    ) -> i32;
+}
+
 /// Try to run this whole forcing on the GPU.
 ///
 /// `Ok(None)` means "not this backend's job" — no adapter, an unsupported cone, or the gate saying
@@ -316,10 +418,10 @@ pub fn try_reduce<R: Reducer>(
     r: &R,
     token: Option<&CancelToken>,
 ) -> Result<Option<R::Acc>> {
-    let Some(dev) = device() else {
+    if !available() {
         crate::profile::note("gpu: no adapter → cpu");
         return Ok(None);
-    };
+    }
 
     // The same simplify the other backends get, so the cone — and therefore the draw ordinals — are
     // identical to what the interpreter would compute.
@@ -344,12 +446,11 @@ pub fn try_reduce<R: Reducer>(
         return Ok(None);
     }
     crate::profile::note(gate_reason(instrs, cost.ops, n));
-    let (pipe, hit) = {
+    let prepared = {
         let _s = crate::profile::span("gpu.pipeline");
-        let hit = dev.pipeline_cached(&wgsl);
-        (dev.pipeline(&wgsl), hit)
+        prepare(&wgsl)
     };
-    let Some(pipe) = pipe else {
+    let Some((pipe, hit)) = prepared else {
         crate::profile::note("gpu: driver rejected shader → cpu");
         return Ok(None); // a shader the driver rejected: fall back rather than fail the program
     };
@@ -374,7 +475,7 @@ pub fn try_reduce<R: Reducer>(
         // One u32 of lane index caps a forcing at 2^32 draws — the same documented boundary the CPU
         // reducer has.
         let lane0 = u32::try_from(done).expect("forcing exceeds 2^32 lanes");
-        let col = dev.dispatch(&pipe, key, lane0, take as u32, 1);
+        let col = dispatch(&pipe, key, lane0, take as u32, 1);
 
         // Fold on the reducer's OWN chunk boundaries, in order — so the accumulation is the same
         // sequence of `absorb`/`merge` calls the CPU reducer would have made, and the answer doesn't
@@ -420,10 +521,10 @@ pub fn try_joint<F: FnMut(&[&[f32]], usize)>(
     mut sink: F,
     token: Option<&CancelToken>,
 ) -> Result<Option<()>> {
-    let Some(dev) = device() else {
+    if !available() {
         crate::profile::note("gpu(joint): no adapter → cpu");
         return Ok(None);
-    };
+    }
     // Same simplify the CPU joint path gets (union cone, cross-root sharing preserved), so the draw
     // ordinals — and thus the joint pairing — are identical to what the interpreter would compute.
     let (g, roots) = {
@@ -459,7 +560,7 @@ pub fn try_joint<F: FnMut(&[&[f32]], usize)>(
         return Ok(None);
     }
     crate::profile::note(gate_reason(instrs, cost.ops, n));
-    let Some(pipe) = dev.pipeline(&wgsl) else {
+    let Some((pipe, _hit)) = prepare(&wgsl) else {
         crate::profile::note("gpu(joint): driver rejected shader → cpu");
         return Ok(None);
     };
@@ -475,7 +576,7 @@ pub fn try_joint<F: FnMut(&[&[f32]], usize)>(
         }
         let take = max_lanes.min(n - done);
         let lane0 = u32::try_from(done).expect("forcing exceeds 2^32 lanes");
-        let buf = dev.dispatch(&pipe, key, lane0, take as u32, k as u32);
+        let buf = dispatch(&pipe, key, lane0, take as u32, k as u32);
         // `buf[j*take + i]` is root `j`, lane `i` — present the k columns for this chunk (lane order
         // preserved), and hand them to the caller's fold exactly as the CPU batch loop would.
         let _s = crate::profile::span("gpu.fold");

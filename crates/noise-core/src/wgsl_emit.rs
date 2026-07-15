@@ -392,7 +392,7 @@ impl Emitter<'_> {
         let last = len - 1;
         format!(
             "select({name}[min(u32(clamp(sign({idx}) * floor(abs({idx}) + 0.5), 0.0, {last}.0)), \
-             {last}u)], bitcast<f32>(NAN_BITS), nz_isnan({idx}))"
+             {last}u)], bitcast<f32>(NAN_BITS | (P.n & 0u)), nz_isnan({idx}))"
         )
     }
 
@@ -714,8 +714,18 @@ fn draw_expr(src: &Source, ctr: &str, lane: &str) -> String {
 /// A decimal literal is a re-rounding, and the engine's constants are specified as f32 *values* — so
 /// writing `0.33333334` in the shader is a different number than the CPU folded. Bit-for-bit draw
 /// parity is decided by exactly this, so the emitter never hand-rounds a constant.
+///
+/// **Non-finite constants go through a runtime zero.** WGSL forbids a *const-expression* that
+/// evaluates to NaN or ±Inf, and Tint (Chrome/Dawn's WebGPU) enforces it — `naga` (native wgpu) does
+/// not, which is why native GPU tests never caught this and only a live browser did (PLAN-WEBGPU G3).
+/// `P.n & 0u` is a runtime zero, so `bits | (P.n & 0u)` is a *non-const* expression carrying the same
+/// bits; `bitcast` of it is the identical NaN/Inf at runtime but is no longer a rejected const NaN.
 fn f32c(x: f32) -> String {
-    format!("bitcast<f32>({:#010x}u)", x.to_bits())
+    if x.is_finite() {
+        format!("bitcast<f32>({:#010x}u)", x.to_bits())
+    } else {
+        format!("bitcast<f32>({:#010x}u | (P.n & 0u))", x.to_bits())
+    }
 }
 
 /// The fixed prelude: params, the `vec2<u32>` u64 emulation, `squares64`, and the draw sources.
@@ -891,6 +901,10 @@ const TWO_OVER_PI: array<u32, 13> = array<u32, 13>(
 const PIO2_HI: f32 = 0x1.92p+0;
 const PIO2_LO: f32 = 0x1.fb5444p-12;
 const PI_4: f32 = 0x1.921fb6p-1;
+// The quiet-NaN bit pattern. Used only as `NAN_BITS | (P.n & 0u)` — the OR with a runtime zero makes
+// the whole expression non-const, because WGSL forbids a const-expression that evaluates to NaN and
+// Tint (Chrome/Dawn) enforces it while `naga` (native wgpu) does not (PLAN-WEBGPU G3). Same NaN at
+// runtime, on both backends.
 const NAN_BITS: u32 = 0x7fc00000u;
 
 // Reduce |x| to (r, k) with r in [-pi/4, pi/4] and x ~ r + k*(pi/2). `ax` must be finite and >= 0.
@@ -988,7 +1002,7 @@ fn trig_quadrant(kq: u32, s: f32, c: f32, is_cos: bool) -> f32 {
 
 // sin(+-inf) and sin(NaN) are NaN. Screened by bits, for the same fast-math reason as `nz_isnan`.
 fn nz_sin(x: f32) -> f32 {
-    if ((bitcast<u32>(x) & 0x7f800000u) == 0x7f800000u) { return bitcast<f32>(NAN_BITS); }
+    if ((bitcast<u32>(x) & 0x7f800000u) == 0x7f800000u) { return bitcast<f32>(NAN_BITS | (P.n & 0u)); }
     let rk = trig_reduce(abs(x));
     let kq = u32(rk.y) & 3u;
     let v = trig_quadrant(kq, sin_kernel(rk.x), cos_kernel(rk.x), false);
@@ -996,7 +1010,7 @@ fn nz_sin(x: f32) -> f32 {
 }
 
 fn nz_cos(x: f32) -> f32 {
-    if ((bitcast<u32>(x) & 0x7f800000u) == 0x7f800000u) { return bitcast<f32>(NAN_BITS); }
+    if ((bitcast<u32>(x) & 0x7f800000u) == 0x7f800000u) { return bitcast<f32>(NAN_BITS | (P.n & 0u)); }
     let rk = trig_reduce(abs(x));
     let kq = u32(rk.y) & 3u;
     return trig_quadrant(kq, sin_kernel(rk.x), cos_kernel(rk.x), true);   // cos is even

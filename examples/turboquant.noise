@@ -11,7 +11,6 @@ extra:
   category: "Functions & research"
   analytic: "bias 2/π ≈ 0.637"
 ---
-engine::set_max_samples(10000);
 use math;     # pi, sqrt, sign
 use vec;      # normalize, ones, iota, quantize, normsq, norm, transpose
 

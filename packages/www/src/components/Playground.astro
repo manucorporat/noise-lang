@@ -296,10 +296,9 @@
   .pg-metric .m-val { color: var(--ink); font-weight: 700; }
   .pg-metric.m-rate .m-val { color: var(--accent); }
   .m-sep { color: var(--ink-faint); opacity: 0.6; }
-  /* The profile phase breakdown: a second, dimmer tier under the primary metrics. */
-  .m-phase-row { display: block; margin-top: 0.15rem; opacity: 0.85; }
-  .pg-metric.m-phase .m-key { color: var(--ink-dim); }
-  .pg-metric.m-phase .m-val { font-weight: 600; color: var(--ink-dim); }
+  /* The metrics container is a template element, so `position` scopes correctly here; the JS-created
+     summary/detail children are styled in the `<style is:global>` block (scoping can't reach them). */
+  #pg-metrics { position: relative; }
 
   /* The right cluster of the Render header: the engine readout + the Share pill. */
   .pg-head-right { display: inline-flex; align-items: center; gap: 0.6rem; min-width: 0; }
@@ -377,6 +376,43 @@
 <style is:global>
   #pg-output.is-preview { container-type: inline-size; }
   #pg-output.is-preview .muted { color: var(--ink-faint); }
+
+  /* Engine readout — the chips and the hover detail panel. These live in the GLOBAL block because
+     the metric nodes are built at runtime (innerHTML), which Astro's scoped styles never reach. */
+  #pg-metrics .m-key { font-variant: small-caps; letter-spacing: 0.04em; color: var(--ink-faint); }
+  #pg-metrics .m-val { color: var(--ink); font-weight: 700; }
+  #pg-metrics .m-sep { color: var(--ink-faint); opacity: 0.6; }
+  #pg-metrics .pg-metric.m-rate .m-val { color: var(--accent); }
+  #pg-metrics .pg-metric.m-phase .m-key,
+  #pg-metrics .pg-metric.m-diag .m-key { color: var(--ink-faint); }
+  #pg-metrics .pg-metric.m-phase .m-val,
+  #pg-metrics .pg-metric.m-diag .m-val { font-weight: 600; color: var(--ink-dim); }
+  #pg-metrics .pg-metric.m-warn .m-key,
+  #pg-metrics .pg-metric.m-warn .m-val { color: #b45309; font-weight: 700; }
+
+  /* Compact summary is always visible; the full breakdown floats in on hover, so the bar stays one
+     quiet line. */
+  #pg-metrics .pg-metrics-summary { cursor: default; }
+  #pg-metrics .pg-metrics-summary .mm-more {
+    margin-left: 0.5rem; color: var(--ink-faint); font-size: 0.68rem; letter-spacing: 0.02em;
+  }
+  #pg-metrics .pg-metrics-summary.has-warn .mm-more { color: #b45309; }
+  #pg-metrics .pg-metrics-detail {
+    display: none; position: absolute; right: 0; top: calc(100% + 0.4rem); z-index: 40;
+    min-width: 19rem; max-width: 30rem; text-align: left; padding: 0.7rem 0.9rem;
+    background: var(--paper); border: 1px solid var(--rule); border-radius: 8px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.14); white-space: normal; line-height: 1.85;
+  }
+  #pg-metrics:hover .pg-metrics-detail { display: block; }
+  #pg-metrics .pg-metrics-detail .mm-sec + .mm-sec {
+    margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--rule);
+  }
+  #pg-metrics .pg-metrics-detail .mm-h {
+    font-variant: small-caps; letter-spacing: 0.06em; color: var(--ink-faint); font-size: 0.66rem;
+  }
+  #pg-metrics .pg-metrics-detail .mm-note {
+    color: var(--ink-dim); font-size: 0.7rem; line-height: 1.5; white-space: pre-wrap;
+  }
   #pg-output .pg-paper {
     max-width: 660px; margin: 0 auto;
     font-family: var(--serif); font-size: 1.04rem; line-height: 1.62; color: var(--ink);
@@ -1173,38 +1209,85 @@
       .replace(/\*([^*]+)\*/g, '<em>$1</em>');
   }
 
-  // The engine readout.
+  // The engine readout: a compact summary (time · samples · backend), with the full breakdown —
+  // per-phase timings, throughput, execution diagnostics, and the engine's own gate notes — revealed
+  // in a tooltip on hover. Everything is available; only the headline is always on screen.
   function renderMetrics(res: NoiseIntrospectResult) {
     const s = res.stats;
-    const chips: Array<[string, string, string?]> = [];
-    if (s.samples > 0) {
-      chips.push(['samples', fmtCount(s.samples)]);
-      chips.push(['ops', fmtCount(s.ops)]);
-      chips.push(['random', fmtCount(s.rng_draws)]);
-    }
-    chips.push(['time', fmtMs(res.elapsedMs)]);
-    if (s.ops > 0 && res.elapsedMs > 0) {
-      chips.push(['ops/sec', fmtCount(Math.round(s.ops / (res.elapsedMs / 1000))), 'm-rate']);
-    }
-    // Per-phase timing breakdown (only present when the run was profiled). Show the phases that
-    // actually took time, most-expensive first, as their own tier of chips.
+    const d = res.diagnostics;
+    const chip = (key: string, val: string, cls?: string) =>
+      `<span class="pg-metric ${cls ?? ''}"><span class="m-key">${key}</span> ` +
+      `<span class="m-val">${val}</span></span>`;
+    const join = (parts: string[]) => parts.join('<span class="m-sep"> · </span>');
+
+    // Backend badge — the one perf fact worth showing up front: did the GPU take this run?
+    const onGpu = !!d && d.gpu.dispatches > 0;
+    const backend = onGpu
+      ? 'gpu'
+      : d && d.gpu.deviceAcquired
+        ? 'cpu'
+        : 'cpu';
+    const warn = !!d && (d.gpu.shaderFailures > 0 || !d.crossOriginIsolated);
+
+    // --- compact summary (always visible) ---
+    const summary: string[] = [chip('time', fmtMs(res.elapsedMs))];
+    if (s.samples > 0) summary.push(chip('samples', fmtCount(s.samples)));
+    summary.push(chip('backend', backend, onGpu ? 'm-rate' : 'm-diag'));
+
+    // --- hover detail (everything) ---
+    const section = (title: string, rows: string) =>
+      rows ? `<div class="mm-sec"><div class="mm-h">${title}</div>${rows}</div>` : '';
+
+    const throughput = join(
+      [
+        s.samples > 0 ? chip('samples', fmtCount(s.samples)) : '',
+        s.ops > 0 ? chip('ops', fmtCount(s.ops)) : '',
+        s.rng_draws > 0 ? chip('random', fmtCount(s.rng_draws)) : '',
+        s.ops > 0 && res.elapsedMs > 0
+          ? chip('ops/sec', fmtCount(Math.round(s.ops / (res.elapsedMs / 1000))), 'm-rate')
+          : '',
+      ].filter(Boolean),
+    );
+
     const phases = (res.profile?.phases ?? [])
       .filter((p) => p.ms >= 0.05)
       .sort((a, b) => b.ms - a.ms);
-    const phaseChips = phases.map(
-      (p): [string, string, string?] => [p.name, fmtMs(p.ms), 'm-phase'],
-    );
-    const render = (cs: Array<[string, string, string?]>) =>
-      cs
-        .map(
-          ([key, val, cls]) =>
-            `<span class="pg-metric ${cls ?? ''}"><span class="m-key">${key}</span> ` +
-            `<span class="m-val">${val}</span></span>`,
-        )
-        .join('<span class="m-sep"> · </span>');
+    const phaseRows = join(phases.map((p) => chip(p.name, fmtMs(p.ms), 'm-phase')));
+
+    let execRows = '';
+    if (d) {
+      const ex: string[] = [chip('backend', backend, onGpu ? 'm-rate' : 'm-diag')];
+      if (onGpu) {
+        ex.push(chip('dispatches', String(d.gpu.dispatches), 'm-diag'));
+        ex.push(chip('gpu lanes', fmtCount(d.gpu.lanes), 'm-diag'));
+      } else {
+        ex.push(chip('workers', String(d.workers), 'm-diag'));
+        if (d.gpu.deviceAcquired) ex.push(chip('gpu', 'available, declined', 'm-diag'));
+        else if (d.gpu.supported) ex.push(chip('gpu', 'no device', 'm-diag'));
+      }
+      ex.push(chip('isolated', d.crossOriginIsolated ? 'yes' : 'no', d.crossOriginIsolated ? 'm-diag' : 'm-warn'));
+      if (d.gpu.shaderFailures > 0) {
+        ex.push(chip('⚠ shader', escapeHtml(d.gpu.lastShaderError ?? 'rejected'), 'm-warn'));
+      }
+      execRows = join(ex);
+    }
+
+    // The engine's own gate/backend notes (why it chose this backend) — the "why" behind `backend`.
+    const notes = res.profile?.notes ?? [];
+    const noteRows = notes.length
+      ? notes.map((n) => `<div class="mm-note">${escapeHtml(n)}</div>`).join('')
+      : '';
+
+    const detail =
+      section('Throughput', throughput) +
+      section('Phases', phaseRows) +
+      section('Execution', execRows) +
+      section('Engine notes', noteRows);
+
     metricsEl.innerHTML =
-      render(chips) +
-      (phaseChips.length ? `<span class="m-phase-row">${render(phaseChips)}</span>` : '');
+      `<span class="pg-metrics-summary ${warn ? 'has-warn' : ''}">${join(summary)}` +
+      `<span class="mm-more">details ▾</span></span>` +
+      `<span class="pg-metrics-detail">${detail}</span>`;
     metricsEl.hidden = false;
   }
 

@@ -48,7 +48,7 @@ RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals \
   -C link-arg=--export=__tls_base -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align" \
   rustup run nightly wasm-pack build crates/noise-wasm \
     --target web --out-dir ../../packages/core/wasm-mt --out-name noise --release \
-    -- --features wasm-threads -Z build-std=std,panic_abort
+    -- --features wasm-threads,gpu -Z build-std=std,panic_abort
 rm -f packages/core/wasm-mt/.gitignore
 
 echo "==> done: packages/core/wasm (st) + packages/core/wasm-mt (mt)"

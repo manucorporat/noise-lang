@@ -311,10 +311,12 @@ fn run_parallel<R: Reducer>(
     }
     // Chunks come back in completion order; `combine_in_order` sorts by index, which is what makes
     // the answer identical to the sequential run bit for bit.
-    Ok(combine_in_order(
-        r,
-        collected.into_inner().expect("reduction mutex poisoned"),
-    ))
+    // `collected` is a shared `&Mutex` here (reborrowed above so the `move` workers capture it by
+    // reference), so take the Vec out through the lock rather than consuming the Mutex. Bind it to a
+    // local first so the `MutexGuard` temporary drops here, not at the end of the block (where it
+    // would outlive the owned `collected` — E0597).
+    let runs = std::mem::take(&mut *collected.lock().expect("reduction mutex poisoned"));
+    Ok(combine_in_order(r, runs))
 }
 
 // --- the moments reducer (mean + population variance), powering P / E / Var ---

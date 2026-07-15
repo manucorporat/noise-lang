@@ -32,6 +32,12 @@ wasm-bindgen-rayon = { version = "1.2", optional = true }
 # (COOP/COEP) for SharedArrayBuffer. See `packages/core/scripts/build-wasm.sh`.
 wasm-threads = ["dep:wasm-bindgen-rayon", "noise-core/wasm-threads"]
 
+# Browser WebGPU backend (PLAN-WEBGPU G3): forwards to `noise-core/gpu`, which on wasm32 compiles the
+# bridge shims (`nz_gpu_*`) that talk to the main-thread device — no `wgpu` (that stays native-only).
+# Built alongside `wasm-threads` for the cross-origin-isolated (`wasm-mt`) artifact; the device host
+# needs the same isolation the SAB does. See `packages/core/scripts/build-wasm.sh`.
+gpu = ["noise-core/gpu"]
+
 [package.metadata.wasm-pack.profile.release]
 # Smaller, faster-to-load artifact for the browser playground.
 wasm-opt = ["-O3"]

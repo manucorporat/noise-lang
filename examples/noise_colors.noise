@@ -13,7 +13,6 @@ extra:
 use math;     # round
 
 n = 256;   # every color drawn at the same resolution
-engine::set_max_samples(3000);   # Monte Carlo budget for the E()s inside neighbor_corr — set once, not per query
 
 # Lag-1 autocorrelation of a noise vector, averaged over many realizations. Built from the raw
 # spatial sums so it's E[<x_k x_{k+1}>] / E[<x_k^2>] — a clean ratio of means.

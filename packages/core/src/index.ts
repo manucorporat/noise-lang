@@ -5,6 +5,9 @@
 // that understands that pattern (Vite, Rollup, webpack 5, esbuild) fingerprints the .wasm and
 // emits it as an asset of the *consuming* app's build — no copying, no CDN, no runtime config.
 import { call, start, stop } from './pool.js';
+import type { RunDiagnostics } from './worker.js';
+
+export type { RunDiagnostics } from './worker.js';
 
 /**
  * Warm the engine: spawn the worker pool and instantiate the wasm in each worker.
@@ -63,6 +66,12 @@ export interface NoiseProfile {
   /** Free-text notes the engine emitted (gate decisions, chosen backend, cache hit/miss). */
   notes: string[];
 }
+
+/** Execution-environment + GPU-host diagnostics for a run — the JS-side complement to `profile`
+ *  (which is measured inside the engine). Answers "why is this slow / not on the GPU?" from one
+ *  place: isolation state, thread/worker count, GPU availability, and the GPU host's real dispatch
+ *  volume plus the exact shader-validation errors the browser raised. See `RunDiagnostics`. */
+export type NoiseDiagnostics = RunDiagnostics;
 
 // --- the Document contract (PLAN-LITERATE §D5) -----------------------------------------------
 //
@@ -184,6 +193,9 @@ export interface NoiseResult extends NoiseDocument {
   stats: NoiseStats;
   /** Per-phase timing breakdown when the run was profiled (`RunOpts.profile`), else `null`. */
   profile: NoiseProfile | null;
+  /** Execution-environment + GPU-host diagnostics (isolation, threads/workers, GPU dispatches, shader
+   *  errors). Always present in the browser; `null` only if the pool couldn't report it. */
+  diagnostics: NoiseDiagnostics | null;
   /** Notes + plots in emission order, in the legacy `LogItem` shape (a filter over `blocks`). */
   log: LogItem[];
   /** Wall-clock time of the run, in milliseconds (measured here, not in Rust). */
@@ -191,7 +203,11 @@ export interface NoiseResult extends NoiseDocument {
 }
 
 /** Derive the client-side convenience fields from a wire `Document`. */
-function enrich(doc: NoiseDocument, elapsedMs: number): NoiseResult {
+function enrich(
+  doc: NoiseDocument,
+  elapsedMs: number,
+  diagnostics: NoiseDiagnostics | null = null,
+): NoiseResult {
   const log: LogItem[] = [];
   const outputLines: string[] = [];
   for (const b of doc.blocks) {
@@ -210,6 +226,7 @@ function enrich(doc: NoiseDocument, elapsedMs: number): NoiseResult {
     error: doc.result.error?.message ?? null,
     stats: doc.result.stats ?? ZERO_STATS,
     profile: doc.result.profile ?? null,
+    diagnostics,
     log,
     elapsedMs,
   };
@@ -281,7 +298,7 @@ export async function run(src: string, opts?: RunOpts): Promise<NoiseResult> {
   // `elapsedMs` is measured inside the worker: it's engine time, not queueing + postMessage latency.
   const res = await call({ op: 'run', src, optsJson: optsToJson(opts) }, opts?.signal);
   const doc = JSON.parse(unwrap(res)) as NoiseDocument;
-  return enrich(doc, res.elapsedMs ?? 0);
+  return enrich(doc, res.elapsedMs ?? 0, res.diag ?? null);
 }
 
 // --- frontmatter (the "read metadata without running" path) ----------------------------------
@@ -410,7 +427,7 @@ export async function runWithIntrospection(
     introspections?: Plot[];
   };
   return {
-    ...enrich(parsed.document, elapsedMs),
+    ...enrich(parsed.document, elapsedMs, res.diag ?? null),
     bindings: parsed.bindings ?? [],
     introspections: parsed.introspections ?? [],
   };

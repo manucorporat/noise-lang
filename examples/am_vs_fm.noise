@@ -13,7 +13,6 @@ extra:
 use math;
 use vec;
 
-engine::set_max_samples(40000);   # how many noise realizations to average over
 engine::set_resolution(64);       # how many points per waveform
 
 am_modulate(msg)              = 1 + msg;               # message in the LENGTH (the angle stays 0)
