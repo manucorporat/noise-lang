@@ -44,7 +44,7 @@ fn every_example_still_runs_end_to_end() {
 /// readout for comparing two working trees or feature sets without a full Criterion run (which owns
 /// the statistically careful numbers, but takes >10 minutes over this corpus).
 ///
-/// `cargo test -p noise-core --release [--features jit] -- --ignored --nocapture example_times`
+/// `cargo test -p noise-core --release [--features gpu] -- --ignored --nocapture example_times`
 #[test]
 #[ignore = "diagnostic: prints a table, asserts nothing"]
 fn example_times() {

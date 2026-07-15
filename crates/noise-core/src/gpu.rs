@@ -6,7 +6,7 @@
 //! GPU hooks one level *up*, in [`crate::reduce::run_reduction`]: if the gate accepts, this drives the
 //! whole forcing itself — dispatching big lane ranges, folding each 16,384-sample chunk into the
 //! caller's `Reducer` in chunk order, and handing back the accumulator. `Program` / `Runner` /
-//! `Reducer` are all untouched, and the interpreter/JIT/wasm paths never see this module.
+//! `Reducer` are all untouched, and the interpreter/wasm paths never see this module.
 //!
 //! Counter keying is what makes that legal: a chunk is *just a lane range* (the draw at lane `i` is a
 //! pure function of `(seed, i, source)`), so the GPU can compute any range independently and the fold

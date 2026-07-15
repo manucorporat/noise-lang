@@ -81,7 +81,7 @@ impl Engine {
         // the `X < 0` lanes, which are *in condition* with probability ~1/2. The correct fix is a
         // dedicated condition column (as `sample_pairs` carries one), keeping the quantity's NaN
         // distinct from the sentinel; it is deferred because the single-root reduce/backend path
-        // (`reduce`/`Runner`, incl. JIT/wasm) produces one column per batch, and re-routing to a
+        // (`reduce`/`Runner`, incl. wasm/WGSL) produces one column per batch, and re-routing to a
         // two-root interpreter pass would change RNG consumption order. See the matching notes on
         // `reduce::CondMomentsReducer` and `sampler::cond_sample_n`.
         let nan = self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num);

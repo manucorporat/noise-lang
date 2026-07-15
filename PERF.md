@@ -22,9 +22,10 @@ commands are at the end.
   Monte-Carlo kernel to match it, at which point you've reimplemented the backend.
 - That one-liner sustains **~5.8 billion samples/sec** on a 14-core M4 Pro (`pi` Monte Carlo,
   generate + reduce, all cores) — and it scales **~9.6×** from one core to all of them.
-- The hot loop never walks an AST. Random variables compile to a **graph IR** lowered three ways: a
-  **columnar batch interpreter** (portable default + correctness oracle), a **Cranelift native JIT**
-  (fuses the whole expression into one kernel), and a **WASM emitter** (the same, for the browser).
+- The hot loop never walks an AST. Random variables compile to a **graph IR** lowered several ways: a
+  **columnar batch interpreter** (portable default + correctness oracle and the fallback floor), a
+  **native WebGPU backend** (dispatches the fused kernel across GPU lanes — the native performance
+  path), and a **WASM emitter** (the same fused kernel, for the browser).
 - **vs native Rust:** per core, the generated kernel is within **~1.15× of hand-written,
   LLVM-compiled Rust** (~87% of "as fast as you could write it by hand"). But because Noise
   parallelizes the one-liner automatically and the typical hand-written kernel is single-threaded, the
@@ -64,7 +65,7 @@ Interpreting an AST once per draw is pointer-chasing death: for `X^2 + Y^2 < 1` 
 tree, re-dispatch on every node, and re-box intermediate values a million times. The entire design
 exists to avoid that.
 
-## The architecture: one IR, three backends
+## The architecture: one IR, several backends
 
 `~` and the distribution constructors build an **`RvGraph`** — an append-only DAG of nodes (`Src`,
 `ConstNum`, `Unary`, `Binary`, `Select`) with structural sharing (so `X + X` is *one* draw of `X`,
@@ -73,18 +74,24 @@ it — not a re-interpretation, code generation:
 
 | Backend | Target | Where it runs | Role |
 |---|---|---|---|
-| Columnar interpreter | flat bytecode over column registers | everywhere | default + correctness oracle |
-| Cranelift JIT (`jit` feature) | native machine code | native | fused kernel, fastest |
+| Columnar interpreter | flat bytecode over column registers | everywhere | default, correctness oracle, and fallback floor |
+| WebGPU (`gpu` feature) | WGSL compute shader | native (via wgpu) | fused kernel across GPU lanes — native performance path |
 | WASM emitter (`wasm_emit`) | WebAssembly bytes | browser (via JS host) | fused kernel, portable |
 
 A shared module (`kernel.rs`) holds the one copy of *what the graph means* — the cost model, the
-multi-stream policy, the RNG seeding layout — so the two code generators are thin "how to spell it on
-this target" layers (`mulsd` vs `f64.mul`; the same inlined xoshiro step either way) and can never
+multi-stream policy, the RNG seeding layout — so the code generators are thin "how to spell it on
+this target" layers (`f64.mul` vs WGSL's `*`; the same inlined RNG step either way) and can never
 drift apart.
 
-The default forcing path is `compile_root`: simplify the graph once, then pick the best available
-backend for the target (native+`jit` → JIT; `wasm32` → WASM host; otherwise → interpreter). Every
-codegen path falls back to the interpreter for anything it can't profitably emit.
+The default forcing path is `compile_root`: simplify the graph once, then pick the lowering for the
+target (`wasm32` → WASM host; otherwise → interpreter). On native, the WebGPU backend hooks a level up
+in `reduce` and takes the forcing when its cost gate accepts; every codegen path falls back to the
+interpreter for anything it can't profitably emit.
+
+> **History:** the native performance backend used to be a **Cranelift JIT** (the `jit` feature),
+> which fused each expression into one native kernel. It has since been retired in favour of the
+> WebGPU backend; the JIT benchmark numbers quoted later in this document are kept as *historical*
+> measurements of that retired backend, and the "vs hand-written Rust" comparison it enabled.
 
 ---
 
@@ -106,7 +113,7 @@ with redundancy: ~0% for `dice`, ~10% for a clean polynomial (a repeated `X*X`),
 identity-laden expression. Risky identities (`x*0`, `x/x`) are deliberately *excluded* — they're
 wrong for a non-finite lane a user could construct.
 
-### 3. Kernel fusion (the JIT / WASM win)
+### 3. Kernel fusion (the codegen win)
 
 The interpreter materializes every intermediate column to memory. The code generators don't: they
 emit **one loop that draws its sources, computes the entire expression keeping intermediates in
@@ -120,8 +127,8 @@ into Rust. The kernel's `next_u64` is a handful of shifts/xors/rotates with zero
 native and in WASM alike (WASM even has a native `i64.rotl`).
 
 The same logic applies to `ln`/`sin`/`cos` — the hot path of `normal` (Box–Muller is `ln`+`cos`),
-`exp`/`geometric` (`ln`), and the signal trig. Those were `extern "C"` calls to libm; the native JIT
-now emits them as **straight-line polynomial approximations** (`crate::approx`: an atanh series for
+`exp`/`geometric` (`ln`), and the signal trig. Those were `extern "C"` calls to libm; the code
+generators emit them as **straight-line polynomial approximations** (`crate::approx`: an atanh series for
 `ln`, fdlibm minimax kernels with Cody–Waite range reduction for `sin`/`cos`, all bit-for-bit
 documented and ~1e-9 vs libm — far tighter than Monte-Carlo noise, so the draws stay
 distribution-identical to the interpreter oracle). Dropping the call roughly **doubles** a
@@ -200,7 +207,7 @@ End-to-end `moments(pi)` (generate + reduce), 1 thread vs all 14 cores, M sample
 | backend | 1 thread | 14 threads | scaling |
 |---|---:|---:|---:|
 | interpreter | 151 | **1662** | 11.0× |
-| JIT | 605 | **5824** | 9.6× |
+| JIT (retired, historical) | 605 | **5824** | 9.6× |
 
 (Measured at a high sample count so per-call thread-spawn is negligible. At the default `P()` budget
 of 1e6 samples the work is too small to amortize spawning 14 threads, so scaling there is modest — the
@@ -208,11 +215,13 @@ parallel win shows up on the high-precision queries that actually need it.)
 
 ---
 
-## End-to-end: interpreter vs JIT (native)
+## End-to-end: interpreter vs the retired JIT (native, historical)
 
 Full `P()`-style workload: 1,000,000 samples + moments reduction, multicore, median M samples/sec.
+These figures were measured against the now-retired Cranelift JIT; they still illustrate *which graph
+shapes* codegen wins on (the same shapes the WebGPU backend now targets), which is why they're kept.
 
-| case | interpreter | JIT | speedup | notes |
+| case | interpreter | JIT (retired) | speedup | notes |
 |---|---:|---:|---:|---|
 | pi_indicator | 167 | **1226** | 7.3× | RNG + arithmetic, fully fusible |
 | poly_deep | 184 | **1061** | 5.8× | deep math, fusion kills column traffic |
@@ -243,14 +252,16 @@ This is where Noise's matrix story matters. `@`, `matvec`, `rotation`, `transpos
 loop** — they expand element-by-element into the same scalar `RvGraph`. So the entire d×d linear
 algebra of one sample collapses into a single straight-line fused kernel:
 
-| estimator | fused kernel | interpreter | JIT | speedup | estimate (paper) |
+| estimator | fused kernel | interpreter | JIT (retired) | speedup | estimate (paper) |
 |---|---:|---:|---:|---:|---|
 | D_mse  b=4 (rotate · quantize · rotate back) | 20,391 nodes | 0.12 | **0.63** | 5.3× | 0.0087 (0.009) |
 | D_prod b=4 (MSE stage + 1-bit QJL residual) | 21,983 nodes | 0.12 | **0.31** | 2.6× | 0.0023 (0.0024) |
 
+(The codegen column above is the retired JIT; the WebGPU backend now carries this workload on native.)
+
 Two things to read here. First, the estimates land on the paper's table — the kernel is correct, not
-just fast. Second, **a ~20,000-node kernel still fuses, JITs, and runs across all cores with zero
-special-casing**: CSE collapses the shared Gram–Schmidt sub-expressions, the profitability gate JITs
+just fast. Second, **a ~20,000-node kernel still fuses, compiles, and runs across all cores with zero
+special-casing**: CSE collapses the shared Gram–Schmidt sub-expressions, the profitability gate emits
 it, and the multicore reducer parallelizes it — the same pipeline as the two-node `pi` kernel.
 
 The flip side is the honest caveat on the matmul question: because there is no loop, the kernel size
@@ -261,15 +272,16 @@ and tiling — an inner loop the straight-line kernel deliberately doesn't have 
 Noise optimizes the *Monte-Carlo* axis (millions of independent samples of a fixed expression), not the
 *linear-algebra* axis (reuse within one large matrix product).
 
-Run it: `cargo test -p noise-core --features jit --release -- --ignored --nocapture bench_turboquant`
+Run it: `cargo test -p noise-core --features gpu --release -- --ignored --nocapture bench_turboquant`
 
 ---
 
-## How it compares to hand-written native Rust
+## How the codegen compared to hand-written native Rust (historical, retired JIT)
 
-The honest ceiling: race the Cranelift kernel against a hand-written, LLVM-compiled Rust loop
-computing the *identical* graph (same inlined xoshiro, same arithmetic, both filling a column so the
-comparison is pure codegen quality):
+This section measured the **retired Cranelift JIT**, kept because it establishes the codegen-quality
+ceiling the project reached on native CPU. The honest ceiling: race the Cranelift kernel against a
+hand-written, LLVM-compiled Rust loop computing the *identical* graph (same inlined xoshiro, same
+arithmetic, both filling a column so the comparison is pure codegen quality):
 
 ```
 fused poly_deep kernel, single thread, M samples/sec:
@@ -302,8 +314,8 @@ Noise version wins — that's the whole point of pushing the optimization into t
 
 ## WASM vs non-WASM (the browser story)
 
-A WASM sandbox can't emit or run native code, so the Cranelift JIT is native-only. The browser's
-equivalent is the **WASM emitter**: it walks the same graph and emits a WebAssembly module
+A WASM sandbox can't emit or run native machine code or reach the GPU, so the native performance
+backend is native-only. The browser's equivalent is the **WASM emitter**: it walks the same graph and emits a WebAssembly module
 (`kernel(out, n, state)` over its own linear memory, same multi-stream interleave, the same inlined
 xoshiro/Box–Muller draws spelled in `f64.*`/`i64.*` — including the inlined `ln`/`sin`/`cos`
 polynomials, so a `normal` kernel makes **no host calls at all**). A tiny JS host
@@ -313,16 +325,16 @@ under the 4 KB main-thread sync-compile limit.
 
 The emitted kernel, timed in V8 (the browser's engine), single thread:
 
-| case | WASM in V8 | native Cranelift | WASM / native |
+| case | WASM in V8 | native codegen (retired JIT) | WASM / native |
 |---|---:|---:|---:|
 | dice_sum | 587 | 890 | 0.66× |
 | pi_indicator | 531 | 718 | 0.74× |
 | poly_deep | 446 | 919 | 0.49× |
 
 So the browser runs the *same fused, multi-stream kernel* at roughly **half to three-quarters of
-native codegen speed** — hundreds of millions of samples/sec, entirely client-side, from ~1.3–1.6 KB
-of generated WASM per program. The gap vs native is the cost of the WASM sandbox + V8's JIT vs
-Cranelift's; it's remarkably small for what you get (no install, no server, runs in a tab).
+the (then-JIT) native codegen speed** — hundreds of millions of samples/sec, entirely client-side,
+from ~1.3–1.6 KB of generated WASM per program. The gap vs native was the cost of the WASM sandbox +
+V8's JIT vs Cranelift's; it's remarkably small for what you get (no install, no server, runs in a tab).
 
 Two practical notes:
 - These WASM figures are **single-thread** (the host runs one instance on the main thread). Native
@@ -372,22 +384,18 @@ Honest negative results — each was implemented and/or measured, then rejected:
 ## Reproduce
 
 ```sh
-# End-to-end (sample + reduce, multicore), interpreter vs JIT — samples/sec per case:
-cargo bench -p noise-core --bench sampling
-cargo bench -p noise-core --features jit --bench sampling
-
-# Single-thread fused-kernel micro-benches (clean signal, no multicore/criterion noise):
-cargo test -p noise-core --features jit --release -- --ignored --nocapture --test-threads=1 bench_streams
-cargo test -p noise-core --features jit --release -- --ignored --nocapture --test-threads=1 bench_cranelift_vs_llvm
+# End-to-end (sample + reduce, multicore) — samples/sec per case:
+cargo bench -p noise-core --bench sampling             # interpreter (the floor)
+cargo bench -p noise-core --features gpu --bench sampling  # with the WebGPU backend enabled
 
 # Multicore scaling (1 thread vs all cores, generate + reduce) — the "uses every core for free" number:
-cargo test -p noise-core --features jit --release -- --ignored --nocapture --test-threads=1 bench_parallel_scaling
+cargo test -p noise-core --release -- --ignored --nocapture --test-threads=1 bench_parallel_scaling
 
 # Reduction-pass A/B (power-sums vs streaming Welford):
 cargo test -p noise-core --release -- --ignored --nocapture --test-threads=1 bench_reduce_absorb
 
 # Large fused-kernel stress test (TurboQuant: a ~20k-node per-sample rotation kernel):
-cargo test -p noise-core --features jit --release -- --ignored --nocapture bench_turboquant
+cargo test -p noise-core --features gpu --release -- --ignored --nocapture bench_turboquant
 
 # WASM: dump an emitted kernel, then time it in V8 (see the dump_kernel test in wasm_emit.rs):
 NOISE_KERNEL_OUT=/tmp/k.wasm NOISE_KERNEL_SRC='use rand; X ~ unif(0,1); X*X*X*X*X - 5*X + 6' \
@@ -396,5 +404,8 @@ NOISE_KERNEL_OUT=/tmp/k.wasm NOISE_KERNEL_SRC='use rand; X ~ unif(0,1); X*X*X*X*
 #  read N f64s at byte 4096 — exactly what crates/noise-core/src/wasm_host.rs does in the browser.)
 ```
 
-Numbers will vary with machine, thermal state, and load — the *ratios* (JIT vs interpreter, Cranelift
-vs LLVM, WASM vs native) are the durable story.
+The single-thread fused-kernel micro-benches (`bench_streams`, `bench_cranelift_vs_llvm`) lived in the
+retired JIT backend and no longer exist; their results are preserved above as historical context.
+
+Numbers will vary with machine, thermal state, and load — the *ratios* (codegen vs interpreter, WASM
+vs native) are the durable story.

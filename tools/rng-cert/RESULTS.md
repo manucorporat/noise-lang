@@ -48,7 +48,7 @@ See PLAN-PERF-3 item 5.
   PractRand would carry the entire evidence burden.
 - **squares32** carries Widynski's published BigCrush/PractRand certification and is
   clean over the reachable domain, but at 0.54× today's CPU throughput (risk to the
-  corpus-neutral gate on RNG-bound JIT examples) and ~8× pcg4d-3r's GPU cost.
+  corpus-neutral gate on RNG-bound codegen examples) and ~8× pcg4d-3r's GPU cost.
 - If a word's low byte is ever consumed (e.g. the Track C interim f64 fill), the contract
   must stay "only bits 8..31 of each word are consumable": an interim f64 uniform should
   take 24+24 bits from two words (2⁻⁴⁸ granularity), not 32+21.
@@ -134,7 +134,7 @@ behind `rng::cell`/`CellStream` + the two `emit_cell`s + KATs).
 
 ## 2026-07-14 — SWAP EXECUTED (owner go)
 
-The engine now runs **squares64** end-to-end (interpreter, JIT, wasm emitter), one call
+The engine now runs **squares64** end-to-end (interpreter, wasm emitter, WGSL/GPU), one call
 per draw counter, 48 consumed bits per call, per-seed construction-compliant keys
 (`rng::Key::from_seed` implements the key rules and a unit test asserts compliance for
 arbitrary seeds). Corpus gate re-run: **4130 ms vs 4351 pre-Track-C baseline (−5.1%)** —

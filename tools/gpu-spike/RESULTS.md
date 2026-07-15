@@ -144,7 +144,7 @@ inlined hashes. The same graph, the same draws, emitted two ways:
 
 | | cold compile | dispatch | end-to-end |
 |---|---|---|---|
-| CPU (Cranelift JIT, multicore) | — | 96 ms | 1.0× |
+| CPU (Cranelift JIT, multicore — the then-native backend, since retired) | — | 96 ms | 1.0× |
 | GPU, **unrolled** | 572 ms | 3.4 ms (28×) | **6.0× SLOWER** |
 | GPU, **looped** | **30 ms** | 5.0 ms (19×) | **2.7× faster** |
 
@@ -156,8 +156,8 @@ iterations) and wins **19× at compile**. On a single cold forcing that is the d
 losing to the CPU and beating it. With a warm pipeline it is ~19× either way.
 
 **This is the G1 design constraint:** a WGSL emitter must NOT be a straight transcription of
-`wasm_emit`/`jit`. Those flatten the cone into a scalar statement chain because their targets have no
-cheaper option; WGSL has real loops, and the demos that motivate this plan (`barrier_option`,
+`wasm_emit` (or the since-retired `jit`). Those flatten the cone into a scalar statement chain because
+their targets have no cheaper option; WGSL has real loops, and the demos that motivate this plan (`barrier_option`,
 `turboquant`, `am_vs_fm`) are all array-draw-and-fold shapes, which are loops by construction. The
 emitter has to preserve that structure rather than unroll it.
 

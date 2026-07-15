@@ -85,7 +85,7 @@ state is **Phases 0–3 plus core-model-rework Steps 1–4 complete** (see `plan
   PLAN-SIGNALS), `shor_period.noise`
   (faithful quantum period-finding — complex inverse-QFT interference comb + `rand::categorical`).
 - **General surface (PLAN-COMPLEX §8):** the `%` operator (`BinOp::Mod`, floored, real-only, all
-  backends), `math::floor`/`ceil` (`UnOp::Floor`/`Ceil`, native cranelift/wasm instructions), and
+  backends), `math::floor`/`ceil` (`UnOp::Floor`/`Ceil`, single wasm/WGSL instructions), and
   **comprehensions** `[for x in xs { body }]` — the `for` loop wrapped in `[ ]` to collect body
   values (`Expr::Comprehension`, build-time unroll that closes over the outer frame —
   `eval_comprehension`). **`continue`** (`Expr::Continue` → `Value::Continue`, a control sentinel
@@ -150,14 +150,15 @@ public surface is the `Engine`/`run` facade plus `error`/`value`/`eval`/`input`/
 | `simplify.rs` | pub(crate) | Graph-level algebraic simplification: const-fold, finite-safe identities, hash-consing/CSE — **iterative** (stack-safe on deep chains, finding A4). |
 | `num.rs` | pub(crate) | Small pure-numeric helpers shared across the interpretive paths (`trim_float`, `quantile_sorted`) — the single home for the formerly copy-pasted pair (finding F5). |
 | `builtins.rs` | pub(crate) | Pure/scalar builtin dispatch via a `QueryCtx` param object (finding F6): `P`/`E`/`Var`/`Q`/`Print`/`round`/`sqrt`/`log`/… plus pure collection builtins. Takes `&RvGraph` (immutable) — cannot build/draw nodes. |
-| `backend.rs` | pub(crate) | The execution-backend seam: `Backend`/`Program`/`Runner` traits and `compile_root`, which simplifies once then selects the interpreter, the JIT (`all(feature="jit", not(wasm32))`), or the WASM host (wasm32). |
-| `kernel.rs` | pub(crate) | Backend-agnostic kernel support shared by both code generators: the cost model (`profitable`/`walk_cost`), the multi-stream policy (`choose_streams`/`latency_bound`), `seed_state`, `supported`, `cost`/`cone_size`. |
-| `approx.rs` | pub(crate) | Inlinable polynomial approximations of `ln`/`sin`/`cos` — the single reference spec both emitters transcribe op-for-op (`TRIG_MAX` range guard, finding C3). |
-| `jit.rs` | pub(crate), `feature = "jit"` | Cranelift native JIT backend: fused multi-stream kernels, inlined `ln`/`sin`/`cos`, six `nz_*` math shims (`atan`/`round`/`pow`/`sin`/`cos`/`exp`), `Drop → free_memory()` (finding C4). |
-| `wasm_emit.rs` | pub(crate) | WASM-emitter backend — the browser twin of `jit.rs`. Emits the same fused kernel in `f64.*`/`i64.*` with inlined polynomials; imports `atan`/`round`/`sin`/`cos`/`exp`/`pow` from module `"m"` only for the rare large-argument/edge paths. |
+| `backend.rs` | pub(crate) | The execution-backend seam: `Backend`/`Program`/`Runner` traits and `compile_root`, which simplifies once then selects the WASM host (wasm32) or the columnar interpreter (otherwise). The native performance backend, WebGPU, hooks a level up in `reduce` (see `gpu.rs`); the interpreter is the floor it falls back to. |
+| `kernel.rs` | pub(crate) | Backend-agnostic kernel support shared by the code generators: the cost model (`profitable`/`walk_cost`), the multi-stream policy (`choose_streams`/`latency_bound`), `seed_state`, `supported`, `cost`/`cone_size`. |
+| `approx.rs` | pub(crate) | Inlinable polynomial approximations of `ln`/`sin`/`cos` — the single reference spec the emitters transcribe op-for-op (`TRIG_MAX` range guard, finding C3). |
+| `gpu.rs` | pub(crate), `feature = "gpu"` | Native WebGPU backend driver seam (native only): hooks a level up in `reduce::run_reduction`, dispatching whole lane ranges to the GPU with a chunk-ordered, deterministic fold. A cost gate (`MAX_WGSL_INSTRS`) declines any cone it can't lower or any forcing that wouldn't pay for itself, falling back to the interpreter. |
+| `wgsl_emit.rs` | pub(crate), `feature = "gpu"` | The WGSL emitter gpu.rs drives: emits the fused kernel as a WGSL compute shader (emulated `squares64` since WGSL has no `u64`), rolling captured `Scan`s into a real WGSL loop rather than unrolling. |
+| `wasm_emit.rs` | pub(crate) | WASM-emitter backend — the browser code generator. Emits the fused kernel in `f64.*`/`i64.*` with inlined polynomials; imports `atan`/`round`/`sin`/`cos`/`exp`/`pow` from module `"m"` only for the rare large-argument/edge paths. |
 | `wasm_host.rs` | pub(crate), `wasm32` | Browser host seam that `instantiate`s and drives an emitted module (content-addressed LRU cache, interpreter fallback). |
 | `flint.rs` | pub(crate) | The output boundary: an introspection `Summary` → `flint-chart` specs (`to_flint`/`Plot`) a host renders; re-exported from `lib.rs`. |
-| `conformance.rs` | test-only | Shared cross-backend conformance corpus (`CONST_CASES` exact, `RNG_CASES` tolerance) consumed by both the `jit` and `wasm_emit` test modules (finding C2). |
+| `conformance.rs` | test-only | Shared cross-backend conformance corpus (`CONST_CASES` exact, `RNG_CASES` tolerance) consumed by the `wasm_emit` and GPU test modules (finding C2). |
 | `lib.rs` | crate root | Curated re-exports (`Engine`, `run`, `RvId`, `Moments`, `Document`, …), the `run(src)` helper with a runnable doc-test, and one in-crate `#[ignore]` bench that reaches `pub(crate)` internals. The golden/integration test corpus now lives in `crates/noise-core/tests/` (moved out of `lib.rs` in Phase 5, finding E3). |
 
 ### End-to-end document data flow
@@ -168,11 +169,13 @@ The whole pipeline, source to host JSON, is one pass with a lazy sampling tail:
 `eval::Engine` walks the AST: deterministic sub-expressions fold to plain `Value`s, and every
 `~`-drawn random variable is lowered into the engine-owned append-only **`RvGraph`** (structural
 sharing/CSE, so `X + X` is one draw). A query (`P`/`E`/`Var`/`Q`/`describe`/`plot::*`) *forces*
-sampling: `backend::compile_root` runs `simplify` once, then the **cost model** (`kernel::profitable`)
-picks a backend — the columnar **bytecode** VM (default + oracle), the Cranelift **JIT**
-(`jit`, native), or the **WASM emitter** (`wasm_emit`, browser) — and `reduce` fans the chosen kernel
-across cores with a deterministic power-sum merge, yielding `Moments` (or sorted draws for `Q`, or a
-`Summary` for introspection). Emissions (`Print`, `plot::*`, `input::*`) buffer on the engine in
+sampling: `backend::compile_root` runs `simplify` once, then picks the lowering for the target — the
+columnar **bytecode** VM (default + oracle, the floor everywhere) or the **WASM emitter**
+(`wasm_emit`, browser). On native the **WebGPU** backend (`gpu.rs`/`wgsl_emit.rs`, behind
+`--features gpu`) is the performance path: it hooks a level up in `reduce`, where a cost gate accepts
+or declines each forcing and the interpreter is the fallback. `reduce` fans the chosen kernel
+across cores (or GPU lane ranges) with a deterministic power-sum merge, yielding `Moments` (or sorted
+draws for `Q`, or a `Summary` for introspection). Emissions (`Print`, `plot::*`, `input::*`) buffer on the engine in
 source order; `run_to_document` assembles them with the frontmatter, code segmentation, and comment
 layer into the single **`Document`** contract, which each host (`noise-cli`, the WASM playground,
 `@noiselang/core`) serializes to JSON and renders. `flint` turns a `Summary` into chart specs on the
@@ -182,7 +185,7 @@ way out.
 
 ```sh
 cargo test --workspace           # the full suite (the integration tests live in noise-core/tests/)
-cargo test -p noise-core --features jit   # also exercise the Cranelift JIT backend + conformance
+cargo test -p noise-core --features gpu   # also exercise the WebGPU backend + cross-backend conformance
 cargo test --doc -p noise-core   # the crate's runnable doc examples
 cargo clippy --all-targets -- -D warnings # must stay clean (watch approx_constant: avoid literals near π)
 cargo run -p noise-cli           # REPL
@@ -195,7 +198,7 @@ The exact test count moves every phase, so it is intentionally *not* pinned here
 
 Modern toolchain; no future-incompat warnings (unlike `legacy/`). `Cargo.lock` is
 committed (reproducible CI and `cargo install`); CI is `.github/workflows/ci.yml`
-(tests native + `--features jit`, clippy `-D warnings`, rustfmt, wasm32 build, `cargo audit`).
+(tests native + `--features gpu`, clippy `-D warnings`, rustfmt, wasm32 build, `cargo audit`).
 
 ## What works today (tested)
 
@@ -289,9 +292,9 @@ committed (reproducible CI and `cargo install`); CI is `.github/workflows/ci.yml
 ### Adding an operator/ufunc across all backends (checklist)
 
 A new `UnOp`/`BinOp`/`Source` variant must land in **every** backend in the *same* change, or the
-three backends silently diverge (this is exactly what caused findings C2/C6). There is one IR
-(`RvGraph`) and three lowerings of it — the interpreter (the oracle), the Cranelift JIT, and the
-WASM emitter — plus the cost model that gates codegen. Work down this list:
+backends silently diverge (this is exactly what caused findings C2/C6). There is one IR
+(`RvGraph`) and its lowerings — the interpreter (the oracle, the floor), the WASM emitter (browser),
+and the native WebGPU/WGSL backend — plus the cost model that gates codegen. Work down this list:
 
 1. **AST + parser/lexer** (`ast.rs`, `lexer.rs`, `parser.rs`): add the variant and the surface
    syntax (or the builtin that synthesizes it). `RvNode`/`Source`/`UnOp`/`BinOp` stay
@@ -299,10 +302,10 @@ WASM emitter — plus the cost model that gates codegen. Work down this list:
 2. **Interpreter — the oracle** (`bytecode.rs`: `apply_un`/`apply_bin` + any new `Inst`, and
    `eval.rs` const-fold): implement the exact IEEE/libm semantics. Everything else is checked
    *against this*, so define the behavior here first.
-3. **Cranelift JIT** (`jit.rs`: `emit_unary`/`emit_binary`/`emit_node`): emit the fused CLIF. If it
-   needs a scalar the ISA can't express in one instruction, add an `nz_*` shim (see
-   `nz_atan`/`nz_sin`) — register it in the `builder.symbol(...)` block, `declare_math`, `MathIds`,
-   and `MathRefs`.
+3. **WebGPU / WGSL emitter** (`wgsl_emit.rs`: `emit_node`/`expr`): emit the WGSL for the variant. If
+   the target genuinely can't express it, return `Unsupported(...)` so `gpu.rs`'s gate declines the
+   cone and the interpreter runs it — never emit a wrong kernel. Transcendentals reuse the shared
+   `approx.rs` polynomials (WGSL has no `u64`, so integer RNG bits are emulated).
 4. **WASM emitter** (`wasm_emit.rs`: `emit_unary`/`emit_binary`/`emit_node`): emit the same kernel in
    `f64.*`/`i64.*`. If it needs a host import, add it to the import-index constants
    (`ATAN`/`ROUND`/…/`N_IMPORTS`), the `imports.import("m", …)` block, **the `wasm_host.rs` JS
@@ -317,8 +320,8 @@ WASM emitter — plus the cost model that gates codegen. Work down this list:
 7. **Conformance corpus** (`src/conformance.rs`): add a case. If the op is **exact** across backends
    (pure arithmetic/logic/select, or a shared library call), add it to `CONST_CASES` (bit-identical
    suite — pin operands with `unif(c,c)`/`unif_int(c,c)`). If it's a within-tolerance approximation
-   (polynomial transcendental, integer-`pow`), add it to `RNG_CASES`. Both the `jit` and `wasm_emit`
-   tests consume this one corpus, so a divergence fails `cargo test -p noise-core --features jit`.
+   (polynomial transcendental, integer-`pow`), add it to `RNG_CASES`. Both the `wasm_emit` and GPU
+   tests consume this one corpus, so a divergence fails `cargo test -p noise-core --features gpu`.
 8. **Docs**: `LANG.md`, `.claude/skills/noise-lang/SKILL.md`, and the module notes above.
 
 ## Status snapshot (2026-07-06)

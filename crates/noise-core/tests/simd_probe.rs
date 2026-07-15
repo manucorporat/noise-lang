@@ -2,20 +2,19 @@
 //! streams, at equal stream count, with correct instruction selection?**
 //!
 //! Background. PERF.md technique 5 claims multi-stream *scalar* RNG "dominates the vector path on
-//! every target". The evidence behind that (PLAN.md, commit `a14e30c`) was a Cranelift `f64x2`
+//! every target". The evidence behind that (PLAN.md, commit `a14e30c`) was an early native-codegen `f64x2`
 //! kernel with **one** vector state — i.e. 2 streams in 2 lanes — benchmarked against scalar
 //! **1**-stream. The two axes (lanes, independent states) were never crossed, the comparison was
 //! never at equal stream count, and the measurement predates the inlined `ln`/`sin`/`cos`
 //! polynomials (`approx.rs`, `a0236b8`) that removed SIMD's worst blocker.
 //!
-//! This probe removes Cranelift from the question, the way `jit::bench_cranelift_vs_llvm` removes it
-//! from the codegen-quality question: both sides are hand-written and LLVM-compiled, so what's
-//! measured is the *ISA*, not a backend's vector lowering. If hand-written NEON can't beat
-//! hand-written scalar here, no JIT will and the vector path stays dead. If it can, this is the
-//! headroom, and the next question is whether Cranelift can be made to emit it.
+//! This probe takes backend codegen out of the question entirely: both sides are hand-written and
+//! LLVM-compiled, so what's measured is the *ISA*, not a backend's vector lowering. If hand-written
+//! NEON can't beat hand-written scalar here, no code generator will and the vector path stays dead.
+//! If it can, this is the headroom, and the next question is whether a code generator can be made to emit it.
 //!
 //! Instruction selection, vs the three penalties the old attempt reported:
-//!   * `u64 → f64`: `vcvtq_f64_u64` is a single `ucvtf.2d`. (Cranelift's `fcvt_from_uint.f64x2`
+//!   * `u64 → f64`: `vcvtq_f64_u64` is a single `ucvtf.2d`. (The retired native codegen's `fcvt_from_uint.f64x2`
 //!     scalarized — an ~6-op extract/convert/insert sequence. That is a backend gap, not an ISA one.)
 //!   * `rotl(x, k)`: `vsraq_n_u64(vshlq_n_u64::<k>(x), x, 64 - k)` — `shl` + `usra`, **2** ops, not 3.
 //!     The two halves of a rotate occupy disjoint bits, so `usra`'s accumulate *is* the `orr`.
@@ -26,7 +25,7 @@
 //! Net effect: the vector RNG comes out at **~4.5 vector ops/sample** (2 `add`, 1 `shl`+1 `usra` for
 //! `rotl23`, 1 `shl` for `t`, 3 `eor3`, 1 `xar`, over 2 lanes) against scalar's **10 integer
 //! ops/sample**. This is a *maximally favourable* NEON kernel — a 2.2x op-count advantage, strictly
-//! better instruction selection than the Cranelift attempt ever had. Whatever it loses, it does not
+//! better instruction selection than the earlier native-codegen attempt ever had. Whatever it loses, it does not
 //! lose because of lowering quality.
 //!
 //! **Hypothesis under test — port heterogeneity, not port count.** A scalar kernel runs the RNG
@@ -62,7 +61,7 @@
 //! extra scalar streams provably buy nothing): `poly_thru` reproduces that signature exactly (scalar
 //! 449/448/384/414) and NEON takes 1.15x of it, so a vector path *would* win there. Phase 2 —
 //! vectorize `approx::{ln, cos}` and settle it directly — is therefore live, but the prize is bounded
-//! at ~1.15x on one graph class, and Cranelift cannot currently emit any of the instruction selection
+//! at ~1.15x on one graph class, and no current code generator emits any of the instruction selection
 //! that earns it.
 //!
 //! Run: `cargo test -p noise-core --release --test simd_probe -- --ignored --nocapture`

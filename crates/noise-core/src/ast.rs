@@ -36,7 +36,7 @@ pub enum UnOp {
     // as a surface operator/ufunc.
     Round,
     // Floor / ceiling (`math::floor`/`math::ceil` ufuncs, PLAN-COMPLEX §8). Also the building block
-    // the `%` operator desugars to (`a − b·floor(a/b)`). Native in every backend (cranelift/wasm
+    // the `%` operator desugars to (`a − b·floor(a/b)`). Native in every backend (wasm and WGSL
     // both have a floor/ceil instruction; the interpreter uses `f64::floor`/`ceil`).
     Floor,
     Ceil,
@@ -50,9 +50,9 @@ pub enum UnOp {
     // IEEE square root (`math::sqrt` of an RV, `vec::norm`, complex `abs`). Its own node — NOT
     // `Pow(x, 0.5)` — semantics are `f64::sqrt`, which differs from `powf(x, 0.5)` at exactly
     // two inputs: `sqrt(-0.0) = -0.0` vs `powf(-0.0, 0.5) = +0.0`, and `sqrt(-inf) = NaN` vs
-    // `powf(-inf, 0.5) = +inf` (C99 pow). The native JIT lowers it to the single correctly-
-    // rounded Cranelift `sqrt` instruction (fusible where non-integer `pow` is a libcall;
-    // PLAN-PERF-2 §5). The wasm emitter instead calls a `Math.sqrt` import: V8/arm64 regresses
+    // `powf(-inf, 0.5) = +inf` (C99 pow). The interpreter uses the single correctly-rounded
+    // `f64::sqrt` (PLAN-PERF-2 §5). The wasm emitter calls a `Math.sqrt` import rather than
+    // the inline `f64.sqrt` instruction: V8/arm64 regresses
     // ~30% on large single-block kernel bodies when the sites become inline `f64.sqrt`
     // (measured 2026-07-14, `am_vs_fm` +21% run-level — the calls act as live-range split
     // points for V8's regalloc); JSC prefers inline, revisit if V8 improves. `Math.sqrt` is

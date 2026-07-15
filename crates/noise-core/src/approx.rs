@@ -8,15 +8,15 @@
 //!
 //! Replacing the calls with straight-line arithmetic fixes both. Monte-Carlo sampling error
 //! (~1/√N) dwarfs the ~1e-10 approximation error here, so full `libm` precision is wasted; these
-//! are tuned for "indistinguishable in distribution from the interpreter oracle", which the JIT/WASM
+//! are tuned for "indistinguishable in distribution from the interpreter oracle", which the codegen
 //! parity tests check. The interpreter itself keeps using `libm` — it stays the exact oracle.
 //!
 //! The coefficient arrays below are the **single source of truth**: the Rust reference functions and
-//! both emitters (`jit`, `wasm_emit`) evaluate the *same* numbers in the *same* Horner order, so the
+//! the `wasm_emit` backend evaluate the *same* numbers in the *same* Horner order, so the
 //! emitted code agrees op-for-op with the reference. Constants are the standard fdlibm kernel
 //! coefficients.
 
-// Reference polynomials/constants transcribed by the JIT (`--features jit`) and WASM backends.
+// Reference polynomials/constants transcribed by the WASM backend.
 // Which items are live depends on the build config, so dead-code analysis is unreliable here
 // (this module was previously `pub`, which masked the same warnings).
 #![allow(dead_code)]
@@ -100,8 +100,8 @@ pub fn ln(x: f64) -> f64 {
     2.0 * f * horner(f2, &LN_COEFFS) + (e as f64) * LN_2
 }
 
-/// Full-domain `ln(x)` — [`ln`] wrapped in the exact domain guards `jit::emit_ln_guarded` and the
-/// wasm emitter lower, so the interpreter's lane path (`bytecode::apply_un`) computes the same
+/// Full-domain `ln(x)` — [`ln`] wrapped in the exact domain guards the
+/// wasm emitter lowers, so the interpreter's lane path (`bytecode::apply_un`) computes the same
 /// bits: `x > 0` → poly (subnormals handled inside [`ln`]), `x == 0` → `-inf`, `x < 0` / NaN →
 /// NaN, `+inf` → `+inf`. This is what makes `log(RV)` bit-identical across backends
 /// (PLAN-PREGPU draw-stream parity extended to the lane ops).
@@ -306,7 +306,7 @@ fn quadrant_f32(kq: i32, sin_r: f32, cos_r: f32, is_cos: bool) -> f32 {
 
 /// `cos(x)` in f32 — inline poly under [`TRIG_MAX_F32`], else the f64 library `cos` rounded to
 /// f32. That "promote, call, demote" shape (rather than `f32::cos`, i.e. `cosf`) is the shared
-/// contract: the JIT's shim and the wasm module's `Math.cos` import both compute in f64 and
+/// contract: the interpreter and the wasm module's `Math.cos` import both compute in f64 and
 /// round, so all three backends agree bit-for-bit on the fallback too.
 pub fn cos_f32(x: f32) -> f32 {
     if x.abs() >= TRIG_MAX_F32 {

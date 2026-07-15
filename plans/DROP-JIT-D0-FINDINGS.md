@@ -76,6 +76,23 @@ joint n=76923 ops/draw=315         →  96 ms  (plot::fan(path) — 52 weekly po
   data volume (2.6 ms floor at 200k lanes). The win there is fewer round-trips (D4b joint = one
   dispatch for many roots), not smaller readbacks.
 
+## D2 — shipped-CLI measurements (the switch, measured)
+
+`noise-cli` now enables `noise-core/gpu` (M4 Pro, release):
+
+| metric | value | note |
+|---|--:|---|
+| clean build time | 12.85 s | noise-cli + wgpu 26 (incremental after wgpu compiles once) |
+| binary size | 6.0 M (4.9 M stripped) | the honest cost of wgpu vs the old interpreter-only CLI (~2–3 M). Cranelift would have added comparable weight had the JIT ever shipped — it never did. |
+| adapter probe | ~ms (Metal) | `dice` cold-runs in 0.02 s, so `gpu::device()` acquisition is cheap; no background warm needed |
+| cold-start (light) | dice 0.02 s, prisoners 0.08 s | fine |
+| cold-start (heavy) | turboquant **2.88 s** cold vs 56 ms warm; noise_colors 0.86 s | the cold **pipeline-compile** tax (10 distinct heavy shaders), NOT adapter init — a one-time per-process cost, and the concrete case for D4e (disk pipeline cache) |
+| correctness | dice P=16.7%, hist mean 3.50 | runs correctly on the GPU end-to-end |
+
+**Ledger:** dropping the JIT + shipping the GPU takes the *shipped* CLI from interpreter-only
+(3868 ms corpus) to 937 ms warm — a 4.1× speedup for every real user — at a cost of ~3.5 M binary
+and a cold pipeline-compile tax on heavy programs (D4e).
+
 ## D0 deliverable status
 - [x] Per-forcing phase timers behind `NOISE_PROFILE=1` — `crate::profile`, wired into
   `reduce::run_reduction`, `gpu::try_reduce` (simplify/emit/gate+reason/pipeline hit-miss/dispatch/

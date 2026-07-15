@@ -152,7 +152,7 @@ fn reading_the_same_element_twice_is_one_draw() {
 /// normals is `N(0, n)`, so `P(sum < 0) = 1/2`.
 #[test]
 fn a_shaped_draw_survives_the_codegen_gate() {
-    // 300k draws: over MIN_DRAWS_JIT (100k), so the JIT compiles this rather than interpreting it.
+    // 300k draws: well over the codegen amortization threshold, so the gate admits this rather than interpreting it.
     let p = est("use rand; use vec;\nzs ~[52] normal(0, 1);\nP(vec::sum(zs) < 0, 300000)");
     assert!(
         (p - 0.5).abs() < 0.01,

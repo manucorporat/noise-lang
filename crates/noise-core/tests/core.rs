@@ -305,7 +305,7 @@ fn floor_ceil_ufuncs() {
     assert_eq!(display_of("math::floor([1.9, 2.1, 3.5])"), "[1, 2, 3]");
     // real-only: complex floor is a type error
     assert!(run("math::floor(1 + math::i)").is_err());
-    // lifts over a random variable (interp and JIT agree)
+    // lifts over a random variable (interp and codegen agree)
     let m = run_num("X ~ rand::unif_int(0, 11); E(X % 4)");
     assert!((m - 1.5).abs() < 0.05, "E(X % 4) = {m}"); // {0,1,2,3} uniform-ish over 0..11
 }

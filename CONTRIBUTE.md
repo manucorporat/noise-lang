@@ -39,6 +39,16 @@ One-time setup: `cargo login` with a crates.io token that has publish rights.
 
 Verify with `cargo info noise-cli` or by installing: `cargo install noise-cli`.
 
+**Backend note for the release announcement (since PLAN-DROP-JIT).** The shipped `noise` binary now
+enables `noise-core/gpu`, so it runs forcings on the machine's GPU where profitable (a **4.1×**
+speedup on the example corpus over the old interpreter-only binary), falling back to the interpreter
+on any machine with no usable GPU adapter. Results stay under the engine's **two-tier contract**:
+tier-1 quantities (draws, counts, probabilities) are **bit-identical** across machines, while tier-2
+f32 arithmetic (means, variances, and other reductions) is **ULP-close** — a user diffing a stat
+between a GPU machine and a no-GPU one can see last-bit differences. This was already true under
+`--features gpu`; it is now the default, so say it out loud. (The native Cranelift JIT backend was
+retired in the same change — it never shipped in the CLI, so no released binary loses anything.)
+
 ### npm package (@noiselang/core)
 
 Requirements: a Rust toolchain with the `wasm32-unknown-unknown` target, `wasm-pack` on `PATH` (or in `~/.cargo/bin`), and `npm login` as a user with publish rights to the `@noiselang` scope.

@@ -3,7 +3,7 @@
 //! Backend-independent: compile the RV cone into a [`Sampler`] once (via [`InterpBackend`], the
 //! default), seed the RNG once, then loop `ceil(N / batch_cap)` batches. The final partial batch
 //! is sliced to the true remaining length so over-count never biases moments. Swapping the
-//! backend (e.g. a Cranelift JIT) changes only how a batch is produced, not this loop.
+//! backend (e.g. the emitted wasm kernel) changes only how a batch is produced, not this loop.
 
 use crate::backend::{compile_root, compile_roots};
 use crate::dist::{RvGraph, RvId};
@@ -161,7 +161,7 @@ pub fn cond_sample_n_par(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Re
 /// Drive a **joint** pass over `roots` — the single batch loop the four joint drivers
 /// (`sample_pairs`/`grid_moments`/`grid_draws`/`corr_matrix`) share (finding B8). Compile the roots
 /// through the backend seam ([`compile_roots`]) into ONE shared kernel so every lane draws them
-/// jointly — the JIT / WASM emitter lower a multi-output kernel where profitable, the multi-root
+/// jointly — the WASM emitter lowers a multi-output kernel where profitable, the multi-root
 /// bytecode interpreter otherwise — **record the run-time cost** here (so a
 /// `describe`/`hist`/`corr`/`fan` pass is no longer invisible in the engine's stats readout), then
 /// loop `ceil(n / cap)` batches invoking `sink(cols, take)`: `cols[j]` is `roots[j]`'s column and
@@ -402,9 +402,10 @@ mod tests {
     }
 
     /// The joint drivers now route through the backend seam (`backend::compile_roots`), so this
-    /// pins THE joint invariant on whichever backend this build selects (interpreter, or the JIT
-    /// joint kernel under `--features jit` — the draw count is above `MIN_DRAWS_JIT` on purpose):
-    /// two roots sharing a source must read the *same* per-lane draw. `b = 2a` exactly, every lane.
+    /// pins THE joint invariant on whichever backend this build selects (the multi-root bytecode
+    /// interpreter on native, or the emitted wasm joint kernel on wasm — the draw count is above
+    /// `MIN_DRAWS_WASM` on purpose): two roots sharing a source must read the *same* per-lane draw.
+    /// `b = 2a` exactly, every lane.
     #[test]
     fn sample_pairs_share_draws_on_every_backend() {
         let mut g = RvGraph::default();
@@ -414,7 +415,7 @@ mod tests {
         );
         let two = g.push(RvNode::ConstNum(2.0), RvKind::Num);
         let x2 = g.push(RvNode::Binary(BinOp::Mul, x, two), RvKind::Num);
-        let n = 150_000; // ≥ MIN_DRAWS_JIT: exercises the codegen joint path where available
+        let n = 150_000; // ≥ MIN_DRAWS_WASM: exercises the codegen joint path where available
         let pairs = sample_pairs(&g, x, x2, None, n, 42).unwrap();
         assert_eq!(pairs.len(), n);
         for &(a, b) in &pairs {

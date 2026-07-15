@@ -13,14 +13,21 @@ env:
 
 jobs:
   test:
-    name: test (workspace + jit)
+    name: test (workspace + gpu)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
-      - run: cargo test -p noise-core --features jit
+      # The GPU leg (replacing the retired `--features jit` leg, PLAN-DROP-JIT D1). On a headless
+      # runner `request_adapter` returns `None`, so every gated forcing declines to the interpreter
+      # — which exercises exactly the graceful-fallback path the switch depends on, while still
+      # compiling the whole `gpu` cone (wgpu, the WGSL emitter, `try_reduce`). The GPU tests check
+      # against the analytic answer + reported standard error, so they pass whether the real Metal/
+      # Vulkan path or the CPU decline produced the estimate. A macOS runner (which has Metal) would
+      # additionally exercise the real dispatch path if one is ever added.
+      - run: cargo test -p noise-core --features gpu
 
   lint:
     name: clippy + rustfmt

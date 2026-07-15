@@ -190,7 +190,7 @@ Print("P(shared birthday among", n, ") =", P(match))
 the range `a..b` (half-open: `0..n` is `0 … n-1`), the shaped draw `~[n] d`, or `vec`
 constructors (`ones(n)`, `zeros(n)`, `iota(n)`). Index with `xs[i]` (chains: `M[i][j]`); the index
 is normally a **constant non-negative integer in range** — a *random* numeric index lifts to a
-per-lane **gather** (each lane picks its own element; interpreter-only, no JIT). There is no
+per-lane **gather** (each lane picks its own element; interpreter-only, not codegen-eligible). There is no
 append/push.
 
 **Arithmetic broadcasts** over arrays (NumPy-style, nesting for matrices):

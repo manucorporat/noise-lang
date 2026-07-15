@@ -14,6 +14,6 @@ pollster = "0.4"
 
 # The spike's whole point is proving the WGSL draws match the engine's, bit for bit — so it links
 # the real generator rather than transcribing it. `internals` is the harness-only door onto `rng`.
-# `jit` too: the CPU baseline the GPU has to beat is the *fast* one (Cranelift, multicore), not the
-# interpreter. Comparing against a handicapped CPU would flatter every number in this spike.
-noise-core = { path = "../../crates/noise-core", features = ["internals", "jit"] }
+# (The CPU baseline is now the multicore interpreter — the native Cranelift JIT this spike once
+# compared against was retired in PLAN-DROP-JIT; the GPU is the native performance backend now.)
+noise-core = { path = "../../crates/noise-core", features = ["internals"] }

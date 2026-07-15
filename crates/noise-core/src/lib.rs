@@ -8,15 +8,15 @@
 //!
 //! Pipeline: [`lexer`](self) → `parser` (a hand-written Pratt parser) → `ast` → [`eval`] (a
 //! tree-walking [`Engine`] that lowers `~`-drawn randomness into an append-only sample-DAG) → a
-//! columnar batched sampler — with an optional Cranelift JIT and a WASM emitter as alternate
-//! backends — which forces `P` / `E` / `var` / `describe` and other queries.
+//! columnar batched sampler — with a WASM emitter (the browser) and a native WebGPU backend as
+//! alternate lowerings — which forces `P` / `E` / `var` / `describe` and other queries.
 //!
 //! ## Public surface
 //!
 //! The curated entry points are [`Engine`] (build, run, and introspect programs) and [`run`]
 //! (parse-and-evaluate a string with a fresh engine). The supporting public modules are [`error`],
 //! [`value`], [`eval`], [`input`], [`doc`], [`introspect`], [`frontmatter`], and [`stats`].
-//! Everything else — the lexer, parser, AST, bytecode VM, the sampler, and the JIT / WASM codegen
+//! Everything else — the lexer, parser, AST, bytecode VM, the sampler, and the WASM / WGSL codegen
 //! backends — is a `pub(crate)` implementation detail and deliberately outside the semver surface.
 //!
 //! ## Example
@@ -45,8 +45,8 @@ pub(crate) mod backend;
 pub(crate) mod builtins;
 pub(crate) mod bytecode;
 pub(crate) mod compile_cache;
-/// Shared cross-backend conformance corpus (finding C2), consumed by the `jit` and `wasm_emit`
-/// test modules. Test-only data — no runtime footprint.
+/// Shared cross-backend conformance corpus (finding C2), consumed by the `wasm_emit` and GPU test
+/// suites (and by any future codegen backend). Test-only data — no runtime footprint.
 #[cfg(test)]
 mod conformance;
 pub(crate) mod dist;
@@ -60,10 +60,11 @@ pub(crate) mod gpu;
 pub mod frontmatter;
 pub mod input;
 pub mod introspect;
-#[cfg(feature = "jit")]
-pub(crate) mod jit;
 pub(crate) mod kernel;
 pub(crate) mod lexer;
+// (The Cranelift JIT backend was removed in PLAN-DROP-JIT: the GPU is the native performance backend
+// now, and the JIT never reached the browser. The two remaining lowerings are the interpreter floor
+// and `wasm_emit`; git history keeps `jit.rs` whole if a CPU codegen backend is ever wanted again.)
 pub(crate) mod num;
 pub(crate) mod parser;
 pub(crate) mod profile;
@@ -140,7 +141,7 @@ pub fn gpu_force_for_tests() {
 /// The one benchmark that stays in-crate after the E3 test relocation: it reaches into
 /// `pub(crate)` internals (`kernel::cone_size`, `sampler::moments`) that the public integration
 /// tests can no longer see. Ignored by default; run with:
-/// `cargo test -p noise-core [--features jit] --release -- --ignored --nocapture bench_turboquant`
+/// `cargo test -p noise-core [--features gpu] --release -- --ignored --nocapture bench_turboquant`
 #[cfg(test)]
 mod bench {
     use crate::{Engine, Value};
@@ -203,7 +204,7 @@ mod bench {
             let g = eng.graph();
             let cone = crate::kernel::cone_size(g, id);
 
-            // Warm up (this compiles + JITs the kernel), then time sampling only.
+            // Warm up (this compiles the kernel + primes caches), then time sampling only.
             let _ = crate::sampler::moments(g, id, 4096, 1);
             let t = Instant::now();
             let m = crate::sampler::moments(g, id, n, 0xC0FFEE).unwrap();

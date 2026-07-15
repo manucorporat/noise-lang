@@ -1,25 +1,26 @@
 //! Backend-agnostic kernel support shared by the code generators (PLAN.md Phase 4).
 //!
-//! The native Cranelift JIT ([`crate::jit`]) and the WASM emitter ([`crate::wasm_emit`]) are two
-//! *lowerings* of the same [`RvGraph`] IR: they walk the identical graph the identical way and emit
-//! the identical fused, multi-stream kernel — only the per-node instruction encoding differs
-//! (`mulsd` vs `f64.mul`, an inlined xoshiro step in either). Everything that is about *what the
-//! graph means* rather than *how to spell it on a target* lives here, so there is exactly one copy:
+//! The WASM emitter ([`crate::wasm_emit`], the browser codegen backend) and the WGSL emitter
+//! ([`crate::wgsl_emit`], the native GPU backend) are *lowerings* of the same [`RvGraph`] IR: they
+//! walk the identical graph the identical way over the same draw-ordinal contract — only the per-node
+//! encoding differs (`f64.mul` vs a WGSL `*`, an inlined xoshiro step vs an emulated `squares64`).
+//! Everything that is about *what the graph means* rather than *how to spell it on a target* lives
+//! here, so there is exactly one copy:
 //!
 //!   * [`STREAMS`] / [`choose_streams`] — the multi-stream RNG policy.
 //!   * [`seed_state`] — SplitMix64 expansion of a seed into the per-stream xoshiro state layout.
-//!   * [`profitable`] / [`walk_cost`] — the cost model deciding whether codegen beats the
-//!     interpreter (the "B2" gate). One cost function, parameterized by `inline_trans`: **both**
-//!     backends now inline `ln`/`sin`/`cos` as polynomials and pass `true` — the native JIT via
-//!     `jit::emit_ln`/`emit_trig`, the WASM emitter via `wasm_emit::emit_ln`/`emit_trig`. The
-//!     `false` branch is a retained seam for a hypothetical backend that couldn't inline them.
-//!     `exp` and the large-argument trig fallback remain real calls on both (a host import on wasm,
-//!     an `nz_*` shim on the JIT) — see PLAN.md "Browser note" and findings C3/C9.
+//!   * [`profitable`] / [`walk_cost`] — the cost model deciding whether the wasm emitter beats the
+//!     interpreter (the "B2" gate). One cost function, parameterized by `inline_trans`: the WASM
+//!     emitter inlines `ln`/`sin`/`cos` as polynomials (`wasm_emit::emit_ln`/`emit_trig`) and passes
+//!     `true`; the `false` branch is a retained seam for a hypothetical backend that couldn't inline
+//!     them. `exp` and the large-argument trig fallback remain real calls (a host import on wasm) —
+//!     see PLAN.md "Browser note" and findings C3/C9. (This model also priced the retired native JIT,
+//!     which shared it.)
 //!   * [`const_int_exponent`] — the `x ^ k` small-integer-power test (repeated multiply vs a `pow`
-//!     call), shared so both backends agree on which exponents fuse.
+//!     call), shared so the emitters agree on which exponents fuse.
 
-// Backend-support helpers whose live set depends on the build config (`--features jit`, wasm
-// target, tests). This module was previously `pub`, which masked the same dead-code warnings.
+// Backend-support helpers whose live set depends on the build config (wasm target, tests). This
+// module was previously `pub`, which masked the same dead-code warnings.
 #![allow(dead_code)]
 
 use std::collections::HashSet;
@@ -32,7 +33,8 @@ use crate::dist::{RvGraph, RvId, RvNode, Source};
 /// xoshiro256++ is a serial dependency chain threaded through the whole loop, so on RNG-bound graphs
 /// that latency — not the arithmetic — is the ceiling; running four independent states lets the
 /// out-of-order core (native) or the host engine overlap the chains for ~2×. Four keeps register
-/// pressure modest; past four the gain flattens (see `jit::bench_streams`). Must divide [`BATCH`].
+/// pressure modest; past four the gain flattens (measured on the codegen backends). Must divide
+/// [`BATCH`].
 pub const STREAMS: usize = 4;
 
 const _: () = assert!(
@@ -74,7 +76,7 @@ pub fn seed_state(seed: u64, streams: usize) -> Vec<u64> {
 ///
 /// Every backend calls this on the same (simplified) graph and therefore agrees bit for bit. That
 /// is the point: the ordinal must be a function of the *graph*, not of any backend's emission order,
-/// or the interpreter and the JIT would draw different numbers from the same program.
+/// or the interpreter and a codegen backend would draw different numbers from the same program.
 ///
 /// **This replaced keying draws on the `RvId` itself** (`Inst::Normal { src: id.0 }`), which had to
 /// go — one `ArrDraw` node cannot hand `n` distinct ordinals to its elements out of its single id.
@@ -198,7 +200,7 @@ pub const GATHER_SELECT_MAX: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatherClass {
     /// Every element is a `ConstNum`: the table is materialized as an `f64` array at compile time
-    /// (JIT: program-owned buffer; wasm: an active data segment) and the node is a **leaf** over
+    /// (wasm: an active data segment) and the node is a **leaf** over
     /// its elems — round index, clamp, one indexed 8-byte load. This is the `rand::empirical` /
     /// `block_bootstrap` / literal-array shape, so a 10k-point table costs one load per lane and
     /// zero graph nodes.
@@ -227,13 +229,12 @@ pub fn gather_class(graph: &RvGraph, elems: &[RvId]) -> Option<GatherClass> {
 /// (no `Poisson` — its Knuth loop stays interpreter-only) **and** the count of fused nodes strictly
 /// exceeds the transcendental-call weight. See [`walk_cost`] for the calibration.
 ///
-/// `inline_trans` says whether *this backend* inlines `ln`/`sin`/`cos` as polynomials. **Both**
-/// backends do — the native JIT via [`crate::approx`] / `jit::emit_ln`, the WASM emitter via
-/// `wasm_emit::emit_ln`/`emit_trig` — so both pass `true` and a `normal`/`exp`/trig graph counts as
-/// fusible on each. The `false` branch is a retained seam: a backend that *couldn't* inline a
-/// transcendental would pass `false` and the gate would correctly leave those graphs to the
-/// interpreter rather than emit a per-draw call. `atan`/`round`/`exp`/non-integer `pow` (and the
-/// rare large-|x| trig fallback, finding C3) are real calls on both backends regardless.
+/// `inline_trans` says whether *this backend* inlines `ln`/`sin`/`cos` as polynomials. The WASM
+/// emitter does — via `wasm_emit::emit_ln`/`emit_trig` (over [`crate::approx`]) — so it passes `true`
+/// and a `normal`/`exp`/trig graph counts as fusible. The `false` branch is a retained seam: a
+/// backend that *couldn't* inline a transcendental would pass `false` and the gate would correctly
+/// leave those graphs to the interpreter rather than emit a per-draw call. `atan`/`round`/`exp`/
+/// non-integer `pow` (and the rare large-|x| trig fallback, finding C3) are real calls regardless.
 pub fn profitable(
     graph: &RvGraph,
     root: RvId,
@@ -268,12 +269,12 @@ pub fn profitable_roots(
             return false; // unsupported (Poisson / large non-const Gather) → interpreter
         }
     }
-    // Route very large cones to the interpreter. The code generators (`jit::emit_node`,
-    // `wasm_emit::emit_node`) emit each node **recursively**, so a hundreds-of-thousands-deep graph
-    // (`cumsum(~[200000] …)`) would overflow their emitters and abort (finding A4). The interpreter's
-    // lowering is now iterative (stack-safe at any depth), and JIT-compiling 10^4+ nodes rarely beats
-    // interpreting them, so this only ever trades a little speed for safety. `seen` is the cone's
-    // distinct-node count (walk_cost just filled it).
+    // Route very large cones to the interpreter. The code generator (`wasm_emit::emit_node`) emits
+    // each node **recursively**, so a hundreds-of-thousands-deep graph (`cumsum(~[200000] …)`) would
+    // overflow the emitter and abort (finding A4). The interpreter's lowering is now iterative
+    // (stack-safe at any depth), and codegen of 10^4+ nodes rarely beats interpreting them, so this
+    // only ever trades a little speed for safety. `seen` is the cone's distinct-node count (walk_cost
+    // just filled it).
     if seen.len() > MAX_CODEGEN_NODES {
         return false;
     }
@@ -285,32 +286,23 @@ pub fn profitable_roots(
     draws >= min_draws
 }
 
-/// Minimum draws before the **Cranelift JIT** is worth compiling (see [`profitable`]'s `min_draws`).
-///
-/// Compiling is a fixed cost paid once per forcing; fusion is a saving earned per draw, so a query
-/// that draws few samples never earns its compile back. That is not a corner case — real programs
-/// force many small queries: `examples/noise_colors.noise` forces 14 at 3,000 draws each,
-/// `examples/turboquant.noise` forces 10 at 10,000. Without this, both ran *slower* with the JIT on
-/// (0.22× and 0.79× — on `noise_colors` the JIT was a 4.5× pessimization).
-///
-/// **One constant, not a cost curve.** `jit::tests::bench_amortization` measures the true break-even
-/// per cone size (13k–75k draws over a 6→1,536-node sweep) and a fitted `f(nodes)` was tried, but it
-/// decides every program in `examples/` exactly as this single threshold does — complexity with no
-/// behavior to show for it. The corpus separates cleanly: losers draw ≤40k per forcing, winners
-/// ≥175k. If a graph class ever lands in that gap, the bench is there to justify a curve then.
-pub const MIN_DRAWS_JIT: usize = 100_000;
-
 /// Minimum draws before the **WASM emitter** is worth emitting (see [`profitable`]'s `min_draws`).
 ///
-/// An order of magnitude below [`MIN_DRAWS_JIT`], because the costs it amortizes are an order of
-/// magnitude apart: `WebAssembly.instantiate` on a ~1 KB kernel is far cheaper than a Cranelift
-/// compile. The two thresholds are the *same rule* with each backend's own measured constant — not
-/// two heuristics.
+/// Emitting is a fixed cost paid once per forcing; fusion is a saving earned per draw, so a query
+/// that draws few samples never earns its emit back. That is not a corner case — real programs force
+/// many small queries: `examples/noise_colors.noise` forces 14 at 3,000 draws each. The gate keeps
+/// the emitter off those and on the ones that pay.
 ///
-/// Measured with `packages/core/bench/examples.mjs` (V8, real programs): reusing the native 100k here
-/// left real wins on the table — `am_vs_fm` (40k draws/forcing) ran 1.20× emitted but 0.94× gated,
-/// and `turboquant` (10k) 1.06× vs 0.90×. Dropping to 10k keeps both emitting while still declining
-/// `noise_colors` (3k draws/forcing), which is 0.31× — a 3× pessimization — when always emitted.
+/// **One constant, not a cost curve.** A fitted `f(nodes)` break-even was tried (the retired native
+/// JIT had a `bench_amortization` probe measuring it per cone size) and decided every program in
+/// `examples/` exactly as this single threshold does — complexity with no behavior to show for it.
+///
+/// Measured with `packages/core/bench/examples.mjs` (V8, real programs): `WebAssembly.instantiate` on
+/// a ~1 KB kernel is cheap, so the threshold sits an order of magnitude below where the old native
+/// JIT's Cranelift compile paid off. `am_vs_fm` (40k draws/forcing) ran 1.20× emitted but 0.94×
+/// gated at 100k, and `turboquant` (10k) 1.06× vs 0.90×; dropping to 10k keeps both emitting while
+/// still declining `noise_colors` (3k draws/forcing), which is 0.31× — a 3× pessimization — when
+/// always emitted.
 pub const MIN_DRAWS_WASM: usize = 10_000;
 
 /// Cone-node ceiling above which codegen is declined in favor of the interpreter (see
@@ -458,7 +450,7 @@ pub fn walk_cost(
                 stack.push(*b);
             }
             // A re-rollable loop (G4c): the interpreter unrolls it, so its codegen support is the
-            // interpreter's, not the JIT/wasm codegen path — those decline (return false) and let the
+            // interpreter's, not the wasm codegen path — that declines (returns false) and lets the
             // interpreter take the whole cone. v1 Scans wrap a permutation read anyway, which is
             // already interpreter-only, so this changes no backend choice.
             RvNode::Scan { .. } | RvNode::ScanOut { .. } => return false,
@@ -496,7 +488,7 @@ pub fn supported(graph: &RvGraph, root: RvId) -> bool {
         RvNode::Select { cond, a, b } => {
             supported(graph, *cond) && supported(graph, *a) && supported(graph, *b)
         }
-        // Interpreter-only: the CPU unrolls a Scan, the JIT/wasm codegen path declines it (G4c).
+        // Interpreter-only: the CPU unrolls a Scan, the wasm codegen path declines it (G4c).
         RvNode::Scan { .. } | RvNode::ScanOut { .. } | RvNode::Placeholder { .. } => false,
     }
 }
@@ -733,6 +725,47 @@ mod shaped_tests {
     fn a_matrix_shaped_draw_is_a_single_block() {
         let (srcs, draws, elems) = counts("use rand;\nm ~[4, 5] normal(0, 1);\nm[0][0]");
         assert_eq!((srcs, draws, elems), (0, 1, 20));
+    }
+
+    /// A const-table gather is a LEAF over its elems ([`gather_class`]): a 10k-point `empirical`-shaped
+    /// table is materialized as data, not 10k graph nodes, so the counted cone is just `{gather,
+    /// index}` — it neither trips `MAX_CODEGEN_NODES` nor blocks the gate. Migrated from the retired
+    /// JIT's `const_table_gather_is_profitable_and_matches`; now a backend-independent `kernel` check
+    /// (the property is about the cost model, not any one emitter) plus an interpreter distribution
+    /// check that the indexed load reproduces uniform-over-the-data.
+    #[test]
+    fn const_table_gather_is_a_leaf_and_profitable() {
+        let mut g = RvGraph::default();
+        let elems: Vec<RvId> = (0..10_000)
+            .map(|i| g.push(RvNode::ConstNum(i as f64), RvKind::Num))
+            .collect();
+        let idx = g.push(
+            RvNode::Src(Source::UniformInt { lo: 0.0, hi: 9999.0 }),
+            RvKind::Num,
+        );
+        let root = g.push(
+            RvNode::Gather { elems: elems.into_boxed_slice(), index: idx },
+            RvKind::Num,
+        );
+        // The counted cone is just {gather, index}: the 10k elems are the emitted table, not nodes.
+        assert_eq!(cone_size(&g, root), 2);
+        assert!(supported(&g, root));
+        assert!(profitable(&g, root, true, usize::MAX, MIN_DRAWS_WASM));
+        // The interpreter's indexed load reproduces uniform-over-the-data: E[table[i]] = 4999.5.
+        let m = crate::sampler::moments(&g, root, 200_000, 42).unwrap();
+        assert!((m.mean - 4999.5).abs() < 100.0, "mean={}", m.mean);
+    }
+
+    /// Poisson keeps the interpreter (Knuth's variable-length per-lane loop is not a fusible scalar
+    /// expression): the gate must decline it, and the interpreter fallback must still draw correctly
+    /// (mean ≈ lambda). Migrated from the retired JIT's `poisson_still_falls_back_to_interpreter`.
+    #[test]
+    fn poisson_is_unsupported_but_samples_correctly() {
+        let mut g = RvGraph::default();
+        let root = g.push(RvNode::Src(Source::Poisson { lambda: 3.0 }), RvKind::Num);
+        assert!(!supported(&g, root), "Poisson must stay interpreter-only");
+        let m = crate::sampler::moments(&g, root, 200_000, 7).unwrap();
+        assert!((m.mean - 3.0).abs() < 0.05, "fallback mean = {}", m.mean);
     }
 
     /// Ordinals are handed out by walking node ids in order: a scalar source takes one, a shaped

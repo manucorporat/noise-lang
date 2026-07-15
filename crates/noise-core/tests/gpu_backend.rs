@@ -15,8 +15,8 @@
 use noise_core::{Engine, Value};
 
 /// Force every gated forcing onto the GPU, so these tests exercise the backend rather than silently
-/// measuring the JIT. Without this, the gate would decline most of them on cost grounds (the native
-/// multicore JIT is *already* fast — see the corpus numbers) and the tests would pass vacuously.
+/// measuring the CPU path. Without this, the gate would decline most of them on cost grounds (the
+/// multicore interpreter is *already* fast — see the corpus numbers) and the tests would pass vacuously.
 fn force() {
     noise_core::gpu_force_for_tests();
 }

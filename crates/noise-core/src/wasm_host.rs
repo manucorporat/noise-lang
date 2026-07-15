@@ -7,8 +7,8 @@
 //! (counter-keyed, PLAN-PREGPU Track C): the runner passes the key words and starting lane as
 //! arguments, and only the output column crosses the boundary.
 //!
-//! It plugs into the exact same [`Backend`]/[`Program`]/[`Runner`] seam the interpreter and native
-//! JIT use, so on `wasm32` [`crate::backend::compile_root`] transparently routes profitable graphs
+//! It plugs into the exact same [`Backend`]/[`Program`]/[`Runner`] seam the interpreter and the
+//! other codegen backends use, so on `wasm32` [`crate::backend::compile_root`] transparently routes profitable graphs
 //! here (and falls back to the interpreter for everything the gate rejects, or if instantiation
 //! fails — e.g. the main-thread sync-compile size limit). Correctness is never at stake, only speed.
 //!

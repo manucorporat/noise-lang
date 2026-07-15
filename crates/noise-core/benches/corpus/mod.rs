@@ -48,7 +48,7 @@ pub const CASES: &[(&str, &str)] = &[
          E ~ unif(0,1); F ~ unif(0,1); G ~ unif(0,1); H ~ unif(0,1); \
          A*B + C*D + E*F + G*H + A*H + B*G + C*F + D*E",
     ),
-    // Single `ln` libcall + a compare — calibrates the cost of one transcendental on the JIT.
+    // Single `ln` libcall + a compare — calibrates the cost of one transcendental under codegen.
     ("exp_tail", "use rand; X ~ exponential(2); X > 1"),
     // MIXED: one normal (libcall-heavy source) feeding a deep arithmetic chain — the case that
     // decides whether fusion can outrun the transcendental penalty (the profitability crossover).

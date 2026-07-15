@@ -22,7 +22,7 @@ makes the language a place to *learn and explore* probability, not a production 
 | Inference | forward MC + **rejection** conditioning | none (you build it) | **HMC/NUTS** (scales to continuous data) | HMC/NUTS, VI, SMC |
 | Independence model | explicit: one `~` = one draw, names reuse it | implicit: re-call the sampler | one `~` per declared node | one distribution per RV |
 | Setup to first answer | zero — type in a browser | `import numpy` | install toolchain, compile a model | install stack, build a context |
-| Speed | millions of draws/s (columnar VM + JIT) | very fast (vectorized C) | fast, but compile + warmup | slower, Python-bound |
+| Speed | millions of draws/s (columnar VM + WebGPU) | very fast (vectorized C) | fast, but compile + warmup | slower, Python-bound |
 | Visualization | **built into the language** (`plot::`, inline) | matplotlib (separate) | bayesplot / external | arviz (separate) |
 | Best at | learning, quick estimates, uncertainty propagation, demos | general array compute | real posterior inference at scale | the same, friendlier |
 | Runs in the browser | **yes** (WASM, no install) | no | no | no |
@@ -229,8 +229,9 @@ what it does" with nothing in between.
 - **It runs in a browser tab.** The whole engine compiles to WASM. No install, no toolchain, no
   compile-and-wait — paste a program into the playground and it samples millions of lanes live.
 - **It's genuinely fast for what it is.** Programs lower to a sample-DAG, compile to columnar
-  bytecode over register columns (with common-subexpression sharing), and JIT with inlined
-  transcendentals — millions of draws per second, deterministic under a fixed seed.
+  bytecode over register columns (with common-subexpression sharing), and — on native — dispatch a
+  fused kernel to the GPU (WebGPU), with inlined transcendentals — millions of draws per second,
+  deterministic under a fixed seed.
 
 ---
 

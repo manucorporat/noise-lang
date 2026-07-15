@@ -185,8 +185,8 @@ pub struct Engine {
     stats: crate::stats::Counters,
     /// Per-engine compiled-program cache (PLAN-PERF-2 §4): identical forcings (same simplified
     /// cone, same gate decision) share ONE compile, so an introspection pass re-forcing a root, a
-    /// REPL, or a playground re-run on this persistent engine stop recompiling — and, under `jit`,
-    /// stop leaking never-freed modules. Owned here (dropped with the engine) and installed as the
+    /// REPL, or a playground re-run on this persistent engine stop recompiling. Owned here (dropped
+    /// with the engine) and installed as the
     /// thread's active cache around each forcing region, exactly like `stats` (see
     /// [`crate::compile_cache`]). Purely an optimization: results are bit-identical with or
     /// without a hit.

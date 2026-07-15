@@ -362,12 +362,11 @@ fn fma_probe(gpu: &Gpu) {
     );
 }
 
-/// The head-to-head: the SAME kernel, over the SAME draws, on the CPU (Cranelift JIT, multicore
-/// reducer) and on the GPU.
+/// The head-to-head: the SAME kernel, over the SAME draws, on the CPU (the multicore interpreter)
+/// and on the GPU.
 ///
 /// Every other number in this spike is an absolute rate, which says nothing on its own. This is the
-/// one that answers "is the GPU worth building" — and it is deliberately run against the *fastest*
-/// CPU backend we have, not the interpreter.
+/// one that answers "is the GPU worth building" — run against the CPU backend the engine ships.
 fn head_to_head(gpu: &Gpu) {
     const STEPS: usize = 100;
     const DRAWS: u32 = 1_000_000;
@@ -380,7 +379,7 @@ fn head_to_head(gpu: &Gpu) {
     let cpu = noise_core::run(&src);
     let cpu_secs = t.elapsed().as_secs_f64();
     match &cpu {
-        Ok(v) => println!("  CPU (jit, multicore)   {:>7.1} ms   E[sum] = {v:?}", cpu_secs * 1e3),
+        Ok(v) => println!("  CPU (interp, multicore) {:>7.1} ms   E[sum] = {v:?}", cpu_secs * 1e3),
         Err(e) => {
             println!("  CPU run failed: {e}");
             return;

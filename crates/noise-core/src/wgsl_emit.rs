@@ -1,6 +1,6 @@
 //! WGSL emitter — the **fourth** lowering of the `RvGraph` (PLAN-WEBGPU G1).
 //!
-//! Same walk as [`crate::jit`] and [`crate::wasm_emit`]: post-order over the simplified cone, one
+//! Same walk as [`crate::wasm_emit`]: post-order over the simplified cone, one
 //! memoized value per node, one column per root. Three things make it *not* a port of those two, and
 //! all three come from measurements in `tools/gpu-spike/RESULTS.md` (G0):
 //!
@@ -13,7 +13,7 @@
 //!    [`RvNode::ArrDraw`] exists. Because the hash is emulated, each RNG source inlines ~150 ALU ops,
 //!    so shader *compile* time tracks the source count at ~6.5 ms apiece. Unrolled,
 //!    `barrier_option`'s 52 weekly normals cost **332 ms** of cold pipeline compile and the GPU
-//!    *loses* to the multicore JIT end to end; as one draw loop over a block of consecutive ordinals
+//!    *loses* to the multicore CPU backend end to end; as one draw loop over a block of consecutive ordinals
 //!    it costs **31 ms** and wins. The other backends have no such problem and keep unrolling.
 //!
 //! 3. **The transcendentals are WGSL's built-ins, not `approx.rs`'s polynomials.** The GPU *fuses

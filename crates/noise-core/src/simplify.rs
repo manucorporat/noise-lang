@@ -2,7 +2,7 @@
 //!
 //! A once-per-compile rewrite of the root's cone that **folds constants**, applies a finite-safe
 //! set of **algebraic identities**, and **hash-conses** (common-subexpression elimination) — so
-//! every backend (interpreter and JIT alike) lowers a smaller DAG with fewer hot-loop ops and
+//! every backend (interpreter and the codegen emitters alike) lowers a smaller DAG with fewer hot-loop ops and
 //! columns. It runs inside [`crate::backend::compile_root`], so the cost is paid once and shared.
 //!
 //! Pure: it reads the engine's graph and builds a **fresh** one, never mutating the original.
@@ -44,7 +44,7 @@ pub fn simplify_roots(graph: &RvGraph, roots: &[RvId]) -> (RvGraph, Vec<RvId>) {
 }
 
 /// Expand every [`RvNode::Scan`] (PLAN-WEBGPU G4c) into flat nodes — the CPU form. Run *before*
-/// [`simplify`] in [`crate::backend::compile_root`], so the interpreter/JIT/wasm lower exactly the
+/// [`simplify`] in [`crate::backend::compile_root`], so the interpreter and wasm backend lower exactly the
 /// DAG eval used to build before this feature existed: the answer and the draw stream are byte-for-
 /// byte unchanged whether a loop was captured as a `Scan` or not. The GPU path skips this and rolls
 /// the `Scan` into a real WGSL loop instead.

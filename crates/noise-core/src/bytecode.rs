@@ -688,9 +688,9 @@ pub fn run_batch(
 /// 0/1 bool column.
 ///
 /// The ops with no pinnable f32 form — `atan`, `round`, `exp` — compute in f64 and round back
-/// (never `f32::atan`, i.e. `atanf`). That is the cross-backend contract: the JIT calls a shim
-/// that promotes/calls/demotes and the wasm module imports the f64 `Math.*` around an
-/// `f64.promote`/`f32.demote` pair, so all three agree bit-for-bit. `sin`/`cos`/`ln` are the
+/// (never `f32::atan`, i.e. `atanf`). That is the cross-backend contract: the interpreter promotes,
+/// calls and demotes, and the wasm module imports the f64 `Math.*` around an
+/// `f64.promote`/`f32.demote` pair, so all backends agree bit-for-bit. `sin`/`cos`/`ln` are the
 /// shared `approx` f32 polynomials both emitters inline; `sqrt`/`floor`/`ceil` are native f32
 /// instructions (correctly rounded, hence identical everywhere).
 #[inline]

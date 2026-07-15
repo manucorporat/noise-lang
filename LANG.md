@@ -484,7 +484,7 @@ hard error, not a wraparound.
   element of the constant numeric array `xs` (resample history instead of assuming a
   distribution). A true recipe: draw with `~`, `~[n]` gives `n` iid resamples, one name is one
   draw. Internally a `unif_int` index plus a per-lane **gather**, so — like all gathers — it runs
-  on the interpreter only (no JIT).
+  on the interpreter only (the codegen backends decline it).
 - **`block_bootstrap(xs, b)`** — the **moving-block bootstrap** for autocorrelated series: one
   draw yields an *array* of `Len(xs)` values assembled from random contiguous blocks of `xs` of
   length `b` (non-wrapping start indices in `[0, n − b]`; the last block truncates to fit), so
@@ -648,7 +648,7 @@ Var(X)                   # ≈ 2 — Var[mu] + E[σ²] = 1 + 1 (variance adds up
 Under the hood, a random-parameter draw lowers to a **standard base draw plus a deterministic
 transform** (`unif(a,b)` → `a + (b−a)·U`; `normal(μ,σ)` → `μ + σ·Z`; `bernoulli(p)` → `U < p`;
 `exponential(r)` → `E/r`), so the sample-DAG, VM, and RNG are unchanged — it's ordinary graph nodes
-that simplify/CSE/JIT like any other. An all-constant call still uses the single efficient source
+that simplify/CSE/lower to any backend like any other. An all-constant call still uses the single efficient source
 instruction (no transform), so nothing slows down.
 
 **Hierarchical + conditioning = (rejection) Bayesian inference.** A random parameter gives you a
@@ -796,7 +796,7 @@ just an array of `dist`.
   range** (out-of-bounds or a non-integer is a spanned error); a *random* numeric index lifts to
   a per-lane **gather** — each Monte Carlo lane picks its own element (`boxes[box]` in
   `prisoners.noise`, and the machinery under `rand::empirical`). Gathers run on the interpreter
-  only (no JIT).
+  only (the codegen backends decline them).
 - **Arithmetic broadcasts over arrays** (NumPy-style): `[1,2,3] + [10,20,30] = [11,22,33]`,
   `1 + [1,2,3] = [2,3,4]`, `[2,4,6] / 2 = [1,2,3]`, `[1,2,3] ^ 2 = [1,4,9]`. It nests, so an
   array-of-arrays (a matrix, or an `[I, Q]` signal pair) broadcasts recursively. Lengths must match.

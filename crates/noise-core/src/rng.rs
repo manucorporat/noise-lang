@@ -11,7 +11,7 @@
 //
 // One `squares64` call per draw counter — no state chain, so any lane range can be
 // computed independently (reducer chunks are just ranges, thread count can't matter)
-// and every backend (interpreter, JIT, wasm, later WGSL) produces bit-identical draws.
+// and every backend (interpreter, wasm, WGSL) produces bit-identical draws.
 // Squares replaced the pcg4d family after C0's criterion 8: every GPU-cheap pcg variant
 // showed real sequential structure by 256 GB of PractRand, while squares (with a
 // construction-compliant key) is clean at 1 TB with zero anomalies — evidence in
@@ -257,7 +257,7 @@ pub fn fill_uniform_int(key: Key, source: u32, lane0: u32, lo: f64, hi: f64, out
 
 /// `Exp(rate)` via inverse-CDF `-ln(1 - u) / rate`, pair-shared. `1 - u ∈ [2⁻²⁴, 1]` — exact on
 /// the f32 uniform grid, so `ln` is never fed 0. Uses the shared [`crate::approx::ln_f32`] (not
-/// libm) so the JIT/wasm/WGSL lowerings — which inline exactly that polynomial — produce
+/// libm) so the wasm lowering — which inlines exactly that polynomial — produces
 /// bit-identical draws (PLAN-PREGPU draw-stream parity).
 ///
 /// The 24-bit grid caps a draw at `ln(2^24) / rate ≈ 16.6 / rate` (it was `33.3 / rate`): the
@@ -405,7 +405,7 @@ mod tests {
 
     /// Known-answer test guarding the squares64 rounds, the seeded key construction, and
     /// the 48-bit consumption contract. These vectors are the cross-backend draw contract:
-    /// the JIT, the wasm emitter, and later the WGSL emitter must reproduce them bit for
+    /// the wasm emitter and the WGSL emitter must reproduce them bit for
     /// bit. Reference: tools/rng-cert (C0).
     #[test]
     fn keyed_known_answer() {
@@ -418,7 +418,7 @@ mod tests {
     }
 
     /// The **f32 lane** contract (Track B): the pair-shared 24-bit uniforms and the Box–Muller
-    /// pair, pinned to exact bit patterns. This is what the JIT, the wasm emitter and a future
+    /// pair, pinned to exact bit patterns. This is what the wasm emitter and the
     /// WGSL emitter must reproduce bit for bit — the pair split (even → low 24, odd → high 24) as
     /// much as the arithmetic.
     #[test]

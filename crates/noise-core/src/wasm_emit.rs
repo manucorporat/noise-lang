@@ -1,6 +1,6 @@
-//! WASM-emitter backend (PLAN.md Phase 4 "Browser note") — the browser's twin of [`crate::jit`].
+//! WASM-emitter backend (PLAN.md Phase 4 "Browser note") — the browser's native-code-free codegen.
 //!
-//! A WASM sandbox can't emit or run native code, so the Cranelift JIT (B1/B2) is native-only. What
+//! A WASM sandbox can't emit or run native code, so a native machine-code JIT is impossible here. What
 //! *is* portable is the [`RvGraph`] IR. This module is the second lowering of that IR: it walks the
 //! identical graph the identical post-order way and emits the identical fused counter-keyed kernel
 //! (PLAN-PREGPU Track C) — only the per-node encoding differs (`f32.mul` instead of `mulss`, the
@@ -12,17 +12,17 @@
 //!   * `memory` — one linear memory the host reads/writes.
 //!   * `kernel(out: i32, n: i32, key_lo: i32, key_hi: i32, lane0: i32)` — fills `out[0..n]` with
 //!     the root draws for global lanes `lane0 .. lane0 + n`, as **f32** (PLAN-PREGPU Track B).
-//!     Stateless — same arguments, same column, bit-identical to the interpreter and the native
-//!     JIT under the same seed.
+//!     Stateless — same arguments, same column, bit-identical to the interpreter and the other
+//!     codegen backends under the same seed.
 //!
 //! **f32 lanes.** Values are `f32` throughout and one squares64 draw feeds a whole lane PAIR (48
 //! consumed bits = two 24-bit uniforms), so the pair-unrolled loop hashes once per two lanes for
 //! every source but `unif_int`. The transcendental *imports* stay `f64` (that is what `Math.*` is):
-//! call sites promote and demote around them, which is exactly the contract the interpreter and the
-//! JIT's shims follow — so the fallback paths agree bit-for-bit too.
+//! call sites promote and demote around them, which is exactly the contract the interpreter's lane
+//! ops follow — so the fallback paths agree bit-for-bit too.
 //!
-//! `ln`/`sin`/`cos` are **inlined as polynomials** ([`emit_ln`]/[`emit_trig`], the same
-//! [`crate::approx`] reference the JIT uses) — wasm has no native ones, and a host call would cross
+//! `ln`/`sin`/`cos` are **inlined as polynomials** ([`emit_ln`]/[`emit_trig`], the shared
+//! [`crate::approx`] reference) — wasm has no native ones, and a host call would cross
 //! the JS boundary per draw. The module imports `atan`/`round`/`pow` from module `"m"`, plus
 //! `sin`/`cos` (the large-argument fallback past `approx::TRIG_MAX` — finding C3), `exp` (matched
 //! to the interpreter — finding C9) and `sqrt` (V8/arm64 regresses on inline `f64.sqrt` in large
@@ -30,21 +30,21 @@
 //! the test harness via Rust `f64` methods. The inline `sin`/`cos` polynomial handles every ordinary argument, so those
 //! imports fire only on the rare huge-argument path. Because the transcendentals are inlined,
 //! [`emit_for`] passes `inline_trans = true` to
-//! [`kernel::profitable`] — the gate decision matches the native JIT, and the 2× win reaches the
-//! browser.
+//! [`kernel::profitable`] — the gate decision accounts for the inlined transcendentals, and the 2×
+//! win reaches the browser.
 //!
 //! **Why no host execution yet.** Running an emitted module means a JS host `instantiate`s it and
 //! drives it (the `Backend`/`Program`/`Runner` seam, browser-side). That wiring is a follow-up; this
 //! cut is the emitter plus a native parity harness (tests run emitted modules through an embedded
-//! wasm interpreter and check distribution parity with the interpreter, mirroring `jit`'s tests).
+//! wasm interpreter and check distribution parity with the interpreter).
 //!
-//! Scope mirrors the JIT: `unif`/`unif_int`/`normal`/`exp`/`geometric` sources, `+ - * /`,
+//! Supported scope: `unif`/`unif_int`/`normal`/`exp`/`geometric` sources, `+ - * /`,
 //! integer-constant `^`, comparisons, `&& ||`, unary `- !` and the math ufuncs, lifted `if`, and
 //! `Gather` — a const table becomes an active **data segment** after the output columns (indexed
 //! load; the `empirical`/bootstrap shape), a small non-const one a compare/select chain
 //! ([`crate::kernel::gather_class`]). `Poisson` and large non-const gathers stay interpreter-only
 //! (rejected by the gate). `unif_int` computes the same 48-bit Lemire multiply-high as the
-//! interpreter/JIT via a split multiply (wasm has no `mulhi`) — exact, hence bit-identical, for
+//! interpreter via a split multiply (wasm has no `mulhi`) — exact, hence bit-identical, for
 //! `count < 2^39` (every post-Track-B count; the 2^24 cap is far below), with the old
 //! float method (`lo + floor(u·count)`, identical in distribution) as the huge-count fallback.
 
@@ -67,7 +67,7 @@ use crate::dist::{RvGraph, RvId, RvNode, Source};
 use crate::kernel::{cone_size_roots, const_int_exponent, gather_class, GatherClass};
 
 // --- imported-function indices (declared in import order, before the local `kernel`) ---
-// `ln` is inlined as a polynomial (`emit_ln`, mirroring `jit`). `sin`/`cos` are inlined too, but
+// `ln` is inlined as a polynomial (`emit_ln`, the shared `approx` reference). `sin`/`cos` are inlined too, but
 // the module re-imports them for the **large-argument fallback**: past `approx::TRIG_MAX` the 2-term
 // reduction degrades, so `emit_trig` defers to the host's accurate `sin`/`cos` there (finding C3).
 // `exp` is imported (rather than lowered as `pow(e, x)`) so it matches the interpreter's `exp`
@@ -123,7 +123,7 @@ const T_F32: u32 = 8;
 /// Cones at most this many nodes pair-unroll the kernel loop (two lanes per iteration, so a
 /// `Normal`'s hash + ln + trig pair is computed once and split across the even/odd lane); larger
 /// ones keep the single-lane parity-select loop — the unroll doubles the value-slot local pool,
-/// and huge straight-line bodies are memory-bound anyway. Mirrors `jit::PAIR_UNROLL_MAX_NODES`.
+/// and huge straight-line bodies are memory-bound anyway.
 const PAIR_UNROLL_MAX_NODES: usize = 2048;
 
 /// How the lane being emitted relates to the **shared pair draw** (Track B): with f32 lanes one
@@ -266,7 +266,7 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId]) -> Vec<u8> {
 
     // --- types: (f64)->f64 for the unary shims, (f64,f64)->f64 for pow, kernel sig ---
     // The imports stay f64 — they ARE `Math.*` — and the f32 call sites promote/demote around
-    // them. That is the shared contract (the JIT's shims compute in f64 and round too).
+    // them. That is the shared contract (the interpreter computes these in f64 and rounds too).
     let mut types = TypeSection::new();
     types.ty().function([ValType::F64], [ValType::F64]); // 0: unary math
     types
@@ -378,8 +378,8 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId]) -> Vec<u8> {
 /// `Poisson`); the browser keeps the interpreter for those, exactly like the native gate.
 ///
 /// `inline_trans = true`: this emitter inlines `ln`/`sin`/`cos` as polynomials (`emit_ln`/`emit_trig`,
-/// same `crate::approx` reference as the JIT), so `normal`/`exp`/trig graphs are fusible here too and
-/// the 2× transcendental win reaches the browser — the gate decision now matches the native JIT.
+/// the same `crate::approx` reference the interpreter checks against), so `normal`/`exp`/trig graphs are fusible here too and
+/// the 2× transcendental win reaches the browser — the gate decision now accounts for the inlined transcendentals.
 pub fn emit_for(graph: &RvGraph, root: RvId, draws: usize) -> Option<Vec<u8>> {
     emit_for_roots(graph, &[root], draws)
 }
@@ -391,8 +391,8 @@ pub fn emit_for_roots(graph: &RvGraph, roots: &[RvId], draws: usize) -> Option<V
     // `draws` gates emit-vs-interpret the same way it does natively: emitting + instantiating a
     // module is a fixed cost, fusion is a per-draw saving, so a short query is faster interpreted.
     //
-    // The threshold is the browser's own (`MIN_DRAWS_WASM`), an order of magnitude below the JIT's:
-    // instantiating a ~1 KB kernel is far cheaper than a Cranelift compile, so emission pays back
+    // The threshold is the browser's own (`MIN_DRAWS_WASM`), far below a native machine-code compile's:
+    // instantiating a ~1 KB kernel is far cheaper than compiling native code, so emission pays back
     // sooner here. Same rule, each backend's measured constant.
     if !crate::kernel::profitable_roots(
         graph,
@@ -408,7 +408,7 @@ pub fn emit_for_roots(graph: &RvGraph, roots: &[RvId], draws: usize) -> Option<V
 
 /// The kernel skeleton: a counted loop (each lane computing every root from one shared memo —
 /// joint draws — into its BATCH-strided column). Stateless — nothing to load or store around the
-/// loop. Mirrors `jit::build_kernel`, including the pair-unroll: small cones emit TWO lanes per
+/// loop. Includes the pair-unroll: small cones emit TWO lanes per
 /// iteration so a `Normal`'s Box–Muller pair — hash, ln, both trig branches — is computed once
 /// and split cos/sin across the even/odd lane (`n` is always the even BATCH from every runner);
 /// large cones keep the single-lane loop with parity-select normals — same draws.
@@ -485,7 +485,7 @@ fn emit_kernel(s: &mut InstructionSink, ctx: &Ctx, roots: &[RvId], unroll: bool)
 }
 
 /// Emit node `id`, memoizing each `RvId` into its own f64 local so a shared sub-RV is computed
-/// once (the CSE guarantee the interpreter/JIT also give — and, with counter keying, the same
+/// once (the CSE guarantee the interpreter also gives — and, with counter keying, the same
 /// *draw*: one hash per node per lane). Children are emitted first (each `local.set`s its slot and
 /// leaves the stack untouched); the parent then `local.get`s them. Returns the local index holding
 /// this node's value.
@@ -593,7 +593,7 @@ fn emit_node(
             match ctx.gather_tables.get(&id) {
                 // Const table (strategy A): round ties-away, clamp to [0, last], one indexed
                 // 8-byte load from the data segment — bit-identical to the interpreter's
-                // `Inst::Gather`. See `jit::emit_gather_table` for the edge-case reasoning
+                // `Inst::Gather`. The gather edge-case reasoning
                 // (ties-away via `nearest` + `d == 0.5` correction; ±inf clamp to the ends;
                 // `i32.trunc_sat` maps NaN to 0 where plain trunc would trap, and the final
                 // `x != x` select restores NaN-index → NaN, never element 0).
@@ -624,8 +624,8 @@ fn emit_node(
                     s.local_get(lx).local_get(lx).f32_ne();
                     s.select();
                 }
-                // Small non-const table (strategy B): compare/select chain, no rounding — see
-                // `jit::emit_gather_chain`. The condition is flipped (`x >= i+0.5 ? acc : e[i]`)
+                // Small non-const table (strategy B): compare/select chain, no rounding.
+                // The condition is flipped (`x >= i+0.5 ? acc : e[i]`)
                 // so the accumulator stays below the operand on the stack; for non-NaN `x` that
                 // is the same chain, and NaN lanes (which fail every compare and would fall
                 // through to e[0] here) are overridden by the final NaN guard anyway.
@@ -647,8 +647,8 @@ fn emit_node(
                 }
             }
         }
-        // Graph constants are f64; a lane holds `x as f32` (the same rounding the interpreter and
-        // the JIT apply).
+        // Graph constants are f64; a lane holds `x as f32` (the same rounding the interpreter
+        // applies).
         RvNode::ConstNum(x) => {
             s.f32_const(f32c(*x as f32));
         }
@@ -843,12 +843,12 @@ fn emit_uniform(s: &mut InstructionSink, ctx: &Ctx, src: u32, lo: f64, hi: f64, 
 }
 
 /// Below this count, `unif_int` computes the exact 48-bit Lemire multiply-high (bit-identical to
-/// the interpreter/JIT); at or above it — unreachable under Track B's 2^24 range cap — it falls
+/// the interpreter); at or above it — unreachable under Track B's 2^24 range cap — it falls
 /// back to the float method (`lo + min(floor(u·count), count-1)`, identical in distribution).
 /// The bound keeps the split multiply's `b_hi·count` term under 2^63.
 const LEMIRE_MAX_COUNT: u64 = 1 << 39;
 
-/// `unif_int(lo, hi)` via the same 48-bit Lemire multiply-high as the interpreter/JIT — the one
+/// `unif_int(lo, hi)` via the same 48-bit Lemire multiply-high as the interpreter — the one
 /// source that is NOT pair-shared (24 bits would put the bias at `count / 2^24`). Wasm has no
 /// `mulhi`, so split `bits = b_hi·2^24 + b_lo` and use
 /// `(bits·count) >> 48 = (b_hi·count + ((b_lo·count) >> 24)) >> 24` — exact (standard nested-floor
@@ -892,7 +892,7 @@ fn emit_uniform_int(s: &mut InstructionSink, ctx: &Ctx, src: u32, lo: f64, hi: f
 }
 
 /// Horner `Σ c[i]·z^i` (coeffs low→high) with `z` already in a local — mirrors
-/// `crate::approx::horner_f32` and `jit::emit_horner`. Leaves the polynomial value on the stack.
+/// `crate::approx::horner_f32`. Leaves the polynomial value on the stack.
 fn emit_horner(s: &mut InstructionSink, z: u32, coeffs: &[f32]) {
     s.f32_const(f32c(*coeffs.last().unwrap()));
     for &c in coeffs.iter().rev().skip(1) {
@@ -900,8 +900,8 @@ fn emit_horner(s: &mut InstructionSink, z: u32, coeffs: &[f32]) {
     }
 }
 
-/// Inlined f32 `ln(x)` for `x > 0` — wasm transcription of [`crate::approx::ln_f32`] /
-/// `jit::emit_ln`. Consumes the f32 input on top of the stack and leaves `ln(x)`, computing through
+/// Inlined f32 `ln(x)` for `x > 0` — wasm transcription of [`crate::approx::ln_f32`].
+/// Consumes the f32 input on top of the stack and leaves `ln(x)`, computing through
 /// the shared scratch (so the surrounding stack is untouched).
 fn emit_ln(s: &mut InstructionSink, ctx: &Ctx) {
     use crate::approx::LN_COEFFS_F32;
@@ -951,15 +951,15 @@ fn emit_ln(s: &mut InstructionSink, ctx: &Ctx) {
 }
 
 /// Call an f64 host import on an f32 value already on the stack: promote, call, demote. The whole
-/// f32/f64 seam of this backend, in one place — and the exact shape `bytecode::apply_un` and the
-/// JIT's shims compute, so the three agree bit-for-bit.
+/// f32/f64 seam of this backend, in one place — and the exact shape `bytecode::apply_un`
+/// computes, so both agree bit-for-bit.
 fn call_f64_import(s: &mut InstructionSink, func: u32) {
     s.f64_promote_f32().call(func).f32_demote_f64();
 }
 
 /// Range-guarded `cos`/`sin` — the inline polynomial ([`emit_trig_poly`]) for `|x| < TRIG_MAX_F32`,
 /// else the imported library `sin`/`cos` in f64, rounded back (finding C3's f32 twin), mirroring
-/// `jit::emit_trig` and [`crate::approx::sin_f32`]. Consumes the f32 input on top of the stack and
+/// [`crate::approx::sin_f32`]. Consumes the f32 input on top of the stack and
 /// leaves the result. (The Box–Muller draw path calls [`emit_trig_poly`] directly — its argument is
 /// always `< 2π`.)
 fn emit_trig(s: &mut InstructionSink, ctx: &Ctx, is_cos: bool) {
@@ -1217,7 +1217,7 @@ fn emit_unary(s: &mut InstructionSink, ctx: &Ctx, op: UnOp, a: u32) {
             // points for V8's regalloc). JSC prefers inline; revisit if V8 improves. Promoting to
             // f64, taking an IEEE-exact sqrt and demoting is *bit-identical* to a correctly-rounded
             // f32 sqrt (f64 carries far more than 2·24+2 bits, so the double rounding is benign) —
-            // so this matches the interpreter's `f32::sqrt` and the JIT's inline one exactly. Never
+            // so this matches the interpreter's `f32::sqrt` exactly. Never
             // `pow(x, 0.5)`, which disagrees at -0.0 and -inf (PLAN-PERF-2 §5).
             s.local_get(a);
             call_f64_import(s, SQRT);
@@ -1226,8 +1226,8 @@ fn emit_unary(s: &mut InstructionSink, ctx: &Ctx, op: UnOp, a: u32) {
             use crate::approx::{LN_SUBNORMAL_CORR_F32, LN_SUBNORMAL_SCALE_F32};
             // Full-domain ln: the inlined poly (positive finite inputs only) behind guards that
             // match `f32::ln` — x > 0 → poly, 0 → -inf, negative/NaN → NaN, +inf → +inf (the
-            // poly's exponent bit-surgery would misread ±inf/NaN/negatives). Mirrors
-            // `jit::emit_ln_guarded`.
+            // poly's exponent bit-surgery would misread ±inf/NaN/negatives). Matches the shared
+            // full-domain `ln_guarded` shape.
             //
             // Subnormal positive inputs are first scaled into the normal range (their zero exponent
             // field would corrupt the mantissa bit-surgery) and corrected by `25·ln2`:
@@ -1280,7 +1280,7 @@ fn emit_unary(s: &mut InstructionSink, ctx: &Ctx, op: UnOp, a: u32) {
 }
 
 fn emit_binary(s: &mut InstructionSink, op: BinOp, a: u32, b: u32) {
-    // `&&`/`||` use the interpreter/JIT's `(a != 0) & (b != 0)` semantics — NOT `f32.min`/`max`,
+    // `&&`/`||` use the interpreter's `(a != 0) & (b != 0)` semantics — NOT `f32.min`/`max`,
     // which return NaN if either operand is NaN whereas `(NaN != 0)` is `true` (finding C8). Both
     // operands are 0/1 events and the result is 0/1, so this is exact and branch-free.
     if matches!(op, BinOp::And | BinOp::Or) {
@@ -1366,7 +1366,7 @@ mod tests {
     use crate::sampler::moments;
     use wasmi::{Engine, Linker, Module as WasmModule, Store};
 
-    // The shared cross-backend conformance corpus (finding C2), also consumed by `jit`.
+    // The shared cross-backend conformance corpus (finding C2), also consumed by the other backends.
     use crate::conformance;
 
     /// Instantiate an emitted kernel in `wasmi`, run one batch at lane 0, and return `out[0]`. For
@@ -1415,8 +1415,8 @@ mod tests {
     /// **Const-graph exact-equality suite (finding C2).** For every RNG-free program the emitted WASM
     /// kernel (run through `wasmi`) must be **bit-identical** to the interpreter oracle — no
     /// Monte-Carlo noise to hide a divergence. Pins the C3 (large-arg trig), C8 (`&&`/`||` relowering),
-    /// and C9 (`exp`) fixes at the bit level; since the JIT suite checks interp↔JIT identically, all
-    /// three backends agree.
+    /// and C9 (`exp`) fixes at the bit level; the WGSL suite checks its backend against the
+    /// interpreter the same way, so all three backends agree.
     #[test]
     fn conformance_const_graphs_bit_identical_interp_vs_wasm() {
         for (label, src) in conformance::CONST_CASES {
@@ -1438,7 +1438,7 @@ mod tests {
     }
 
     /// The RNG half of the shared corpus: the emitted WASM kernel must agree with the interpreter in
-    /// distribution on every case (mean within tolerance) — the same superset the JIT runs (C2).
+    /// distribution on every case (mean within tolerance) — the same corpus the other backends run (C2).
     #[test]
     fn conformance_rng_cases_match_interp() {
         for (_label, src, seed) in conformance::RNG_CASES {

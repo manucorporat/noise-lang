@@ -5,7 +5,7 @@
 //!
 //! - [`fold_binop`] — the scalar `BinOp` kernel used by the bytecode VM (`bytecode::apply_bin`),
 //!   the signal-tree folder (`signal::scalar_binop`), the `eval` constant-fold, and the
-//!   graph-simplifier (`simplify::binary`). The JIT and WASM emitters legitimately stay separate:
+//!   graph-simplifier (`simplify::binary`). The WASM and WGSL emitters legitimately stay separate:
 //!   they *emit* code, they don't compute, so their kernels live with their backends.
 //! - [`floored_mod`] — floored modulo (the `%` operator), which was hand-spelled in several of the
 //!   above.
@@ -59,8 +59,8 @@ pub fn floored_mod_f32(a: f32, b: f32) -> f32 {
 ///
 /// `Pow` is the one op that is *not* a plain f32 operation: it computes in f64 and rounds
 /// (`powf` has no correctly-rounded f32 form we can pin across backends). That is the shared
-/// contract — the JIT's `nz_pow` shim and the wasm module's `Math.pow` import do exactly the same
-/// promote/call/demote — so all three backends agree bit-for-bit. The same shape covers `atan`,
+/// contract — the interpreter and the wasm module's `Math.pow` import do exactly the same
+/// promote/call/demote — so all backends agree bit-for-bit. The same shape covers `atan`,
 /// `round` and `exp` in [`crate::bytecode::apply_un`].
 #[inline]
 pub fn fold_binop_f32(op: BinOp, a: f32, b: f32) -> f32 {

@@ -321,8 +321,8 @@ pub enum RvNode {
     /// This node emits **no code on any backend**. Its whole job is to own a *contiguous block of
     /// `n` source ordinals* (see [`crate::kernel::source_ordinals`]) that its [`ArrElem`](
     /// RvNode::ArrElem) readers index into — element `k` draws from ordinal `base + k`, so the draw
-    /// stream is exactly what `n` separate `Src` nodes would have produced. The interpreter, JIT and
-    /// wasm emitters lower each `ArrElem` to the same scalar fill they lower a `Src` to, and never
+    /// stream is exactly what `n` separate `Src` nodes would have produced. The interpreter and the
+    /// wasm and WGSL emitters lower each `ArrElem` to the same scalar fill they lower a `Src` to, and never
     /// see this node at all.
     ///
     /// **Why it exists: the WGSL emitter.** WGSL has no `u64`, so `squares64` must be emulated, and

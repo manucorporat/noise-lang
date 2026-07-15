@@ -22,8 +22,12 @@ cargo install noise-cli   # provides the `noise` binary
 
 ## Features
 
-- `jit` — enable the native Cranelift JIT backend (off by default; falls back to the columnar
-  interpreter for any graph it can't yet emit, so results are unchanged).
+- `gpu` — enable the native WebGPU backend (off by default; native only). Emits a WGSL kernel and
+  dispatches whole lane ranges to the GPU, falling back to the columnar interpreter for any graph it
+  can't lower or any forcing that wouldn't pay for itself, so results are unchanged.
+
+The columnar interpreter is always available as the portable floor; in the browser the engine uses
+the WASM emitter instead.
 
 ## License
 

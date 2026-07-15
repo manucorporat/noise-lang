@@ -199,7 +199,7 @@ noise-lang` to undo.)
 
 | Path | What it is |
 | --- | --- |
-| [`crates/noise-core`](crates/noise-core) | The language: parser, random-variable graph, samplers, JIT. |
+| [`crates/noise-core`](crates/noise-core) | The language: parser, random-variable graph, samplers, columnar interpreter + WebGPU/WASM backends. |
 | [`crates/noise-cli`](crates/noise-cli) | The `noise` binary — file runner + REPL (`cargo install noise-cli`). |
 | [`crates/noise-wasm`](crates/noise-wasm) | WebAssembly bindings for the engine. |
 | [`packages/core`](packages/core) | [`@noiselang/core`](packages/core) — the npm package wrapping the WASM engine. |

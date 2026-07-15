@@ -6,7 +6,7 @@
 //! instead we record, per forcing, the *static* per-draw cost of the cone — its distinct-node count
 //! (`ops`) and source-node count (`sources`), both computed once by [`crate::kernel::cost`] on the
 //! simplified graph — and multiply by `n`. So `ops`/`rng_draws` are exact lane-evaluation totals,
-//! independent of which backend (interpreter / JIT / wasm) ran.
+//! independent of which backend (interpreter / wasm / WGSL) ran.
 //!
 //! **Per-engine, not global (finding B8).** The counters are owned by each [`Engine`](crate::Engine)
 //! as a shared [`Counters`] cell. Around a forcing region an `Engine` *installs* its cell as the

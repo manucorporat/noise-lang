@@ -421,7 +421,7 @@ impl Reducer for MomentsReducer {
 /// but the condition still holds) is silently dropped instead of propagated, biasing the estimate
 /// and tightening `m`'s standard error dishonestly. The fix is a dedicated condition column (see the
 /// note in `Engine::query_cond`); deferred because it would ripple through the single-column
-/// `Reducer`/`Runner` interface (JIT/wasm included).
+/// `Reducer`/`Runner` interface (the wasm backend included).
 pub struct CondMomentsReducer;
 
 impl Reducer for CondMomentsReducer {
@@ -654,7 +654,7 @@ mod tests {
     /// (`sample_n` — one runner, one ordered stream) vs the NEW parallel chunked collection
     /// (`sample_n_par`), each followed by the (shared, central) sort — a 5M-draw `Q` over a normal
     /// cone. Ignored; run with:
-    /// `cargo test -p noise-core [--features jit] --release -- --ignored --nocapture bench_quantile_collect`
+    /// `cargo test -p noise-core [--features gpu] --release -- --ignored --nocapture bench_quantile_collect`
     #[test]
     #[ignore]
     fn bench_quantile_collect() {
@@ -699,7 +699,7 @@ mod tests {
     /// End-to-end multicore scaling: time a full `moments` workload (generate + reduce) at 1 thread
     /// vs all cores, at a sample count large enough to amortize thread-spawn overhead. This is the
     /// "the simplest program uses every core for free" number. Ignored; run with:
-    /// `cargo test -p noise-core [--features jit] --release -- --ignored --nocapture bench_parallel_scaling`
+    /// `cargo test -p noise-core [--features gpu] --release -- --ignored --nocapture bench_parallel_scaling`
     #[test]
     #[ignore]
     fn bench_parallel_scaling() {

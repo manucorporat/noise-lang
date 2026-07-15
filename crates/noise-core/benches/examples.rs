@@ -1,7 +1,7 @@
 //! End-to-end benchmark over the **real** programs in `examples/`.
 //!
 //! `sampling.rs` times the hot loop of a single hand-written RV expression: compile once, draw a
-//! million samples. That isolates throughput, which is what the JIT and WASM emitters were built to
+//! million samples. That isolates throughput, which is what the WASM and WGSL emitters were built to
 //! win — but it is *not* the shape of a real program, and it systematically hides the cost those
 //! backends add. A real Noise program:
 //!
@@ -16,7 +16,7 @@
 //! example. It is the honest regression gate: a change that speeds the kernel but slows codegen
 //! shows up *here* and nowhere else.
 //!
-//! Run: `cargo bench -p noise-core --bench examples` (interpreter) and again with `--features jit`
+//! Run: `cargo bench -p noise-core --bench examples` (interpreter) and again with `--features gpu`
 //! to compare backends on the same real programs.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};

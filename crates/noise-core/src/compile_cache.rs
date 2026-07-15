@@ -4,9 +4,7 @@
 //! recompile its cone from scratch — `noise_colors` compiles 14 kernels per run, `kelly` 13, and an
 //! introspection pass forces one root several times. The compiled artifact is a pure function of
 //! the *simplified cone* and the backend's emit-vs-interpret gate decision, so identical forcings
-//! can share one compile. Caching also bounds the memory the JIT now retains: `JitProgramInner`
-//! deliberately never frees module memory (freeing was a use-after-free — see `jit.rs`), so
-//! churning modules leaks a few KB per compile; a hit stops the churn.
+//! can share one compile.
 //!
 //! **Per-engine, installed thread-locally (the [`crate::stats`] pattern).** The cache is owned by
 //! each [`Engine`](crate::Engine) — a REPL/playground reuses it across `run` calls, and it drops
@@ -47,10 +45,9 @@ pub struct CacheState {
 /// Most entries either map holds. **Eviction is clear-on-full**: inserting into a full map drops
 /// the whole map rather than tracking recency/insertion order — the working set of a real program
 /// is its forcing count (≤ ~15 in the corpus), so 64 is generous and a clear is a rare, cheap
-/// worst case (the next run recompiles once). Note an evicted (dropped) JIT program still leaks
-/// its module bytes — module memory is never freed (the use-after-free trade, see `jit.rs`) —
-/// that's pre-existing and accepted; the cache's job is to make re-compiles of the same cone hit
-/// instead of churn, not to reclaim what a drop can't.
+/// worst case (the next run recompiles once). The remaining backends (interpreter bytecode, emitted
+/// wasm) free cleanly on drop, so eviction reclaims what it drops; the cache's job is to make
+/// re-compiles of the same cone hit instead of churn.
 const MAX_ENTRIES: usize = 64;
 
 /// A per-engine cache cell, shared so it can be *installed* as the thread's active cache around a
@@ -383,8 +380,8 @@ mod tests {
     }
 
     /// The joint seam: one joint pass compiles once, a repeat hits, and hit results are
-    /// bit-identical to an uncached (no cache installed) run at the same seed. The draw count sits
-    /// above `MIN_DRAWS_JIT` so the codegen joint kernel is the cached artifact where available.
+    /// bit-identical to an uncached (no cache installed) run at the same seed. The cached artifact is
+    /// the multi-root bytecode interpreter on native (or the emitted wasm joint kernel on wasm).
     #[test]
     fn joint_pass_hits_cache_and_matches_uncached() {
         let mut g = RvGraph::default();
@@ -421,14 +418,12 @@ mod tests {
         let cache = new_cache();
         let _i = install(&cache);
         let c0 = probe::compiles();
-        let _ = compile_root(&g, root, 1_000); // below every gate
-        let _ = compile_root(&g, root, 200_000); // above MIN_DRAWS_JIT
-        // Interpreter-only builds have one bucket (no gate), so the second call is a hit there.
-        let expected = if cfg!(all(feature = "jit", not(target_arch = "wasm32"))) {
-            2
-        } else {
-            1
-        };
+        let _ = compile_root(&g, root, 1_000); // below the wasm gate
+        let _ = compile_root(&g, root, 200_000); // above it
+        // Native has no CPU codegen gate now the JIT is gone (one bucket → the second call hits);
+        // only the wasm build gates (`MIN_DRAWS_WASM`), where the two counts flip the bucket. This
+        // test runs on native, so `expected` is 1.
+        let expected = if cfg!(target_arch = "wasm32") { 2 } else { 1 };
         assert_eq!(probe::compiles() - c0, expected);
         // Different raw counts in the same buckets: all hits.
         let _ = compile_root(&g, root, 2_000);

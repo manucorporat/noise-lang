@@ -1,16 +1,16 @@
 //! Shared cross-backend conformance corpus (finding C2). Test-only (`#[cfg(test)] mod conformance`
 //! in `lib.rs`).
 //!
-//! ONE corpus, consumed by BOTH the JIT tests (`src/jit.rs`) and the WASM-emitter tests
-//! (`src/wasm_emit.rs`) via `crate::conformance::{CONST_CASES, RNG_CASES}`, so the two backends can
-//! no longer drift apart the way the old hand-maintained near-copies did (the wasm side had gained
-//! 2nd/4th-moment and wide-trig probes the JIT never did). It holds only `(&str, ...)` data. The
+//! ONE corpus, consumed by the WASM-emitter tests (`src/wasm_emit.rs`) and the GPU suite via
+//! `crate::conformance::{CONST_CASES, RNG_CASES}`, so no codegen backend can drift from the
+//! interpreter the way hand-maintained near-copies once did. It holds only `(&str, ...)` data. The
 //! per-backend harness (bit comparison for [`CONST_CASES`]; distribution comparison for
 //! [`RNG_CASES`]) lives in each file, reusing that file's existing execution machinery
-//! (`jit::build`; `wasm_emit::emit` + `wasmi`).
+//! (`wasm_emit::emit` + `wasmi`; the WGSL emitter + wgpu). (The retired native JIT was a third
+//! consumer; a few of its unique cases — e.g. `floor_mod` — were folded in here so nothing was lost.)
 //!
-//! Both backends already agree with the interpreter (transitively with each other) on every case:
-//! the interpreter is the oracle each is checked against.
+//! Every codegen backend already agrees with the interpreter on every case: the interpreter is the
+//! oracle each is checked against.
 
 /// **Deterministic (RNG-free) programs — the exact-equality suite.**
 ///
@@ -18,8 +18,8 @@
 /// (`lo + (hi - lo)·u = c`) and `unif_int(c, c)` draws exactly `c` (count 1 → offset 0). Making the
 /// pinned draw an operand forces the emitters to build and evaluate a *real* graph node (the
 /// alternative — a bare constant expression — would fold to a `ConstNum` and never reach a backend),
-/// while the output carries no Monte-Carlo noise. So the interpreter, JIT, and WASM backends must be
-/// **bit-identical** here (`f64::to_bits`), the strongest form of the "backend only changes speed,
+/// while the output carries no Monte-Carlo noise. So the interpreter and every codegen backend must
+/// be **bit-identical** here (`f64::to_bits`), the strongest form of the "backend only changes speed,
 /// never results" contract (`backend.rs`).
 ///
 /// Only ops that are exact across all three backends appear: `+ - * /`, comparisons, `&&`/`||`, `!`,
@@ -90,10 +90,10 @@ pub const CONST_CASES: &[(&str, &str)] = &[
     ),
     // --- non-integer `^` → a `powf` call on every backend (exact) ---
     ("pow_frac", "use rand; X ~ unif(0,0); (2.0 + X) ^ (0.5 + X)"),
-    // --- sqrt → `UnOp::Sqrt` (PLAN-PERF-2 §5): the native sqrt instruction on Cranelift, a
-    // `Math.sqrt` import call on wasm (V8/arm64 regresses on inline `f64.sqrt` — see `wasm_emit`).
-    // Both are IEEE correctly rounded, so bit-identical to the interpreter's `f64::sqrt` across the
-    // whole domain. The edge cases are exactly where sqrt differs from the old `powf(x, 0.5)` lowering
+    // --- sqrt → `UnOp::Sqrt` (PLAN-PERF-2 §5): a `Math.sqrt` import call on wasm (V8/arm64
+    // regresses on inline `f64.sqrt` — see `wasm_emit`). IEEE correctly rounded, so bit-identical to
+    // the interpreter's `f64::sqrt` across the whole domain. The edge cases are exactly where sqrt
+    // differs from the old `powf(x, 0.5)` lowering
     // (sqrt(-0.0) = -0.0 not +0.0, sqrt(-inf and any x<0) = NaN not +inf), so these pin the new
     // semantics at the bit level (the -0.0 case only passes if the sign bit survives). ---
     ("sqrt_pos", "use rand; use math; X ~ unif(9,9); sqrt(X)"), // → 3
@@ -196,8 +196,8 @@ pub const CONST_CASES: &[(&str, &str)] = &[
 /// `Z*Z*Z*Z`) so a biased transcendental approximation — invisible in `E[Z]=0` — shows up in the
 /// spread. `(label, source, seed)`.
 ///
-/// This is the union of what the two corpora tested separately, so both backends now exercise the
-/// same superset — including the 2nd/4th-moment and wide-range-trig probes the JIT corpus lacked,
+/// This is the union of what the per-backend corpora once tested separately, so every codegen
+/// backend exercises the same superset — including the 2nd/4th-moment and wide-range-trig probes,
 /// and the large-argument trig case (`sin(1e12 * X)`) that motivated the C3 range guard.
 pub const RNG_CASES: &[(&str, &str, u64)] = &[
     // uniform arithmetic
@@ -267,6 +267,9 @@ pub const RNG_CASES: &[(&str, &str, u64)] = &[
     // mod / floor / ceil
     ("mod_uniform", "use rand; X ~ unif(0,10); X % 3", 19),
     ("mod_neg", "use rand; X ~ unif(-5,5); X % 4", 20),
+    // floored modulo of a floored draw — a composed op chain (floor then %), migrated from the
+    // retired JIT's `jit_mod_floor_ceil_match_interp` so every codegen backend still exercises it.
+    ("floor_mod", "use rand; use math; X ~ unif(0,8); math::floor(X) % 3", 33),
     (
         "floor_uniform",
         "use rand; use math; X ~ unif(-3,3); math::floor(X)",

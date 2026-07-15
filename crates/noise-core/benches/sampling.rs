@@ -3,14 +3,14 @@
 //! Each case parses + lowers a representative program ONCE (outside the timed loop), then times
 //! the columnar VM drawing `N` samples of the root RV. We report `Throughput::Elements(N)` so
 //! Criterion prints **samples/sec** directly — the number Phase 4's definition of done is stated
-//! in, and the regression gate any future engine (SIMD interpreter, Cranelift JIT, WASM codegen)
+//! in, and the regression gate any future engine (SIMD interpreter, WASM codegen, WGSL codegen)
 //! must beat on the SAME cases.
 //!
 //! Cases are chosen to separate the two cost regimes the engine has (see the Phase 4 discussion):
 //!   * `pi`, `dice_sum`        — tiny graphs: dispatch + RNG-bound, the toy-example regime.
 //!   * `normal_sum`            — transcendental-bound (Box–Muller sin/cos/ln per draw).
 //!   * `poly_deep`, `poly_wide`— larger arithmetic DAGs: memory-traffic-bound from materializing
-//!     every intermediate column. This is where fusion (JIT) should pull away from the
+//!     every intermediate column. This is where fusion (codegen) should pull away from the
 //!     interpreter, so it's the case that justifies — or doesn't — building a codegen backend.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
