@@ -776,6 +776,24 @@ fn is_dist(v: &Value) -> bool {
     matches!(v, Value::Dist(_))
 }
 
+thread_local! {
+    /// Whether `for` loops are captured as rolled [`crate::dist::RvNode::Scan`] nodes (G4c). On by
+    /// default; a test flips it off to compare a rolled program against the unrolled baseline and
+    /// prove the two produce bit-identical results.
+    static LOOP_CAPTURE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Whether the G4c loop-capture is active on this thread (see [`LOOP_CAPTURE`]).
+pub(crate) fn loop_capture_enabled() -> bool {
+    LOOP_CAPTURE.with(std::cell::Cell::get)
+}
+
+/// Enable/disable loop capture on this thread; returns the previous value. Test-only knob so a rolled
+/// run can be checked against the unrolled one.
+pub fn set_loop_capture(on: bool) -> bool {
+    LOOP_CAPTURE.with(|c| c.replace(on))
+}
+
 /// If `expr` is a direct `input::<base>(…)` call, return `(base, args)` — the hook the `Expr::Bind`
 /// arm uses to infer the input's name from the binding LHS (PLAN-INPUTS §2). `None` otherwise.
 fn as_input_call(expr: &Expr) -> Option<(&str, &CallArgs)> {
@@ -921,10 +939,12 @@ fn ancestors(graph: &RvGraph, root: RvId) -> HashSet<RvId> {
                 stack.push(*index);
             }
             RvNode::ArrElem { arr, .. } => stack.push(*arr),
-            // A Scan's upstream dependencies are its loop-carried initial values (the body is a
-            // separate sub-graph — its inner nodes aren't main-graph ancestors). `ScanOut` reads a
-            // Scan; `Placeholder` never appears in the main graph.
-            RvNode::Scan { body } => stack.extend(body.inits.iter().copied()),
+            // A Scan depends on its carried inits and on whatever its body reads (loop-invariant
+            // nodes, reached through `nexts`). A `Placeholder` is a leaf. `ScanOut` reads a Scan.
+            RvNode::Scan { body } => {
+                stack.extend(body.inits.iter().copied());
+                stack.extend(body.nexts.iter().copied());
+            }
             RvNode::ScanOut { scan, .. } => stack.push(*scan),
             RvNode::Placeholder { .. } => {}
             RvNode::Src(_)

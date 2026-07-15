@@ -69,6 +69,11 @@ pub trait Backend {
 /// cheap relative to codegen, and the simplified cone is the correct cache key — see
 /// [`crate::compile_cache::key`]); with no cache installed this compiles exactly as before.
 pub fn compile_root(graph: &RvGraph, root: RvId, draws: usize) -> (Arc<dyn Program>, NodeCost) {
+    // Expand any re-rollable loop (G4c) BEFORE simplify, so the CPU backends lower exactly the flat
+    // DAG eval built before this feature — bit-for-bit the same answer and draw stream. (The GPU took
+    // its shot earlier in `run_reduction`, rolling the Scan into a real loop; this is the fallback.)
+    let unrolled = crate::simplify::unroll_scans(graph, root);
+    let (graph, root) = unrolled.as_ref().map_or((graph, root), |(g, r)| (g, *r));
     // Simplify once (fold constants, apply identities, CSE) so the backend lowers a smaller DAG.
     // The rewritten graph is local — backends copy what they need, retaining no reference to it.
     let (graph, root) = crate::simplify::simplify(graph, root);
@@ -156,6 +161,9 @@ pub fn compile_roots(
     roots: &[RvId],
     draws: usize,
 ) -> (Arc<dyn JointProgram>, NodeCost) {
+    let unrolled = crate::simplify::unroll_scans_roots(graph, roots);
+    let (graph, roots): (&RvGraph, &[RvId]) =
+        unrolled.as_ref().map_or((graph, roots), |(g, r)| (g, r));
     let (graph, roots) = crate::simplify::simplify_roots(graph, roots);
     let key = crate::compile_cache::key(&graph, &roots, gate_bucket(draws));
     if let Some(hit) = crate::compile_cache::lookup_joint(&key) {

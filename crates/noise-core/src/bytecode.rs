@@ -304,16 +304,10 @@ fn lower(
                         push_child(&mut stack, *index);
                         push_child(&mut stack, *arr);
                     }
-                    // A Scan's main-graph operands are its carried initial values (the body is
-                    // unrolled at Emit from its own sub-graph). `ScanOut` reads the Scan.
-                    RvNode::Scan { body } => {
-                        for &init in body.inits.iter().rev() {
-                            push_child(&mut stack, init);
-                        }
-                    }
-                    RvNode::ScanOut { scan, .. } => push_child(&mut stack, *scan),
-                    RvNode::Placeholder { .. } => {
-                        unreachable!("Placeholder appears only inside a ScanBody sub-graph")
+                    // G4c: `unroll_scans` expands every Scan into flat nodes before the interpreter
+                    // lowers, so the interpreter never sees one — bit-for-bit today's DAG.
+                    RvNode::Scan { .. } | RvNode::ScanOut { .. } | RvNode::Placeholder { .. } => {
+                        unreachable!("Scan is unrolled before bytecode lowering (unroll_scans)")
                     }
                 }
             }

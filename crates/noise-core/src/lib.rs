@@ -96,7 +96,7 @@ pub use dist::RvGraph;
 pub use dist::RvId;
 pub use doc::Document;
 pub use error::{NoiseError, Result};
-pub use eval::{Emission, Engine, Output};
+pub use eval::{set_loop_capture, Emission, Engine, Output};
 /// Chart lowering used by the WASM playground host to turn an [`introspect::Summary`] into a
 /// `flint-chart` spec. Re-exported (rather than a public `flint` module) so the rest of that module
 /// stays internal.

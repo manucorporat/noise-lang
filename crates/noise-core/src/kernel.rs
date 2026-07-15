@@ -603,7 +603,10 @@ pub fn cost_roots(graph: &RvGraph, roots: &[RvId]) -> NodeCost {
             // the sample count) is unchanged whether the loop is rolled or not. The body is a separate
             // sub-graph, priced by a recursive walk over its `nexts`.
             RvNode::Scan { body } => {
-                let bc = cost_roots(&body.graph, &body.nexts);
+                // The body cone lives in this same graph, reached via `nexts`; price it once (a
+                // recursive walk, placeholders/index counting as leaves) and multiply by `trip`, the
+                // honest unrolled cost that keeps the sample budget unchanged whether rolled or not.
+                let bc = cost_roots(graph, &body.nexts);
                 c.ops += bc.ops.saturating_mul(u64::from(body.trip));
                 c.sources += bc.sources.saturating_mul(u64::from(body.trip));
                 for &init in body.inits.iter() {

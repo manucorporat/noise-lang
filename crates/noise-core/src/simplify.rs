@@ -43,6 +43,191 @@ pub fn simplify_roots(graph: &RvGraph, roots: &[RvId]) -> (RvGraph, Vec<RvId>) {
     (b.out, new_roots)
 }
 
+/// Expand every [`RvNode::Scan`] (PLAN-WEBGPU G4c) into flat nodes — the CPU form. Run *before*
+/// [`simplify`] in [`crate::backend::compile_root`], so the interpreter/JIT/wasm lower exactly the
+/// DAG eval used to build before this feature existed: the answer and the draw stream are byte-for-
+/// byte unchanged whether a loop was captured as a `Scan` or not. The GPU path skips this and rolls
+/// the `Scan` into a real WGSL loop instead.
+///
+/// Returns `None` when there is no `Scan`, so the overwhelmingly common case pays nothing.
+///
+/// The one correctness rule is that a **loop-invariant** node — above all a source, whose duplication
+/// would fork the draw stream — is built **once and shared**, while a node that depends on the loop
+/// index or a carried value is rebuilt **per iteration**. [`taint_set`] marks the latter; the
+/// `env`-threaded [`Unroller::rebuild`] resolves placeholders and reuses the shared invariants.
+pub fn unroll_scans(graph: &RvGraph, root: RvId) -> Option<(RvGraph, RvId)> {
+    let has_scan = (0..graph.len()).any(|i| matches!(graph.node(RvId(i as u32)), RvNode::Scan { .. }));
+    if !has_scan {
+        return None;
+    }
+    let mut u = Unroller {
+        graph,
+        out: RvGraph::default(),
+        taint: taint_set(graph),
+        memo: HashMap::new(),
+        finals: HashMap::new(),
+    };
+    let new_root = u.rebuild(root, &HashMap::new());
+    Some((u.out, new_root))
+}
+
+/// Multi-root [`unroll_scans`] for the joint drivers: one [`Unroller`] (shared invariant memo) over
+/// every root, so a source feeding two roots stays a single node. `None` when there is no `Scan`.
+pub fn unroll_scans_roots(graph: &RvGraph, roots: &[RvId]) -> Option<(RvGraph, Vec<RvId>)> {
+    let has_scan = (0..graph.len()).any(|i| matches!(graph.node(RvId(i as u32)), RvNode::Scan { .. }));
+    if !has_scan {
+        return None;
+    }
+    let mut u = Unroller {
+        graph,
+        out: RvGraph::default(),
+        taint: taint_set(graph),
+        memo: HashMap::new(),
+        finals: HashMap::new(),
+    };
+    let empty = HashMap::new();
+    let new_roots = roots.iter().map(|&r| u.rebuild(r, &empty)).collect();
+    Some((u.out, new_roots))
+}
+
+/// Ids whose value depends on a loop [`Placeholder`](RvNode::Placeholder) — a carried slot or the
+/// iteration counter — and so must be rebuilt *per iteration* rather than shared. Computed in one
+/// ascending pass because a node's operands always have smaller ids (append-only arena).
+fn taint_set(graph: &RvGraph) -> std::collections::HashSet<RvId> {
+    let mut taint = std::collections::HashSet::new();
+    let t = |taint: &std::collections::HashSet<RvId>, id: &RvId| taint.contains(id);
+    for i in 0..graph.len() {
+        let id = RvId(i as u32);
+        let tainted = match graph.node(id) {
+            RvNode::Placeholder { .. } => true,
+            // A loop is tainted (its result depends on outer state) iff a carried init is.
+            RvNode::Scan { body } => body.inits.iter().any(|x| t(&taint, x)),
+            RvNode::ScanOut { scan, .. } => t(&taint, scan),
+            RvNode::Src(_)
+            | RvNode::ConstNum(_)
+            | RvNode::ConstBool(_)
+            | RvNode::Permutation { .. }
+            | RvNode::Rotation { .. }
+            | RvNode::ArrDraw { .. } => false,
+            RvNode::ArrElem { arr, .. } => t(&taint, arr),
+            RvNode::Unary(_, a) => t(&taint, a),
+            RvNode::Binary(_, a, b) => t(&taint, a) || t(&taint, b),
+            RvNode::Select { cond, a, b } => t(&taint, cond) || t(&taint, a) || t(&taint, b),
+            RvNode::Gather { elems, index } => {
+                t(&taint, index) || elems.iter().any(|e| t(&taint, e))
+            }
+            RvNode::ArrIndex { arr, index } => t(&taint, arr) || t(&taint, index),
+        };
+        if tainted {
+            taint.insert(id);
+        }
+    }
+    taint
+}
+
+struct Unroller<'g> {
+    graph: &'g RvGraph,
+    out: RvGraph,
+    taint: std::collections::HashSet<RvId>,
+    /// Invariant old-id → new-id: built once, shared across iterations (sources must not duplicate).
+    memo: HashMap<RvId, RvId>,
+    /// Cached final slot values of a *non-tainted* (loop-independent) Scan, so its several `ScanOut`
+    /// readers expand it once, not once per slot.
+    finals: HashMap<RvId, Vec<RvId>>,
+}
+
+impl Unroller<'_> {
+    /// Rebuild `id` into the output graph under the current placeholder bindings `env`. Tainted nodes
+    /// (loop-dependent) are rebuilt fresh; invariants are memoized and shared.
+    fn rebuild(&mut self, id: RvId, env: &HashMap<RvId, RvId>) -> RvId {
+        if let Some(&n) = env.get(&id) {
+            return n;
+        }
+        if let Some(&n) = self.memo.get(&id) {
+            return n;
+        }
+        let kind = self.graph.kind(id);
+        let new = match self.graph.node(id).clone() {
+            RvNode::Placeholder { .. } => {
+                unreachable!("a placeholder must be bound by its enclosing Scan's env")
+            }
+            RvNode::Scan { .. } => unreachable!("a Scan is reached only through its ScanOut"),
+            RvNode::ScanOut { scan, slot } => self.scan_finals(scan, env)[slot as usize],
+            RvNode::Src(s) => self.out.push(RvNode::Src(s), kind),
+            RvNode::ConstNum(x) => self.out.push(RvNode::ConstNum(x), kind),
+            RvNode::ConstBool(b) => self.out.push(RvNode::ConstBool(b), kind),
+            RvNode::Permutation { n } => self.out.push(RvNode::Permutation { n }, kind),
+            RvNode::Rotation { d } => self.out.push(RvNode::Rotation { d }, kind),
+            RvNode::ArrDraw { n, src } => self.out.push(RvNode::ArrDraw { n, src }, kind),
+            RvNode::ArrElem { arr, k } => {
+                let arr = self.rebuild(arr, env);
+                self.out.push(RvNode::ArrElem { arr, k }, kind)
+            }
+            RvNode::Unary(op, a) => {
+                let a = self.rebuild(a, env);
+                self.out.push(RvNode::Unary(op, a), kind)
+            }
+            RvNode::Binary(op, a, b) => {
+                let a = self.rebuild(a, env);
+                let b = self.rebuild(b, env);
+                self.out.push(RvNode::Binary(op, a, b), kind)
+            }
+            RvNode::Select { cond, a, b } => {
+                let cond = self.rebuild(cond, env);
+                let a = self.rebuild(a, env);
+                let b = self.rebuild(b, env);
+                self.out.push(RvNode::Select { cond, a, b }, kind)
+            }
+            RvNode::Gather { elems, index } => {
+                let elems: Box<[RvId]> = elems.iter().map(|&e| self.rebuild(e, env)).collect();
+                let index = self.rebuild(index, env);
+                self.out.push(RvNode::Gather { elems, index }, kind)
+            }
+            RvNode::ArrIndex { arr, index } => {
+                let arr = self.rebuild(arr, env);
+                let index = self.rebuild(index, env);
+                self.out.push(RvNode::ArrIndex { arr, index }, kind)
+            }
+        };
+        if !self.taint.contains(&id) {
+            self.memo.insert(id, new);
+        }
+        new
+    }
+
+    /// The final carried values of a Scan after `trip` iterations. A loop-independent (non-tainted)
+    /// Scan is expanded once and cached; a loop-dependent one is expanded fresh under the caller's env.
+    fn scan_finals(&mut self, scan_id: RvId, env: &HashMap<RvId, RvId>) -> Vec<RvId> {
+        if !self.taint.contains(&scan_id) {
+            if let Some(f) = self.finals.get(&scan_id) {
+                return f.clone();
+            }
+        }
+        let body = match self.graph.node(scan_id).clone() {
+            RvNode::Scan { body } => body,
+            _ => unreachable!("scan_finals on a non-Scan"),
+        };
+        // Slot values before iteration 0, in the caller's env (a carried init may itself be tainted,
+        // e.g. an inner loop starting from the outer loop's index).
+        let mut cur: Vec<RvId> = body.inits.iter().map(|&i| self.rebuild(i, env)).collect();
+        for k in 0..body.trip {
+            let mut it_env = env.clone();
+            for (slot, &ph) in body.placeholders.iter().enumerate() {
+                it_env.insert(ph, cur[slot]);
+            }
+            if let Some(iph) = body.index_ph {
+                let c = self.out.push(RvNode::ConstNum(f64::from(k)), RvKind::Num);
+                it_env.insert(iph, c);
+            }
+            cur = body.nexts.iter().map(|&nx| self.rebuild(nx, &it_env)).collect();
+        }
+        if !self.taint.contains(&scan_id) {
+            self.finals.insert(scan_id, cur.clone());
+        }
+        cur
+    }
+}
+
 /// A worklist item for the iterative post-order rewrite (see [`Builder::rewrite`]).
 enum Task {
     /// First visit: schedule this node's rebuild after its children.
@@ -126,11 +311,21 @@ impl Builder {
                             push_child(*index);
                             push_child(*arr);
                         }
-                        // A Scan's main-graph operands are its carried initial values; the body is a
-                        // self-contained sub-graph copied verbatim at Emit.
+                        // A Scan's operands, all in this graph: the carried inits, and the body cone
+                        // (its `nexts`, which reach the placeholders and loop-invariant nodes). All
+                        // are simplified so the rebuilt Scan points into the new graph.
                         RvNode::Scan { body } => {
-                            for &init in body.inits.iter().rev() {
+                            for &init in body.inits.iter() {
                                 push_child(init);
+                            }
+                            for &ph in body.placeholders.iter() {
+                                push_child(ph);
+                            }
+                            if let Some(ph) = body.index_ph {
+                                push_child(ph);
+                            }
+                            for &nx in body.nexts.iter() {
+                                push_child(nx);
                             }
                         }
                         RvNode::ScanOut { scan, .. } => push_child(*scan),
@@ -199,19 +394,19 @@ impl Builder {
                             let arr = self.done[arr];
                             self.arr_elem(arr, *k, kind)
                         }
-                        // A Scan is a loop-shaped SOURCE-like node: remap its carried inits to the
-                        // simplified graph and copy the body sub-graph verbatim (it is small and
-                        // self-contained; simplifying across the loop boundary is a v2 nicety). Not
-                        // interned — two loops rarely coincide and a wrong merge would fuse distinct
-                        // recurrences.
+                        // A Scan is a loop-shaped SOURCE-like node: remap every carried id (inits,
+                        // placeholders, nexts, index) into the simplified graph. Not interned — two
+                        // loops rarely coincide and a wrong merge would fuse distinct recurrences.
                         RvNode::Scan { body } => {
-                            let inits: Box<[RvId]> =
-                                body.inits.iter().map(|i| self.done[i]).collect();
+                            let map = |ids: &[RvId]| -> Box<[RvId]> {
+                                ids.iter().map(|i| self.done[i]).collect()
+                            };
                             let new_body = crate::dist::ScanBody {
                                 trip: body.trip,
-                                graph: body.graph.clone(),
-                                inits,
-                                nexts: body.nexts.clone(),
+                                placeholders: map(&body.placeholders),
+                                inits: map(&body.inits),
+                                nexts: map(&body.nexts),
+                                index_ph: body.index_ph.map(|p| self.done[&p]),
                                 kinds: body.kinds.clone(),
                             };
                             self.out
@@ -221,8 +416,10 @@ impl Builder {
                             let scan = self.done[scan];
                             self.out.push(RvNode::ScanOut { scan, slot: *slot }, kind)
                         }
-                        RvNode::Placeholder { .. } => {
-                            unreachable!("Placeholder appears only inside a ScanBody sub-graph")
+                        // A placeholder keeps its identity across simplification (two slots are
+                        // distinct); copied as a fresh node, never interned.
+                        RvNode::Placeholder { slot } => {
+                            self.out.push(RvNode::Placeholder { slot: *slot }, kind)
                         }
                     };
                     self.done.insert(id, new);

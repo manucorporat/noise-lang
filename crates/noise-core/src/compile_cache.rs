@@ -212,18 +212,27 @@ pub(crate) fn key(graph: &RvGraph, roots: &[RvId], gate: bool) -> Vec<u8> {
                 push_id(&mut out, *arr);
                 push_u32(&mut out, *k);
             }
-            // A Scan (G4c): serialize its shape (trip, inits, next-slots, kinds) and recurse into the
-            // body sub-graph via `key` itself — the same canonical form, keyed on the body's `nexts`.
-            // Two loops that differ anywhere (trip, a carried init, a body op) key differently.
+            // A Scan (G4c): single-arena, so its body nodes are already serialized in id order above;
+            // here we only need its shape — `trip`, the carried inits / placeholders / nexts, the
+            // optional index placeholder, and the kinds. Two loops that differ anywhere key differently.
             RvNode::Scan { body } => {
                 out.push(12);
                 push_u32(&mut out, body.trip);
                 push_u32(&mut out, body.inits.len() as u32);
-                for &init in body.inits.iter() {
-                    push_id(&mut out, init);
+                for slot in body
+                    .inits
+                    .iter()
+                    .chain(body.placeholders.iter())
+                    .chain(body.nexts.iter())
+                {
+                    push_id(&mut out, *slot);
                 }
-                for &nx in body.nexts.iter() {
-                    push_id(&mut out, nx);
+                match body.index_ph {
+                    Some(ph) => {
+                        out.push(1);
+                        push_id(&mut out, ph);
+                    }
+                    None => out.push(0),
                 }
                 for &k in body.kinds.iter() {
                     out.push(match k {
@@ -232,9 +241,6 @@ pub(crate) fn key(graph: &RvGraph, roots: &[RvId], gate: bool) -> Vec<u8> {
                         RvKind::Arr(_) => 2,
                     });
                 }
-                let bkey = key(&body.graph, &body.nexts, gate);
-                push_u32(&mut out, bkey.len() as u32);
-                out.extend_from_slice(&bkey);
             }
             RvNode::ScanOut { scan, slot } => {
                 out.push(13);

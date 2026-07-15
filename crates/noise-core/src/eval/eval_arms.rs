@@ -352,6 +352,13 @@ impl Engine {
                 ))
             }
         };
+        // Try to keep the loop *rolled* as a `Scan` node (PLAN-WEBGPU G4c) — the GPU compiles a 15k-node
+        // unrolled `prisoners` into a 2.2 s pathological shader, but one WGSL loop in milliseconds. This
+        // is best-effort: any shape it can't capture (a draw inside the loop, a non-scalar accumulator,
+        // the loop index used over a non-`0..n` iterator) returns `None` and we unroll exactly as before.
+        if let Some(v) = self.try_capture_loop(var, &xs, body)? {
+            return Ok(v);
+        }
         // Build-time unroll: bind the loop var in the *current* frame and run the body once per
         // element. Bindings leak (Noise blocks don't scope), which is exactly how accumulators
         // persist across iterations. Each `~` inside is a fresh node, giving independence.
@@ -360,6 +367,173 @@ impl Engine {
             self.eval(body)?;
         }
         Ok(Value::Unit)
+    }
+
+    /// Attempt to capture a `for` loop as a single [`RvNode::Scan`] instead of unrolling it (G4c).
+    ///
+    /// The mechanism rests on one fact: a placeholder for a loop-carried variable is just an ordinary
+    /// `Value::Dist` RV node. So we bind every carried variable (and, if the iterator is `0..n`, the
+    /// loop index) to a fresh [`RvNode::Placeholder`], evaluate the body **once**, and read back each
+    /// carried variable's new value — that *is* the recurrence, expressed over the placeholders. The
+    /// CPU later expands this back to the identical flat DAG ([`crate::simplify::unroll_scans`]); only
+    /// the GPU rolls it into a real loop.
+    ///
+    /// Returns `Ok(None)` (→ caller unrolls) for anything outside the v1 envelope, so it can never
+    /// change a result — only whether the loop stays rolled.
+    fn try_capture_loop(
+        &mut self,
+        var: &str,
+        xs: &Rc<Vec<Value>>,
+        body: &Spanned,
+    ) -> Result<Option<Value>> {
+        /// Loops shorter than this just unroll — a `Scan` earns its keep only over many iterations,
+        /// and small unrolled cones compile fine on every backend.
+        const MIN_SCAN_TRIP: usize = 8;
+        let trip = xs.len();
+        if !(MIN_SCAN_TRIP..=(1 << 20)).contains(&trip) || !super::loop_capture_enabled() {
+            return Ok(None);
+        }
+        // The iterator is `[0, 1, …, n-1]` — the only case where the loop index equals the iteration
+        // counter, which is what a `Scan`'s `index_ph` represents.
+        let is_iota = xs
+            .iter()
+            .enumerate()
+            .all(|(k, v)| matches!(v, Value::Num(n) if *n == k as f64));
+
+        // Carried slots = every name the body assigns (a superset is safe: an unused placeholder is
+        // dead). Deterministic order so the graph — and its cache key — are stable.
+        let mut assigned = std::collections::BTreeSet::new();
+        collect_assigned(&body.expr, &mut assigned);
+        assigned.remove(var);
+        let carried: Vec<String> = assigned.into_iter().collect();
+
+        // --- open the capture: placeholders for the index and each carried slot ---
+        // Snapshot the emission buffer: a loop that Prints (or emits a note) has a *per-iteration side
+        // effect* that a single symbolic pass can't reproduce and the GPU can't run — so any emission
+        // during the trial forces a fall back to real unrolling, and the trial's stray emission is
+        // rolled back here.
+        let out_mark = self.outputs.len();
+        let dropped_mark = self.dropped;
+        let span_mark = self.first_dropped_span;
+        let mark = self.graph.len();
+        let index_ph = self.graph.push(RvNode::Placeholder { slot: crate::dist::INDEX_SLOT }, RvKind::Num);
+        let saved_loop_var = self.vars.get(var).cloned();
+        self.vars.insert(var.to_string(), Value::Dist(index_ph));
+
+        let mut inits = Vec::with_capacity(carried.len());
+        let mut placeholders = Vec::with_capacity(carried.len());
+        let mut kinds = Vec::with_capacity(carried.len());
+        let mut saved: Vec<(String, Option<Value>)> = Vec::with_capacity(carried.len());
+        let mut bail = false;
+        for (slot, name) in carried.iter().enumerate() {
+            let pre = self.vars.get(name).cloned();
+            let (init, kind) = match pre.as_ref().map(|v| self.value_to_rvid(v)) {
+                Some(Some(pair)) => pair,
+                Some(None) => {
+                    bail = true; // a non-scalar carried value (e.g. an array) — can't roll in v1
+                    break;
+                }
+                // A new var (first assigned inside the loop): its placeholder is a leak of the
+                // previous iteration; iteration 0 must not read it. Poison init catches a read.
+                None => (self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num), RvKind::Num),
+            };
+            let ph = self.graph.push(RvNode::Placeholder { slot: slot as u32 }, kind);
+            inits.push(init);
+            placeholders.push(ph);
+            kinds.push(kind);
+            saved.push((name.clone(), pre));
+            self.vars.insert(name.clone(), Value::Dist(ph));
+        }
+
+        // Evaluate the body ONCE, symbolically. An error here is not fatal — it usually means the body
+        // wanted a concrete value where a placeholder stood, so we abandon the capture and unroll.
+        let body_ok = !bail && self.eval(body).is_ok();
+
+        // A draw inside the loop is out of v1 scope: each iteration would need its own source
+        // ordinals, which the flat unroll gives but this single-body capture does not.
+        let has_draw = (mark..self.graph.len())
+            .any(|i| is_source_node(self.graph.node(crate::dist::RvId(i as u32))));
+        let emitted = self.outputs.len() != out_mark || self.dropped != dropped_mark;
+
+        let nexts: Option<Vec<crate::dist::RvId>> = if body_ok && !has_draw && !emitted {
+            let mut ids = Vec::with_capacity(carried.len());
+            let mut ok = true;
+            for name in &carried {
+                let v = self.vars.get(name).cloned();
+                match v.and_then(|v| self.value_to_rvid(&v)) {
+                    Some((id, _)) => ids.push(id),
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            ok.then_some(ids)
+        } else {
+            None
+        };
+
+        let restore = |me: &mut Self| {
+            match &saved_loop_var {
+                Some(v) => { me.vars.insert(var.to_string(), v.clone()); }
+                None => { me.vars.remove(var); }
+            }
+            for (name, pre) in &saved {
+                match pre {
+                    Some(v) => { me.vars.insert(name.clone(), v.clone()); }
+                    None => { me.vars.remove(name); }
+                }
+            }
+            // Undo any stray emission the trial pass produced, so the real unroll re-emits cleanly.
+            me.outputs.truncate(out_mark);
+            me.dropped = dropped_mark;
+            me.first_dropped_span = span_mark;
+        };
+
+        let Some(nexts) = nexts else {
+            restore(self);
+            return Ok(None);
+        };
+
+        // Does the recurrence read the loop index? If so it is only valid for a `0..n` iterator.
+        let index_used = cone_contains(&self.graph, &nexts, index_ph);
+        if index_used && !is_iota {
+            restore(self);
+            return Ok(None);
+        }
+
+        let body_struct = crate::dist::ScanBody {
+            trip: trip as u32,
+            placeholders: placeholders.into_boxed_slice(),
+            inits: inits.into_boxed_slice(),
+            nexts: nexts.into_boxed_slice(),
+            index_ph: index_used.then_some(index_ph),
+            kinds: kinds.clone().into_boxed_slice(),
+        };
+        let scan = self.graph.push(RvNode::Scan { body: Box::new(body_struct) }, RvKind::Num);
+
+        // Post-loop bindings: the loop variable leaks its last value; each carried variable becomes the
+        // Scan's final value for that slot (a `ScanOut`). Dead ones are dropped by simplify/DCE.
+        match xs.last() {
+            Some(v) => { self.vars.insert(var.to_string(), v.clone()); }
+            None => { self.vars.remove(var); }
+        }
+        for (slot, name) in carried.iter().enumerate() {
+            let out = self.graph.push(RvNode::ScanOut { scan, slot: slot as u32 }, kinds[slot]);
+            self.vars.insert(name.clone(), Value::Dist(out));
+        }
+        Ok(Some(Value::Unit))
+    }
+
+    /// Lift a scalar `Value` to an `RvId` (a `Dist` handle, or a fresh constant node). `None` for a
+    /// non-scalar (an array/matrix carried value), which the loop capture can't roll in v1.
+    fn value_to_rvid(&mut self, v: &Value) -> Option<(crate::dist::RvId, RvKind)> {
+        match v {
+            Value::Dist(id) => Some((*id, self.graph.kind(*id))),
+            Value::Num(x) => Some((self.graph.push(RvNode::ConstNum(*x), RvKind::Num), RvKind::Num)),
+            Value::Bool(b) => Some((self.graph.push(RvNode::ConstBool(*b), RvKind::Bool), RvKind::Bool)),
+            _ => None,
+        }
     }
 
     /// `[for var in iter { body }]` — a comprehension (PLAN-COMPLEX §8). Build-time unrolled exactly
@@ -777,5 +951,133 @@ impl Engine {
                 e.span,
             )),
         }
+    }
+}
+
+/// Collect every variable name a `for` body assigns — the loop-carried-slot candidates (G4c). A
+/// superset is safe (an unused placeholder is dead); missing one would leave its post-loop value
+/// wrong, so the walk is thorough. `for`/comprehension binds leak into the current frame (Noise has
+/// no block scope), so they are collected too; a nested `FnDef` is its own scope and is not.
+fn collect_assigned(expr: &crate::ast::Expr, out: &mut std::collections::BTreeSet<String>) {
+    use crate::ast::{CallArgs, Expr, TemplatePart};
+    let go = |s: &crate::ast::Spanned, out: &mut std::collections::BTreeSet<String>| {
+        collect_assigned(&s.expr, out);
+    };
+    match expr {
+        Expr::Bind(_, name, rhs) => {
+            out.insert(name.clone());
+            go(rhs, out);
+        }
+        Expr::For { var, iter, body } => {
+            out.insert(var.clone());
+            go(iter, out);
+            go(body, out);
+        }
+        Expr::Comprehension { body, var, iter } => {
+            out.insert(var.clone());
+            go(body, out);
+            go(iter, out);
+        }
+        Expr::Block(stmts) => stmts.iter().for_each(|s| go(s, out)),
+        Expr::If(c, t, e) => {
+            go(c, out);
+            go(t, out);
+            if let Some(e) = e {
+                go(e, out);
+            }
+        }
+        Expr::Unary(_, a) => go(a, out),
+        Expr::Binary(_, a, b)
+        | Expr::MatMul(a, b)
+        | Expr::Range(a, b)
+        | Expr::Index(a, b)
+        | Expr::Cond { event: a, given: b } => {
+            go(a, out);
+            go(b, out);
+        }
+        Expr::Sample { shape, body } => {
+            shape.iter().for_each(|s| go(s, out));
+            go(body, out);
+        }
+        Expr::Array(items) => items.iter().for_each(|s| go(s, out)),
+        Expr::Call(_, args) => match args {
+            CallArgs::Positional(a) => a.iter().for_each(|s| go(s, out)),
+            CallArgs::Named(a) => a.iter().for_each(|(_, s)| go(s, out)),
+        },
+        Expr::Template { parts, .. } => parts.iter().for_each(|p| {
+            if let TemplatePart::Hole(s) = p {
+                go(s, out);
+            }
+        }),
+        // A function body is a fresh scope; its binds don't leak into the loop frame.
+        Expr::FnDef { .. } => {}
+        Expr::Number(_)
+        | Expr::Bool(_)
+        | Expr::Str(_)
+        | Expr::Ident(_)
+        | Expr::Use(_)
+        | Expr::Continue => {}
+    }
+}
+
+/// Whether a node is a random-draw *source* — used to detect a draw inside a loop body, which the v1
+/// `Scan` capture can't roll (each iteration would need its own source ordinals).
+fn is_source_node(node: &RvNode) -> bool {
+    matches!(
+        node,
+        RvNode::Src(_)
+            | RvNode::Permutation { .. }
+            | RvNode::Rotation { .. }
+            | RvNode::ArrDraw { .. }
+    )
+}
+
+/// Whether `target` lies in the cone of any of `roots` — how the capture learns if the recurrence
+/// actually reads the loop index. Bounded by the graph (ids only shrink toward operands).
+fn cone_contains(graph: &crate::dist::RvGraph, roots: &[crate::dist::RvId], target: crate::dist::RvId) -> bool {
+    use crate::dist::RvId;
+    let mut seen = std::collections::HashSet::new();
+    let mut stack: Vec<RvId> = roots.to_vec();
+    while let Some(id) = stack.pop() {
+        if id == target {
+            return true;
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        push_operands(graph, id, &mut stack);
+    }
+    false
+}
+
+/// Push a node's operand ids (its direct graph children) onto `stack`. Total over every `RvNode`.
+fn push_operands(graph: &crate::dist::RvGraph, id: crate::dist::RvId, stack: &mut Vec<crate::dist::RvId>) {
+    match graph.node(id) {
+        RvNode::Unary(_, a) | RvNode::ArrElem { arr: a, .. } => stack.push(*a),
+        RvNode::Binary(_, a, b) | RvNode::ArrIndex { arr: a, index: b } => {
+            stack.push(*a);
+            stack.push(*b);
+        }
+        RvNode::Select { cond, a, b } => {
+            stack.push(*cond);
+            stack.push(*a);
+            stack.push(*b);
+        }
+        RvNode::Gather { elems, index } => {
+            stack.extend(elems.iter().copied());
+            stack.push(*index);
+        }
+        RvNode::Scan { body } => {
+            stack.extend(body.inits.iter().copied());
+            stack.extend(body.nexts.iter().copied());
+        }
+        RvNode::ScanOut { scan, .. } => stack.push(*scan),
+        RvNode::Src(_)
+        | RvNode::ConstNum(_)
+        | RvNode::ConstBool(_)
+        | RvNode::Permutation { .. }
+        | RvNode::Rotation { .. }
+        | RvNode::ArrDraw { .. }
+        | RvNode::Placeholder { .. } => {}
     }
 }

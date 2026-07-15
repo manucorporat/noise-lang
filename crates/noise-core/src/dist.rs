@@ -384,21 +384,34 @@ pub enum RvNode {
     },
 }
 
-/// The body of a [`RvNode::Scan`]: a self-contained recurrence run `trip` times.
+/// The body of a [`RvNode::Scan`]: a recurrence over loop-carried scalar slots, run `trip` times.
 ///
-/// One id space per field is deliberate. `inits` are **parent-graph** ids (the carried slots' values
-/// before iteration 0). `graph` is the **body** sub-graph; its [`Placeholder`](RvNode::Placeholder)
-/// nodes stand for the carried slots at an iteration's start, and `nexts` are body ids giving each
-/// slot's value at the iteration's end — so slot `i` evolves `inits[i] → nexts[i][ph:=prev] → …`.
-/// `kinds[i]` is slot `i`'s value kind. To unroll: substitute placeholders with the previous
-/// iteration's values (or `inits` / the concrete index for iteration 0) and splice `graph` in, `trip`
-/// times. To roll (WGSL): one `var` per slot, initialised from `inits`, a `for` loop of `graph`.
+/// **Single id space.** Every id is a node in the *same* [`RvGraph`] the `Scan` lives in — the body
+/// nodes are ordinary nodes reachable only through this `Scan`'s `nexts`. That is deliberate: the
+/// loop body reads loop-*invariant* values (a permutation, constants) defined outside the loop, and
+/// keeping one arena makes those plain id references rather than cross-graph captures.
+///
+/// Slot `i` evolves `inits[i]` → then each iteration `nexts[i]` with the [`Placeholder`](
+/// RvNode::Placeholder) nodes standing for the slots' values at the iteration's start. `placeholders[i]`
+/// is slot `i`'s placeholder; `index_ph` (if present) is the iteration counter `0..trip`. `kinds[i]`
+/// is slot `i`'s value kind.
+///
+/// To **unroll** (CPU, [`crate::simplify::unroll_scans`]): substitute placeholders with the previous
+/// iteration's values (or `inits` / the concrete index at iteration 0) and splice the body in `trip`
+/// times — reproducing exactly the flat DAG eval used to build, so the interpreter's answer and draw
+/// stream are byte-for-byte unchanged. To **roll** (WGSL): one `var` per slot from `inits`, a `for`
+/// loop of the body.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanBody {
     pub trip: u32,
-    pub graph: RvGraph,
+    /// The carried-slot placeholder node ids (main graph), one per slot.
+    pub placeholders: Box<[RvId]>,
+    /// Each slot's value before iteration 0 (main graph).
     pub inits: Box<[RvId]>,
+    /// Each slot's value at an iteration's end, in terms of the placeholders (main graph).
     pub nexts: Box<[RvId]>,
+    /// The iteration-counter placeholder (`0..trip`), if the body reads the loop index.
+    pub index_ph: Option<RvId>,
     pub kinds: Box<[RvKind]>,
 }
 
