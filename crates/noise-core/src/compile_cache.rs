@@ -212,6 +212,39 @@ pub(crate) fn key(graph: &RvGraph, roots: &[RvId], gate: bool) -> Vec<u8> {
                 push_id(&mut out, *arr);
                 push_u32(&mut out, *k);
             }
+            // A Scan (G4c): serialize its shape (trip, inits, next-slots, kinds) and recurse into the
+            // body sub-graph via `key` itself — the same canonical form, keyed on the body's `nexts`.
+            // Two loops that differ anywhere (trip, a carried init, a body op) key differently.
+            RvNode::Scan { body } => {
+                out.push(12);
+                push_u32(&mut out, body.trip);
+                push_u32(&mut out, body.inits.len() as u32);
+                for &init in body.inits.iter() {
+                    push_id(&mut out, init);
+                }
+                for &nx in body.nexts.iter() {
+                    push_id(&mut out, nx);
+                }
+                for &k in body.kinds.iter() {
+                    out.push(match k {
+                        RvKind::Num => 0,
+                        RvKind::Bool => 1,
+                        RvKind::Arr(_) => 2,
+                    });
+                }
+                let bkey = key(&body.graph, &body.nexts, gate);
+                push_u32(&mut out, bkey.len() as u32);
+                out.extend_from_slice(&bkey);
+            }
+            RvNode::ScanOut { scan, slot } => {
+                out.push(13);
+                push_id(&mut out, *scan);
+                push_u32(&mut out, *slot);
+            }
+            RvNode::Placeholder { slot } => {
+                out.push(14);
+                push_u32(&mut out, *slot);
+            }
         }
     }
     push_u32(&mut out, roots.len() as u32);

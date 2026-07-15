@@ -350,10 +350,64 @@ pub enum RvNode {
         arr: RvId,
         k: u32,
     },
+    /// A re-rollable **loop** — the compact form of a `for` whose body threads loop-carried scalar
+    /// state (PLAN-WEBGPU G4c). `for prisoner … { … for hop … { box = boxes[box]; found = found ||
+    /// (box == prisoner) } … }` unrolls at eval time into a flat chain of thousands of dependent
+    /// nodes; on the GPU that chain is one gigantic dependent basic block whose shader compile is
+    /// super-linear (2.2 s for `prisoners`). This node keeps the loop instead: the CPU backends
+    /// **unroll it at lowering** (byte-for-byte the flat form they lower today, so nothing about the
+    /// interpreter's answer or draw stream changes), while the WGSL emitter rolls it into an actual
+    /// `for` loop over per-thread `var`s.
+    ///
+    /// The body is an encapsulated sub-graph so the main-graph walks (`cost`, `simplify`, ordinals)
+    /// see `Scan` as one opaque node; only the unroll/roll code looks inside. `ScanOut` reads a
+    /// carried slot's final value. See [`ScanBody`].
+    ///
+    /// **v1 scope:** the body draws nothing (no `~` inside the loop), so there are no per-iteration
+    /// source ordinals to thread — the sources it reads (a permutation, constants) live outside the
+    /// loop and are drawn once. A loop with an internal draw falls back to eval-time unrolling.
+    Scan {
+        body: Box<ScanBody>,
+    },
+    /// Final value of carried slot `slot` after a [`Scan`](RvNode::Scan) completes its `trip`
+    /// iterations. Distinct nodes per slot so a loop with several live outputs composes and dead
+    /// slots are dropped by DCE. `scan` must be a `Scan`; the kind is that slot's carried kind.
+    ScanOut {
+        scan: RvId,
+        slot: u32,
+    },
+    /// Inside a [`ScanBody`] sub-graph only: the value of carried slot `slot` at the *start* of an
+    /// iteration (the recurrence variable the body reads), or — for `slot == INDEX_SLOT` — the
+    /// iteration counter `0..trip`. Never appears in the main graph.
+    Placeholder {
+        slot: u32,
+    },
 }
 
+/// The body of a [`RvNode::Scan`]: a self-contained recurrence run `trip` times.
+///
+/// One id space per field is deliberate. `inits` are **parent-graph** ids (the carried slots' values
+/// before iteration 0). `graph` is the **body** sub-graph; its [`Placeholder`](RvNode::Placeholder)
+/// nodes stand for the carried slots at an iteration's start, and `nexts` are body ids giving each
+/// slot's value at the iteration's end — so slot `i` evolves `inits[i] → nexts[i][ph:=prev] → …`.
+/// `kinds[i]` is slot `i`'s value kind. To unroll: substitute placeholders with the previous
+/// iteration's values (or `inits` / the concrete index for iteration 0) and splice `graph` in, `trip`
+/// times. To roll (WGSL): one `var` per slot, initialised from `inits`, a `for` loop of `graph`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScanBody {
+    pub trip: u32,
+    pub graph: RvGraph,
+    pub inits: Box<[RvId]>,
+    pub nexts: Box<[RvId]>,
+    pub kinds: Box<[RvKind]>,
+}
+
+/// The [`Placeholder`](RvNode::Placeholder) slot that carries the iteration counter (`0..trip`)
+/// rather than a loop-carried variable. Chosen well above any real carried-slot count.
+pub const INDEX_SLOT: u32 = u32::MAX;
+
 /// Append-only arena. Structural sharing is REQUIRED for correctness.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct RvGraph {
     nodes: Vec<RvNode>,
     kinds: Vec<RvKind>, // parallel to `nodes`; kinds[id] is the value-kind of node id

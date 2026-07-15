@@ -239,6 +239,11 @@ fn collect_gather_tables(
                 stack.push(*arr);
                 stack.push(*index);
             }
+            // A Scan is interpreter-only (walk_cost declines), so this table-collection walk is never
+            // run on a graph the wasm backend will emit; keep it total over the carried inits.
+            RvNode::Scan { body } => stack.extend(body.inits.iter().copied()),
+            RvNode::ScanOut { scan, .. } => stack.push(*scan),
+            RvNode::Placeholder { .. } => {}
         }
     }
     (addrs, data)
@@ -536,6 +541,11 @@ fn emit_node(
         RvNode::Src(Source::Poisson { .. }) => unreachable!("profitable() excludes Poisson"),
         RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => {
             unreachable!("profitable() excludes the array-valued draw nodes")
+        }
+        // A Scan is interpreter-only (walk_cost declines), so the wasm codegen path is never taken
+        // for a cone containing one — the interpreter unrolls it instead.
+        RvNode::Scan { .. } | RvNode::ScanOut { .. } | RvNode::Placeholder { .. } => {
+            unreachable!("walk_cost excludes Scan from wasm codegen (G4c: interpreter unrolls it)")
         }
         // A shaped draw emits nothing — it owns an ordinal block, and only its readers draw. It is
         // never reached: `ArrElem` takes its recipe from the graph, not from an emitted parent.

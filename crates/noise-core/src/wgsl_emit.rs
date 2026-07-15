@@ -170,6 +170,13 @@ fn plan_blocks(graph: &RvGraph, roots: &[RvId]) -> Result<Plan, Unsupported> {
                 stack.push(*a);
                 stack.push(*b);
             }
+            // G4c: a Scan will roll into a WGSL loop (wired in the next step). For now decline so the
+            // GPU falls back to the interpreter — safe, and behaviourally identical to today since no
+            // Scan is produced yet.
+            RvNode::Scan { .. } | RvNode::ScanOut { .. } => return Err(Unsupported("scan")),
+            RvNode::Placeholder { .. } => {
+                unreachable!("Placeholder appears only inside a ScanBody sub-graph")
+            }
         }
     }
 

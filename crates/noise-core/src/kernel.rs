@@ -457,6 +457,14 @@ pub fn walk_cost(
                 stack.push(*a);
                 stack.push(*b);
             }
+            // A re-rollable loop (G4c): the interpreter unrolls it, so its codegen support is the
+            // interpreter's, not the JIT/wasm codegen path — those decline (return false) and let the
+            // interpreter take the whole cone. v1 Scans wrap a permutation read anyway, which is
+            // already interpreter-only, so this changes no backend choice.
+            RvNode::Scan { .. } | RvNode::ScanOut { .. } => return false,
+            RvNode::Placeholder { .. } => {
+                unreachable!("Placeholder appears only inside a ScanBody sub-graph")
+            }
         }
     }
     true
@@ -488,6 +496,8 @@ pub fn supported(graph: &RvGraph, root: RvId) -> bool {
         RvNode::Select { cond, a, b } => {
             supported(graph, *cond) && supported(graph, *a) && supported(graph, *b)
         }
+        // Interpreter-only: the CPU unrolls a Scan, the JIT/wasm codegen path declines it (G4c).
+        RvNode::Scan { .. } | RvNode::ScanOut { .. } | RvNode::Placeholder { .. } => false,
     }
 }
 
@@ -588,6 +598,22 @@ pub fn cost_roots(graph: &RvGraph, roots: &[RvId]) -> NodeCost {
                 stack.push(*arr);
                 stack.push(*index);
             }
+            // A re-rollable loop (G4c): the honest per-lane cost is the body run `trip` times, plus
+            // the initial values — exactly what the unrolled form charged, so the op budget (and thus
+            // the sample count) is unchanged whether the loop is rolled or not. The body is a separate
+            // sub-graph, priced by a recursive walk over its `nexts`.
+            RvNode::Scan { body } => {
+                let bc = cost_roots(&body.graph, &body.nexts);
+                c.ops += bc.ops.saturating_mul(u64::from(body.trip));
+                c.sources += bc.sources.saturating_mul(u64::from(body.trip));
+                for &init in body.inits.iter() {
+                    stack.push(init);
+                }
+            }
+            RvNode::ScanOut { scan, .. } => stack.push(*scan),
+            // A leaf inside a ScanBody (a carried value or the index); the recursive `cost_roots`
+            // above walks these when pricing the body.
+            RvNode::Placeholder { .. } => {}
         }
     }
     c
@@ -645,6 +671,15 @@ pub fn cone_size_roots(graph: &RvGraph, roots: &[RvId]) -> usize {
                 stack.push(*arr);
                 stack.push(*index);
             }
+            // A Scan is interpreter-only (walk_cost declines), so no wasm emitter sizes it; count it
+            // as its own node over the initial-value cones. Placeholders live only in the body.
+            RvNode::Scan { body } => {
+                for &init in body.inits.iter() {
+                    stack.push(init);
+                }
+            }
+            RvNode::ScanOut { scan, .. } => stack.push(*scan),
+            RvNode::Placeholder { .. } => {}
         }
     }
     seen.len()

@@ -921,6 +921,12 @@ fn ancestors(graph: &RvGraph, root: RvId) -> HashSet<RvId> {
                 stack.push(*index);
             }
             RvNode::ArrElem { arr, .. } => stack.push(*arr),
+            // A Scan's upstream dependencies are its loop-carried initial values (the body is a
+            // separate sub-graph — its inner nodes aren't main-graph ancestors). `ScanOut` reads a
+            // Scan; `Placeholder` never appears in the main graph.
+            RvNode::Scan { body } => stack.extend(body.inits.iter().copied()),
+            RvNode::ScanOut { scan, .. } => stack.push(*scan),
+            RvNode::Placeholder { .. } => {}
             RvNode::Src(_)
             | RvNode::ConstNum(_)
             | RvNode::ConstBool(_)

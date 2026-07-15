@@ -126,6 +126,15 @@ impl Builder {
                             push_child(*index);
                             push_child(*arr);
                         }
+                        // A Scan's main-graph operands are its carried initial values; the body is a
+                        // self-contained sub-graph copied verbatim at Emit.
+                        RvNode::Scan { body } => {
+                            for &init in body.inits.iter().rev() {
+                                push_child(init);
+                            }
+                        }
+                        RvNode::ScanOut { scan, .. } => push_child(*scan),
+                        RvNode::Placeholder { .. } => {}
                     }
                 }
                 Task::Emit(id) => {
@@ -189,6 +198,31 @@ impl Builder {
                         RvNode::ArrElem { arr, k } => {
                             let arr = self.done[arr];
                             self.arr_elem(arr, *k, kind)
+                        }
+                        // A Scan is a loop-shaped SOURCE-like node: remap its carried inits to the
+                        // simplified graph and copy the body sub-graph verbatim (it is small and
+                        // self-contained; simplifying across the loop boundary is a v2 nicety). Not
+                        // interned — two loops rarely coincide and a wrong merge would fuse distinct
+                        // recurrences.
+                        RvNode::Scan { body } => {
+                            let inits: Box<[RvId]> =
+                                body.inits.iter().map(|i| self.done[i]).collect();
+                            let new_body = crate::dist::ScanBody {
+                                trip: body.trip,
+                                graph: body.graph.clone(),
+                                inits,
+                                nexts: body.nexts.clone(),
+                                kinds: body.kinds.clone(),
+                            };
+                            self.out
+                                .push(RvNode::Scan { body: Box::new(new_body) }, kind)
+                        }
+                        RvNode::ScanOut { scan, slot } => {
+                            let scan = self.done[scan];
+                            self.out.push(RvNode::ScanOut { scan, slot: *slot }, kind)
+                        }
+                        RvNode::Placeholder { .. } => {
+                            unreachable!("Placeholder appears only inside a ScanBody sub-graph")
                         }
                     };
                     self.done.insert(id, new);

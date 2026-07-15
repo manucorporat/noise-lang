@@ -304,6 +304,17 @@ fn lower(
                         push_child(&mut stack, *index);
                         push_child(&mut stack, *arr);
                     }
+                    // A Scan's main-graph operands are its carried initial values (the body is
+                    // unrolled at Emit from its own sub-graph). `ScanOut` reads the Scan.
+                    RvNode::Scan { body } => {
+                        for &init in body.inits.iter().rev() {
+                            push_child(&mut stack, init);
+                        }
+                    }
+                    RvNode::ScanOut { scan, .. } => push_child(&mut stack, *scan),
+                    RvNode::Placeholder { .. } => {
+                        unreachable!("Placeholder appears only inside a ScanBody sub-graph")
+                    }
                 }
             }
             Task::Emit(id) => {
@@ -439,6 +450,12 @@ fn lower(
                             arr: a,
                             index: ri,
                         });
+                    }
+                    // G4c: the interpreter unrolls a Scan into the flat instruction stream (below).
+                    // These arms don't fit the one-inst-per-Emit shape, so they're handled specially
+                    // and never reach here — see the note. (Wired in the next step.)
+                    RvNode::Scan { .. } | RvNode::ScanOut { .. } | RvNode::Placeholder { .. } => {
+                        unreachable!("G4c Scan lowering not yet wired")
                     }
                 }
                 memo.insert(id, dst);

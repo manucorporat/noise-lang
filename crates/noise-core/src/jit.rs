@@ -737,6 +737,11 @@ fn emit_node(
         RvNode::Permutation { .. } | RvNode::Rotation { .. } | RvNode::ArrIndex { .. } => {
             unreachable!("profitable() excludes the array-valued draw nodes")
         }
+        // A Scan is interpreter-only (walk_cost declines), so the JIT codegen path is never taken
+        // for a cone containing one — the interpreter unrolls it (G4c).
+        RvNode::Scan { .. } | RvNode::ScanOut { .. } | RvNode::Placeholder { .. } => {
+            unreachable!("walk_cost excludes Scan from JIT codegen (G4c: interpreter unrolls it)")
+        }
         // A shaped draw emits nothing — it owns an ordinal block, and only its readers draw.
         RvNode::ArrDraw { .. } => unreachable!("ArrDraw emits no code; only its ArrElem readers do"),
         // Element `k` of a shaped draw: emitted as EXACTLY the scalar source it replaced, at
