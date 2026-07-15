@@ -1,12 +1,12 @@
 # PLAN-WEBGPU — the GPU as a fourth lowering of the RvGraph
 
-**Date:** 2026-07-13 · **Status: G0–G2 + G1b + G4a/G4b LANDED (2026-07-15). The GPU works, and
-turboquant now runs on it.**
-Native corpus **3935.6 ms → 1811.7 ms (2.17×)** with `--features jit,gpu`; **turboquant 19×**
-(1294→68 ms), `secretary` 12.2×, `barrier_option` 4.3×, `birthday` 2.1×, `am_vs_fm` 2.0×, and no
-regressions. Every node lowers except Poisson (declined) and `prisoners`' unrolled cycle-following
-(a pathological compile — needs loop re-rolling). Remaining: **G3** (browser host), **G4c** (re-roll
-`prisoners`, the heaviest remaining at 851 ms; Poisson; joint kernels).
+**Date:** 2026-07-13 · **Status: G0–G2 + G1b + G4a/G4b/G4c LANDED (2026-07-15). The GPU works;
+turboquant and prisoners both run on it.**
+Native corpus **3935.6 ms → 873.0 ms (4.5×)** with `--features jit,gpu`; **prisoners 304×**
+(851→2.8 ms), **turboquant 19×** (1294→68 ms), `secretary` 12.2×, `barrier_option` 4.3×, and no
+regressions. Every node now lowers except Poisson (declined) and draws inside a rolled loop (fall
+back to unrolling). Remaining: **G3** (browser host — where the GPU speedup should be worth far more
+than on already-fast native), and an optional **G4d** (Poisson, joint kernels, draws-in-loop).
 **Depends on PLAN-PREGPU** (complete), which moved every cross-backend decision out of this plan —
 the GPU lands as just another backend under one shared contract.
 
@@ -414,12 +414,31 @@ decision, not a surprise.
   a heavy tail to ~1e-3 on the near-singular lanes — harmless for a Monte Carlo expectation, and the
   interpreter test now checks the RMS residual plus a generous cap rather than a tail-sensitive max.
 
-- **G4c — re-roll `prisoners` (and the divergent tail).** Structured control flow carried past
-  graph-build, so the cycle-following `for` becomes a WGSL loop instead of ~15k unrolled reads (the
-  general form of what `ArrDraw` did for shaped draws). This is the only way `prisoners` (851 ms,
-  still the heaviest remaining) reaches the GPU — its shader is otherwise a 2.2 s pathological
-  compile. Also here: Knuth `Poisson` as a legal divergent loop, GPU-side moments reduction, joint
-  (multi-root) kernels for the introspection drivers.
+- **G4c — re-roll `prisoners`. ✅ LANDED (2026-07-15). 851 ms → 2.8 ms (304×).** A `for` loop is
+  captured as a single `RvNode::Scan` at eval time instead of unrolling, so the cycle-following
+  becomes one WGSL loop rather than ~15k dependent reads — turning a 2.2 s pathological shader into a
+  handful of statements the gate takes naturally. **Corpus 1812 ms → 873 ms, i.e. 3935 ms → 873 ms =
+  4.5× over the original CPU baseline.**
+
+  The mechanism that made it tractable: a loop-carried variable's placeholder is just an ordinary
+  `Value::Dist` RV node, so binding every carried var (and, for a `0..n` iterator, the index) to a
+  fresh `RvNode::Placeholder` and evaluating the body **once** reads the recurrence back directly.
+  Carried slots are found by an AST walk of the body's assignments; nested loops fall out of
+  recursion. Capture is best-effort with a clean fallback to unrolling for anything outside v1 — a
+  draw inside the loop, a non-scalar accumulator, the index over a non-`0..n` iterator, or an
+  emission (a `Print` is a per-iteration side effect one pass can't reproduce).
+
+  Two lowerings from the one node: `simplify::unroll_scans` expands it to the flat DAG for the CPU
+  **before** simplify, so the interpreter's answer and draw stream are byte-for-byte unchanged
+  (proved by `tests/loops_g4c.rs`: capture-on == capture-off bit-for-bit, over a pointer-chase, an
+  index-using accumulator, and the full doubly-nested prisoners); `wgsl_emit::emit_scan` rolls it
+  into a `for` loop for the GPU, hoisting loop-invariant sources (the permutation is drawn once) and
+  binding placeholders to the loop `var`s. The one rule throughout: an invariant is built/drawn once
+  and shared; an index/carried-dependent node is rebuilt per iteration.
+
+  Still open (a smaller G4d if wanted): Knuth `Poisson` as a legal divergent loop, GPU-side moments
+  reduction, joint (multi-root) kernels for the introspection drivers, and draws *inside* a rolled
+  loop (v1 falls back to unrolling those).
 
 ## Would it be worth it? The numbers
 
