@@ -93,6 +93,45 @@ joint n=76923 ops/draw=315         →  96 ms  (plot::fan(path) — 52 weekly po
 (3868 ms corpus) to 937 ms warm — a 4.1× speedup for every real user — at a cost of ~3.5 M binary
 and a cold pipeline-compile tax on heavy programs (D4e).
 
+## D4a — gate recalibration (landed, −27 ms)
+
+`MIN_CONE_OPS` 100 → 45, re-derived from the confusion matrix (bootstrap tops at 41 ops/draw and
+loses on GPU; beta_bernoulli starts at 47 and wins). Corpus 936.8 → 909.7 ms. beta_bernoulli −24.3,
+noise_colors −5.8, st_petersburg −2.4, barrier_option −1.2; no real regression. See the D4a commit.
+
+## D3a — L1-tiling: **attempted, measured a regression, reverted**
+
+Implemented `run_batch` tiling (TILE=256, bit-identical — the wasm-vs-interp conformance stayed
+byte-exact) and measured it: **+28.7 ms on the gpu-build corpus** (am_vs_fm +6.6, noise_colors +7.6,
+st_petersburg +7.1, barrier_option +3.4). Reverted.
+
+**Why it regressed — the plan's D3a/D3b ordering is backwards for this codebase.** With
+one-register-per-node (no liveness reuse — `bytecode::compile` allocates a fresh register per graph
+node, D3b deferred since Phase 4), the dominant CPU cones are the *wide* plot/joint ones: am_vs_fm's
+`plot::line` cone is ~882 registers. Its full-batch working set is 882 × 4 KB = **3.5 MB**; a 256-lane
+tile is still 882 × 1 KB = **882 KB**, which *does not fit L1* either (128 KB on M4). So tiling buys
+no L1 locality on exactly the cones that dominate — it only adds the 4× instruction-walk overhead of
+re-scanning the instruction list per tile. Tiling *does* help narrow cones (beta_bernoulli ~47 regs →
+47 KB tile fits L1), but those are now on the GPU (D4a) or small in the total.
+
+**D3b is a prerequisite for D3a, not a multiplier.** Register-liveness reuse would shrink the *live*
+set from n_regs (hundreds, mostly dead) to ~10–50, making a 256-lane tile's working set ~50 KB —
+comfortably L1-resident — at which point tiling pays. The correct sequence is **D3b then D3a**, a
+larger change than D3a alone. Left as documented follow-up; the tiling patch is in this session's
+scratchpad + git reflog if D3b lands.
+
+## D4b / noise_colors −119 ms — gated behind cold-compile safety (D4e)
+
+The confusion matrix's biggest single gap is noise_colors (forced 113.9 vs gated 232.7, −119): the
+gate declines its two ~12,206-instr cones via `MAX_WGSL_INSTRS=8000`, and forcing them onto the GPU
+wins 2× **warm**. But those two shaders cost ~1 s each to *cold*-compile (G0's super-linear pipeline
+curve), so raising the cap would take a cold `noise noise_colors.noise` from 0.86 s (D2) to ~2.9 s —
+a real regression for the shipped CLI, which runs cold. So this win is **gated behind D4e** (disk
+pipeline cache) or a true D4b joint kernel (one shader for all roots, compiled once). Not a safe
+standalone change now. The other D4b prize — routing the CPU-only `for_each_joint_batch` plot passes
+(am_vs_fm 200 ms, barrier 96 ms) through a GPU joint driver — is a substantial new code path
+(multi-column dispatch + per-column fold under the two-tier contract); scoped, not yet built.
+
 ## D0 deliverable status
 - [x] Per-forcing phase timers behind `NOISE_PROFILE=1` — `crate::profile`, wired into
   `reduce::run_reduction`, `gpu::try_reduce` (simplify/emit/gate+reason/pipeline hit-miss/dispatch/
