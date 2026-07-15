@@ -24,9 +24,43 @@
 #![allow(dead_code)]
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ast::{BinOp, UnOp};
 use crate::bytecode::BATCH;
+
+/// **The configurable cost model** (PLAN-DROP-JIT, API note). Every codegen gate — the WASM emitter's
+/// [`profitable_roots`] and the native GPU's `gpu::profitable` — balances two things: whether the
+/// fused kernel is faster *per lane* (a runtime property) and whether a *single* forcing draws enough
+/// to refund *compiling* it (an amortization property). The second is a bet about how the artifact is
+/// used, and only the host knows the answer: a one-shot `noise file.noise` pays the compile once and
+/// must earn it back that run; an **interactive** host (the playground re-running as a slider moves, a
+/// JS caller sweeping inputs) reuses the same pipeline across many runs, so the compile is amortized
+/// and the GPU is worth it whenever its *runtime* wins — even for a short forcing.
+///
+/// When this is set, the gates drop the amortization term and keep only the runtime terms (`ops/draw`
+/// fatness, the joint per-root term). They do NOT drop the cold-compile *feasibility* cap
+/// (`MAX_WGSL_INSTRS`): a shader that takes seconds to compile blocks the first run no matter how it
+/// is reused, and — until inputs lower as shader *uniforms* rather than baked constants (see the API
+/// note in `plans/`) — changing an input still recompiles, so a giant shader would pay that cost on
+/// every slider drag. Off by default (one-shot). Set it from the host for an interactive session, or
+/// with `NOISE_PREFER_RUNTIME=1`.
+static PREFER_RUNTIME: AtomicBool = AtomicBool::new(false);
+
+/// Set the cost model to prefer codegen runtime over one-shot compile amortization (see
+/// [`PREFER_RUNTIME`]). Idempotent; process-wide, like the rest of the backend policy.
+pub fn set_prefer_runtime(on: bool) {
+    PREFER_RUNTIME.store(on, Ordering::Relaxed);
+}
+
+/// Whether the cost model prefers codegen runtime (see [`set_prefer_runtime`]). Also honors
+/// `NOISE_PREFER_RUNTIME=1` (read once) so a host or a bench can flip it without code.
+pub fn prefer_runtime() -> bool {
+    use std::sync::OnceLock;
+    static ENV: OnceLock<bool> = OnceLock::new();
+    PREFER_RUNTIME.load(Ordering::Relaxed)
+        || *ENV.get_or_init(|| std::env::var("NOISE_PREFER_RUNTIME").is_ok_and(|v| v == "1"))
+}
 use crate::dist::{RvGraph, RvId, RvNode, Source};
 
 /// Number of independent xoshiro streams a kernel interleaves (samples emitted per loop iteration).
@@ -282,8 +316,10 @@ pub fn profitable_roots(
         return false;
     }
     // Codegen has to *pay for itself*. Everything above asks whether the fused kernel is faster per
-    // draw; this asks whether the query takes enough draws to refund *compiling* it.
-    draws >= min_draws
+    // draw; this asks whether the query takes enough draws to refund *compiling* it — the
+    // amortization term the configurable cost model drops for an interactive host that reuses the
+    // pipeline across runs (see [`prefer_runtime`]).
+    prefer_runtime() || draws >= min_draws
 }
 
 /// Minimum draws before the **WASM emitter** is worth emitting (see [`profitable`]'s `min_draws`).

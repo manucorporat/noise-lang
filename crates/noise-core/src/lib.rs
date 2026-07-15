@@ -127,6 +127,28 @@ pub fn run(src: &str) -> Result<Value> {
     Engine::new().run(src)
 }
 
+/// Configure the **codegen cost model** to prefer runtime over one-shot compile amortization.
+///
+/// Every codegen gate (the WASM emitter, the native WebGPU backend) weighs two things: whether the
+/// fused kernel is faster *per lane*, and whether a *single* forcing draws enough to refund
+/// *compiling* it. The second is a bet about how the artifact is used. A one-shot `noise file.noise`
+/// must earn the compile back in that run (the default, `on = false`). An **interactive** host — the
+/// playground re-running as a slider moves, a JS caller sweeping inputs — reuses the same pipeline
+/// across many runs, so the compile is amortized and codegen is worth it whenever its *runtime* wins,
+/// even for a short forcing. Call this with `on = true` from such a host (or set
+/// `NOISE_PREFER_RUNTIME=1`).
+///
+/// It drops only the amortization term; the runtime terms and the cold-compile *feasibility* cap
+/// always hold. Process-wide and idempotent.
+///
+/// **Caveat for input-driven interactivity:** changing an `input::real(…)` value currently recompiles
+/// the kernel (the value bakes into the shader as a constant), so the amortization this unlocks only
+/// pays across re-runs that keep the same shader — reusing the identical program, or once inputs lower
+/// as shader *uniforms* (a planned change; see the API note in `plans/`).
+pub fn set_prefer_runtime(on: bool) {
+    kernel::set_prefer_runtime(on);
+}
+
 /// Force every gated forcing onto the WebGPU backend, bypassing its profitability gate.
 ///
 /// For the GPU test suite and the benchmark harness only. Without it those tests would pass

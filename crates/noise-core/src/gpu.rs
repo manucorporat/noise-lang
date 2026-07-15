@@ -115,11 +115,16 @@ fn emitted_instrs(wgsl: &str) -> usize {
 /// [`MIN_CONE_OPS`] for the calibration this is built on.
 ///
 /// Three terms, because a GPU forcing has three ways to lose: a cone too big to compile, a cone too
-/// *thin* to be worth dispatching, and a forcing too short to earn the compile back.
+/// *thin* to be worth dispatching, and a forcing too short to earn the compile back. The **configurable
+/// cost model** ([`crate::kernel::prefer_runtime`]) drops that last (amortization) term for an
+/// interactive host that reuses the pipeline across runs — a fat cone then goes to the GPU even for a
+/// short forcing, because its *runtime* wins and the compile is paid once. The feasibility cap
+/// (`MAX_WGSL_INSTRS`) and the runtime term (`MIN_CONE_OPS`) always hold: a shader that takes seconds
+/// to compile blocks the first run regardless, and a thin cone is slower on the GPU however it is used.
 fn profitable(instrs: usize, ops_per_draw: u64, n: usize) -> bool {
-    instrs <= MAX_WGSL_INSTRS
-        && ops_per_draw >= MIN_CONE_OPS
-        && (n as f64 * ops_per_draw as f64) >= MIN_WORK_GPU
+    let work_ok = crate::kernel::prefer_runtime()
+        || (n as f64 * ops_per_draw as f64) >= MIN_WORK_GPU;
+    instrs <= MAX_WGSL_INSTRS && ops_per_draw >= MIN_CONE_OPS && work_ok
 }
 
 /// The gate decision with the reason the failing term (for `NOISE_PROFILE=1`, PLAN-DROP-JIT D0): the
@@ -130,13 +135,14 @@ fn gate_reason(instrs: usize, ops_per_draw: u64, n: usize) -> String {
         format!("gate: DECLINE — cone too big ({instrs} instrs > {MAX_WGSL_INSTRS})")
     } else if ops_per_draw < MIN_CONE_OPS {
         format!("gate: DECLINE — cone too thin ({ops_per_draw} ops/draw < {MIN_CONE_OPS})")
-    } else if (n as f64 * ops_per_draw as f64) < MIN_WORK_GPU {
+    } else if !crate::kernel::prefer_runtime() && (n as f64 * ops_per_draw as f64) < MIN_WORK_GPU {
         format!(
             "gate: DECLINE — work too small ({:.2e} < {MIN_WORK_GPU:.0e})",
             n as f64 * ops_per_draw as f64
         )
     } else {
-        format!("gate: ACCEPT — {instrs} instrs, {ops_per_draw} ops/draw, {n} draws")
+        let mode = if crate::kernel::prefer_runtime() { " (prefer-runtime)" } else { "" };
+        format!("gate: ACCEPT{mode} — {instrs} instrs, {ops_per_draw} ops/draw, {n} draws")
     }
 }
 
