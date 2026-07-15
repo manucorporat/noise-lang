@@ -1,13 +1,12 @@
 # PLAN-WEBGPU — the GPU as a fourth lowering of the RvGraph
 
-**Date:** 2026-07-13 · **Status: G0–G2 + G1b LANDED (2026-07-15). The GPU works, with no
-semantic holes left in it.**
-Native corpus **3935.6 ms → 2999.2 ms (1.31×)** with `--features gpu`; `barrier_option` 4.3×,
-`secretary` 12.2×, `birthday` 2.1×, `am_vs_fm` 2.0×, and no regressions. Every node the emitter
-*accepts* is now conformant for its whole domain — G1b closed the last exception (large-argument
-trig). Remaining: **G3** (browser host), **G4** (`Gather`/`Permutation`/`Rotation` — which is where
-`turboquant` and `prisoners`, still the two heaviest, finally move, and which is most of the
-remaining headroom).
+**Date:** 2026-07-13 · **Status: G0–G2 + G1b + G4a/G4b LANDED (2026-07-15). The GPU works, and
+turboquant now runs on it.**
+Native corpus **3935.6 ms → 1811.7 ms (2.17×)** with `--features jit,gpu`; **turboquant 19×**
+(1294→68 ms), `secretary` 12.2×, `barrier_option` 4.3×, `birthday` 2.1×, `am_vs_fm` 2.0×, and no
+regressions. Every node lowers except Poisson (declined) and `prisoners`' unrolled cycle-following
+(a pathological compile — needs loop re-rolling). Remaining: **G3** (browser host), **G4c** (re-roll
+`prisoners`, the heaviest remaining at 851 ms; Poisson; joint kernels).
 **Depends on PLAN-PREGPU** (complete), which moved every cross-backend decision out of this plan —
 the GPU lands as just another backend under one shared contract.
 
@@ -380,11 +379,47 @@ decision, not a surprise.
   exists (PREGPU Track A): the native `CancelToken` gives "check before each dispatch submission and
   abandon in-flight `mapAsync` readbacks", and the browser's `AbortSignal` already stops a run by
   terminating the worker — see the device-ownership cost noted in the async-bridge section above.
-- **G4 — exceed the CPU codegen.** `Gather` is plain array indexing in WGSL — this
-  unlocks `prisoners`, `empirical`, `block_bootstrap`, permutation programs that no CPU
-  codegen path will ever take. Knuth `Poisson` is a legal (divergent) loop bounded by
-  `POISSON_KNUTH_MAX`. GPU-side moments reduction. Joint (multi-root) kernels for the
-  introspection drivers.
+- **G4a — `Permutation` / `Gather` / `ArrIndex`, bit-identical. ✅ LANDED (2026-07-15).** All three
+  are integer draws (Fisher–Yates swaps, Lemire bounded draws, clamped index reads), so they lower
+  **bit-identically** to the interpreter — verified on device. `kernel::cell_stream_ordinals` is the
+  new shared id-order assignment of `CellStream` ordinals (replacing a DFS-emit-order counter, the
+  last traversal-dependent numbering — same brittleness `source_ordinals` removed; folds into the
+  numerics-v2 cut). `wgsl_emit` gains `cell_bits48`/`bounded48` in the prelude and a Fisher–Yates
+  fill; `ArrIndex`/`Gather` share one clamped, NaN-screened read matching `Inst::ArrIndex`.
+
+  **Corpus-neutral, and the finding is why.** `prisoners` lowers now but the gate correctly declines
+  it: its 100×50 cycle-following unrolls to ~15,000 *data-dependent* `ArrIndex` reads — one giant
+  dependent basic block, on which the Metal compiler goes **super-linear**: 2.2 s cold, vs 127 ms for
+  a 12k-instruction shader with ordinary parallelism. (A forced run showed "51 ms" only because the
+  timed pass hit the process-wide pipeline cache the untimed warm-up filled.) Moving `prisoners` needs
+  its cycle loop **re-rolled** into WGSL control flow — the loops are gone by the time the emitter
+  sees the DAG, the same problem `ArrDraw` solved for shaped draws — which is **G4c**, below.
+
+- **G4b — `Rotation` (turboquant). ✅ LANDED (2026-07-15). 1294 ms → 68 ms (19×).** Unlike
+  `prisoners`, a rotation's work is a *bounded loop* (d² normals + O(d³) Gram–Schmidt), so it emits a
+  **small** shader that compiles cheap — the gate takes turboquant naturally and the GPU crushes it.
+  **Corpus 3022 ms → 1812 ms**, i.e. **3935 ms → 1812 ms = 2.17×** over the original CPU baseline.
+
+  ⚠️ **Rotation is the one draw that is distribution-identical, not lane-identical — and that is a
+  measured fact, not a concession.** The interpreter's MGS used to run in f64 scratch (~1e-7
+  orthonormality); WGSL has no f64. The CPU rotation is now **also pure f32** (matching the GPU op for
+  op, keeping the lane type f32 everywhere rather than forking precision per backend; the f64
+  reference is in git history if ever wanted as an opt-in mode). Even so, **the two f32 rotations
+  diverge lane-for-lane by ~2.6e-2 on the worst lane**: MGS occasionally lands on a near-singular
+  Gaussian matrix where it is ill-conditioned, and there it turns the `ln`/`sin`/`cos` ULP gap
+  (built-ins vs `approx`) and FMA into a finite rotation of the output basis. So rotation *cannot* be
+  lane-for-lane on any two independent float implementations. What survives is what matters:
+  turboquant's b=1 distortion is **0.347221 on both**, identical to six digits, because any valid Haar
+  rotation gives the same distributional answer. f32 also loosens orthonormality to ~2e-5 typical with
+  a heavy tail to ~1e-3 on the near-singular lanes — harmless for a Monte Carlo expectation, and the
+  interpreter test now checks the RMS residual plus a generous cap rather than a tail-sensitive max.
+
+- **G4c — re-roll `prisoners` (and the divergent tail).** Structured control flow carried past
+  graph-build, so the cycle-following `for` becomes a WGSL loop instead of ~15k unrolled reads (the
+  general form of what `ArrDraw` did for shaped draws). This is the only way `prisoners` (851 ms,
+  still the heaviest remaining) reaches the GPU — its shader is otherwise a 2.2 s pathological
+  compile. Also here: Knuth `Poisson` as a legal divergent loop, GPU-side moments reduction, joint
+  (multi-root) kernels for the introspection drivers.
 
 ## Would it be worth it? The numbers
 
