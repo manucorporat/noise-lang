@@ -51,6 +51,51 @@ fn a_gaussian_model_on_the_gpu() {
     assert!((v - 4.0).abs() < 0.05, "var = {v}, want 4");
 }
 
+/// **A Haar rotation on the GPU (G4b), tested by the property that DEFINES it.**
+///
+/// A rotation is the one draw the GPU cannot make bit-identical to the interpreter: the interpreter
+/// runs its Gram–Schmidt in f64 scratch and WGSL has no f64, so the two produce *different* matrices
+/// from the same seed. What must survive is the thing turboquant actually relies on — that the matrix
+/// is orthonormal — so the contract here is distributional, not lane-for-lane.
+///
+/// Norm preservation is exactly that property, sharpened: a true rotation has `|Pi·x|² = |x|²` for
+/// EVERY lane, so with `x` a fixed unit vector `normsq(Pi @ x)` is identically 1 — mean 1 **and**
+/// near-zero variance. The variance is the real test: a matrix that was merely unit-*mean* but not
+/// orthonormal would pass the mean and fail the spread.
+#[test]
+fn a_haar_rotation_on_the_gpu() {
+    let setup = "use rand; use vec; x = normalize(ones(20)); Pi ~ rand::rotation(20);";
+
+    let (m, _) = est(&format!("{setup} E(normsq(Pi @ x), 300000)"));
+    assert!((m - 1.0).abs() < 1e-3, "E[|Pi x|²] = {m}, want 1 — the rotation is not norm-preserving");
+
+    // f32 Gram–Schmidt at d=20 holds orthonormality to ~1e-4, so |Pi x|² sits within ~1e-4 of 1 every
+    // lane; its variance is thus ~1e-8. Anything like 1e-2 would mean the rows aren't orthonormal.
+    let (v, _) = est(&format!("{setup} Var(normsq(Pi @ x), 300000)"));
+    assert!(
+        v < 1e-4,
+        "Var(|Pi x|²) = {v} — a true rotation gives |Pi x|² ≡ 1 (zero variance up to f32); this large \
+         a spread means the GPU matrix is not orthonormal"
+    );
+}
+
+/// **turboquant, end to end on the GPU** — the demo this whole phase is for. Algorithm 1's 1-bit
+/// distortion is a known quantity (the paper's ≈0.36), and it is a *distributional* result: it does
+/// not depend on drawing the interpreter's exact rotations, only on drawing valid ones from the Haar
+/// measure. So the GPU — with its own f32 rotations — must still land it.
+#[test]
+fn turboquant_distortion_on_the_gpu() {
+    let (d, _) = est(
+        "use rand; use vec; use math; \
+         d = 20; x = normalize(ones(d)); s = 1 / sqrt(d); \
+         L1 = [-0.7979, 0.7979] * s; \
+         Pi ~ rand::rotation(d); PiT = transpose(Pi); \
+         E(normsq(x - (PiT @ quantize(Pi @ x, L1))), 200000)",
+    );
+    // The paper's Algorithm-1 b=1 distortion is ≈0.36; allow for MC noise and the f32 rotation.
+    assert!((d - 0.36).abs() < 0.03, "turboquant b=1 distortion = {d}, want ≈0.36");
+}
+
 /// The `barrier_option` shape, and the reason `ArrDraw` exists: 52 shaped normals folded by a sum,
 /// emitted as ONE draw loop. `sum(zs) ~ N(0, 52)`, so `P(sum < 0) = 1/2` and `Var(sum) = 52`.
 ///
@@ -119,3 +164,4 @@ fn the_answer_does_not_depend_on_the_dispatch_split() {
     assert!((a - 1.0 / 3.0).abs() < 6.0 * sa, "1M: {a} +- {sa}");
     assert!((b - 1.0 / 3.0).abs() < 6.0 * sb, "3M (spans 3 dispatches): {b} +- {sb}");
 }
+

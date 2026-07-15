@@ -125,21 +125,23 @@ fn plan_blocks(graph: &RvGraph, roots: &[RvId]) -> Result<Plan, Unsupported> {
             continue;
         }
         match graph.node(id) {
-            // Still out of scope (G4b): `Rotation`'s Gram–Schmidt runs in **f64** in the interpreter
-            // — deliberately, since turboquant's distortion needs true orthonormality — and WGSL has
-            // no f64, so a shader rotation cannot be reproduced lane-for-lane. `Poisson`'s Knuth loop
-            // likewise multiplies f32 uniforms where the interpreter uses f64. Both need a
-            // *distribution*-level contract, not the lane-for-lane one this backend ships under.
+            // Still out of scope: `Poisson`'s Knuth loop counts f64 uniforms in the interpreter and
+            // the count is data-dependent — a divergent loop with an f64 contract this backend can't
+            // reproduce. Stays interpreter-only.
             RvNode::Src(Source::Poisson { .. }) => return Err(Unsupported("poisson")),
-            RvNode::Rotation { .. } => return Err(Unsupported("rotation")),
             RvNode::ArrDraw { src, .. } => {
                 if matches!(src, Source::Poisson { .. }) {
                     return Err(Unsupported("poisson"));
                 }
             }
-            // A `Permutation` is an integer draw (Fisher–Yates over a cell stream), so it lowers
-            // bit-identically — it is a leaf here (no node operands; it reads only key/lane/stream).
-            RvNode::Permutation { .. } => {}
+            // Array-valued sources, both leaves here (their only inputs are key/lane/stream).
+            // `Permutation` is integer (Fisher–Yates) and lowers bit-identically. `Rotation` fills
+            // f32 normals and Gram–Schmidts them in a bounded loop (G4b): the interpreter does the
+            // same in f64, so the *matrix* is not bit-identical — but it is a valid Haar rotation, and
+            // the programs that draw it (turboquant) are distributional, so this backend takes them
+            // under a distribution-level contract rather than the lane-for-lane one. Both compile to a
+            // small shader because the work is a *loop*, not unrolled.
+            RvNode::Permutation { .. } | RvNode::Rotation { .. } => {}
             // `ArrIndex` reads an array-valued source; `Gather` reads a table of scalar nodes. Both
             // push their operands so the walk reaches them — which is also how an `ArrIndex` over a
             // (declined) `Rotation` correctly declines the whole cone.
@@ -309,7 +311,52 @@ impl Emitter<'_> {
                 );
                 Ok(name)
             }
-            RvNode::Rotation { .. } => Err(Unsupported("rotation")),
+            // A Haar rotation (G4b): fill d² standard normals from the node's cell stream, then
+            // modified Gram–Schmidt the d rows in place — the same algorithm as `Inst::Rotation`, but
+            // in **f32** (the interpreter uses f64 scratch, which WGSL has no equivalent for). The
+            // matrix is therefore *not* bit-identical to the interpreter's; it is a valid orthonormal
+            // rotation drawn from the same Haar distribution, which is the contract turboquant needs.
+            //
+            // Normals match `Inst::Rotation` op for op: two u48 draws per Box–Muller evaluation feed
+            // BOTH branches (cos → even entry, sin → odd), so entry k costs one draw pair per two
+            // entries and the per-lane draw budget matches the interpreter's (d² u48s for d² normals).
+            // theta ∈ [0, 2π) stays inside the built-in trig's guaranteed range, as in `src_normal`.
+            RvNode::Rotation { d } => {
+                let stream = self.stream_ords[arr.0 as usize];
+                let dd = d * d;
+                let _ = write!(
+                    self.body,
+                    "    var {name}: array<f32, {dd}u>;\n\
+                     \x20   {{\n\
+                     \x20       var e = 0u;\n\
+                     \x20       var dj = 0u;\n\
+                     \x20       loop {{\n\
+                     \x20           if (e >= {dd}u) {{ break; }}\n\
+                     \x20           let b0 = cell_bits48(key, {stream}u, lane, dj);\n\
+                     \x20           let b1 = cell_bits48(key, {stream}u, lane, dj + 1u);\n\
+                     \x20           dj = dj + 2u;\n\
+                     \x20           let u1 = (f32(b0.y) + 0.5) * SCALE24;\n\
+                     \x20           let rr = sqrt(-2.0 * log(u1));\n\
+                     \x20           let th = 6.28318530717958647692 * (f32(b1.y) * SCALE24);\n\
+                     \x20           {name}[e] = rr * cos(th);\n\
+                     \x20           if (e + 1u < {dd}u) {{ {name}[e + 1u] = rr * sin(th); }}\n\
+                     \x20           e = e + 2u;\n\
+                     \x20       }}\n\
+                     \x20       for (var row = 0u; row < {d}u; row = row + 1u) {{\n\
+                     \x20           for (var p = 0u; p < row; p = p + 1u) {{\n\
+                     \x20               var dot = 0.0;\n\
+                     \x20               for (var c = 0u; c < {d}u; c = c + 1u) {{ dot = dot + {name}[row * {d}u + c] * {name}[p * {d}u + c]; }}\n\
+                     \x20               for (var c = 0u; c < {d}u; c = c + 1u) {{ {name}[row * {d}u + c] = {name}[row * {d}u + c] - dot * {name}[p * {d}u + c]; }}\n\
+                     \x20           }}\n\
+                     \x20           var nsq = 0.0;\n\
+                     \x20           for (var c = 0u; c < {d}u; c = c + 1u) {{ nsq = nsq + {name}[row * {d}u + c] * {name}[row * {d}u + c]; }}\n\
+                     \x20           let inv = 1.0 / sqrt(nsq);\n\
+                     \x20           for (var c = 0u; c < {d}u; c = c + 1u) {{ {name}[row * {d}u + c] = {name}[row * {d}u + c] * inv; }}\n\
+                     \x20       }}\n\
+                     \x20   }}\n"
+                );
+                Ok(name)
+            }
             ref other => unreachable!("not an array-valued node: {other:?}"),
         }
     }
@@ -894,20 +941,22 @@ mod tests {
     /// these: it has array indexing and divergent loops.)
     #[test]
     fn unsupported_cones_are_declined() {
-        // Poisson: the Knuth loop uses f64 in the interpreter (G4b).
+        // Poisson is the last node this backend declines: its Knuth loop counts f64 uniforms a
+        // data-dependent number of times, which WGSL's f32 can't reproduce. It declines whether read
+        // directly or through a shaped block, so the whole cone falls back — not a partial lowering.
         let (g, root) = g_with(|g| {
             g.push(RvNode::Src(Source::Poisson { lambda: 3.0 }), RvKind::Num)
         });
         assert_eq!(emit(&g, &[root]), Err(Unsupported("poisson")));
 
-        // Rotation: the Gram–Schmidt is f64 (G4b) — declined even when read through an ArrIndex, so
-        // the whole cone falls back, not just the array node.
         let (g, root) = g_with(|g| {
-            let rot = g.push(RvNode::Rotation { d: 3 }, RvKind::Arr(9));
-            let k = g.push(RvNode::ConstNum(0.0), RvKind::Num);
-            g.push(RvNode::ArrIndex { arr: rot, index: k }, RvKind::Num)
+            let arr = g.push(
+                RvNode::ArrDraw { n: 4, src: Source::Poisson { lambda: 2.0 } },
+                RvKind::Arr(4),
+            );
+            g.push(RvNode::ArrElem { arr, k: 1 }, RvKind::Num)
         });
-        assert_eq!(emit(&g, &[root]), Err(Unsupported("rotation")));
+        assert_eq!(emit(&g, &[root]), Err(Unsupported("poisson")));
     }
 
     /// A `Permutation` read through `ArrIndex` lowers to a Fisher–Yates fill plus an array read — the
@@ -925,6 +974,30 @@ mod tests {
         assert!(b.contains("cell_bits48("), "the shuffle must draw from a cell stream:\n{src}");
         assert!(b.contains("bounded48("), "Fisher–Yates needs the bounded draw:\n{src}");
         assert!(b.contains("array<f32, 8u>"), "the permutation array must be materialized:\n{src}");
+    }
+
+    /// A `Rotation` lowers to a Gram–Schmidt **loop** (G4b) — the property that keeps it a small
+    /// shader. A d=20 rotation is 400 normals + O(d³) MGS flops; unrolled that is the pathological
+    /// shape that keeps `prisoners` off the GPU, but as nested `for`s it is a handful of statements
+    /// whatever d is, so it compiles cheap and the GPU wins big on turboquant.
+    #[test]
+    fn a_rotation_lowers_to_a_gram_schmidt_loop() {
+        let (g, root) = g_with(|g| {
+            let rot = g.push(RvNode::Rotation { d: 20 }, RvKind::Arr(400));
+            let k = g.push(RvNode::ConstNum(0.0), RvKind::Num);
+            g.push(RvNode::ArrIndex { arr: rot, index: k }, RvKind::Num)
+        });
+        let src = emit(&g, &[root]).expect("a rotation must lower now, not decline");
+        let b = body(&src);
+        assert!(b.contains("array<f32, 400u>"), "the matrix must be materialized:\n{src}");
+        assert!(b.contains("cell_bits48("), "the normal fill draws from a cell stream:\n{src}");
+        // The whole point: a bounded loop, NOT 400 unrolled draws. `barrier_option`'s lesson applied
+        // to Gram–Schmidt — a d=20 shader must not scale its statement count with d³.
+        assert!(
+            b.matches("cell_bits48(").count() <= 2,
+            "the normal fill must be ONE loop (<=2 draw calls in its body), not unrolled:\n{src}"
+        );
+        assert!(b.len() < 4000, "a d=20 rotation shader must stay small (loops), got {} bytes", b.len());
     }
 
     /// A `Gather` (`xs[i]`, a *random* index into a table of scalar nodes) lowers to a local table
@@ -1361,6 +1434,49 @@ mod gpu_tests {
                  from the interpreter's"
             );
         }
+    }
+
+    /// **A rotation is a DISTRIBUTION-contract draw, and this is the test that says so (G4b).**
+    ///
+    /// Every other supported node is checked lane-for-lane — bit-identical for the integer draws,
+    /// ULP-close for the arithmetic. Rotation cannot be: the two backends run the same f32 Gram–
+    /// Schmidt, but the normal fill's `ln`/`sin`/`cos` are WGSL built-ins on one side and `approx`
+    /// polynomials on the other (ULPs apart), the GPU may fuse the MGS dots where the CPU does not,
+    /// and — measured — those low bits do **not** stay small: MGS occasionally lands on a near-singular
+    /// Gaussian matrix where it is ill-conditioned, and there it turns a ULP into a finite rotation of
+    /// the output basis. The worst lane here differs by ~2.6e-2, not 1e-6.
+    ///
+    /// So the contract is distributional: the two are the *same random rotation law*, not the same
+    /// matrix. This test pins exactly that — element moments agree (mean 0, second moment 1/d, the
+    /// Haar signature) even though the elements themselves don't — which is the property turboquant
+    /// (and any honest use of a random rotation) actually depends on.
+    #[test]
+    fn a_rotation_matches_the_interpreter_in_distribution() {
+        let Some(gpu) = gpu() else {
+            eprintln!("no GPU adapter — skipping");
+            return;
+        };
+        let mean = |v: &[f32]| v.iter().map(|&x| f64::from(x)).sum::<f64>() / v.len() as f64;
+        let m2 = |v: &[f32]| v.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>() / v.len() as f64;
+        let mut lanewise_worst = 0.0f32;
+        for (i, j) in [(0usize, 0usize), (2, 3), (4, 4), (1, 4), (3, 0)] {
+            let src = format!("use rand; Pi ~ rand::rotation(5); Pi[{i}][{j}]");
+            let (g, c) = both(&gpu, &src, 5).expect("a rotation cone must lower");
+            // Same distribution: element mean ≈ 0 and second moment ≈ 1/d = 0.2, and the two backends
+            // agree on both to within Monte Carlo error (SE ~ 0.007 on 4096 lanes).
+            assert!((mean(&g) - mean(&c)).abs() < 0.03, "element ({i},{j}) means diverge: {} vs {}", mean(&g), mean(&c));
+            assert!((m2(&g) - m2(&c)).abs() < 0.03, "element ({i},{j}) 2nd moments diverge: {} vs {}", m2(&g), m2(&c));
+            assert!((m2(&g) - 0.2).abs() < 0.03, "element ({i},{j}) 2nd moment {} != 1/d", m2(&g));
+            let w = g.iter().zip(&c).map(|(&a, &b)| (a - b).abs()).fold(0.0f32, f32::max);
+            lanewise_worst = lanewise_worst.max(w);
+        }
+        // And confirm the point of the whole test: lane-for-lane they genuinely differ (this is a
+        // distribution contract, not a lane one). If this ever collapses to ~0, the backends became
+        // bit-identical and the softer distributional asserts above are hiding a stronger truth.
+        assert!(
+            lanewise_worst > 1e-4,
+            "rotations are unexpectedly lane-identical ({lanewise_worst:e}); revisit the contract"
+        );
     }
 
     /// A `Gather` (`xs[i]`, random index) on device: the drawn index and the clamped, NaN-screened

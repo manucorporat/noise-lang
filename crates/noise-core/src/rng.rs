@@ -207,48 +207,6 @@ impl CellStream {
     pub fn next_bounded(&mut self, count: u64) -> u64 {
         ((self.next_u48() as u128 * count as u128) >> 48) as u64
     }
-
-    /// Bulk-fill `out` with the exact u48 stream [`next_u48`] yields, through a hot loop
-    /// whose iterations are independent (one squares64 each) — this is what lets a
-    /// `Rotation`'s per-lane Gaussian seed overlap its multiply chains instead of
-    /// serializing through the scalar path (PLAN-PERF-3 item 1).
-    pub fn fill_u48s(&mut self, out: &mut [u64]) {
-        debug_assert!(
-            self.j as usize + out.len() <= CELL_STREAM_MAX_DRAWS as usize,
-            "cell stream over its draw budget"
-        );
-        for x in out.iter_mut() {
-            *x = draw48(self.key, self.base + self.j as u64);
-            self.j += 1;
-        }
-    }
-
-    /// Bulk normals: pair `t` of `out` comes from u48s `2t`/`2t+1` — one Box–Muller
-    /// evaluation yields BOTH branches (cos to the even slot, sin to the odd), so a
-    /// `Rotation`'s `d²` Gaussian seed costs one `ln` + one two-branch trig per TWO
-    /// entries, and the two-phase shape (u48s via [`fill_u48s`] into a reused caller
-    /// `scratch`, then independent pairs) lets the draw loop and the transcendental
-    /// chains overlap. `CellStream` is interpreter-only (Rotation / Permutation /
-    /// Poisson never reach codegen), so this consumption schedule has no cross-backend
-    /// parity constraint — but a future WGSL rotation kernel must mirror it.
-    pub fn fill_normals(&mut self, out: &mut [f64], scratch: &mut Vec<u64>) {
-        use std::f64::consts::TAU;
-        let pairs = out.len().div_ceil(2);
-        scratch.clear();
-        scratch.resize(2 * pairs, 0);
-        self.fill_u48s(scratch);
-        for (t, uu) in scratch.chunks_exact(2).enumerate() {
-            let u1 = (uu[0] as f64 + 0.5) * SCALE48;
-            let u2 = uu[1] as f64 * SCALE48;
-            let r = (-2.0 * crate::approx::ln(u1)).sqrt();
-            let theta = TAU * u2;
-            let k = 2 * t;
-            out[k] = r * crate::approx::cos(theta);
-            if k + 1 < out.len() {
-                out[k + 1] = r * crate::approx::sin(theta);
-            }
-        }
-    }
 }
 
 /// The two lanes' 24-bit draws of one pair — the shared head of every pair-shared fill.
@@ -660,18 +618,28 @@ mod tests {
         });
         time("fill_normal", &mut |c| fill_normal(key, 2, 0, 0.0, 1.0, c));
         time("fill_exp", &mut |c| fill_exp(key, 3, 0, 1.0, c));
-        // Rotation-style consumption: d²=256 normals per lane from one CellStream (bulk).
+        // Rotation-style consumption: d²=256 f32 normals per lane from one CellStream (the exact
+        // Box–Muller fill `Inst::Rotation` runs — two u48 draws per pair, 24-bit uniforms).
         let d2 = 256;
         let lanes = n / d2;
-        let mut scratch = Vec::new();
-        let mut fcol = vec![0.0f64; n]; // CellStream normals stay f64 (Rotation's MGS scratch)
+        const SCALE24: f32 = 1.0 / (1u32 << 24) as f32;
+        let mut fcol = vec![0.0f32; n];
         let t = Instant::now();
         for lane in 0..lanes as u32 {
             let mut s = CellStream::new(key, lane, 4);
-            s.fill_normals(
-                &mut fcol[lane as usize * d2..(lane as usize + 1) * d2],
-                &mut scratch,
-            );
+            let col = &mut fcol[lane as usize * d2..(lane as usize + 1) * d2];
+            let mut e = 0;
+            while e < d2 {
+                let hi0 = (s.next_u48() >> 24) as u32;
+                let hi1 = (s.next_u48() >> 24) as u32;
+                let r = (-2.0f32 * crate::approx::ln_f32((hi0 as f32 + 0.5) * SCALE24)).sqrt();
+                let theta = std::f32::consts::TAU * (hi1 as f32 * SCALE24);
+                col[e] = r * crate::approx::cos_f32(theta);
+                if e + 1 < d2 {
+                    col[e + 1] = r * crate::approx::sin_f32(theta);
+                }
+                e += 2;
+            }
         }
         let el = t.elapsed().as_secs_f64();
         std::hint::black_box(&fcol);

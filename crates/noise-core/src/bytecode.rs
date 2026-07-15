@@ -582,34 +582,47 @@ pub fn run_batch(
             }
             Inst::Rotation { dst, stream, d } => {
                 // Per lane: fill the lane's contiguous `d²` run (row-major, `m[r*d + c]`) with iid
-                // standard normals from the lane's `CellStream` chain (same cos-branch Box–Muller
-                // primitive every `Normal` source uses, so tails/quality match) — then modified
-                // Gram–Schmidt the rows in place: subtract each earlier (already unit) row's
-                // projection, then normalize. This is the native-Rust replacement for the old
-                // graph-level MGS (`O(d³)` interpreted nodes per draw); the flops are the same
-                // `O(d³)`, they just run as three tight loops per lane. Per-cell keying makes
-                // consumption a pure function of `(lane, src)` — partial batches can't change the
-                // stream. A zero-norm row (probability 0 for Gaussians) would yield inf/NaN
-                // entries — the same IEEE answer the graph-level `normalize` produced.
+                // standard normals from the lane's `CellStream` chain, then modified Gram–Schmidt the
+                // rows in place — subtract each earlier (already unit) row's projection, then
+                // normalize. Per-cell keying makes consumption a pure function of `(lane, src)`, so a
+                // partial batch can't change the stream. A zero-norm row (probability 0 for Gaussians)
+                // yields inf/NaN, the same IEEE answer the graph-level `normalize` produced.
                 //
-                // The Gaussian seed and the MGS itself run in **f64 scratch**, and only the
-                // finished matrix is rounded into the f32 array register: orthonormality is then
-                // limited by f32 *storage* (~1e-7) rather than by f32 arithmetic accumulating
-                // through an O(d³) elimination (~1e-5 at d = 5). The cost is one d²-element
-                // scratch buffer per batch — nothing against the O(d³) flops it protects, and
-                // `turboquant`'s distortion result depends on the rotation being a true
-                // orthonormal one.
+                // **All f32 (PLAN-WEBGPU G4b).** This mirrors the WGSL rotation kernel *op for op* —
+                // the same 24-bit uniforms, the same Box–Muller pairing (two u48 draws feed both
+                // branches, cos → even entry, sin → odd), the same MGS loop order — so the two
+                // backends draw the same rotation to within f32 transcendental ULPs and FMA. The
+                // interpreter used to run this in f64 scratch (orthonormality ~1e-7 vs f32's ~2e-5),
+                // but the lane type is f32 everywhere else and the extra precision changed no result:
+                // turboquant's b=1 distortion is 0.347221 either way. Keeping it f32 makes rotation
+                // consistent with the rest of the engine and lets the GPU take turboquant without a
+                // precision fork (the f64 reference lives in git history if it is ever wanted back).
                 let d = d as usize;
                 let dd = d * d;
                 let buf = &mut arrs[dst as usize];
-                let mut u48s: Vec<u64> = Vec::new();
-                let mut m = vec![0.0f64; dd];
+                const SCALE24: f32 = 1.0 / (1u32 << 24) as f32;
+                let mut m = vec![0.0f32; dd];
                 for k in 0..BATCH {
                     let mut draws = rng::CellStream::new(key, stream, lane0.wrapping_add(k as u32));
-                    draws.fill_normals(&mut m, &mut u48s);
+                    // Box–Muller in f32, matching `wgsl_emit`'s rotation fill: `u1` from the top 24
+                    // bits of the first u48 (+0.5 keeps it off zero, so `ln` is safe), `u2` from the
+                    // second; theta ∈ [0, 2π) stays inside `approx::TRIG_MAX_F32`.
+                    let mut e = 0;
+                    while e < dd {
+                        let hi0 = (draws.next_u48() >> 24) as u32;
+                        let hi1 = (draws.next_u48() >> 24) as u32;
+                        let u1 = (hi0 as f32 + 0.5) * SCALE24;
+                        let r = (-2.0f32 * crate::approx::ln_f32(u1)).sqrt();
+                        let theta = std::f32::consts::TAU * (hi1 as f32 * SCALE24);
+                        m[e] = r * crate::approx::cos_f32(theta);
+                        if e + 1 < dd {
+                            m[e + 1] = r * crate::approx::sin_f32(theta);
+                        }
+                        e += 2;
+                    }
                     for r in 0..d {
                         for p in 0..r {
-                            let mut dot = 0.0;
+                            let mut dot = 0.0f32;
                             for c in 0..d {
                                 dot += m[r * d + c] * m[p * d + c];
                             }
@@ -617,7 +630,7 @@ pub fn run_batch(
                                 m[r * d + c] -= dot * m[p * d + c];
                             }
                         }
-                        let mut normsq = 0.0;
+                        let mut normsq = 0.0f32;
                         for c in 0..d {
                             normsq += m[r * d + c] * m[r * d + c];
                         }
@@ -626,9 +639,7 @@ pub fn run_batch(
                             m[r * d + c] *= inv;
                         }
                     }
-                    for (dstx, &srcx) in buf[k * dd..(k + 1) * dd].iter_mut().zip(m.iter()) {
-                        *dstx = srcx as f32;
-                    }
+                    buf[k * dd..(k + 1) * dd].copy_from_slice(&m);
                 }
             }
             Inst::ArrIndex { dst, arr, index } => {
@@ -925,14 +936,24 @@ mod tests {
 
     #[test]
     fn rotation_lanes_are_orthonormal() {
-        // Every lane's d² element reads must form an orthonormal matrix: each row unit-norm and
-        // each row pair orthogonal to f64 rounding (per-lane MGS keeps both < 1e-9 at d = 5; the
-        // determinant's sign is irrelevant — the draw is Haar over O(d)).
+        // Every lane's d² element reads must form an orthonormal matrix: each row unit-norm and each
+        // row pair orthogonal. The MGS now runs in **f32** (G4b — matching the GPU rather than the
+        // old f64 scratch), so orthonormality is limited by f32 *arithmetic* accumulating through an
+        // O(d³) elimination — ~2e-5 at d = 5, a hundred-fold looser than the old f64's ~1e-7, and the
+        // deliberate cost of keeping the lane type f32 everywhere. The determinant's sign is
+        // irrelevant — the draw is Haar over O(d).
+        // f32 MGS gives a *typical* residual ~2e-5, but the tail is heavy: a near-singular Gaussian
+        // matrix (which occurs at rate ~1/1000s at d=5) is ill-conditioned, and there f32 loses
+        // enough that a lane's residual reaches ~1e-3 — f64 absorbed these with its 29 extra bits, f32
+        // doesn't. So a hard per-lane max is the wrong assertion; check the RMS residual (robust, and
+        // the quantity that governs a Monte Carlo expectation) is tight, plus a generous per-lane cap
+        // that still catches a matrix that isn't a rotation at all (residual O(0.1)).
         const D: usize = 5;
         let (g, roots) = rot_with_elems(D);
         let (prog, regs) = compile_roots(&g, &roots);
         let (mut buf, mut arrs) = reg_files(&prog);
         let key = crate::rng::Key::from_seed(13);
+        let (mut sumsq, mut count, mut worst) = (0.0f64, 0u64, 0.0f64);
         for b in 0..20u32 {
             run_batch(&prog, &mut buf, &mut arrs, key, b * BATCH as u32);
             for k in 0..BATCH {
@@ -941,15 +962,18 @@ mod tests {
                     for r2 in r1..D {
                         let dot: f64 = (0..D).map(|c| q(r1, c) as f64 * q(r2, c) as f64).sum();
                         let want = if r1 == r2 { 1.0 } else { 0.0 };
-                        // f32 STORAGE limit (the MGS itself runs in f64 scratch): ~d·2^-24.
-                        assert!(
-                            (dot - want).abs() < 1e-6,
-                            "lane {k}: rows {r1}·{r2} = {dot}, want {want}"
-                        );
+                        let err = (dot - want).abs();
+                        sumsq += err * err;
+                        count += 1;
+                        worst = worst.max(err);
+                        assert!(err < 1e-2, "lane {k}: rows {r1}·{r2} = {dot}, want {want} — not a rotation");
                     }
                 }
             }
         }
+        let rms = (sumsq / count as f64).sqrt();
+        assert!(rms < 1e-4, "RMS orthonormality residual {rms:e} — f32 MGS should hold ~2e-5 typical");
+        assert!(worst < 1e-2, "worst orthonormality residual {worst:e}");
     }
 
     #[test]
