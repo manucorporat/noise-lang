@@ -5,8 +5,9 @@ turboquant and prisoners both run on it.**
 Native corpus **3935.6 ms → 873.0 ms (4.5×)** with `--features jit,gpu`; **prisoners 304×**
 (851→2.8 ms), **turboquant 19×** (1294→68 ms), `secretary` 12.2×, `barrier_option` 4.3×, and no
 regressions. Every node now lowers except Poisson (declined) and draws inside a rolled loop (fall
-back to unrolling). Remaining: **G3** (browser host — where the GPU speedup should be worth far more
-than on already-fast native), and an optional **G4d** (Poisson, joint kernels, draws-in-loop).
+back to unrolling). Remaining: **G3** (browser host — bridge DECIDED as (b) `Atomics.wait`, full spec
+below; needs a live isolated playground + Chrome-WebGPU session to build and verify), and an optional
+**G4d** (Poisson, joint kernels, draws-in-loop).
 **Depends on PLAN-PREGPU** (complete), which moved every cross-backend decision out of this plan —
 the GPU lands as just another backend under one shared contract.
 
@@ -392,13 +393,53 @@ decision, not a surprise.
   source *blocks* (white one, brown one, OU two, pink a pair per octave) took it to **1,177
   instructions**, and it — plus `am_vs_fm`, which shares the path — now lower. That is the second time
   the source count, not the node count, turned out to be what mattered.
-- **G3 — browser host.** `nz_gpu_*` inline-JS shim (device ownership, content-addressed
-  pipeline cache with the same LRU/liveness story as `nz_kernel_*`), the async engine's
-  `run_async` path (**this is where PREGPU A1–A2 gets built — G3 is their only consumer**),
-  playground wiring, feature-detect + silent fallback to today's wasm path. Cancellation already
-  exists (PREGPU Track A): the native `CancelToken` gives "check before each dispatch submission and
-  abandon in-flight `mapAsync` readbacks", and the browser's `AbortSignal` already stops a run by
-  terminating the worker — see the device-ownership cost noted in the async-bridge section above.
+- **G3 — browser host. ⏸ SPEC'D, NOT STARTED — bridge DECIDED (b, above). Do this in a session with
+  a live cross-origin-isolated playground + a Chrome that has WebGPU**, because every piece (the SAB
+  protocol, `mapAsync` timing, the main-thread device) is only verifiable in a browser — unlike the
+  native backend, which native Rust tests prove. `run_async`/PREGPU A1–A2 are **NOT needed** (that was
+  bridge (a); we chose (b)).
+
+  **The shared-memory protocol (engine worker ⇄ main thread).** One `SharedArrayBuffer`, laid out as a
+  header of `Int32Array` control words + a byte region:
+    - `[0] REQ` — worker sets 1 to ask for a dispatch, main clears to 0 when done.
+    - `[1] STATUS` — main writes 0 = ok, -1 = decline/fail before notifying.
+    - `[2] SHADER_LEN`, `[3] N`, `[4] K0`, `[5] K1`, `[6] LANE0`, `[7] OUT_LEN`.
+    - byte region: the WGSL text (utf-8, `SHADER_LEN` bytes), then the `OUT_LEN × 4` result bytes.
+
+    Worker (in the `nz_gpu_dispatch` shim, called synchronously from wasm mid-forcing): write the
+    shader + params into the SAB, `postMessage({type:'gpu'})` to the main thread, then
+    `Atomics.wait(ctrl, DONE, 1)`. Main thread's handler: read the request, run the **async** WebGPU
+    dispatch (content-addressed pipeline cache keyed on the shader text — same LRU/liveness as
+    `nz_kernel_*`), copy the result column into the SAB, set `STATUS`, `Atomics.store(ctrl, DONE, 0)`,
+    `Atomics.notify`. Worker wakes, reads the column, folds it with the ordinary reducer. **The fold
+    stays in wasm, so the answer is bit-identical to native.** `postMessage`-then-`wait` is safe: the
+    message is queued to the main thread's event loop before the worker blocks.
+
+  **Rust side (the verifiable half — mirrors native `gpu::try_reduce`).** A `#[cfg(target_arch =
+  "wasm32")]` `try_reduce` sharing the portable pieces (`simplify` → `wgsl_emit::emit` → `cost` →
+  `profitable`/`emitted_instrs`) and swapping the dispatch: an `extern "C"` `nz_gpu_available() -> i32`
+  (feature-detect: `crossOriginIsolated && navigator.gpu`), `nz_gpu_prepare(wgsl) -> i32` (compile +
+  cache the pipeline via the bridge, so a shader the driver rejects declines *before* the fold loop —
+  the same "decline, never fail" contract), and `nz_gpu_dispatch(wgsl, out, n, k0, k1, lane0) -> i32`
+  filling `out`. Gate it under the SAME `gpu` feature but split the module: native keeps wgpu, wasm
+  gets the shim. The reduce hook (`reduce.rs:134`) already fires for `feature = "gpu"`; it just needs
+  to be reachable on wasm32.
+
+  **JS side.** `pool.ts`/`worker.ts`: on the isolated (`wasm-mt`) path, the main thread creates the
+  SAB, acquires a WebGPU device once (owns it for the page's life), and installs the `{type:'gpu'}`
+  message handler; the worker gets the SAB at init. `astro.config.mjs` needs a tiny dev-only Vite
+  plugin setting `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy:
+  require-corp` (production already sets them in `netlify.toml`). Feature-detect + silent fallback to
+  today's wasm kernel on any non-isolated / no-WebGPU / declined path.
+
+  **Build & test.** `build-wasm.sh` gains a `wasm-mt` variant with `--features wasm-threads,gpu`
+  (nightly, already the MT toolchain). Verify in Chrome: a GPU-eligible program (`pi`,
+  `barrier_option`, `prisoners`) runs on the GPU and matches the wasm-kernel answer; a declined one
+  (Poisson) falls back; abort (terminate the worker) leaves the main-thread device intact so the next
+  run re-attaches with no re-acquire.
+
+  **Cancellation** already exists (PREGPU Track A, terminate the worker); with the device on the main
+  thread the abort no longer discards it.
 - **G4a — `Permutation` / `Gather` / `ArrIndex`, bit-identical. ✅ LANDED (2026-07-15).** All three
   are integer draws (Fisher–Yates swaps, Lemire bounded draws, clamped index reads), so they lower
   **bit-identically** to the interpreter — verified on device. `kernel::cell_stream_ordinals` is the
