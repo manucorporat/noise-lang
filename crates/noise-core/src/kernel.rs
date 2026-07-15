@@ -108,6 +108,59 @@ pub fn source_ordinals(graph: &RvGraph) -> Vec<u32> {
 /// Ordinal of a node that draws nothing (see [`source_ordinals`]).
 pub const NO_SOURCE: u32 = u32::MAX;
 
+/// Assign every **cell-stream** node its ordinal — the `stream` argument [`rng::CellStream::new`]
+/// keys its counter region on. These are the draws that consume a *variable or per-lane-large*
+/// number of u48s and so cannot pair-share a single hash: Knuth [`Poisson`](RvNode::Src), the
+/// Fisher–Yates in [`Permutation`](RvNode::Permutation), the Gaussian seed of
+/// [`Rotation`](RvNode::Rotation). Indexed by `RvId`; [`NO_STREAM`] for every other node.
+///
+/// Same contract, and for the same reason, as [`source_ordinals`]: **id order, sequential**, so the
+/// assignment is a function of the graph and every backend agrees. It replaces a running counter
+/// that `bytecode::lower` incremented in DFS *emission* order — which made the stream a function of
+/// traversal, exactly the brittleness `source_ordinals` was created to remove (a `simplify` rewrite
+/// could renumber it). A cell stream and a plain source draw from disjoint counter regions
+/// (`CellStream`'s `base` sets bit 63), so the two ordinal spaces are independent — a `Poisson` node
+/// carries one of each.
+pub fn cell_stream_ordinals(graph: &RvGraph) -> Vec<u32> {
+    let mut ord = vec![NO_STREAM; graph.len()];
+    let mut next: u32 = 0;
+    for i in 0..graph.len() {
+        let id = RvId(i as u32);
+        // A shaped Poisson (`~[n] poisson`) is an `ArrDraw` whose every element is an independent
+        // Knuth draw, so it owns a *contiguous block of `n` streams* — the same block shape
+        // `source_ordinals` uses. Its element `k` reads stream `base + k` (see [`elem_stream`]).
+        // No other recipe an `ArrDraw` can hold needs a stream, and `Permutation`/`Rotation` are
+        // array-valued sources of their own (never shaped), so each takes exactly one.
+        let take = match graph.node(id) {
+            RvNode::Src(Source::Poisson { .. })
+            | RvNode::Permutation { .. }
+            | RvNode::Rotation { .. } => 1,
+            RvNode::ArrDraw { n, src: Source::Poisson { .. } } => *n,
+            _ => 0,
+        };
+        if take > 0 {
+            ord[i] = next;
+            // `CellStream::new` debug-asserts `stream < 2^14`; keep the same ceiling here so an
+            // overflow surfaces as this named error rather than a counter-region collision.
+            next = next
+                .checked_add(take)
+                .filter(|&n| n < (1 << 14))
+                .expect("cell-stream ordinals exceeded the 2^14 region");
+        }
+    }
+    ord
+}
+
+/// Ordinal of a node with no cell stream (see [`cell_stream_ordinals`]).
+pub const NO_STREAM: u32 = u32::MAX;
+
+/// The cell-stream ordinal of an [`RvNode::ArrElem`] over a shaped-Poisson block: base plus index.
+pub fn elem_stream(stream_ords: &[u32], arr: RvId, k: u32) -> u32 {
+    let base = stream_ords[arr.0 as usize];
+    debug_assert_ne!(base, NO_STREAM, "ArrElem's parent is not a cell-stream block");
+    base + k
+}
+
 /// The draw ordinal of an [`RvNode::ArrElem`]: its parent block's base, plus the static index.
 pub fn elem_ordinal(ords: &[u32], arr: RvId, k: u32) -> u32 {
     let base = ords[arr.0 as usize];

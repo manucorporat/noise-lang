@@ -38,6 +38,14 @@ const CHUNK_SAMPLES: usize = 16 * crate::bytecode::BATCH;
 /// `u64`). G0 measured cold pipeline compile against exactly this quantity: ~5k instructions is
 /// ~325 ms, 17.6k is ~1.9 s, 45k is ~8.9 s. Past this ceiling the compile can no longer pay for
 /// itself no matter how many draws follow it.
+///
+/// **G4 sharpened this: a long chain of *statements* can be as costly as the sources.** `prisoners`
+/// lowers now (its permutation and gathers are supported), but its 100×50 cycle-following unrolls
+/// into ~15,000 data-dependent `ArrIndex` reads — one gigantic dependent basic block, on which the
+/// Metal compiler goes *super-linear*: 2.2 s cold, versus 127 ms for an 12k-instruction shader with
+/// ordinary parallelism. So the cap earns its keep on statement volume too, not only on draw calls,
+/// and `prisoners` is correctly declined — it needs the cycle loop *re-rolled* (structured control
+/// flow the IR doesn't yet carry past graph-build), which is G4c, not just node support.
 const MAX_WGSL_INSTRS: usize = 8_000;
 
 /// **The gate, calibrated against the corpus** (`example_times`, M4 Pro, `--features jit,gpu`).
@@ -253,7 +261,7 @@ pub fn try_reduce<R: Reducer>(
     // identical to what the interpreter would compute.
     let (g, root) = crate::simplify::simplify(graph, root);
     let Ok(wgsl) = wgsl_emit::emit(&g, &[root]) else {
-        return Ok(None); // Poisson / gather / permutation / rotation / explicit trig → CPU
+        return Ok(None); // Poisson / Rotation (f64 Gram–Schmidt) → CPU; see wgsl_emit::plan_blocks
     };
 
     let cost = crate::kernel::cost(&g, root);

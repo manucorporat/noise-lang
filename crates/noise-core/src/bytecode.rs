@@ -157,8 +157,8 @@ pub fn compile(graph: &RvGraph, root: RvId) -> Program {
     let mut insts: Vec<Inst> = Vec::new();
     let mut gathers: Vec<Box<[Reg]>> = Vec::new();
     let mut arrays: Vec<u32> = Vec::new();
-    let mut streams = 0u32;
     let ords = crate::kernel::source_ordinals(graph);
+    let stream_ords = crate::kernel::cell_stream_ordinals(graph);
     let root_reg = lower(
         graph,
         root,
@@ -167,7 +167,7 @@ pub fn compile(graph: &RvGraph, root: RvId) -> Program {
         &mut insts,
         &mut gathers,
         &mut arrays,
-        &mut streams,
+        &stream_ords,
         &ords,
     );
     Program {
@@ -194,10 +194,10 @@ pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
     let mut insts: Vec<Inst> = Vec::new();
     let mut gathers: Vec<Box<[Reg]>> = Vec::new();
     let mut arrays: Vec<u32> = Vec::new();
-    let mut streams = 0u32;
     // One ordinal map for the whole joint program, so a source shared by two roots draws ONE stream
     // — the property the joint drivers (`corr`, `scatter`) exist for.
     let ords = crate::kernel::source_ordinals(graph);
+    let stream_ords = crate::kernel::cell_stream_ordinals(graph);
     let regs: Vec<Reg> = roots
         .iter()
         .map(|&r| {
@@ -209,7 +209,7 @@ pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
                 &mut insts,
                 &mut gathers,
                 &mut arrays,
-                &mut streams,
+                &stream_ords,
                 &ords,
             )
         })
@@ -251,7 +251,7 @@ fn lower(
     insts: &mut Vec<Inst>,
     gathers: &mut Vec<Box<[Reg]>>,
     arrays: &mut Vec<u32>,
-    streams: &mut u32,
+    stream_ords: &[u32],
     ords: &[u32],
 ) -> Reg {
     if let Some(&reg) = memo.get(&id) {
@@ -332,8 +332,7 @@ fn lower(
                         insts.push(Inst::Exp { dst, src: ords[id.0 as usize], rate })
                     }
                     RvNode::Src(Source::Poisson { lambda }) => {
-                        let stream = *streams;
-                        *streams += 1;
+                        let stream = stream_ords[id.0 as usize];
                         insts.push(Inst::Poisson { dst, src: ords[id.0 as usize], stream, lambda });
                     }
                     RvNode::Src(Source::Geometric { p }) => {
@@ -364,8 +363,7 @@ fn lower(
                             Source::Exp { rate } => insts.push(Inst::Exp { dst, src, rate }),
                             Source::Geometric { p } => insts.push(Inst::Geometric { dst, src, p }),
                             Source::Poisson { lambda } => {
-                                let stream = *streams;
-                                *streams += 1;
+                                let stream = crate::kernel::elem_stream(stream_ords, arr, k);
                                 insts.push(Inst::Poisson { dst, src, stream, lambda });
                             }
                         }
@@ -420,8 +418,7 @@ fn lower(
                             .expect("bytecode exceeded 2^32 array registers");
                         arrays.push(n);
                         arr_memo.insert(id, a);
-                        let stream = *streams;
-                        *streams += 1;
+                        let stream = stream_ords[id.0 as usize];
                         insts.push(Inst::Permutation { dst: a, stream, n });
                     }
                     RvNode::Rotation { d } => {
@@ -432,8 +429,7 @@ fn lower(
                             .expect("bytecode exceeded 2^32 array registers");
                         arrays.push(d * d);
                         arr_memo.insert(id, a);
-                        let stream = *streams;
-                        *streams += 1;
+                        let stream = stream_ords[id.0 as usize];
                         insts.push(Inst::Rotation { dst: a, stream, d });
                     }
                     RvNode::ArrIndex { arr, index } => {

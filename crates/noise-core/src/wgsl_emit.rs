@@ -43,7 +43,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use crate::ast::{BinOp, UnOp};
-use crate::dist::{RvGraph, RvId, RvNode, Source};
+use crate::dist::{RvGraph, RvId, RvKind, RvNode, Source};
 use crate::kernel::{const_int_exponent, elem_ordinal, elem_source, source_ordinals};
 
 /// Invocations per workgroup. 64 = two SIMD groups on Apple silicon and a safe divisor everywhere.
@@ -68,12 +68,15 @@ pub struct Unsupported(pub &'static str);
 /// with every other backend — see [`source_ordinals`]).
 pub fn emit(graph: &RvGraph, roots: &[RvId]) -> Result<String, Unsupported> {
     let ords = source_ordinals(graph);
+    let stream_ords = crate::kernel::cell_stream_ordinals(graph);
     let plan = plan_blocks(graph, roots)?;
     let mut e = Emitter {
         graph,
         ords: &ords,
+        stream_ords: &stream_ords,
         plan,
         memo: HashMap::new(),
+        arrays_emitted: HashSet::new(),
         body: String::new(),
     };
 
@@ -122,17 +125,33 @@ fn plan_blocks(graph: &RvGraph, roots: &[RvId]) -> Result<Plan, Unsupported> {
             continue;
         }
         match graph.node(id) {
-            // Out of scope for G1 — the gate keeps them off this backend, and G4 is where the GPU
-            // *beats* the CPU codegen on exactly these (WGSL has array indexing and divergent loops).
+            // Still out of scope (G4b): `Rotation`'s Gram–Schmidt runs in **f64** in the interpreter
+            // — deliberately, since turboquant's distortion needs true orthonormality — and WGSL has
+            // no f64, so a shader rotation cannot be reproduced lane-for-lane. `Poisson`'s Knuth loop
+            // likewise multiplies f32 uniforms where the interpreter uses f64. Both need a
+            // *distribution*-level contract, not the lane-for-lane one this backend ships under.
             RvNode::Src(Source::Poisson { .. }) => return Err(Unsupported("poisson")),
-            RvNode::Permutation { .. } => return Err(Unsupported("permutation")),
             RvNode::Rotation { .. } => return Err(Unsupported("rotation")),
-            RvNode::ArrIndex { .. } => return Err(Unsupported("array index")),
-            RvNode::Gather { .. } => return Err(Unsupported("gather")),
             RvNode::ArrDraw { src, .. } => {
                 if matches!(src, Source::Poisson { .. }) {
                     return Err(Unsupported("poisson"));
                 }
+            }
+            // A `Permutation` is an integer draw (Fisher–Yates over a cell stream), so it lowers
+            // bit-identically — it is a leaf here (no node operands; it reads only key/lane/stream).
+            RvNode::Permutation { .. } => {}
+            // `ArrIndex` reads an array-valued source; `Gather` reads a table of scalar nodes. Both
+            // push their operands so the walk reaches them — which is also how an `ArrIndex` over a
+            // (declined) `Rotation` correctly declines the whole cone.
+            RvNode::ArrIndex { arr, index } => {
+                stack.push(*arr);
+                stack.push(*index);
+            }
+            RvNode::Gather { elems, index } => {
+                for &e in elems.iter() {
+                    stack.push(e);
+                }
+                stack.push(*index);
             }
             RvNode::ArrElem { arr, .. } => {
                 *readers.entry(*arr).or_default() += 1;
@@ -168,8 +187,12 @@ fn plan_blocks(graph: &RvGraph, roots: &[RvId]) -> Result<Plan, Unsupported> {
 struct Emitter<'g> {
     graph: &'g RvGraph,
     ords: &'g [u32],
+    stream_ords: &'g [u32],
     plan: Plan,
     memo: HashMap<RvId, String>,
+    /// Array-valued nodes already materialized as a `var … : array<f32, n>` in the body — a
+    /// `Permutation` read by several `ArrIndex`es is filled once, not once per read.
+    arrays_emitted: HashSet<RvId>,
     body: String,
 }
 
@@ -240,8 +263,66 @@ impl Emitter<'_> {
             RvNode::Unary(_, a) => vec![*a],
             RvNode::Binary(_, a, b) => vec![*a, *b],
             RvNode::Select { cond, a, b } => vec![*cond, *a, *b],
+            // The *scalar* operands. An `ArrIndex`'s array parent is materialized on demand by
+            // `ensure_array` (not a scalar `let`), so it is deliberately not listed; only `index` is.
+            RvNode::ArrIndex { index, .. } => vec![*index],
+            RvNode::Gather { elems, index } => {
+                let mut c = elems.to_vec();
+                c.push(*index);
+                c
+            }
             _ => vec![],
         }
+    }
+
+    /// Materialize an array-valued node as a `var … : array<f32, n>` in the body, once. Returns the
+    /// variable name. Only `Permutation` reaches here — `Rotation` is declined in `plan_blocks`, and
+    /// `ArrDraw` blocks go through `emit_draw_loop`.
+    fn ensure_array(&mut self, arr: RvId) -> Result<String, Unsupported> {
+        let name = format!("p{}", arr.0);
+        if !self.arrays_emitted.insert(arr) {
+            return Ok(name);
+        }
+        match *self.graph.node(arr) {
+            // Fisher–Yates high-to-low over the node's cell stream, byte-for-byte `Inst::Permutation`:
+            // identity, then for j = n-1 … 1 swap element j with element `next_bounded(j+1)`. The
+            // draw index counts up from 0 as the interpreter's `CellStream.j` does, so the consumed
+            // stream — and thus the permutation — is identical lane for lane.
+            RvNode::Permutation { n } => {
+                let stream = self.stream_ords[arr.0 as usize];
+                let _ = write!(
+                    self.body,
+                    "    var {name}: array<f32, {n}u>;\n\
+                     \x20   {{\n\
+                     \x20       for (var t = 0u; t < {n}u; t = t + 1u) {{ {name}[t] = f32(t); }}\n\
+                     \x20       var dj = 0u;\n\
+                     \x20       var jj = {n}u - 1u;\n\
+                     \x20       loop {{\n\
+                     \x20           if (jj < 1u) {{ break; }}\n\
+                     \x20           let b = cell_bits48(key, {stream}u, lane, dj);\n\
+                     \x20           dj = dj + 1u;\n\
+                     \x20           let i = bounded48(b, jj + 1u);\n\
+                     \x20           let tmp = {name}[i]; {name}[i] = {name}[jj]; {name}[jj] = tmp;\n\
+                     \x20           jj = jj - 1u;\n\
+                     \x20       }}\n\
+                     \x20   }}\n"
+                );
+                Ok(name)
+            }
+            RvNode::Rotation { .. } => Err(Unsupported("rotation")),
+            ref other => unreachable!("not an array-valued node: {other:?}"),
+        }
+    }
+
+    /// A per-lane read `array[round(clamp(index))]` with the engine's exact index semantics
+    /// (`Inst::ArrIndex` / `Inst::Gather`): ties-away round, clamp into `0..=len-1`, NaN index → NaN
+    /// (never element 0). `len >= 1` always (the evaluator builds no zero-length array).
+    fn arr_read(name: &str, len: u32, idx: &str) -> String {
+        let last = len - 1;
+        format!(
+            "select({name}[min(u32(clamp(sign({idx}) * floor(abs({idx}) + 0.5), 0.0, {last}.0)), \
+             {last}u)], bitcast<f32>(NAN_BITS), nz_isnan({idx}))"
+        )
     }
 
     /// The WGSL expression for one node, over its already-emitted children.
@@ -355,6 +436,32 @@ impl Emitter<'_> {
                 format!("select({y}, {x}, {c} != 0.0)")
             }
 
+            // A per-lane read of an array-valued source. Materialize the array (a `Permutation`;
+            // a `Rotation` would have been declined), then read it at the lane's rounded index.
+            RvNode::ArrIndex { arr, index } => {
+                let name = self.ensure_array(arr)?;
+                let idx = self.memo[&index].clone();
+                let RvKind::Arr(len) = self.graph.kind(arr) else {
+                    unreachable!("ArrIndex parent is array-kinded")
+                };
+                Self::arr_read(&name, len, &idx)
+            }
+
+            // A per-lane read of a *table of scalar nodes* (`xs[i]` with `i` an RV). The elements are
+            // already emitted as `let`s (they are children); pack them into a local array and read it
+            // with the same index semantics as `ArrIndex`.
+            RvNode::Gather { elems, index } => {
+                let idx = self.memo[&index].clone();
+                let len = elems.len() as u32;
+                let name = format!("g{}", id.0);
+                let _ = writeln!(self.body, "    var {name}: array<f32, {len}u>;");
+                for (k, e) in elems.iter().enumerate() {
+                    let v = self.memo[e].clone();
+                    let _ = writeln!(self.body, "    {name}[{k}u] = {v};");
+                }
+                Self::arr_read(&name, len, &idx)
+            }
+
             other => unreachable!("plan_blocks rejects {other:?} before we get here"),
         })
     }
@@ -466,6 +573,27 @@ fn pair_bits(key: vec2<u32>, source: u32, lane: u32) -> vec2<u32> {
 fn lane_bits48(key: vec2<u32>, source: u32, lane: u32) -> vec2<u32> {
     let w = squares64(vec2<u32>(lane, source << 4u), key);
     return vec2<u32>(w.x >> 8u, w.y >> 8u);   // (lo24, hi24)
+}
+
+// A CellStream draw (rng::CellStream): the counter region is (1<<63) | (stream<<49) | (lane<<17) | j,
+// disjoint from the source region above (bit 63 set), so a Permutation's shuffle and a plain source
+// never collide. `j` is the draw index within the lane. Returns the 48 consumed bits as (lo24, hi24),
+// exactly what draw48 packs: lo24 = w[8:32], hi24 = w[40:64].
+fn cell_bits48(key: vec2<u32>, stream: u32, lane: u32, j: u32) -> vec2<u32> {
+    let lo = (lane << 17u) | j;
+    let hi = 0x80000000u | (stream << 17u) | (lane >> 15u);
+    let w = squares64(vec2<u32>(lo, hi), key);
+    return vec2<u32>(w.x >> 8u, w.y >> 8u);
+}
+
+// Lemire bounded reduction of a (lo24, hi24) draw: (bits48 * count) >> 48, in 32-bit pieces. Same
+// arithmetic as src_unif_int, factored out for the Fisher–Yates in a Permutation fill.
+fn bounded48(b: vec2<u32>, count: u32) -> u32 {
+    let t = mul_wide(count, b.x);
+    let u = mul_wide(count, b.y);
+    let tsh = (t.x >> 24u) | (t.y << 8u);
+    let s = add64(u, vec2<u32>(tsh, 0u));
+    return (s.x >> 24u) | (s.y << 8u);
 }
 
 // NaN, detected by BITS — not by `x != x`.
@@ -766,13 +894,56 @@ mod tests {
     /// these: it has array indexing and divergent loops.)
     #[test]
     fn unsupported_cones_are_declined() {
+        // Poisson: the Knuth loop uses f64 in the interpreter (G4b).
         let (g, root) = g_with(|g| {
             g.push(RvNode::Src(Source::Poisson { lambda: 3.0 }), RvKind::Num)
         });
         assert_eq!(emit(&g, &[root]), Err(Unsupported("poisson")));
 
-        let (g, root) = g_with(|g| g.push(RvNode::Permutation { n: 8 }, RvKind::Arr(8)));
-        assert_eq!(emit(&g, &[root]), Err(Unsupported("permutation")));
+        // Rotation: the Gram–Schmidt is f64 (G4b) — declined even when read through an ArrIndex, so
+        // the whole cone falls back, not just the array node.
+        let (g, root) = g_with(|g| {
+            let rot = g.push(RvNode::Rotation { d: 3 }, RvKind::Arr(9));
+            let k = g.push(RvNode::ConstNum(0.0), RvKind::Num);
+            g.push(RvNode::ArrIndex { arr: rot, index: k }, RvKind::Num)
+        });
+        assert_eq!(emit(&g, &[root]), Err(Unsupported("rotation")));
+    }
+
+    /// A `Permutation` read through `ArrIndex` lowers to a Fisher–Yates fill plus an array read — the
+    /// G4 unlock for `prisoners`. Integer-only, so it is bit-identical to the interpreter (proved on
+    /// device by `a_permutation_kernel_matches_the_interpreter`); this pins the emitted shape.
+    #[test]
+    fn a_permutation_lowers_to_a_fisher_yates_fill() {
+        let (g, root) = g_with(|g| {
+            let perm = g.push(RvNode::Permutation { n: 8 }, RvKind::Arr(8));
+            let k = g.push(RvNode::ConstNum(3.0), RvKind::Num);
+            g.push(RvNode::ArrIndex { arr: perm, index: k }, RvKind::Num)
+        });
+        let src = emit(&g, &[root]).expect("a permutation must lower now, not decline");
+        let b = body(&src);
+        assert!(b.contains("cell_bits48("), "the shuffle must draw from a cell stream:\n{src}");
+        assert!(b.contains("bounded48("), "Fisher–Yates needs the bounded draw:\n{src}");
+        assert!(b.contains("array<f32, 8u>"), "the permutation array must be materialized:\n{src}");
+    }
+
+    /// A `Gather` (`xs[i]`, a *random* index into a table of scalar nodes) lowers to a local table
+    /// plus the same clamped/NaN-screened read as `ArrIndex`.
+    #[test]
+    fn a_gather_lowers_to_a_table_read() {
+        let (g, root) = g_with(|g| {
+            let a = g.push(RvNode::ConstNum(10.0), RvKind::Num);
+            let bb = g.push(RvNode::ConstNum(20.0), RvKind::Num);
+            let idx = g.push(
+                RvNode::Src(Source::UniformInt { lo: 0.0, hi: 1.0 }),
+                RvKind::Num,
+            );
+            g.push(RvNode::Gather { elems: Box::new([a, bb]), index: idx }, RvKind::Num)
+        });
+        let src = emit(&g, &[root]).expect("a gather must lower");
+        let b = body(&src);
+        assert!(b.contains("array<f32, 2u>"), "the table must be materialized:\n{src}");
+        assert!(b.contains("nz_isnan("), "the read must screen a NaN index:\n{src}");
     }
 
     /// Comparisons must screen NaN by **bits**, never by a float identity.
@@ -1165,5 +1336,44 @@ mod gpu_tests {
             "max |Δ| {worst:e} on a sum of 52 normals (|x| ~ 7) — f32 rounding over 52 terms is \
              ~1e-5; anything larger means the loop is drawing the wrong ordinals"
         );
+    }
+
+    /// **The G4 unlock, on device and BIT-IDENTICAL: a permutation.** `prisoners` is a program of
+    /// permutations, and the reason it can move to the GPU under the *same* lane-for-lane contract as
+    /// everything else — rather than the looser statistical one a rotation would need — is that
+    /// Fisher–Yates is integer arithmetic: the same cell stream, the same Lemire bounded draws, the
+    /// same swaps. So the shuffled deck must match the interpreter's exactly, not merely in
+    /// distribution. A read of *every* element pins the whole permutation, not just one entry.
+    #[test]
+    fn a_permutation_kernel_matches_the_interpreter() {
+        let Some(gpu) = gpu() else {
+            eprintln!("no GPU adapter — skipping");
+            return;
+        };
+        // Read each of the 20 boxes; if any lane's shuffle diverged, some element read disagrees.
+        for k in [0usize, 1, 7, 13, 19] {
+            let src = format!("use rand; d ~ rand::permutation(20); d[{k}]");
+            let (g, c) = both(&gpu, &src, 5).expect("a permutation cone must lower now");
+            let exact = g.iter().zip(&c).filter(|(a, b)| a.to_bits() == b.to_bits()).count();
+            assert_eq!(
+                exact, LANES as usize,
+                "perm[{k}]: only {exact}/{LANES} lanes bit-identical — the GPU Fisher–Yates diverged \
+                 from the interpreter's"
+            );
+        }
+    }
+
+    /// A `Gather` (`xs[i]`, random index) on device: the drawn index and the clamped, NaN-screened
+    /// read are all integer/exact, so this too is bit-identical to the interpreter.
+    #[test]
+    fn a_gather_kernel_matches_the_interpreter() {
+        let Some(gpu) = gpu() else {
+            eprintln!("no GPU adapter — skipping");
+            return;
+        };
+        let src = "use rand; i ~ unif_int(0, 3); [10, 20, 30, 40][i]";
+        let (g, c) = both(&gpu, src, 9).expect("a gather cone must lower");
+        let exact = g.iter().zip(&c).filter(|(a, b)| a.to_bits() == b.to_bits()).count();
+        assert_eq!(exact, LANES as usize, "gather: only {exact}/{LANES} lanes bit-identical");
     }
 }
