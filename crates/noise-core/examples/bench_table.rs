@@ -6,7 +6,10 @@ use noise_core::Engine;
 use std::time::Instant;
 
 fn main() {
-    let reps: usize = std::env::var("REPS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+    let reps: usize = std::env::var("REPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
     let filter = std::env::var("FILTER").ok();
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples");
     let mut files: Vec<_> = std::fs::read_dir(dir)

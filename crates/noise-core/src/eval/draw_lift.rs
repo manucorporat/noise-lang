@@ -346,9 +346,9 @@ impl Engine {
             Recipe::NormalDyn { mu, sigma, int } => {
                 // mu + sigma·Z,  Z ~ N(0,1); `int` rounds each lane (normal_int).
                 let z = self.push_src(Source::Normal {
-                        mu: 0.0,
-                        sigma: 1.0,
-                    });
+                    mu: 0.0,
+                    sigma: 1.0,
+                });
                 let (mu, sigma) = (self.arg_id(mu), self.arg_id(sigma));
                 let scaled = self
                     .graph

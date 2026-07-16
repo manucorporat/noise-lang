@@ -268,7 +268,10 @@ fn untargeted_queries_default_to_the_auto_precision_target() {
     let Value::Est { val, se } = v else {
         panic!("expected an estimate")
     };
-    assert!((val - 0.5).abs() < 6.0 * se, "P(Y<0.5 | X<0.05) = {val} ± {se}");
+    assert!(
+        (val - 0.5).abs() < 6.0 * se,
+        "P(Y<0.5 | X<0.05) = {val} ± {se}"
+    );
     assert!(
         eng.stats().samples > 500_000,
         "a 5%-acceptance conditional must sweep far past the pilot to reach m >= 40k, swept {}",
@@ -330,9 +333,7 @@ fn precision_target_stops_early_and_goes_far() {
     // Validation 2 (PLAN-PRECISION): a loose relative target on a fat probability stops with FAR
     // fewer draws than the fixed 1M default — the stats counters record what was actually swept.
     let mut eng = Engine::new();
-    let v = eng
-        .run("use rand; C ~ bernoulli(0.5); P(C, 0.01)")
-        .unwrap();
+    let v = eng.run("use rand; C ~ bernoulli(0.5); P(C, 0.01)").unwrap();
     let (val, se) = match v {
         Value::Est { val, se } => (val, se),
         other => panic!("expected an estimate, got {other:?}"),
@@ -368,9 +369,14 @@ fn per_call_argument_splits_count_from_target() {
     eng.run("use rand; X ~ unif(0,1); E(X, 3)").unwrap();
     assert_eq!(eng.stats().samples, 3, "P(e, 3) must draw exactly 3");
 
-    assert!(run("X ~ unif(0,1); P(X < 0.5, 0.5)").is_ok(), "0.5 is a 50% relative target");
+    assert!(
+        run("X ~ unif(0,1); P(X < 0.5, 0.5)").is_ok(),
+        "0.5 is a 50% relative target"
+    );
     for bad in ["P(X < 0.5, 0)", "P(X < 0.5, -2)", "E(X, 0)", "Var(X, -0.5)"] {
-        let err = run(&format!("X ~ unif(0,1); {bad}")).unwrap_err().to_string();
+        let err = run(&format!("X ~ unif(0,1); {bad}"))
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("sample count") && err.contains("precision"),
             "{bad}: {err}"
@@ -425,10 +431,7 @@ fn max_time_caps_a_run_with_an_honest_warning() {
     );
     assert!(doc.result.error.is_none(), "{:?}", doc.result.error);
     assert!(
-        doc.result
-            .warnings
-            .iter()
-            .any(|w| w.contains("max_time")),
+        doc.result.warnings.iter().any(|w| w.contains("max_time")),
         "warnings: {:?}",
         doc.result.warnings
     );
@@ -656,7 +659,12 @@ fn bench_thin_cone_cpu() {
         let t = std::time::Instant::now();
         let v = noise_core::Engine::new().run(&src).unwrap();
         let ms = t.elapsed().as_secs_f64() * 1e3;
-        let noise_core::Value::Est { val, .. } = v else { panic!() };
-        println!("  cpu n={n:>11}  {ms:8.1} ms  ({:.0} M draws/s)  pi={val:.4}", n as f64 / ms / 1e3);
+        let noise_core::Value::Est { val, .. } = v else {
+            panic!()
+        };
+        println!(
+            "  cpu n={n:>11}  {ms:8.1} ms  ({:.0} M draws/s)  pi={val:.4}",
+            n as f64 / ms / 1e3
+        );
     }
 }

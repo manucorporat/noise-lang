@@ -256,7 +256,11 @@ pub fn compile_roots(graph: &RvGraph, roots: &[RvId]) -> (Program, Vec<Reg>) {
 ///
 /// Returns `(new_n_regs, remap)` with `remap[old] == new`; the caller remaps its root(s). Columns that
 /// are never read (a shaped source's phantom scalar slot) are simply never allocated.
-fn reuse_registers(insts: &mut [Inst], gathers: &mut [Box<[Reg]>], roots: &[Reg]) -> (usize, Vec<Reg>) {
+fn reuse_registers(
+    insts: &mut [Inst],
+    gathers: &mut [Box<[Reg]>],
+    roots: &[Reg],
+) -> (usize, Vec<Reg>) {
     let n = insts.len();
     // last_use[r] = last instruction that reads column r; a root is never freed (it must survive to
     // the reducer). Default `r` (defined at inst r, dead there if never read).
@@ -485,21 +489,40 @@ fn lower(
                         });
                     }
                     RvNode::Src(Source::UniformInt { lo, hi }) => {
-                        insts.push(Inst::UniformInt { dst, src: ords[id.0 as usize], lo, hi });
+                        insts.push(Inst::UniformInt {
+                            dst,
+                            src: ords[id.0 as usize],
+                            lo,
+                            hi,
+                        });
                     }
                     RvNode::Src(Source::Normal { mu, sigma }) => {
-                        insts.push(Inst::Normal { dst, src: ords[id.0 as usize], mu, sigma });
+                        insts.push(Inst::Normal {
+                            dst,
+                            src: ords[id.0 as usize],
+                            mu,
+                            sigma,
+                        });
                     }
-                    RvNode::Src(Source::Exp { rate }) => {
-                        insts.push(Inst::Exp { dst, src: ords[id.0 as usize], rate })
-                    }
+                    RvNode::Src(Source::Exp { rate }) => insts.push(Inst::Exp {
+                        dst,
+                        src: ords[id.0 as usize],
+                        rate,
+                    }),
                     RvNode::Src(Source::Poisson { lambda }) => {
                         let stream = stream_ords[id.0 as usize];
-                        insts.push(Inst::Poisson { dst, src: ords[id.0 as usize], stream, lambda });
+                        insts.push(Inst::Poisson {
+                            dst,
+                            src: ords[id.0 as usize],
+                            stream,
+                            lambda,
+                        });
                     }
-                    RvNode::Src(Source::Geometric { p }) => {
-                        insts.push(Inst::Geometric { dst, src: ords[id.0 as usize], p })
-                    }
+                    RvNode::Src(Source::Geometric { p }) => insts.push(Inst::Geometric {
+                        dst,
+                        src: ords[id.0 as usize],
+                        p,
+                    }),
                     // The shaped-draw pair (PLAN-WEBGPU G-half). `ArrDraw` lowers to NOTHING: it is
                     // a pure ordinal-block owner, so it never occupies an instruction slot and
                     // never enters `memo` (nothing reads it — `ArrElem` gets its recipe and its
@@ -515,18 +538,31 @@ fn lower(
                     RvNode::ArrElem { arr, k } => {
                         let src = crate::kernel::elem_ordinal(ords, arr, k);
                         match crate::kernel::elem_source(graph, arr) {
-                            Source::Uniform(u) => insts.push(Inst::Uniform { dst, src, lo: u.lo, hi: u.hi }),
+                            Source::Uniform(u) => insts.push(Inst::Uniform {
+                                dst,
+                                src,
+                                lo: u.lo,
+                                hi: u.hi,
+                            }),
                             Source::UniformInt { lo, hi } => {
                                 insts.push(Inst::UniformInt { dst, src, lo, hi })
                             }
-                            Source::Normal { mu, sigma } => {
-                                insts.push(Inst::Normal { dst, src, mu, sigma })
-                            }
+                            Source::Normal { mu, sigma } => insts.push(Inst::Normal {
+                                dst,
+                                src,
+                                mu,
+                                sigma,
+                            }),
                             Source::Exp { rate } => insts.push(Inst::Exp { dst, src, rate }),
                             Source::Geometric { p } => insts.push(Inst::Geometric { dst, src, p }),
                             Source::Poisson { lambda } => {
                                 let stream = crate::kernel::elem_stream(stream_ords, arr, k);
-                                insts.push(Inst::Poisson { dst, src, stream, lambda });
+                                insts.push(Inst::Poisson {
+                                    dst,
+                                    src,
+                                    stream,
+                                    lambda,
+                                });
                             }
                         }
                     }
@@ -643,7 +679,12 @@ pub fn run_batch(
             Inst::UniformInt { dst, src, lo, hi } => {
                 rng::fill_uniform_int(key, src, lane0, lo, hi, &mut regs[dst as usize]);
             }
-            Inst::Normal { dst, src, mu, sigma } => {
+            Inst::Normal {
+                dst,
+                src,
+                mu,
+                sigma,
+            } => {
                 rng::fill_normal(key, src, lane0, mu, sigma, &mut regs[dst as usize]);
             }
             Inst::Exp { dst, src, rate } => {
@@ -972,7 +1013,14 @@ mod tests {
         let mut buf: Vec<Box<[f32]>> = (0..prog.n_regs)
             .map(|_| vec![0.0f32; BATCH].into_boxed_slice())
             .collect();
-        run_batch(&prog, &mut buf, &mut [], crate::rng::Key::from_seed(0), 0, &[]);
+        run_batch(
+            &prog,
+            &mut buf,
+            &mut [],
+            crate::rng::Key::from_seed(0),
+            0,
+            &[],
+        );
         let out = &buf[prog.root as usize];
         assert!(
             out.iter().all(|x| x.is_nan()),
@@ -1001,7 +1049,14 @@ mod tests {
         let mut buf: Vec<Box<[f32]>> = (0..prog.n_regs)
             .map(|_| vec![0.0f32; BATCH].into_boxed_slice())
             .collect();
-        run_batch(&prog, &mut buf, &mut [], crate::rng::Key::from_seed(0), 0, &[]);
+        run_batch(
+            &prog,
+            &mut buf,
+            &mut [],
+            crate::rng::Key::from_seed(0),
+            0,
+            &[],
+        );
         assert!(buf[prog.root as usize].iter().all(|&x| x == 20.0));
     }
 
@@ -1098,10 +1153,21 @@ mod tests {
         let roots = [first, last, neg, tie, huge, nan];
         let (prog, regs) = compile_roots(&g, &roots);
         let (mut buf, mut arrs) = reg_files(&prog);
-        run_batch(&prog, &mut buf, &mut arrs, crate::rng::Key::from_seed(11), 0, &[]);
+        run_batch(
+            &prog,
+            &mut buf,
+            &mut arrs,
+            crate::rng::Key::from_seed(11),
+            0,
+            &[],
+        );
         let col = |r: Reg| &buf[r as usize];
         for k in 0..BATCH {
-            assert_eq!(col(regs[2])[k], col(regs[0])[k], "negative index → element 0");
+            assert_eq!(
+                col(regs[2])[k],
+                col(regs[0])[k],
+                "negative index → element 0"
+            );
             assert_eq!(col(regs[3])[k], col(regs[1])[k], "2.5 rounds away to 3");
             assert_eq!(col(regs[4])[k], col(regs[1])[k], "+inf clamps to last");
             assert!(col(regs[5])[k].is_nan(), "NaN index must yield NaN");
@@ -1157,13 +1223,19 @@ mod tests {
                         sumsq += err * err;
                         count += 1;
                         worst = worst.max(err);
-                        assert!(err < 1e-2, "lane {k}: rows {r1}·{r2} = {dot}, want {want} — not a rotation");
+                        assert!(
+                            err < 1e-2,
+                            "lane {k}: rows {r1}·{r2} = {dot}, want {want} — not a rotation"
+                        );
                     }
                 }
             }
         }
         let rms = (sumsq / count as f64).sqrt();
-        assert!(rms < 1e-4, "RMS orthonormality residual {rms:e} — f32 MGS should hold ~2e-5 typical");
+        assert!(
+            rms < 1e-4,
+            "RMS orthonormality residual {rms:e} — f32 MGS should hold ~2e-5 typical"
+        );
         assert!(worst < 1e-2, "worst orthonormality residual {worst:e}");
     }
 

@@ -230,7 +230,10 @@ pub fn run_reduction_range<R: Reducer>(
         let out = run_epoch(graph, root, base, sub, epoch_seed(seed, e), r, acc)?;
         acc = out.acc;
         if out.stopped.is_some() {
-            return Ok(Reduced { acc, stopped: out.stopped });
+            return Ok(Reduced {
+                acc,
+                stopped: out.stopped,
+            });
         }
     }
     Ok(Reduced { acc, stopped: None })
@@ -265,7 +268,10 @@ fn run_epoch<R: Reducer>(
     }
     // Already soft-stopped (a deadline passed between statements): don't draw either.
     if let Some(cause) = crate::exec::stop_cause_of(token.as_ref(), deadline) {
-        return Ok(Reduced { acc: carry, stopped: Some(cause) });
+        return Ok(Reduced {
+            acc: carry,
+            stopped: Some(cause),
+        });
     }
 
     // The GPU takes the WHOLE epoch range or none of it (PLAN-WEBGPU G2). It hooks here rather than
@@ -276,7 +282,8 @@ fn run_epoch<R: Reducer>(
     #[cfg(feature = "gpu")]
     let carry = {
         let local = (sub.start - epoch_base)..(sub.end - epoch_base);
-        match crate::gpu::try_reduce(graph, root, local, seed, r, token.as_ref(), deadline, carry)? {
+        match crate::gpu::try_reduce(graph, root, local, seed, r, token.as_ref(), deadline, carry)?
+        {
             // `try_reduce` records the run stats itself, off the SIMPLIFIED cone.
             crate::gpu::GpuReduce::Done(out) => return Ok(out),
             crate::gpu::GpuReduce::Declined(c) => c,
@@ -289,7 +296,11 @@ fn run_epoch<R: Reducer>(
         let _s = crate::profile::span("compile");
         compile_root(graph, root, usize::try_from(n).unwrap_or(usize::MAX))
     };
-    crate::stats::record(usize::try_from(n).unwrap_or(usize::MAX), cost.ops, cost.sources);
+    crate::stats::record(
+        usize::try_from(n).unwrap_or(usize::MAX),
+        cost.ops,
+        cost.sources,
+    );
     crate::profile::set_ops(cost.ops);
     crate::profile::note("backend=cpu (gpu declined or absent)");
     let _reduce = crate::profile::span("reduce");
@@ -330,7 +341,10 @@ fn run_epoch<R: Reducer>(
             stopped = Some(cause);
             break;
         }
-        acc = r.merge(acc, reduce_chunk(&mut *runner, r, epoch_base, sub.end, i, seed));
+        acc = r.merge(
+            acc,
+            reduce_chunk(&mut *runner, r, epoch_base, sub.end, i, seed),
+        );
     }
     Ok(Reduced { acc, stopped })
 }
@@ -484,7 +498,10 @@ fn run_parallel<R: Reducer>(
                     }
                     local.push((i, reduce_chunk(&mut *runner, r, epoch_base, end, i, seed)));
                 }
-                collected.lock().expect("reduction mutex poisoned").append(&mut local);
+                collected
+                    .lock()
+                    .expect("reduction mutex poisoned")
+                    .append(&mut local);
             });
         }
     });
@@ -871,8 +888,9 @@ mod tests {
         // independent stream, not a replay.
         let n = 2 * CHUNK_SAMPLES as u64;
         let epoch0 = run_reduction_range(g, id, 0..n, seed, &r, r.identity()).unwrap();
-        let epoch1 = run_reduction_range(g, id, EPOCH_LANES..EPOCH_LANES + n, seed, &r, r.identity())
-            .unwrap();
+        let epoch1 =
+            run_reduction_range(g, id, EPOCH_LANES..EPOCH_LANES + n, seed, &r, r.identity())
+                .unwrap();
         assert_ne!(
             epoch0.acc.sum.to_bits(),
             epoch1.acc.sum.to_bits(),
@@ -994,7 +1012,10 @@ mod tests {
         // The public entry (its own compile + threshold + thread choice) agrees bit for bit.
         let public = run_reduction(g, id, n, seed, &r).unwrap();
         assert!(
-            public.iter().zip(&base).all(|(a, b)| a.to_bits() == b.to_bits()),
+            public
+                .iter()
+                .zip(&base)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
             "run_reduction disagrees with the pinned 1-thread collection"
         );
     }

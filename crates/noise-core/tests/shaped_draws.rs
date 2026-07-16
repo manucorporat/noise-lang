@@ -40,12 +40,10 @@ fn the_leaves_of_a_shaped_draw_are_independent() {
 /// If they were merged, `a - b` would be identically zero and its variance 0 instead of 2.
 #[test]
 fn two_shaped_draws_of_one_recipe_are_independent() {
-    let v = est(
-        "use rand; use vec;\n\
+    let v = est("use rand; use vec;\n\
          a ~[8] normal(0, 1);\n\
          b ~[8] normal(0, 1);\n\
-         Var(vec::sum(a) - vec::sum(b), 400000)",
-    );
+         Var(vec::sum(a) - vec::sum(b), 400000)");
     assert!(
         (v - 16.0).abs() < 1.0,
         "Var(sum(a) - sum(b)) = {v}, want ~16 (8 + 8); a CSE-merged block would give 0"
@@ -62,13 +60,11 @@ fn two_shaped_draws_of_one_recipe_are_independent() {
 #[test]
 fn a_shaped_draw_draws_exactly_what_n_separate_draws_draw() {
     let shaped = est("use rand; use vec;\nzs ~[3] normal(0, 1);\nE(vec::sum(zs), 100000)");
-    let scalar = est(
-        "use rand;\n\
+    let scalar = est("use rand;\n\
          a ~ normal(0, 1);\n\
          b ~ normal(0, 1);\n\
          c ~ normal(0, 1);\n\
-         E(a + b + c, 100000)",
-    );
+         E(a + b + c, 100000)");
     assert_eq!(
         shaped, scalar,
         "`~[3] normal` must draw the same stream as three `~ normal` draws, not merely the same \
@@ -81,10 +77,16 @@ fn a_shaped_draw_draws_exactly_what_n_separate_draws_draw() {
 #[test]
 fn shaped_draws_keep_their_distributions() {
     let mean = est("use rand; use vec;\nxs ~[10] unif(0, 1);\nE(vec::sum(xs), 400000)");
-    assert!((mean - 5.0).abs() < 0.02, "E[sum of 10 U(0,1)] = {mean}, want 5");
+    assert!(
+        (mean - 5.0).abs() < 0.02,
+        "E[sum of 10 U(0,1)] = {mean}, want 5"
+    );
 
     let var = est("use rand; use vec;\nzs ~[10] normal(0, 3);\nVar(vec::sum(zs), 400000)");
-    assert!((var - 90.0).abs() < 2.0, "Var(sum of 10 N(0,9)) = {var}, want 90");
+    assert!(
+        (var - 90.0).abs() < 2.0,
+        "Var(sum of 10 N(0,9)) = {var}, want 90"
+    );
 }
 
 /// A multi-dimensional shape is ONE block, not one per row — `~[3, 4]` is a single 12-wide draw.
@@ -92,11 +94,9 @@ fn shaped_draws_keep_their_distributions() {
 /// independence: the 12 leaves are still iid.
 #[test]
 fn a_matrix_shaped_draw_is_one_block_of_iid_leaves() {
-    let v = est(
-        "use rand; use vec;\n\
+    let v = est("use rand; use vec;\n\
          m ~[3, 4] normal(0, 1);\n\
-         Var(vec::sum(m[0]) + vec::sum(m[1]) + vec::sum(m[2]), 400000)",
-    );
+         Var(vec::sum(m[0]) + vec::sum(m[1]) + vec::sum(m[2]), 400000)");
     assert!(
         (v - 12.0).abs() < 0.8,
         "Var(sum of a 3x4 iid normal draw) = {v}, want ~12 — row-major leaves must stay independent"
@@ -117,16 +117,17 @@ fn derived_and_hierarchical_recipes_shape_correctly() {
 
     // normal_int: still integers, still mean 0.
     let ni = est("use rand; use vec;\nxs ~[4] normal_int(0, 2);\nE(vec::sum(xs), 200000)");
-    assert!(ni.abs() < 0.05, "E[sum of 4 normal_int(0,2)] = {ni}, want ~0");
+    assert!(
+        ni.abs() < 0.05,
+        "E[sum of 4 normal_int(0,2)] = {ni}, want ~0"
+    );
 
     // Hierarchical: one shared mu, 5 conditionally-independent draws around it.
     // Var(sum) = Var(5*mu) + 5*Var(noise) = 25*1 + 5*1 = 30.
-    let h = est(
-        "use rand; use vec;\n\
+    let h = est("use rand; use vec;\n\
          mu ~ normal(0, 1);\n\
          xs ~[5] normal(mu, 1);\n\
-         Var(vec::sum(xs), 400000)",
-    );
+         Var(vec::sum(xs), 400000)");
     assert!(
         (h - 30.0).abs() < 1.5,
         "Var(sum of 5 draws around a shared mu) = {h}, want ~30 (25 from mu + 5 from the noise) — \

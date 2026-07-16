@@ -66,36 +66,120 @@ pub const CASES: &[(&str, &str)] = &[
 /// exercise codegen cost, multi-forcing programs, joint/introspection passes, and plots — none of
 /// which [`CASES`] touches.
 pub const EXAMPLES: &[(&str, &str)] = &[
-    ("advantage", include_str!("../../../../examples/advantage.noise")),
-    ("am_vs_fm", include_str!("../../../../examples/am_vs_fm.noise")),
-    ("barrier_option", include_str!("../../../../examples/barrier_option.noise")),
-    ("beta_bernoulli", include_str!("../../../../examples/beta_bernoulli.noise")),
-    ("birthday", include_str!("../../../../examples/birthday.noise")),
-    ("bootstrap", include_str!("../../../../examples/bootstrap.noise")),
+    (
+        "advantage",
+        include_str!("../../../../examples/advantage.noise"),
+    ),
+    (
+        "am_vs_fm",
+        include_str!("../../../../examples/am_vs_fm.noise"),
+    ),
+    (
+        "barrier_option",
+        include_str!("../../../../examples/barrier_option.noise"),
+    ),
+    (
+        "beta_bernoulli",
+        include_str!("../../../../examples/beta_bernoulli.noise"),
+    ),
+    (
+        "birthday",
+        include_str!("../../../../examples/birthday.noise"),
+    ),
+    (
+        "bootstrap",
+        include_str!("../../../../examples/bootstrap.noise"),
+    ),
     ("buffon", include_str!("../../../../examples/buffon.noise")),
-    ("clt_normal", include_str!("../../../../examples/clt_normal.noise")),
-    ("coin_streak", include_str!("../../../../examples/coin_streak.noise")),
-    ("conditional_bayes", include_str!("../../../../examples/conditional_bayes.noise")),
+    (
+        "clt_normal",
+        include_str!("../../../../examples/clt_normal.noise"),
+    ),
+    (
+        "coin_streak",
+        include_str!("../../../../examples/coin_streak.noise"),
+    ),
+    (
+        "conditional_bayes",
+        include_str!("../../../../examples/conditional_bayes.noise"),
+    ),
     ("dice", include_str!("../../../../examples/dice.noise")),
-    ("dice_bet", include_str!("../../../../examples/dice_bet.noise")),
-    ("dice_sum", include_str!("../../../../examples/dice_sum.noise")),
-    ("dithering", include_str!("../../../../examples/dithering.noise")),
-    ("exactly_two_heads", include_str!("../../../../examples/exactly_two_heads.noise")),
-    ("functions", include_str!("../../../../examples/functions.noise")),
-    ("insurance", include_str!("../../../../examples/insurance.noise")),
-    ("irwin_hall", include_str!("../../../../examples/irwin_hall.noise")),
+    (
+        "dice_bet",
+        include_str!("../../../../examples/dice_bet.noise"),
+    ),
+    (
+        "dice_sum",
+        include_str!("../../../../examples/dice_sum.noise"),
+    ),
+    (
+        "dithering",
+        include_str!("../../../../examples/dithering.noise"),
+    ),
+    (
+        "exactly_two_heads",
+        include_str!("../../../../examples/exactly_two_heads.noise"),
+    ),
+    (
+        "functions",
+        include_str!("../../../../examples/functions.noise"),
+    ),
+    (
+        "insurance",
+        include_str!("../../../../examples/insurance.noise"),
+    ),
+    (
+        "irwin_hall",
+        include_str!("../../../../examples/irwin_hall.noise"),
+    ),
     ("kelly", include_str!("../../../../examples/kelly.noise")),
-    ("max_of_dice", include_str!("../../../../examples/max_of_dice.noise")),
-    ("monty_hall", include_str!("../../../../examples/monty_hall.noise")),
-    ("noise_colors", include_str!("../../../../examples/noise_colors.noise")),
-    ("nyquist", include_str!("../../../../examples/nyquist.noise")),
+    (
+        "max_of_dice",
+        include_str!("../../../../examples/max_of_dice.noise"),
+    ),
+    (
+        "monty_hall",
+        include_str!("../../../../examples/monty_hall.noise"),
+    ),
+    (
+        "noise_colors",
+        include_str!("../../../../examples/noise_colors.noise"),
+    ),
+    (
+        "nyquist",
+        include_str!("../../../../examples/nyquist.noise"),
+    ),
     ("pi", include_str!("../../../../examples/pi.noise")),
-    ("prisoners", include_str!("../../../../examples/prisoners.noise")),
-    ("qjl_scalar", include_str!("../../../../examples/qjl_scalar.noise")),
-    ("rare_event", include_str!("../../../../examples/rare_event.noise")),
-    ("reliability", include_str!("../../../../examples/reliability.noise")),
-    ("secretary", include_str!("../../../../examples/secretary.noise")),
-    ("shor_period", include_str!("../../../../examples/shor_period.noise")),
-    ("st_petersburg", include_str!("../../../../examples/st_petersburg.noise")),
-    ("turboquant", include_str!("../../../../examples/turboquant.noise")),
+    (
+        "prisoners",
+        include_str!("../../../../examples/prisoners.noise"),
+    ),
+    (
+        "qjl_scalar",
+        include_str!("../../../../examples/qjl_scalar.noise"),
+    ),
+    (
+        "rare_event",
+        include_str!("../../../../examples/rare_event.noise"),
+    ),
+    (
+        "reliability",
+        include_str!("../../../../examples/reliability.noise"),
+    ),
+    (
+        "secretary",
+        include_str!("../../../../examples/secretary.noise"),
+    ),
+    (
+        "shor_period",
+        include_str!("../../../../examples/shor_period.noise"),
+    ),
+    (
+        "st_petersburg",
+        include_str!("../../../../examples/st_petersburg.noise"),
+    ),
+    (
+        "turboquant",
+        include_str!("../../../../examples/turboquant.noise"),
+    ),
 ];

@@ -287,7 +287,10 @@ mod tests {
             true
         });
         t.cancel();
-        assert!(h.join().unwrap(), "cancel must be visible on another thread");
+        assert!(
+            h.join().unwrap(),
+            "cancel must be visible on another thread"
+        );
     }
 
     #[test]

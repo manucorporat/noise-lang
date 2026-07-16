@@ -216,7 +216,11 @@ impl fmt::Display for Value {
             }
             // A symbolic input renders as its *current* value (so `${slider}` interpolation and
             // `Print` show the number a reader expects), folded against the installed input values.
-            Value::Sym(s) => write!(f, "{}", format_num(s.force_scalar(&crate::input_rt::current()))),
+            Value::Sym(s) => write!(
+                f,
+                "{}",
+                format_num(s.force_scalar(&crate::input_rt::current()))
+            ),
             Value::Signal(s) => write!(f, "{s}"),
             // An undrawn generator prints as its recipe, like `Value::Recipe`.
             Value::Noise(spec) => write!(f, "{spec}"),

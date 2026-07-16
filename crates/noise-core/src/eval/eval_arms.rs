@@ -421,7 +421,12 @@ impl Engine {
         let dropped_mark = self.dropped;
         let span_mark = self.first_dropped_span;
         let mark = self.graph.len();
-        let index_ph = self.graph.push(RvNode::Placeholder { slot: crate::dist::INDEX_SLOT }, RvKind::Num);
+        let index_ph = self.graph.push(
+            RvNode::Placeholder {
+                slot: crate::dist::INDEX_SLOT,
+            },
+            RvKind::Num,
+        );
         let saved_loop_var = self.vars.get(var).cloned();
         self.vars.insert(var.to_string(), Value::Dist(index_ph));
 
@@ -440,9 +445,14 @@ impl Engine {
                 }
                 // A new var (first assigned inside the loop): its placeholder is a leak of the
                 // previous iteration; iteration 0 must not read it. Poison init catches a read.
-                None => (self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num), RvKind::Num),
+                None => (
+                    self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num),
+                    RvKind::Num,
+                ),
             };
-            let ph = self.graph.push(RvNode::Placeholder { slot: slot as u32 }, kind);
+            let ph = self
+                .graph
+                .push(RvNode::Placeholder { slot: slot as u32 }, kind);
             inits.push(init);
             placeholders.push(ph);
             kinds.push(kind);
@@ -480,13 +490,21 @@ impl Engine {
 
         let restore = |me: &mut Self| {
             match &saved_loop_var {
-                Some(v) => { me.vars.insert(var.to_string(), v.clone()); }
-                None => { me.vars.remove(var); }
+                Some(v) => {
+                    me.vars.insert(var.to_string(), v.clone());
+                }
+                None => {
+                    me.vars.remove(var);
+                }
             }
             for (name, pre) in &saved {
                 match pre {
-                    Some(v) => { me.vars.insert(name.clone(), v.clone()); }
-                    None => { me.vars.remove(name); }
+                    Some(v) => {
+                        me.vars.insert(name.clone(), v.clone());
+                    }
+                    None => {
+                        me.vars.remove(name);
+                    }
                 }
             }
             // Undo any stray emission the trial pass produced, so the real unroll re-emits cleanly.
@@ -515,16 +533,31 @@ impl Engine {
             index_ph: index_used.then_some(index_ph),
             kinds: kinds.clone().into_boxed_slice(),
         };
-        let scan = self.graph.push(RvNode::Scan { body: Box::new(body_struct) }, RvKind::Num);
+        let scan = self.graph.push(
+            RvNode::Scan {
+                body: Box::new(body_struct),
+            },
+            RvKind::Num,
+        );
 
         // Post-loop bindings: the loop variable leaks its last value; each carried variable becomes the
         // Scan's final value for that slot (a `ScanOut`). Dead ones are dropped by simplify/DCE.
         match xs.last() {
-            Some(v) => { self.vars.insert(var.to_string(), v.clone()); }
-            None => { self.vars.remove(var); }
+            Some(v) => {
+                self.vars.insert(var.to_string(), v.clone());
+            }
+            None => {
+                self.vars.remove(var);
+            }
         }
         for (slot, name) in carried.iter().enumerate() {
-            let out = self.graph.push(RvNode::ScanOut { scan, slot: slot as u32 }, kinds[slot]);
+            let out = self.graph.push(
+                RvNode::ScanOut {
+                    scan,
+                    slot: slot as u32,
+                },
+                kinds[slot],
+            );
             self.vars.insert(name.clone(), Value::Dist(out));
         }
         Ok(Some(Value::Unit))
@@ -535,8 +568,14 @@ impl Engine {
     fn value_to_rvid(&mut self, v: &Value) -> Option<(crate::dist::RvId, RvKind)> {
         match v {
             Value::Dist(id) => Some((*id, self.graph.kind(*id))),
-            Value::Num(x) => Some((self.graph.push(RvNode::ConstNum(*x), RvKind::Num), RvKind::Num)),
-            Value::Bool(b) => Some((self.graph.push(RvNode::ConstBool(*b), RvKind::Bool), RvKind::Bool)),
+            Value::Num(x) => Some((
+                self.graph.push(RvNode::ConstNum(*x), RvKind::Num),
+                RvKind::Num,
+            )),
+            Value::Bool(b) => Some((
+                self.graph.push(RvNode::ConstBool(*b), RvKind::Bool),
+                RvKind::Bool,
+            )),
             _ => None,
         }
     }
@@ -948,7 +987,12 @@ impl Engine {
     /// they are structural / control, and recompiling when they change is correct.
     fn input_value(&self, idx: u32, value: InputValue) -> Value {
         match value {
-            InputValue::Num(_) if matches!(self.input_manifest.get(idx as usize).map(|r| r.spec.kind), Some(crate::input::InputKind::Real)) => {
+            InputValue::Num(_)
+                if matches!(
+                    self.input_manifest.get(idx as usize).map(|r| r.spec.kind),
+                    Some(crate::input::InputKind::Real)
+                ) =>
+            {
                 Value::Sym(crate::sym::SymExpr::input(idx))
             }
             other => input_value_to_value(other),
@@ -1079,7 +1123,11 @@ fn is_source_node(node: &RvNode) -> bool {
 
 /// Whether `target` lies in the cone of any of `roots` — how the capture learns if the recurrence
 /// actually reads the loop index. Bounded by the graph (ids only shrink toward operands).
-fn cone_contains(graph: &crate::dist::RvGraph, roots: &[crate::dist::RvId], target: crate::dist::RvId) -> bool {
+fn cone_contains(
+    graph: &crate::dist::RvGraph,
+    roots: &[crate::dist::RvId],
+    target: crate::dist::RvId,
+) -> bool {
     use crate::dist::RvId;
     let mut seen = std::collections::HashSet::new();
     let mut stack: Vec<RvId> = roots.to_vec();
@@ -1115,7 +1163,11 @@ fn is_dist_ctor(base: &str) -> bool {
 }
 
 /// Push a node's operand ids (its direct graph children) onto `stack`. Total over every `RvNode`.
-fn push_operands(graph: &crate::dist::RvGraph, id: crate::dist::RvId, stack: &mut Vec<crate::dist::RvId>) {
+fn push_operands(
+    graph: &crate::dist::RvGraph,
+    id: crate::dist::RvId,
+    stack: &mut Vec<crate::dist::RvId>,
+) {
     match graph.node(id) {
         RvNode::Unary(_, a) | RvNode::ArrElem { arr: a, .. } => stack.push(*a),
         RvNode::Binary(_, a, b) | RvNode::ArrIndex { arr: a, index: b } => {

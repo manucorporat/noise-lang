@@ -276,7 +276,13 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId]) -> Vec<u8> {
         .ty()
         .function([ValType::F64, ValType::F64], [ValType::F64]); // 1: pow
     types.ty().function(
-        [ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        [
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+        ],
         [],
     ); // 2: kernel(out, n, key_lo, key_hi, lane0)
 
@@ -516,7 +522,9 @@ fn emit_node(
                 emit_uniform(s, ctx, ctx.ord(id), lo, hi, half)
             });
         }
-        RvNode::Src(Source::UniformInt { lo, hi }) => emit_uniform_int(s, ctx, ctx.ord(id), *lo, *hi),
+        RvNode::Src(Source::UniformInt { lo, hi }) => {
+            emit_uniform_int(s, ctx, ctx.ord(id), *lo, *hi)
+        }
         RvNode::Src(Source::Normal { mu, sigma }) => match pair {
             PairMode::Single => emit_normal_single(s, ctx, ctx.ord(id), *mu, *sigma),
             PairMode::Even { bank, next_bank } => {
@@ -552,7 +560,9 @@ fn emit_node(
         }
         // A shaped draw emits nothing — it owns an ordinal block, and only its readers draw. It is
         // never reached: `ArrElem` takes its recipe from the graph, not from an emitted parent.
-        RvNode::ArrDraw { .. } => unreachable!("ArrDraw emits no code; only its ArrElem readers do"),
+        RvNode::ArrDraw { .. } => {
+            unreachable!("ArrDraw emits no code; only its ArrElem readers do")
+        }
         // Element `k` of a shaped draw: emitted as EXACTLY the scalar source it replaced, at
         // ordinal `base + k`. That is the whole point — `~[n] d` and n separate `~ d` draws produce
         // the same kernel and the same bits; only the graph got smaller.
@@ -660,7 +670,9 @@ fn emit_node(
         }
         // The WASM emit of a host input uniform is P1; for P0 `walk_cost` declines any cone with one,
         // so this backend never sees it (the interpreter, reading `input_values`, takes it instead).
-        RvNode::Input { .. } => unreachable!("walk_cost excludes Input cones from wasm codegen (P0)"),
+        RvNode::Input { .. } => {
+            unreachable!("walk_cost excludes Input cones from wasm codegen (P0)")
+        }
         RvNode::Unary(op, a) => {
             let la = emit_node(s, ctx, *a, memo, slot, pair);
             emit_unary(s, ctx, *op, la);
@@ -1428,7 +1440,9 @@ mod tests {
         for (label, src) in conformance::CONST_CASES {
             let (eng, id) = graph_of(src);
             let g = eng.graph();
-            let mut ir = InterpBackend.compile(g, id, ENOUGH_DRAWS).runner(std::sync::Arc::from(&[] as &[f64]));
+            let mut ir = InterpBackend
+                .compile(g, id, ENOUGH_DRAWS)
+                .runner(std::sync::Arc::from(&[] as &[f64]));
             ir.position(0, 0);
             let cap = ir.batch_cap();
             let interp = ir.next_batch(cap)[0];
@@ -1536,7 +1550,9 @@ mod tests {
 
         // Bitwise: the whole first batch against the interpreter oracle (both branches of the
         // pair-unrolled loop get exercised, not just lane 0's cos arm).
-        let mut ir = InterpBackend.compile(graph, id, ENOUGH_DRAWS).runner(std::sync::Arc::from(&[] as &[f64]));
+        let mut ir = InterpBackend
+            .compile(graph, id, ENOUGH_DRAWS)
+            .runner(std::sync::Arc::from(&[] as &[f64]));
         ir.position(seed, 0);
         let interp_col: Vec<f32> = ir.next_batch(BATCH).to_vec();
         let wasm_col = first_batch_emitted(&bytes, seed);
@@ -1641,14 +1657,22 @@ mod tests {
     #[test]
     fn gate_and_distribution() {
         for (label, src) in [
-            ("dice-sum", "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B"),
-            ("normal-sum", "use rand; X ~ normal(0,1); Y ~ normal(0,1); X + Y"),
+            (
+                "dice-sum",
+                "use rand; A ~ unif_int(1,6); B ~ unif_int(1,6); A + B",
+            ),
+            (
+                "normal-sum",
+                "use rand; X ~ normal(0,1); Y ~ normal(0,1); X + Y",
+            ),
             ("pow", "use rand; A ~ unif(1,2); B ~ unif(1,2); A ^ B"),
         ] {
             let (eng, id) = graph_of(src);
             let bytes = emit_for(eng.graph(), id, ENOUGH_DRAWS).expect("graph should emit");
             let (wasm_mean, count) = run_emitted(&bytes, 0xABCDEF, 64);
-            let interp = moments(eng.graph(), id, count as usize, 0xABCDEF).unwrap().mean;
+            let interp = moments(eng.graph(), id, count as usize, 0xABCDEF)
+                .unwrap()
+                .mean;
             assert!(
                 (wasm_mean - interp).abs() < 0.05,
                 "{label}: wasm={wasm_mean} interp={interp}"

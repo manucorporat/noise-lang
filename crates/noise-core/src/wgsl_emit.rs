@@ -516,7 +516,10 @@ impl Emitter<'_> {
         // Hoist every loop-invariant node the body reads to BEFORE the loop, so it is computed once —
         // and a permutation/rotation source is *drawn* once, not re-drawn per iteration.
         for id in self.body_invariants(&body.nexts) {
-            if matches!(self.graph.node(id), RvNode::Permutation { .. } | RvNode::Rotation { .. }) {
+            if matches!(
+                self.graph.node(id),
+                RvNode::Permutation { .. } | RvNode::Rotation { .. }
+            ) {
                 self.ensure_array(id)?;
             } else {
                 self.emit_node(id)?;
@@ -708,9 +711,9 @@ impl Emitter<'_> {
                     BinOp::Mod => format!("({x} - {y} * floor({x} / {y}))"),
                     BinOp::Eq => cmp("=="),
                     // The one inverted case: `NaN != anything` is TRUE.
-                    BinOp::Ne => format!(
-                        "select(0.0, 1.0, nz_isnan({x}) || nz_isnan({y}) || {x} != {y})"
-                    ),
+                    BinOp::Ne => {
+                        format!("select(0.0, 1.0, nz_isnan({x}) || nz_isnan({y}) || {x} != {y})")
+                    }
                     BinOp::Lt => cmp("<"),
                     BinOp::Gt => cmp(">"),
                     BinOp::Le => cmp("<="),
@@ -773,7 +776,11 @@ fn draw_expr(src: &Source, ctr: &str, lane: &str) -> String {
             // The bounds are folded to f32 ONCE, exactly as `rng::fill_uniform` folds them, so the
             // arithmetic agrees op-for-op with the CPU fills.
             let (loc, span) = (u.lo as f32, (u.hi - u.lo) as f32);
-            format!("src_unif(key, {ctr}, {lane}, {}, {})", f32c(loc), f32c(span))
+            format!(
+                "src_unif(key, {ctr}, {lane}, {}, {})",
+                f32c(loc),
+                f32c(span)
+            )
         }
         Source::UniformInt { lo, hi } => {
             let count = (hi - lo + 1.0).max(1.0) as u32;
@@ -1116,7 +1123,9 @@ mod tests {
     /// Just the kernel body — the prelude defines `fn src_normal(...)` etc., so counting draw calls
     /// over the whole shader would count every definition as a use.
     fn body(src: &str) -> &str {
-        src.split("fn main").nth(1).expect("emitted shader has a main")
+        src.split("fn main")
+            .nth(1)
+            .expect("emitted shader has a main")
     }
 
     fn g_with(f: impl FnOnce(&mut RvGraph) -> RvId) -> (RvGraph, RvId) {
@@ -1136,7 +1145,13 @@ mod tests {
     fn a_shaped_draw_emits_one_loop_not_n_inlined_hashes() {
         let (g, root) = g_with(|g| {
             let arr = g.push(
-                RvNode::ArrDraw { n: 52, src: Source::Normal { mu: 0.0, sigma: 1.0 } },
+                RvNode::ArrDraw {
+                    n: 52,
+                    src: Source::Normal {
+                        mu: 0.0,
+                        sigma: 1.0,
+                    },
+                },
                 RvKind::Arr(52),
             );
             let mut acc = g.push(RvNode::ConstNum(0.0), RvKind::Num);
@@ -1148,14 +1163,21 @@ mod tests {
         });
         let src = emit(&g, &[root]).expect("lowers");
         let b = body(&src);
-        assert_eq!(b.matches("for (var j").count(), 1, "expected exactly one draw loop");
+        assert_eq!(
+            b.matches("for (var j").count(),
+            1,
+            "expected exactly one draw loop"
+        );
         assert_eq!(
             b.matches("src_normal(").count(),
             1,
             "the 52 draws must collapse to ONE call inside the loop — an unrolled emitter would \
              put 52 here and cost 10x the pipeline compile:\n{src}"
         );
-        assert!(src.contains("var a"), "the block must be materialized: {src}");
+        assert!(
+            src.contains("var a"),
+            "the block must be materialized: {src}"
+        );
     }
 
     /// A block that is barely read must NOT be looped: drawing all 10,000 elements per lane to read
@@ -1164,14 +1186,23 @@ mod tests {
     fn a_barely_read_block_is_inlined_not_looped() {
         let (g, root) = g_with(|g| {
             let arr = g.push(
-                RvNode::ArrDraw { n: 10_000, src: Source::Normal { mu: 0.0, sigma: 1.0 } },
+                RvNode::ArrDraw {
+                    n: 10_000,
+                    src: Source::Normal {
+                        mu: 0.0,
+                        sigma: 1.0,
+                    },
+                },
                 RvKind::Arr(10_000),
             );
             g.push(RvNode::ArrElem { arr, k: 0 }, RvKind::Num)
         });
         let src = emit(&g, &[root]).expect("lowers");
         let b = body(&src);
-        assert!(!b.contains("for (var j"), "a 1-of-10000 read must not emit a draw loop:\n{src}");
+        assert!(
+            !b.contains("for (var j"),
+            "a 1-of-10000 read must not emit a draw loop:\n{src}"
+        );
         assert_eq!(b.matches("src_normal(").count(), 1);
     }
 
@@ -1209,14 +1240,16 @@ mod tests {
         // Poisson is the last node this backend declines: its Knuth loop counts f64 uniforms a
         // data-dependent number of times, which WGSL's f32 can't reproduce. It declines whether read
         // directly or through a shaped block, so the whole cone falls back — not a partial lowering.
-        let (g, root) = g_with(|g| {
-            g.push(RvNode::Src(Source::Poisson { lambda: 3.0 }), RvKind::Num)
-        });
+        let (g, root) =
+            g_with(|g| g.push(RvNode::Src(Source::Poisson { lambda: 3.0 }), RvKind::Num));
         assert_eq!(emit(&g, &[root]), Err(Unsupported("poisson")));
 
         let (g, root) = g_with(|g| {
             let arr = g.push(
-                RvNode::ArrDraw { n: 4, src: Source::Poisson { lambda: 2.0 } },
+                RvNode::ArrDraw {
+                    n: 4,
+                    src: Source::Poisson { lambda: 2.0 },
+                },
                 RvKind::Arr(4),
             );
             g.push(RvNode::ArrElem { arr, k: 1 }, RvKind::Num)
@@ -1232,13 +1265,28 @@ mod tests {
         let (g, root) = g_with(|g| {
             let perm = g.push(RvNode::Permutation { n: 8 }, RvKind::Arr(8));
             let k = g.push(RvNode::ConstNum(3.0), RvKind::Num);
-            g.push(RvNode::ArrIndex { arr: perm, index: k }, RvKind::Num)
+            g.push(
+                RvNode::ArrIndex {
+                    arr: perm,
+                    index: k,
+                },
+                RvKind::Num,
+            )
         });
         let src = emit(&g, &[root]).expect("a permutation must lower now, not decline");
         let b = body(&src);
-        assert!(b.contains("cell_bits48("), "the shuffle must draw from a cell stream:\n{src}");
-        assert!(b.contains("bounded48("), "Fisher–Yates needs the bounded draw:\n{src}");
-        assert!(b.contains("array<f32, 8u>"), "the permutation array must be materialized:\n{src}");
+        assert!(
+            b.contains("cell_bits48("),
+            "the shuffle must draw from a cell stream:\n{src}"
+        );
+        assert!(
+            b.contains("bounded48("),
+            "Fisher–Yates needs the bounded draw:\n{src}"
+        );
+        assert!(
+            b.contains("array<f32, 8u>"),
+            "the permutation array must be materialized:\n{src}"
+        );
     }
 
     /// A `Rotation` lowers to a Gram–Schmidt **loop** (G4b) — the property that keeps it a small
@@ -1254,15 +1302,25 @@ mod tests {
         });
         let src = emit(&g, &[root]).expect("a rotation must lower now, not decline");
         let b = body(&src);
-        assert!(b.contains("array<f32, 400u>"), "the matrix must be materialized:\n{src}");
-        assert!(b.contains("cell_bits48("), "the normal fill draws from a cell stream:\n{src}");
+        assert!(
+            b.contains("array<f32, 400u>"),
+            "the matrix must be materialized:\n{src}"
+        );
+        assert!(
+            b.contains("cell_bits48("),
+            "the normal fill draws from a cell stream:\n{src}"
+        );
         // The whole point: a bounded loop, NOT 400 unrolled draws. `barrier_option`'s lesson applied
         // to Gram–Schmidt — a d=20 shader must not scale its statement count with d³.
         assert!(
             b.matches("cell_bits48(").count() <= 2,
             "the normal fill must be ONE loop (<=2 draw calls in its body), not unrolled:\n{src}"
         );
-        assert!(b.len() < 4000, "a d=20 rotation shader must stay small (loops), got {} bytes", b.len());
+        assert!(
+            b.len() < 4000,
+            "a d=20 rotation shader must stay small (loops), got {} bytes",
+            b.len()
+        );
     }
 
     /// A `Gather` (`xs[i]`, a *random* index into a table of scalar nodes) lowers to a local table
@@ -1276,12 +1334,24 @@ mod tests {
                 RvNode::Src(Source::UniformInt { lo: 0.0, hi: 1.0 }),
                 RvKind::Num,
             );
-            g.push(RvNode::Gather { elems: Box::new([a, bb]), index: idx }, RvKind::Num)
+            g.push(
+                RvNode::Gather {
+                    elems: Box::new([a, bb]),
+                    index: idx,
+                },
+                RvKind::Num,
+            )
         });
         let src = emit(&g, &[root]).expect("a gather must lower");
         let b = body(&src);
-        assert!(b.contains("array<f32, 2u>"), "the table must be materialized:\n{src}");
-        assert!(b.contains("nz_isnan("), "the read must screen a NaN index:\n{src}");
+        assert!(
+            b.contains("array<f32, 2u>"),
+            "the table must be materialized:\n{src}"
+        );
+        assert!(
+            b.contains("nz_isnan("),
+            "the read must screen a NaN index:\n{src}"
+        );
     }
 
     /// Comparisons must screen NaN by **bits**, never by a float identity.
@@ -1324,7 +1394,10 @@ mod tests {
         });
         let src = emit(&g, &[root]).expect("explicit trig lowers");
         let b = body(&src);
-        assert!(b.contains("nz_sin("), "must call the exact reduction:\n{src}");
+        assert!(
+            b.contains("nz_sin("),
+            "must call the exact reduction:\n{src}"
+        );
         assert!(
             !b.contains(" sin(") && !b.contains("=sin("),
             "must not call WGSL's built-in `sin` — it is wrong past [-pi, pi]:\n{src}"
@@ -1334,7 +1407,10 @@ mod tests {
         // theta in [0, 2pi), always inside the built-in's guaranteed range. It stays a built-in.
         let (g, root) = g_with(|g| {
             g.push(
-                RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }),
+                RvNode::Src(Source::Normal {
+                    mu: 0.0,
+                    sigma: 1.0,
+                }),
                 RvKind::Num,
             )
         });
@@ -1359,7 +1435,10 @@ mod tests {
         let (g, roots) = {
             let mut g = RvGraph::default();
             let x = g.push(
-                RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }),
+                RvNode::Src(Source::Normal {
+                    mu: 0.0,
+                    sigma: 1.0,
+                }),
                 RvKind::Num,
             );
             let two = g.push(RvNode::ConstNum(2.0), RvKind::Num);
@@ -1409,10 +1488,9 @@ mod gpu_tests {
     /// `None` when the machine has no GPU — the tests then skip rather than fail.
     fn gpu() -> Option<Gpu> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let adapter = pollster::block_on(
-            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
-        )
-        .ok()?;
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()?;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
         Some(Gpu { device, queue })
@@ -1421,10 +1499,12 @@ mod gpu_tests {
     /// Compile and dispatch a generated shader; return its column.
     fn run(gpu: &Gpu, wgsl: &str, key: crate::rng::Key, lane0: u32, n: u32) -> Vec<f32> {
         gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: None,
-            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-        });
+        let module = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: None,
+                source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+            });
         let pipeline = gpu
             .device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1466,8 +1546,14 @@ mod gpu_tests {
             label: None,
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: out.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ubuf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: out.as_entire_binding(),
+                },
             ],
         });
         let mut enc = gpu.device.create_command_encoder(&Default::default());
@@ -1545,10 +1631,13 @@ mod gpu_tests {
             let Some((g, c)) = both(&gpu, src, 7) else {
                 panic!("{label}: the emitter declined a supported cone")
             };
-            let exact = g.iter().zip(&c).filter(|(a, b)| a.to_bits() == b.to_bits()).count();
+            let exact = g
+                .iter()
+                .zip(&c)
+                .filter(|(a, b)| a.to_bits() == b.to_bits())
+                .count();
             assert_eq!(
-                exact,
-                LANES as usize,
+                exact, LANES as usize,
                 "{label}: only {exact}/{LANES} lanes bit-identical — the GPU is drawing a \
                  DIFFERENT stream than the interpreter, which would void the RNG certification"
             );
@@ -1569,7 +1658,9 @@ mod gpu_tests {
         };
         let mut checked = 0;
         for (label, src) in conformance::CONST_CASES {
-            let Some((g, c)) = both(&gpu, src, 3) else { continue }; // declined: fine, not this backend's job
+            let Some((g, c)) = both(&gpu, src, 3) else {
+                continue;
+            }; // declined: fine, not this backend's job
             checked += 1;
             for (i, (&a, &b)) in g.iter().zip(&c).enumerate() {
                 // Exact agreement (including the infinities `sqrt(+inf)` and `1/0` produce) passes
@@ -1590,7 +1681,10 @@ mod gpu_tests {
                 );
             }
         }
-        assert!(checked > 10, "only {checked} corpus cases reached the GPU — the gate is too tight");
+        assert!(
+            checked > 10,
+            "only {checked} corpus cases reached the GPU — the gate is too tight"
+        );
     }
 
     /// **Payne-Hanek, on device, exactly where the built-in gives up (G1b).**
@@ -1618,7 +1712,8 @@ mod gpu_tests {
                 // `unif(0,1)` spreads the arguments across the decade, so this is thousands of
                 // distinct large arguments per case, not one lucky point.
                 let src = format!("use rand; use math; X ~ unif(0,1); math::{f}({mag} * X)");
-                let (g, c) = both(&gpu, &src, 7).expect("explicit trig must lower now, not decline");
+                let (g, c) =
+                    both(&gpu, &src, 7).expect("explicit trig must lower now, not decline");
                 for (i, (&a, &b)) in g.iter().zip(&c).enumerate() {
                     assert!(
                         (a - b).abs() <= 1e-6,
@@ -1640,7 +1735,9 @@ mod gpu_tests {
             return;
         };
         for (label, src, seed) in conformance::RNG_CASES {
-            let Some((g, c)) = both(&gpu, src, *seed) else { continue };
+            let Some((g, c)) = both(&gpu, src, *seed) else {
+                continue;
+            };
             let mean = |v: &[f32]| v.iter().map(|&x| f64::from(x)).sum::<f64>() / v.len() as f64;
             let (mg, mc) = (mean(&g), mean(&c));
             // Both columns are the SAME draws, so this is far tighter than a two-sample test: the
@@ -1692,7 +1789,11 @@ mod gpu_tests {
         for k in [0usize, 1, 7, 13, 19] {
             let src = format!("use rand; d ~ rand::permutation(20); d[{k}]");
             let (g, c) = both(&gpu, &src, 5).expect("a permutation cone must lower now");
-            let exact = g.iter().zip(&c).filter(|(a, b)| a.to_bits() == b.to_bits()).count();
+            let exact = g
+                .iter()
+                .zip(&c)
+                .filter(|(a, b)| a.to_bits() == b.to_bits())
+                .count();
             assert_eq!(
                 exact, LANES as usize,
                 "perm[{k}]: only {exact}/{LANES} lanes bit-identical — the GPU Fisher–Yates diverged \
@@ -1722,17 +1823,37 @@ mod gpu_tests {
             return;
         };
         let mean = |v: &[f32]| v.iter().map(|&x| f64::from(x)).sum::<f64>() / v.len() as f64;
-        let m2 = |v: &[f32]| v.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>() / v.len() as f64;
+        let m2 = |v: &[f32]| {
+            v.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>() / v.len() as f64
+        };
         let mut lanewise_worst = 0.0f32;
         for (i, j) in [(0usize, 0usize), (2, 3), (4, 4), (1, 4), (3, 0)] {
             let src = format!("use rand; Pi ~ rand::rotation(5); Pi[{i}][{j}]");
             let (g, c) = both(&gpu, &src, 5).expect("a rotation cone must lower");
             // Same distribution: element mean ≈ 0 and second moment ≈ 1/d = 0.2, and the two backends
             // agree on both to within Monte Carlo error (SE ~ 0.007 on 4096 lanes).
-            assert!((mean(&g) - mean(&c)).abs() < 0.03, "element ({i},{j}) means diverge: {} vs {}", mean(&g), mean(&c));
-            assert!((m2(&g) - m2(&c)).abs() < 0.03, "element ({i},{j}) 2nd moments diverge: {} vs {}", m2(&g), m2(&c));
-            assert!((m2(&g) - 0.2).abs() < 0.03, "element ({i},{j}) 2nd moment {} != 1/d", m2(&g));
-            let w = g.iter().zip(&c).map(|(&a, &b)| (a - b).abs()).fold(0.0f32, f32::max);
+            assert!(
+                (mean(&g) - mean(&c)).abs() < 0.03,
+                "element ({i},{j}) means diverge: {} vs {}",
+                mean(&g),
+                mean(&c)
+            );
+            assert!(
+                (m2(&g) - m2(&c)).abs() < 0.03,
+                "element ({i},{j}) 2nd moments diverge: {} vs {}",
+                m2(&g),
+                m2(&c)
+            );
+            assert!(
+                (m2(&g) - 0.2).abs() < 0.03,
+                "element ({i},{j}) 2nd moment {} != 1/d",
+                m2(&g)
+            );
+            let w = g
+                .iter()
+                .zip(&c)
+                .map(|(&a, &b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
             lanewise_worst = lanewise_worst.max(w);
         }
         // And confirm the point of the whole test: lane-for-lane they genuinely differ (this is a
@@ -1754,7 +1875,14 @@ mod gpu_tests {
         };
         let src = "use rand; i ~ unif_int(0, 3); [10, 20, 30, 40][i]";
         let (g, c) = both(&gpu, src, 9).expect("a gather cone must lower");
-        let exact = g.iter().zip(&c).filter(|(a, b)| a.to_bits() == b.to_bits()).count();
-        assert_eq!(exact, LANES as usize, "gather: only {exact}/{LANES} lanes bit-identical");
+        let exact = g
+            .iter()
+            .zip(&c)
+            .filter(|(a, b)| a.to_bits() == b.to_bits())
+            .count();
+        assert_eq!(
+            exact, LANES as usize,
+            "gather: only {exact}/{LANES} lanes bit-identical"
+        );
     }
 }

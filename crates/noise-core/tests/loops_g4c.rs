@@ -22,9 +22,21 @@ fn run(src: &str) -> f64 {
 /// The same program with capture on and off must agree to the last bit — the whole correctness claim
 /// of `unroll_scans`.
 fn assert_capture_matches(src: &str) {
-    let off = { set_loop_capture(false); let v = run(src); set_loop_capture(true); v };
-    let on = { set_loop_capture(true); run(src) };
-    assert_eq!(on.to_bits(), off.to_bits(), "capture changed the result for:\n{src}\n on={on} off={off}");
+    let off = {
+        set_loop_capture(false);
+        let v = run(src);
+        set_loop_capture(true);
+        v
+    };
+    let on = {
+        set_loop_capture(true);
+        run(src)
+    };
+    assert_eq!(
+        on.to_bits(),
+        off.to_bits(),
+        "capture changed the result for:\n{src}\n on={on} off={off}"
+    );
 }
 
 /// The tier-2 twin of [`assert_capture_matches`] for a *floating-point arithmetic* cone that can gate
@@ -39,7 +51,10 @@ fn assert_capture_matches_ulp(src: &str) {
         set_loop_capture(true);
         v
     };
-    let on = { set_loop_capture(true); run(src) };
+    let on = {
+        set_loop_capture(true);
+        run(src)
+    };
     let tol = 1e-6 * on.abs().max(1.0);
     assert!(
         (on - off).abs() <= tol,
@@ -80,11 +95,12 @@ fn nested_scan_matches_unroll() {
 #[test]
 fn prisoners_analytic() {
     // The real thing: ~31.18% for n=100, opens=50.
-    let p = run(
-        "use rand; n = 100; boxes ~ permutation(n); all = true; \
+    let p = run("use rand; n = 100; boxes ~ permutation(n); all = true; \
          for prisoner in 0..n { box = prisoner; found = false; \
            for hop in 0..50 { box = boxes[box]; found = found || (box == prisoner) }; \
-           all = all && found }; P(all, 200000)",
+           all = all && found }; P(all, 200000)");
+    assert!(
+        (p - 0.3118).abs() < 0.01,
+        "prisoners P(all) = {p}, want ~0.3118"
     );
-    assert!((p - 0.3118).abs() < 0.01, "prisoners P(all) = {p}, want ~0.3118");
 }

@@ -99,7 +99,10 @@ impl Key {
             let i = (next() % pool.len() as u64) as usize;
             key |= (pool.swap_remove(i) as u64) << (4 * pos);
         }
-        Key { k0: key as u32, k1: (key >> 32) as u32 }
+        Key {
+            k0: key as u32,
+            k1: (key >> 32) as u32,
+        }
     }
 
     #[inline(always)]
@@ -190,7 +193,10 @@ impl CellStream {
     /// The consumed 48 bits of the next draw.
     #[inline]
     pub fn next_u48(&mut self) -> u64 {
-        debug_assert!(self.j < CELL_STREAM_MAX_DRAWS, "cell stream over its draw budget");
+        debug_assert!(
+            self.j < CELL_STREAM_MAX_DRAWS,
+            "cell stream over its draw budget"
+        );
         let bits = draw48(self.key, self.base + self.j as u64);
         self.j += 1;
         bits
@@ -222,7 +228,11 @@ pub fn pair_bits(key: Key, source: u32, lane: u32) -> (u32, u32) {
 /// what both emitters bake in as constants, so the arithmetic agrees op-for-op.
 #[inline]
 pub fn fill_uniform(key: Key, source: u32, lane0: u32, lo: f64, hi: f64, out: &mut [f32]) {
-    debug_assert_eq!(lane0 & 1, 0, "fills start on even lanes (pair-shared draws)");
+    debug_assert_eq!(
+        lane0 & 1,
+        0,
+        "fills start on even lanes (pair-shared draws)"
+    );
     let (loc, span) = (lo as f32, (hi - lo) as f32);
     for (t, pair) in out.chunks_mut(2).enumerate() {
         let lane = lane0.wrapping_add(2 * t as u32);
@@ -264,7 +274,11 @@ pub fn fill_uniform_int(key: Key, source: u32, lane0: u32, lo: f64, hi: f64, out
 /// f32 uniform simply has no smaller positive value to invert. Tail mass beyond it is 6e-8.
 #[inline]
 pub fn fill_exp(key: Key, source: u32, lane0: u32, rate: f64, out: &mut [f32]) {
-    debug_assert_eq!(lane0 & 1, 0, "fills start on even lanes (pair-shared draws)");
+    debug_assert_eq!(
+        lane0 & 1,
+        0,
+        "fills start on even lanes (pair-shared draws)"
+    );
     let rate = rate as f32;
     let one_minus_ln = |b: u32| -crate::approx::ln_f32(1.0 - unit24(b)) / rate;
     for (t, pair) in out.chunks_mut(2).enumerate() {
@@ -283,7 +297,11 @@ pub fn fill_exp(key: Key, source: u32, lane0: u32, rate: f64, out: &mut [f32]) {
 /// emitters bake in. Same 24-bit tail cap as [`fill_exp`].
 #[inline]
 pub fn fill_geometric(key: Key, source: u32, lane0: u32, p: f64, out: &mut [f32]) {
-    debug_assert_eq!(lane0 & 1, 0, "fills start on even lanes (pair-shared draws)");
+    debug_assert_eq!(
+        lane0 & 1,
+        0,
+        "fills start on even lanes (pair-shared draws)"
+    );
     let denom = (1.0 - p).ln() as f32;
     let geo = |b: u32| (crate::approx::ln_f32(1.0 - unit24(b)) / denom).floor();
     for (t, pair) in out.chunks_mut(2).enumerate() {
@@ -327,7 +345,11 @@ pub fn normal_pair(key: Key, lane: u32, source: u32) -> (f32, f32) {
 /// two-branch trig evaluation per TWO lanes.
 #[inline]
 pub fn fill_normal(key: Key, source: u32, lane0: u32, mu: f64, sigma: f64, out: &mut [f32]) {
-    debug_assert_eq!(lane0 & 1, 0, "fills start on even lanes (pair-shared draws)");
+    debug_assert_eq!(
+        lane0 & 1,
+        0,
+        "fills start on even lanes (pair-shared draws)"
+    );
     let (mu, sigma) = (mu as f32, sigma as f32);
     for (t, pair) in out.chunks_mut(2).enumerate() {
         let lane = lane0.wrapping_add(2 * t as u32);
@@ -393,10 +415,16 @@ mod tests {
             assert_eq!(k & 1, 1, "seed {seed}: LSD must be odd (key {k:016x})");
             for half in [k & 0xFFFF_FFFF, k >> 32] {
                 let digits: Vec<u64> = (0..8).map(|i| (half >> (4 * i)) & 0xF).collect();
-                assert!(digits.iter().all(|&d| d != 0), "seed {seed}: zero digit in {half:08x}");
+                assert!(
+                    digits.iter().all(|&d| d != 0),
+                    "seed {seed}: zero digit in {half:08x}"
+                );
                 let mut seen = [false; 16];
                 for &d in &digits {
-                    assert!(!seen[d as usize], "seed {seed}: repeated digit in {half:08x}");
+                    assert!(
+                        !seen[d as usize],
+                        "seed {seed}: repeated digit in {half:08x}"
+                    );
                     seen[d as usize] = true;
                 }
             }
@@ -446,13 +474,22 @@ mod tests {
         let key = Key::from_seed(0);
         println!("KAT_KEY0 = 0x{:016X}", key.as_u64());
         for (src, lane) in [(0u32, 0u32), (0, 1), (1, 0), (7, 12345)] {
-            println!("draw48(src {src}, lane {lane}) = 0x{:012X}", draw48(key, scalar_ctr(src, lane)));
+            println!(
+                "draw48(src {src}, lane {lane}) = 0x{:012X}",
+                draw48(key, scalar_ctr(src, lane))
+            );
         }
         let mut col = [0.0f32; 4];
         fill_uniform(key, 0, 0, 0.0, 1.0, &mut col);
-        println!("KAT_UNIF_F32 = {:?}", col.map(|x| format!("0x{:08X}", x.to_bits())));
+        println!(
+            "KAT_UNIF_F32 = {:?}",
+            col.map(|x| format!("0x{:08X}", x.to_bits()))
+        );
         fill_normal(key, 2, 0, 0.0, 1.0, &mut col);
-        println!("KAT_NORM_F32 = {:?}", col.map(|x| format!("0x{:08X}", x.to_bits())));
+        println!(
+            "KAT_NORM_F32 = {:?}",
+            col.map(|x| format!("0x{:08X}", x.to_bits()))
+        );
     }
 
     const KAT_KEY0: u64 = 0x432A_B7DF_C618_529F;
@@ -534,7 +571,10 @@ mod tests {
         assert!((mean - 3.0).abs() < 0.05, "geometric mean = {mean}");
         fill_poisson(key, 5, 0, 0, 100_000.0, &mut col); // normal-approx regime
         let (mean, var) = stats(&col);
-        assert!((mean / 1e5 - 1.0).abs() < 0.01, "poisson approx mean = {mean}");
+        assert!(
+            (mean / 1e5 - 1.0).abs() < 0.01,
+            "poisson approx mean = {mean}"
+        );
         assert!((var / 1e5 - 1.0).abs() < 0.05, "poisson approx var = {var}");
     }
 
@@ -612,7 +652,9 @@ mod tests {
             std::hint::black_box(&col);
             println!("  {label:<28}{:>8.1} M draws/s", n as f64 / el / 1e6);
         };
-        time("fill_uniform", &mut |c| fill_uniform(key, 0, 0, 0.0, 1.0, c));
+        time("fill_uniform", &mut |c| {
+            fill_uniform(key, 0, 0, 0.0, 1.0, c)
+        });
         time("fill_uniform_int(1,6)", &mut |c| {
             fill_uniform_int(key, 1, 0, 1.0, 6.0, c)
         });
@@ -659,7 +701,10 @@ mod tests {
         fill_uniform(key, 0, 0, 0.0, 1.0, &mut col);
         for &u in &col {
             assert!((0.0..1.0).contains(&u), "uniform out of range: {u}");
-            assert!(1.0 - u >= (1.0f32 / (1u32 << 24) as f32), "1 - u underflowed to 0");
+            assert!(
+                1.0 - u >= (1.0f32 / (1u32 << 24) as f32),
+                "1 - u underflowed to 0"
+            );
         }
     }
 }

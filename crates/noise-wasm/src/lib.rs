@@ -112,9 +112,13 @@ fn parse_opts(opts_json: Option<&str>) -> Result<ParsedOpts, String> {
                 }
                 _ => None,
             };
-            let (rel, abs) = pair
-                .ok_or_else(|| "opts.precision must be a number or [rel, abs]".to_string())?;
-            if !rel.is_finite() || !abs.is_finite() || rel < 0.0 || abs < 0.0 || (rel == 0.0 && abs == 0.0)
+            let (rel, abs) =
+                pair.ok_or_else(|| "opts.precision must be a number or [rel, abs]".to_string())?;
+            if !rel.is_finite()
+                || !abs.is_finite()
+                || rel < 0.0
+                || abs < 0.0
+                || (rel == 0.0 && abs == 0.0)
             {
                 return Err(
                     "opts.precision needs rel >= 0 and abs >= 0, not both 0 (e.g. 1e-4)".into(),
@@ -440,7 +444,9 @@ mod tests {
         assert_eq!(parse_opts(Some("   ")).unwrap(), ParsedOpts::default());
         // a well-formed opts object → typed overrides
         let got = parse_opts(Some(r#"{"inputs":{"n":6,"flag":true}}"#)).unwrap();
-        assert!(got.overrides.contains(&("n".to_string(), InputValue::Num(6.0))));
+        assert!(got
+            .overrides
+            .contains(&("n".to_string(), InputValue::Num(6.0))));
         assert!(got
             .overrides
             .contains(&("flag".to_string(), InputValue::Bool(true))));
@@ -455,9 +461,11 @@ mod tests {
         assert!(got.profile);
         assert!(got.overrides.is_empty());
         // still off when explicitly false
-        assert!(!parse_opts(Some(r#"{"inputs":{"n":1},"profile":false}"#))
-            .unwrap()
-            .profile);
+        assert!(
+            !parse_opts(Some(r#"{"inputs":{"n":1},"profile":false}"#))
+                .unwrap()
+                .profile
+        );
     }
 
     #[test]

@@ -52,7 +52,11 @@ impl Engine {
             }
             None => 0.0,
         };
-        if !rel.is_finite() || !abs.is_finite() || rel < 0.0 || abs < 0.0 || (rel == 0.0 && abs == 0.0)
+        if !rel.is_finite()
+            || !abs.is_finite()
+            || rel < 0.0
+            || abs < 0.0
+            || (rel == 0.0 && abs == 0.0)
         {
             return Err(NoiseError::runtime(
                 format!(

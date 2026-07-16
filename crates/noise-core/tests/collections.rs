@@ -409,7 +409,10 @@ fn rotation_is_orthonormal() {
         "d = 8; Pi ~ rotation(d); x = normalize(iota(d)); \
          E(normsq(transpose(Pi) @ (Pi @ x) - x), 100)",
     );
-    assert!(rt < 1e-6, "||Pi^T Pi x - x||^2 = {rt}, want ~0 to f32 precision");
+    assert!(
+        rt < 1e-6,
+        "||Pi^T Pi x - x||^2 = {rt}, want ~0 to f32 precision"
+    );
 }
 
 #[test]

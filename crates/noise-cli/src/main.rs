@@ -72,7 +72,9 @@ mod interrupt {
             let active = ACTIVE.lock().ok().and_then(|g| g.clone());
             match active {
                 Some(token) if HITS.fetch_add(1, Ordering::SeqCst) == 0 => {
-                    eprintln!("\nstopping — showing what was sampled so far (Ctrl-C again to kill)");
+                    eprintln!(
+                        "\nstopping — showing what was sampled so far (Ctrl-C again to kill)"
+                    );
                     token.stop();
                 }
                 _ => std::process::exit(130),
@@ -124,7 +126,6 @@ struct Args {
     resolution: Option<usize>,
 }
 
-
 impl Args {
     /// Apply the runtime settings to an engine (each pins its setting — "pragmas declare, `run()`
     /// overrides"). The `max_time` ladder: an explicit `--max-time 0` = no deadline, an explicit
@@ -159,7 +160,8 @@ fn parse_precision(v: &str) -> Result<(f64, f64), String> {
             .map_err(|_| format!("bad --precision {v:?}: {s:?} is not a number"))?,
         None => 0.0,
     };
-    if !rel.is_finite() || !abs.is_finite() || rel < 0.0 || abs < 0.0 || (rel == 0.0 && abs == 0.0) {
+    if !rel.is_finite() || !abs.is_finite() || rel < 0.0 || abs < 0.0 || (rel == 0.0 && abs == 0.0)
+    {
         return Err(format!(
             "bad --precision {v:?}: needs rel >= 0 and abs >= 0, not both 0 (e.g. --precision 1e-4)"
         ));
@@ -180,10 +182,9 @@ fn parse_max_time(v: &str) -> Result<Option<std::time::Duration>, String> {
     } else {
         (v, 1.0)
     };
-    let secs: f64 = num
-        .trim()
-        .parse()
-        .map_err(|_| format!("bad --max-time {v:?}: expected 0, seconds, or e.g. 2s / 500ms / 3m"))?;
+    let secs: f64 = num.trim().parse().map_err(|_| {
+        format!("bad --max-time {v:?}: expected 0, seconds, or e.g. 2s / 500ms / 3m")
+    })?;
     if !secs.is_finite() || secs < 0.0 {
         return Err(format!("bad --max-time {v:?}: must be >= 0"));
     }
@@ -353,7 +354,9 @@ fn print_help() {
     println!("  noise <file>                run a program file");
     println!("  noise <file> --input k=v    tune an inline input (repeatable; also -i k=v)");
     println!("  noise <file> --precision p  sample until se <= p*|est| (or `rel,abs`); overrides pragmas");
-    println!("  noise <file> --max-time t   wall-clock ceiling (e.g. 2s, 500ms; 0 = off, default 60s)");
+    println!(
+        "  noise <file> --max-time t   wall-clock ceiling (e.g. 2s, 500ms; 0 = off, default 60s)"
+    );
     println!("  noise <file> --resolution n ambient signal resolution");
     println!("  noise validate <file>       parse and build the graph without producing output");
     println!("  noise ide-integration       install the VS Code / Cursor syntax extension");
@@ -780,9 +783,18 @@ u.noise:2:1: unexpected character 'π'
         let got = parse_args(&s(&["p.noise", "--precision=1e-3,1e-6", "--max-time=0"])).unwrap();
         assert_eq!(got.precision, Some((1e-3, 1e-6)));
         assert!(got.max_time_off);
-        assert_eq!(parse_max_time("500ms").unwrap(), Some(std::time::Duration::from_millis(500)));
-        assert_eq!(parse_max_time("1.5").unwrap(), Some(std::time::Duration::from_secs_f64(1.5)));
-        assert_eq!(parse_max_time("3m").unwrap(), Some(std::time::Duration::from_secs(180)));
+        assert_eq!(
+            parse_max_time("500ms").unwrap(),
+            Some(std::time::Duration::from_millis(500))
+        );
+        assert_eq!(
+            parse_max_time("1.5").unwrap(),
+            Some(std::time::Duration::from_secs_f64(1.5))
+        );
+        assert_eq!(
+            parse_max_time("3m").unwrap(),
+            Some(std::time::Duration::from_secs(180))
+        );
 
         // Validation: both-zero precision, negative durations, fractional counts.
         assert!(parse_args(&s(&["p.noise", "--precision", "0"])).is_err());

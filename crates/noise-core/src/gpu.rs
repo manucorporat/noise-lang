@@ -26,9 +26,9 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
-use std::sync::OnceLock;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use crate::dist::{RvGraph, RvId};
 use crate::error::{NoiseError, Result};
@@ -158,8 +158,8 @@ fn emitted_instrs(wgsl: &str) -> usize {
 /// (`MAX_WGSL_INSTRS`) and the runtime term (`MIN_CONE_OPS`) always hold: a shader that takes seconds
 /// to compile blocks the first run regardless, and a thin cone is slower on the GPU however it is used.
 fn profitable(instrs: usize, ops_per_draw: u64, n: usize) -> bool {
-    let work_ok = crate::kernel::prefer_runtime()
-        || (n as f64 * ops_per_draw as f64) >= MIN_WORK_GPU;
+    let work_ok =
+        crate::kernel::prefer_runtime() || (n as f64 * ops_per_draw as f64) >= MIN_WORK_GPU;
     instrs <= MAX_WGSL_INSTRS && ops_per_draw >= MIN_CONE_OPS && work_ok
 }
 
@@ -199,7 +199,11 @@ fn profitable_reduce(instrs: usize, ops_per_draw: u64, n: usize) -> bool {
 /// [`profitable_reduce`] exactly.
 fn gate_reason_reduce(instrs: usize, ops_per_draw: u64, n: usize) -> String {
     let runtime = crate::kernel::prefer_runtime();
-    let floor = if runtime { MIN_WORK_REDUCE_RUNTIME } else { MIN_WORK_GPU_REDUCE };
+    let floor = if runtime {
+        MIN_WORK_REDUCE_RUNTIME
+    } else {
+        MIN_WORK_GPU_REDUCE
+    };
     if instrs > MAX_WGSL_INSTRS {
         format!("gate(reduce): DECLINE — cone too big ({instrs} instrs > {MAX_WGSL_INSTRS})")
     } else if profitable(instrs, ops_per_draw, n) {
@@ -231,7 +235,11 @@ fn gate_reason(instrs: usize, ops_per_draw: u64, n: usize) -> String {
             n as f64 * ops_per_draw as f64
         )
     } else {
-        let mode = if crate::kernel::prefer_runtime() { " (prefer-runtime)" } else { "" };
+        let mode = if crate::kernel::prefer_runtime() {
+            " (prefer-runtime)"
+        } else {
+            ""
+        };
         format!("gate: ACCEPT{mode} — {instrs} instrs, {ops_per_draw} ops/draw, {n} draws")
     }
 }
@@ -301,10 +309,12 @@ impl Device {
             return Some(p.clone());
         }
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: None,
-            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-        });
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: None,
+                source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+            });
         let pipeline = self
             .device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -328,7 +338,14 @@ impl Device {
     /// Dispatch lanes `lane0 .. lane0 + n` and read back what the shader wrote — see
     /// [`dispatch_shape`] for the two output layouts (`cols >= 1` column mode, `cols == 0` reduce
     /// mode).
-    fn dispatch(&self, pipe: &wgpu::ComputePipeline, key: crate::rng::Key, lane0: u32, n: u32, cols: u32) -> Vec<f32> {
+    fn dispatch(
+        &self,
+        pipe: &wgpu::ComputePipeline,
+        key: crate::rng::Key,
+        lane0: u32,
+        n: u32,
+        cols: u32,
+    ) -> Vec<f32> {
         let (out_len, workgroups) = dispatch_shape(n, cols);
         let bytes = out_len as u64 * 4;
         let params: [u32; 4] = [key.k0, key.k1, lane0, n];
@@ -358,8 +375,14 @@ impl Device {
             label: None,
             layout: &pipe.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: out.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ubuf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: out.as_entire_binding(),
+                },
             ],
         });
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -466,7 +489,10 @@ fn dispatch(prep: &Prepared, key: crate::rng::Key, lane0: u32, n: u32, cols: u32
     let (out_len, _wgs) = dispatch_shape(n, cols);
     let mut out = vec![0.0f32; out_len];
     let ok = nz_gpu_dispatch(&prep.0, &mut out, n, cols, key.k0, key.k1, lane0);
-    debug_assert_eq!(ok, 1, "nz_gpu_dispatch failed after prepare succeeded (device loss?)");
+    debug_assert_eq!(
+        ok, 1,
+        "nz_gpu_dispatch failed after prepare succeeded (device loss?)"
+    );
     out
 }
 
@@ -603,7 +629,8 @@ pub fn try_reduce<R: Reducer>(
         }
         let take = GPU_DISPATCH.min(n - done);
         // Epoch-local lanes fit u32 by construction (the reduce driver split at 2³² boundaries).
-        let lane0 = u32::try_from(lanes.start + done as u64).expect("epoch-local lane exceeds 2^32");
+        let lane0 =
+            u32::try_from(lanes.start + done as u64).expect("epoch-local lane exceeds 2^32");
         let col = dispatch(&pipe, key, lane0, take as u32, 1);
 
         // Fold on the reducer's OWN chunk boundaries, in order, into the running carry — so the
@@ -698,7 +725,8 @@ fn reduce_on_gpu<R: Reducer>(
         }
         let take = dispatch_lanes.min(n - done);
         // Epoch-local lanes fit u32 by construction (the reduce driver split at 2³² boundaries).
-        let lane0 = u32::try_from(lanes.start + done as u64).expect("epoch-local lane exceeds 2^32");
+        let lane0 =
+            u32::try_from(lanes.start + done as u64).expect("epoch-local lane exceeds 2^32");
         let partials = dispatch(&pipe, key, lane0, take as u32, 0);
 
         // One `(Σx, Σx², count)` triple per workgroup, in workgroup order — which IS lane order,
@@ -833,20 +861,24 @@ mod tests {
         let v = eng
             .run_rv("use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X*X + Y*Y < 1")
             .unwrap();
-        let crate::Value::Dist(root) = v else { panic!("expected a dist") };
+        let crate::Value::Dist(root) = v else {
+            panic!("expected a dist")
+        };
         let g = eng.graph();
         let r = MomentsReducer;
         let seed = 11u64;
         let (mid, end) = (1u64 << 28, (1u64 << 28) + (1u64 << 28)); // 2 × 268M lanes, both gate-accepted
 
-        let run = |lanes: std::ops::Range<u64>, carry| {
-            match try_reduce(g, root, lanes, seed, &r, None, None, carry).unwrap() {
-                GpuReduce::Done(out) => {
-                    assert!(out.stopped.is_none());
-                    out.acc
-                }
-                GpuReduce::Declined(_) => panic!("gate must accept a 268M-lane thin cone"),
+        let run = |lanes: std::ops::Range<u64>, carry| match try_reduce(
+            g, root, lanes, seed, &r, None, None, carry,
+        )
+        .unwrap()
+        {
+            GpuReduce::Done(out) => {
+                assert!(out.stopped.is_none());
+                out.acc
             }
+            GpuReduce::Declined(_) => panic!("gate must accept a 268M-lane thin cone"),
         };
         let single = run(0..end, r.identity());
         let staged = {
@@ -855,9 +887,21 @@ mod tests {
         };
         assert_eq!(staged.count(), single.count());
         let (a, b) = (staged.into_moments(), single.into_moments());
-        assert_eq!(a.mean.to_bits(), b.mean.to_bits(), "staged mean must match bit-for-bit");
-        assert_eq!(a.variance.to_bits(), b.variance.to_bits(), "staged variance must match");
+        assert_eq!(
+            a.mean.to_bits(),
+            b.mean.to_bits(),
+            "staged mean must match bit-for-bit"
+        );
+        assert_eq!(
+            a.variance.to_bits(),
+            b.variance.to_bits(),
+            "staged variance must match"
+        );
         // …and it is still π/4.
-        assert!((a.mean - std::f64::consts::FRAC_PI_4).abs() < 1e-4, "mean = {}", a.mean);
+        assert!(
+            (a.mean - std::f64::consts::FRAC_PI_4).abs() < 1e-4,
+            "mean = {}",
+            a.mean
+        );
     }
 }

@@ -171,7 +171,10 @@ pub fn cell_stream_ordinals(graph: &RvGraph) -> Vec<u32> {
             RvNode::Src(Source::Poisson { .. })
             | RvNode::Permutation { .. }
             | RvNode::Rotation { .. } => 1,
-            RvNode::ArrDraw { n, src: Source::Poisson { .. } } => *n,
+            RvNode::ArrDraw {
+                n,
+                src: Source::Poisson { .. },
+            } => *n,
             _ => 0,
         };
         if take > 0 {
@@ -193,7 +196,10 @@ pub const NO_STREAM: u32 = u32::MAX;
 /// The cell-stream ordinal of an [`RvNode::ArrElem`] over a shaped-Poisson block: base plus index.
 pub fn elem_stream(stream_ords: &[u32], arr: RvId, k: u32) -> u32 {
     let base = stream_ords[arr.0 as usize];
-    debug_assert_ne!(base, NO_STREAM, "ArrElem's parent is not a cell-stream block");
+    debug_assert_ne!(
+        base, NO_STREAM,
+        "ArrElem's parent is not a cell-stream block"
+    );
     base + k
 }
 
@@ -440,9 +446,7 @@ pub fn walk_cost(
                     // form regressed V8/arm64 ~30% on large kernels, 2026-07-14) — so it is
                     // charged fusible wherever the backend inlines transcendentals, and as a
                     // call on a hypothetical backend that can't (`inline_trans = false`).
-                    UnOp::Sin | UnOp::Cos | UnOp::Ln | UnOp::Sqrt => {
-                        charge(1, fusible, libcalls)
-                    }
+                    UnOp::Sin | UnOp::Cos | UnOp::Ln | UnOp::Sqrt => charge(1, fusible, libcalls),
                     UnOp::Atan | UnOp::Round | UnOp::Exp => *libcalls += 1, // still a call everywhere
                     // Cheap fused instructions on every backend (native/wasm floor/ceil/neg).
                     UnOp::Neg | UnOp::Not | UnOp::Sign | UnOp::Floor | UnOp::Ceil => *fusible += 1,
@@ -500,7 +504,6 @@ pub fn walk_cost(
     }
     true
 }
-
 
 /// Whether every node in the cone of `root` is something a code generator can emit — after "B2"
 /// that is everything except `Poisson` and large non-const `Gather` (see [`gather_class`]). (The
@@ -756,7 +759,10 @@ mod shaped_tests {
         let (srcs, draws, elems) = counts("use rand;\nzs ~[52] normal(0, 1);\nzs[0]");
         assert_eq!(draws, 1, "expected ONE ArrDraw block");
         assert_eq!(elems, 52, "expected 52 element reads");
-        assert_eq!(srcs, 0, "a shaped draw must push no scalar Src nodes at all");
+        assert_eq!(
+            srcs, 0,
+            "a shaped draw must push no scalar Src nodes at all"
+        );
     }
 
     /// A `~[d, d]` matrix draw is likewise ONE block of `d²` — not `d` blocks of `d`. (turboquant
@@ -780,11 +786,17 @@ mod shaped_tests {
             .map(|i| g.push(RvNode::ConstNum(i as f64), RvKind::Num))
             .collect();
         let idx = g.push(
-            RvNode::Src(Source::UniformInt { lo: 0.0, hi: 9999.0 }),
+            RvNode::Src(Source::UniformInt {
+                lo: 0.0,
+                hi: 9999.0,
+            }),
             RvKind::Num,
         );
         let root = g.push(
-            RvNode::Gather { elems: elems.into_boxed_slice(), index: idx },
+            RvNode::Gather {
+                elems: elems.into_boxed_slice(),
+                index: idx,
+            },
             RvKind::Num,
         );
         // The counted cone is just {gather, index}: the 10k elems are the emitted table, not nodes.
@@ -815,19 +827,41 @@ mod shaped_tests {
     #[test]
     fn source_ordinals_hand_a_shaped_draw_a_contiguous_block() {
         let mut g = RvGraph::default();
-        let a = g.push(RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }), RvKind::Num);
+        let a = g.push(
+            RvNode::Src(Source::Normal {
+                mu: 0.0,
+                sigma: 1.0,
+            }),
+            RvKind::Num,
+        );
         let blk = g.push(
-            RvNode::ArrDraw { n: 4, src: Source::Uniform(Uniform { lo: 0.0, hi: 1.0 }) },
+            RvNode::ArrDraw {
+                n: 4,
+                src: Source::Uniform(Uniform { lo: 0.0, hi: 1.0 }),
+            },
             RvKind::Arr(4),
         );
         let _e2 = g.push(RvNode::ArrElem { arr: blk, k: 2 }, RvKind::Num);
         let z = g.push(RvNode::ConstNum(1.0), RvKind::Num);
-        let b = g.push(RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }), RvKind::Num);
+        let b = g.push(
+            RvNode::Src(Source::Normal {
+                mu: 0.0,
+                sigma: 1.0,
+            }),
+            RvKind::Num,
+        );
 
         let ords = source_ordinals(&g);
-        assert_eq!(ords[a.0 as usize], 0, "the first scalar source takes ordinal 0");
+        assert_eq!(
+            ords[a.0 as usize], 0,
+            "the first scalar source takes ordinal 0"
+        );
         assert_eq!(ords[blk.0 as usize], 1, "the block's base follows it");
-        assert_eq!(elem_ordinal(&ords, blk, 2), 3, "element k draws from base + k");
+        assert_eq!(
+            elem_ordinal(&ords, blk, 2),
+            3,
+            "element k draws from base + k"
+        );
         assert_eq!(ords[z.0 as usize], NO_SOURCE, "a constant draws nothing");
         assert_eq!(
             ords[b.0 as usize], 5,

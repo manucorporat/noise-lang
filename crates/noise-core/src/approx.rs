@@ -198,27 +198,18 @@ pub fn sin(x: f64) -> f64 {
 pub(crate) const LN_COEFFS_F32: [f32; 5] = [1.0, 1.0 / 3.0, 1.0 / 5.0, 1.0 / 7.0, 1.0 / 9.0];
 
 /// `sin(r)/r` tail on `[-π/4, π/4]` (Taylor, f32): dropped `r¹¹/11!` ≈ 1.8e-9 at the range end.
-pub(crate) const SIN_COEFFS_F32: [f32; 4] = [
-    -1.0 / 6.0,
-    1.0 / 120.0,
-    -1.0 / 5040.0,
-    1.0 / 362_880.0,
-];
+pub(crate) const SIN_COEFFS_F32: [f32; 4] =
+    [-1.0 / 6.0, 1.0 / 120.0, -1.0 / 5040.0, 1.0 / 362_880.0];
 
 /// `cos(r)` tail on `[-π/4, π/4]` (Taylor, f32): dropped `r¹²/12!` ≈ 1.1e-10 at the range end.
-pub(crate) const COS_COEFFS_F32: [f32; 4] = [
-    1.0 / 24.0,
-    -1.0 / 720.0,
-    1.0 / 40_320.0,
-    -1.0 / 3_628_800.0,
-];
+pub(crate) const COS_COEFFS_F32: [f32; 4] =
+    [1.0 / 24.0, -1.0 / 720.0, 1.0 / 40_320.0, -1.0 / 3_628_800.0];
 
 /// π/2 split for the f32 Cody–Waite reduction. The high part has only 8 significant mantissa
 /// bits (`0x3FC90000`), so `k · PIO2_HI_F32` is *exact* in f32 for every `k` below 2¹⁵ — far past
 /// any `k` the guard admits — and the pair `HI + LO` pins π/2 to ~3e-11.
 pub(crate) const PIO2_HI_F32: f32 = 1.5703125;
-pub(crate) const PIO2_LO_F32: f32 =
-    (std::f64::consts::FRAC_PI_2 - PIO2_HI_F32 as f64) as f32;
+pub(crate) const PIO2_LO_F32: f32 = (std::f64::consts::FRAC_PI_2 - PIO2_HI_F32 as f64) as f32;
 
 /// The f32 twin of [`TRIG_MAX`], and much lower: the 2-term reduction's error grows like
 /// `k · 3e-11`, and an f32 ulp near 1 is only 6e-8, so the inline poly stays trustworthy to
@@ -353,7 +344,10 @@ mod tests {
             max_wide = max_wide.max((ln_f32(x) - want).abs() / want.abs().max(1.0));
             x *= 1.7;
         }
-        assert!(max_wide < 1e-6, "ln_f32 wide-range relative err {max_wide:e}");
+        assert!(
+            max_wide < 1e-6,
+            "ln_f32 wide-range relative err {max_wide:e}"
+        );
 
         let (mut max_sin, mut max_cos) = (0.0f32, 0.0f32);
         for i in 0..400_000 {
@@ -369,7 +363,15 @@ mod tests {
     /// library — the f32 twin of the C3 fallback (`sin(1e12 * X)`).
     #[test]
     fn f32_trig_agrees_past_the_reduction_limit() {
-        for &x in &[1e4f32, 1e6, 1e12, 1e20, -1e12, TRIG_MAX_F32, TRIG_MAX_F32 * 4.0] {
+        for &x in &[
+            1e4f32,
+            1e6,
+            1e12,
+            1e20,
+            -1e12,
+            TRIG_MAX_F32,
+            TRIG_MAX_F32 * 4.0,
+        ] {
             assert_eq!(sin_f32(x), (x as f64).sin() as f32, "sin_f32({x:e})");
             assert_eq!(cos_f32(x), (x as f64).cos() as f32, "cos_f32({x:e})");
         }

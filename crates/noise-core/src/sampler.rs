@@ -42,7 +42,10 @@ pub enum Quantity {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DrawBudget {
     Fixed(u64),
-    ToPrecision { rel: f64, abs: f64 },
+    ToPrecision {
+        rel: f64,
+        abs: f64,
+    },
     /// The untargeted default: `se ≤ DEFAULT_REL · max(|est|, sd)`, where `sd = se·√m` is the
     /// quantity's per-draw spread. The `sd` floor is what a bare `rel` target lacks — it makes the
     /// default **scale-free and always reachable** (a pure relative target never terminates on an
@@ -258,7 +261,9 @@ pub fn query_moments(
         } else {
             LANE_CAP as f64
         };
-        let mut n_next = (need as u64).min(drawn.saturating_mul(GROWTH_CAP)).min(LANE_CAP);
+        let mut n_next = (need as u64)
+            .min(drawn.saturating_mul(GROWTH_CAP))
+            .min(LANE_CAP);
 
         // Track D (deadline-aware sizing): from THIS stage's measured throughput, cap the next
         // stage at what the remaining deadline is predicted to afford. Throughput is per-backend
@@ -662,7 +667,10 @@ mod tests {
             RvKind::Num,
         );
         let z = g.push(
-            RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }),
+            RvNode::Src(Source::Normal {
+                mu: 0.0,
+                sigma: 1.0,
+            }),
             RvKind::Num,
         );
         let sum = g.push(RvNode::Binary(BinOp::Add, x, z), RvKind::Num);
@@ -786,7 +794,13 @@ mod tests {
         let tenth = g.push(RvNode::ConstNum(0.1), RvKind::Num);
         let roots: Vec<RvId> = (0..k)
             .map(|i| {
-                let z = g.push(RvNode::Src(Source::Normal { mu: 0.0, sigma: 1.0 }), RvKind::Num);
+                let z = g.push(
+                    RvNode::Src(Source::Normal {
+                        mu: 0.0,
+                        sigma: 1.0,
+                    }),
+                    RvKind::Num,
+                );
                 let z2 = g.push(RvNode::Binary(BinOp::Mul, z, z), RvKind::Num);
                 let z3 = g.push(RvNode::Binary(BinOp::Mul, z2, z), RvKind::Num);
                 let sc = g.push(RvNode::Binary(BinOp::Mul, z3, tenth), RvKind::Num);
@@ -837,11 +851,17 @@ mod tests {
             hit,
             false,
             Quantity::Prob,
-            DrawBudget::ToPrecision { rel: 2e-3, abs: 0.0 },
+            DrawBudget::ToPrecision {
+                rel: 2e-3,
+                abs: 0.0,
+            },
             7,
         )
         .unwrap();
-        assert!(adaptive.capped.is_none(), "no deadline set — must hit the target");
+        assert!(
+            adaptive.capped.is_none(),
+            "no deadline set — must hit the target"
+        );
         assert!(
             adaptive.se <= 2e-3 * adaptive.est.abs(),
             "target missed: se {} est {}",
@@ -887,7 +907,11 @@ mod tests {
         let nan = g.push(RvNode::ConstNum(f64::NAN), RvKind::Num);
         // Numeric event indicator under the condition sentinel: select(cond, event, NaN).
         let root = g.push(
-            RvNode::Select { cond, a: event, b: nan },
+            RvNode::Select {
+                cond,
+                a: event,
+                b: nan,
+            },
             RvKind::Num,
         );
 
@@ -903,7 +927,11 @@ mod tests {
         .unwrap();
         assert!(out.capped.is_none());
         assert!((out.est - 0.5).abs() < 0.02, "P(A|C) = {}", out.est);
-        assert!(out.se <= rel * out.est.abs(), "target missed: se {}", out.se);
+        assert!(
+            out.se <= rel * out.est.abs(),
+            "target missed: se {}",
+            out.se
+        );
         // m is the in-condition count; the lanes swept must be ~1/0.03 ≈ 33× that.
         assert!(
             out.drawn > 10 * out.count,

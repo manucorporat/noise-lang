@@ -92,8 +92,8 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
     // source (error messages and the doc model rely on it): a `#!` shebang on line 1, then an
     // optional `---`-fenced frontmatter block. Only a fence at the very top counts; `---` anywhere
     // else stays three unary minuses. See `crate::frontmatter`.
-    let mut i = crate::frontmatter::block_end(src)?
-        .unwrap_or_else(|| crate::frontmatter::shebang_end(src));
+    let mut i =
+        crate::frontmatter::block_end(src)?.unwrap_or_else(|| crate::frontmatter::shebang_end(src));
     let mut out = Vec::new();
     let n = bytes.len();
 

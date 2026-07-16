@@ -97,7 +97,10 @@ pub const CONST_CASES: &[(&str, &str)] = &[
     // (sqrt(-0.0) = -0.0 not +0.0, sqrt(-inf and any x<0) = NaN not +inf), so these pin the new
     // semantics at the bit level (the -0.0 case only passes if the sign bit survives). ---
     ("sqrt_pos", "use rand; use math; X ~ unif(9,9); sqrt(X)"), // → 3
-    ("sqrt_neg_nan", "use rand; use math; X ~ unif(0,0); sqrt(X - 1.0)"), // sqrt(-1) → NaN
+    (
+        "sqrt_neg_nan",
+        "use rand; use math; X ~ unif(0,0); sqrt(X - 1.0)",
+    ), // sqrt(-1) → NaN
     (
         "sqrt_neg_zero",
         "use rand; use math; X ~ unif(0,0); sqrt((0.0 - 1.0) * X)", // sqrt(-0.0) → -0.0
@@ -269,7 +272,11 @@ pub const RNG_CASES: &[(&str, &str, u64)] = &[
     ("mod_neg", "use rand; X ~ unif(-5,5); X % 4", 20),
     // floored modulo of a floored draw — a composed op chain (floor then %), migrated from the
     // retired JIT's `jit_mod_floor_ceil_match_interp` so every codegen backend still exercises it.
-    ("floor_mod", "use rand; use math; X ~ unif(0,8); math::floor(X) % 3", 33),
+    (
+        "floor_mod",
+        "use rand; use math; X ~ unif(0,8); math::floor(X) % 3",
+        33,
+    ),
     (
         "floor_uniform",
         "use rand; use math; X ~ unif(-3,3); math::floor(X)",

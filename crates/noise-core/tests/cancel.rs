@@ -48,7 +48,9 @@ fn cancelling_mid_forcing_aborts_promptly_with_a_cancelled_error() {
 
     started.store(true, Ordering::Release);
     let t = Instant::now();
-    let err = eng.run(BIG).expect_err("a cancelled run must not return a value");
+    let err = eng
+        .run(BIG)
+        .expect_err("a cancelled run must not return a value");
     let elapsed = t.elapsed();
     killer.join().unwrap();
 
@@ -68,7 +70,9 @@ fn cancelling_mid_forcing_aborts_promptly_with_a_cancelled_error() {
 fn a_cancellation_is_not_a_program_error() {
     let mut eng = Engine::new();
     eng.cancel();
-    let err = eng.run("1 + 1").expect_err("a pre-cancelled run must abort");
+    let err = eng
+        .run("1 + 1")
+        .expect_err("a pre-cancelled run must abort");
 
     assert!(err.kind.is_cancelled());
     assert!(

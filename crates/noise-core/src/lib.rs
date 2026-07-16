@@ -55,9 +55,9 @@ pub mod error;
 pub mod eval;
 pub mod exec;
 pub(crate) mod flint;
+pub mod frontmatter;
 #[cfg(feature = "gpu")]
 pub(crate) mod gpu;
-pub mod frontmatter;
 pub mod input;
 pub(crate) mod input_rt;
 pub mod introspect;
@@ -77,21 +77,21 @@ pub mod rng;
 pub(crate) mod rng;
 pub(crate) mod sampler;
 pub(crate) mod signal;
-pub(crate) mod sym;
 pub(crate) mod simplify;
 pub mod stats;
+pub(crate) mod sym;
 pub mod value;
 pub(crate) mod wasm_emit;
 // The WGSL emitter (PLAN-WEBGPU G1) is pure text generation with no GPU dependency, so it builds on
 // every target; `internals` exposes it to `tools/gpu-spike`, which owns the wgpu harness that runs
 // the generated shaders against the interpreter oracle.
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod wasm_host;
 #[cfg(feature = "internals")]
 #[doc(hidden)]
 pub mod wgsl_emit;
 #[cfg(not(feature = "internals"))]
 pub(crate) mod wgsl_emit;
-#[cfg(target_arch = "wasm32")]
-pub(crate) mod wasm_host;
 
 /// Re-exported only so the [`eval`] facade's [`Engine::graph`] accessor can name it. The sample-DAG
 /// is an implementation detail, not part of the curated surface — hence `#[doc(hidden)]`.

@@ -56,7 +56,8 @@ pub fn simplify_roots(graph: &RvGraph, roots: &[RvId]) -> (RvGraph, Vec<RvId>) {
 /// index or a carried value is rebuilt **per iteration**. [`taint_set`] marks the latter; the
 /// `env`-threaded [`Unroller::rebuild`] resolves placeholders and reuses the shared invariants.
 pub fn unroll_scans(graph: &RvGraph, root: RvId) -> Option<(RvGraph, RvId)> {
-    let has_scan = (0..graph.len()).any(|i| matches!(graph.node(RvId(i as u32)), RvNode::Scan { .. }));
+    let has_scan =
+        (0..graph.len()).any(|i| matches!(graph.node(RvId(i as u32)), RvNode::Scan { .. }));
     if !has_scan {
         return None;
     }
@@ -74,7 +75,8 @@ pub fn unroll_scans(graph: &RvGraph, root: RvId) -> Option<(RvGraph, RvId)> {
 /// Multi-root [`unroll_scans`] for the joint drivers: one [`Unroller`] (shared invariant memo) over
 /// every root, so a source feeding two roots stays a single node. `None` when there is no `Scan`.
 pub fn unroll_scans_roots(graph: &RvGraph, roots: &[RvId]) -> Option<(RvGraph, Vec<RvId>)> {
-    let has_scan = (0..graph.len()).any(|i| matches!(graph.node(RvId(i as u32)), RvNode::Scan { .. }));
+    let has_scan =
+        (0..graph.len()).any(|i| matches!(graph.node(RvId(i as u32)), RvNode::Scan { .. }));
     if !has_scan {
         return None;
     }
@@ -221,7 +223,11 @@ impl Unroller<'_> {
                 let c = self.out.push(RvNode::ConstNum(f64::from(k)), RvKind::Num);
                 it_env.insert(iph, c);
             }
-            cur = body.nexts.iter().map(|&nx| self.rebuild(nx, &it_env)).collect();
+            cur = body
+                .nexts
+                .iter()
+                .map(|&nx| self.rebuild(nx, &it_env))
+                .collect();
         }
         if !self.taint.contains(&scan_id) {
             self.finals.insert(scan_id, cur.clone());
@@ -417,8 +423,12 @@ impl Builder {
                                 index_ph: body.index_ph.map(|p| self.done[&p]),
                                 kinds: body.kinds.clone(),
                             };
-                            self.out
-                                .push(RvNode::Scan { body: Box::new(new_body) }, kind)
+                            self.out.push(
+                                RvNode::Scan {
+                                    body: Box::new(new_body),
+                                },
+                                kind,
+                            )
                         }
                         RvNode::ScanOut { scan, slot } => {
                             let scan = self.done[scan];
@@ -669,7 +679,11 @@ mod tests {
         let (out, r) = simplify(&g, root);
         match out.node(r) {
             RvNode::Binary(BinOp::Mul, a, b) => {
-                assert_eq!(out.node(*a), &RvNode::Input { idx: 0 }, "the Input leaf must survive");
+                assert_eq!(
+                    out.node(*a),
+                    &RvNode::Input { idx: 0 },
+                    "the Input leaf must survive"
+                );
                 assert_eq!(out.node(*b), &RvNode::ConstNum(2.0));
             }
             other => panic!("Input*2 must stay a Mul over the Input, got {other:?}"),
@@ -678,7 +692,10 @@ mod tests {
         let input_count = (0..out.len() as u32)
             .filter(|&i| matches!(out.node(RvId(i)), RvNode::Input { idx: 0 }))
             .count();
-        assert_eq!(input_count, 1, "exactly one Input leaf, deduped, never folded");
+        assert_eq!(
+            input_count, 1,
+            "exactly one Input leaf, deduped, never folded"
+        );
     }
 
     #[test]
@@ -878,7 +895,10 @@ mod tests {
         let n_perm = (0..out.len() as u32)
             .filter(|i| matches!(out.node(RvId(*i)), RvNode::Permutation { .. }))
             .count();
-        assert_eq!(n_perm, 2, "independent permutation draws must stay distinct");
+        assert_eq!(
+            n_perm, 2,
+            "independent permutation draws must stay distinct"
+        );
         match out.node(r) {
             RvNode::Binary(BinOp::Eq, a, b) => {
                 assert_ne!(a, b, "element reads of distinct draws must not merge")

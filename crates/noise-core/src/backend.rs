@@ -280,7 +280,14 @@ impl Runner for InterpRunner {
 
     fn next_batch(&mut self, len: usize) -> &[f32] {
         // Fill the full BATCH (lane consumption is constant per call), then slice to `len`.
-        run_batch(&self.prog, &mut self.regs, &mut self.arrs, self.key, self.lane, &self.inputs);
+        run_batch(
+            &self.prog,
+            &mut self.regs,
+            &mut self.arrs,
+            self.key,
+            self.lane,
+            &self.inputs,
+        );
         self.lane = self.lane.wrapping_add(BATCH as u32);
         &self.regs[self.prog.root as usize][..len]
     }
@@ -361,7 +368,14 @@ impl JointRunner for InterpJointRunner {
     }
 
     fn next_batch(&mut self) {
-        run_batch(&self.prog, &mut self.buf, &mut self.arrs, self.key, self.lane, &self.inputs);
+        run_batch(
+            &self.prog,
+            &mut self.buf,
+            &mut self.arrs,
+            self.key,
+            self.lane,
+            &self.inputs,
+        );
         self.lane = self.lane.wrapping_add(BATCH as u32);
     }
 

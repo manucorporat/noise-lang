@@ -67,7 +67,10 @@ fn a_haar_rotation_on_the_gpu() {
     let setup = "use rand; use vec; x = normalize(ones(20)); Pi ~ rand::rotation(20);";
 
     let (m, _) = est(&format!("{setup} E(normsq(Pi @ x), 300000)"));
-    assert!((m - 1.0).abs() < 1e-3, "E[|Pi x|²] = {m}, want 1 — the rotation is not norm-preserving");
+    assert!(
+        (m - 1.0).abs() < 1e-3,
+        "E[|Pi x|²] = {m}, want 1 — the rotation is not norm-preserving"
+    );
 
     // f32 Gram–Schmidt at d=20 holds orthonormality to ~1e-4, so |Pi x|² sits within ~1e-4 of 1 every
     // lane; its variance is thus ~1e-8. Anything like 1e-2 would mean the rows aren't orthonormal.
@@ -85,15 +88,16 @@ fn a_haar_rotation_on_the_gpu() {
 /// measure. So the GPU — with its own f32 rotations — must still land it.
 #[test]
 fn turboquant_distortion_on_the_gpu() {
-    let (d, _) = est(
-        "use rand; use vec; use math; \
+    let (d, _) = est("use rand; use vec; use math; \
          d = 20; x = normalize(ones(d)); s = 1 / sqrt(d); \
          L1 = [-0.7979, 0.7979] * s; \
          Pi ~ rand::rotation(d); PiT = transpose(Pi); \
-         E(normsq(x - (PiT @ quantize(Pi @ x, L1))), 200000)",
-    );
+         E(normsq(x - (PiT @ quantize(Pi @ x, L1))), 200000)");
     // The paper's Algorithm-1 b=1 distortion is ≈0.36; allow for MC noise and the f32 rotation.
-    assert!((d - 0.36).abs() < 0.03, "turboquant b=1 distortion = {d}, want ≈0.36");
+    assert!(
+        (d - 0.36).abs() < 0.03,
+        "turboquant b=1 distortion = {d}, want ≈0.36"
+    );
 }
 
 /// The `barrier_option` shape, and the reason `ArrDraw` exists: 52 shaped normals folded by a sum,
@@ -128,7 +132,10 @@ fn declined_cones_still_give_the_right_answer() {
 
     // Permutation: box 0 holds card 0 with probability 1/20 in a uniform permutation of 20.
     let (p, se) = est("use rand; d ~ rand::permutation(20); P(d[0] == 0, 500000)");
-    assert!((p - 0.05).abs() < 6.0 * se, "P(perm[0] == 0) = {p} +- {se}, want 0.05");
+    assert!(
+        (p - 0.05).abs() < 6.0 * se,
+        "P(perm[0] == 0) = {p} +- {se}, want 0.05"
+    );
 }
 
 /// Large-argument trig, end to end and now **on** the GPU (G1b) — this cone used to be declined.
@@ -140,7 +147,10 @@ fn declined_cones_still_give_the_right_answer() {
 #[test]
 fn large_argument_trig_on_the_gpu() {
     let (m, se) = est("use rand; use math; X ~ unif(0,1); E(math::sin(1000000 * X), 500000)");
-    assert!(m.abs() < 6.0 * se.max(1e-3), "E[sin(1e6 X)] = {m} +- {se}, want ~0");
+    assert!(
+        m.abs() < 6.0 * se.max(1e-3),
+        "E[sin(1e6 X)] = {m} +- {se}, want ~0"
+    );
 
     // The sharper probe: E[sin²] = 1/2 exactly, and unlike the mean it cannot be faked by a
     // backend that returns 0 everywhere — which is precisely what the built-in does here.
@@ -162,9 +172,11 @@ fn the_answer_does_not_depend_on_the_dispatch_split() {
     let (b, sb) = est("use rand; X ~ unif(0,1); E(X * X, 3000000)");
     // Both estimate 1/3, and they share a seed and a stream, so they should be very close.
     assert!((a - 1.0 / 3.0).abs() < 6.0 * sa, "1M: {a} +- {sa}");
-    assert!((b - 1.0 / 3.0).abs() < 6.0 * sb, "3M (spans 3 dispatches): {b} +- {sb}");
+    assert!(
+        (b - 1.0 / 3.0).abs() < 6.0 * sb,
+        "3M (spans 3 dispatches): {b} +- {sb}"
+    );
 }
-
 
 /// Track F gate calibration: forced-GPU reduce-mode timings for a THIN cone (pi, ~7 ops/draw) across
 /// n — the numbers `MIN_WORK_GPU_REDUCE` is set from, paired with the CPU half in
@@ -181,7 +193,10 @@ fn bench_thin_cone_gpu() {
         let v = Engine::new().run(&src).unwrap();
         let ms = t.elapsed().as_secs_f64() * 1e3;
         let Value::Est { val, .. } = v else { panic!() };
-        println!("  gpu n={n:>11}  {ms:8.1} ms  ({:.0} M draws/s)  pi={val:.4}", n as f64 / ms / 1e3);
+        println!(
+            "  gpu n={n:>11}  {ms:8.1} ms  ({:.0} M draws/s)  pi={val:.4}",
+            n as f64 / ms / 1e3
+        );
     }
 }
 
@@ -214,13 +229,14 @@ fn adaptive_precision_is_bit_identical_to_fixed_on_the_gpu() {
 /// The loop rolls to a WGSL `for`, and its answer must still be the interpreter's (analytic 0.3118).
 #[test]
 fn prisoners_on_the_gpu() {
-    let (p, _se) = est(
-        "use rand; n = 100; boxes ~ permutation(n); all = true; \
+    let (p, _se) = est("use rand; n = 100; boxes ~ permutation(n); all = true; \
          for prisoner in 0..n { box = prisoner; found = false; \
            for hop in 0..50 { box = boxes[box]; found = found || (box == prisoner) }; \
-           all = all && found }; P(all, 200000)",
+           all = all && found }; P(all, 200000)");
+    assert!(
+        (p - 0.3118).abs() < 0.01,
+        "prisoners on GPU = {p}, want ~0.3118"
     );
-    assert!((p - 0.3118).abs() < 0.01, "prisoners on GPU = {p}, want ~0.3118");
 }
 
 /// A single rolled loop on the GPU (pointer-chase over a permutation), forced onto the backend.
@@ -231,5 +247,8 @@ fn a_rolled_loop_on_the_gpu() {
          for hop in 0..12 { box = boxes[box]; found = found || (box == 0) }; P(found, 500000)",
     );
     // A cycle of length <=12 through 0 in a random permutation of 20: analytic P = 12/20 = 0.6.
-    assert!((p - 0.6).abs() < 6.0 * se.max(1e-3), "P(found) = {p} +- {se}, want 0.6");
+    assert!(
+        (p - 0.6).abs() < 6.0 * se.max(1e-3),
+        "P(found) = {p} +- {se}, want 0.6"
+    );
 }

@@ -530,10 +530,8 @@ impl Engine {
         self.cancel.reset_stop();
         crate::exec::reset_host_stop();
         self.warnings.borrow_mut().clear();
-        let _deadline = crate::exec::install_deadline(
-            self.max_time
-                .map(|d| web_time::Instant::now() + d),
-        );
+        let _deadline =
+            crate::exec::install_deadline(self.max_time.map(|d| web_time::Instant::now() + d));
         self.stats.set(crate::stats::RunStats::default());
         self.dropped = 0;
         self.first_dropped_span = None;
@@ -586,7 +584,11 @@ impl Engine {
     /// stop. Message text only; `run_to_document` also renders them with line numbers into
     /// `DocResult.warnings`.
     pub fn warnings(&self) -> Vec<String> {
-        self.warnings.borrow().iter().map(|w| w.message.clone()).collect()
+        self.warnings
+            .borrow()
+            .iter()
+            .map(|w| w.message.clone())
+            .collect()
     }
 
     /// Concretize a top-level `Value::Sym` to its current `Value::Num` (folded against the installed
@@ -660,10 +662,8 @@ impl Engine {
         self.cancel.reset_stop();
         crate::exec::reset_host_stop();
         self.warnings.borrow_mut().clear();
-        let _deadline = crate::exec::install_deadline(
-            self.max_time
-                .map(|d| web_time::Instant::now() + d),
-        );
+        let _deadline =
+            crate::exec::install_deadline(self.max_time.map(|d| web_time::Instant::now() + d));
         // Profiling is opt-in (`set_profiling`): only then do we reset + install the accumulator,
         // which is what turns per-phase timing on for this run. Off → the guard is `None` and every
         // `profile::span` stays inert.
@@ -731,9 +731,7 @@ impl Engine {
         // Snapshot the accumulated phase timings (only when profiling was on; `None` otherwise, so
         // `DocResult.profile` is absent for ordinary runs). Drop the guard first isn't needed — the
         // cell is an `Rc`, we just read it.
-        let profile = self
-            .profile_enabled
-            .then(|| self.profile.borrow().clone());
+        let profile = self.profile_enabled.then(|| self.profile.borrow().clone());
         // Render the run's warnings with their 1-based source lines (PLAN-PRECISION Track C) —
         // the CLI prints these to stderr, the playground shows them like its other diagnostics.
         let warnings = self

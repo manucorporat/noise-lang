@@ -392,8 +392,16 @@ mod tests {
         let mut baked = Engine::new();
         let baked_05 = est(baked.run("use rand; X ~ unif(0, 1); P(X < 0.5)").unwrap());
         let baked_025 = est(baked.run("use rand; X ~ unif(0, 1); P(X < 0.25)").unwrap());
-        assert_eq!(at_default.to_bits(), baked_05.to_bits(), "uniform != baked const at 0.5");
-        assert_eq!(at_025.to_bits(), baked_025.to_bits(), "uniform != baked const at 0.25");
+        assert_eq!(
+            at_default.to_bits(),
+            baked_05.to_bits(),
+            "uniform != baked const at 0.5"
+        );
+        assert_eq!(
+            at_025.to_bits(),
+            baked_025.to_bits(),
+            "uniform != baked const at 0.25"
+        );
     }
 
     /// Caching must be observationally invisible: a cache hit (second query, same engine) and a
@@ -464,9 +472,9 @@ mod tests {
         let c0 = probe::compiles();
         let _ = compile_root(&g, root, 1_000); // below the wasm gate
         let _ = compile_root(&g, root, 200_000); // above it
-        // Native has no CPU codegen gate now the JIT is gone (one bucket → the second call hits);
-        // only the wasm build gates (`MIN_DRAWS_WASM`), where the two counts flip the bucket. This
-        // test runs on native, so `expected` is 1.
+                                                 // Native has no CPU codegen gate now the JIT is gone (one bucket → the second call hits);
+                                                 // only the wasm build gates (`MIN_DRAWS_WASM`), where the two counts flip the bucket. This
+                                                 // test runs on native, so `expected` is 1.
         let expected = if cfg!(target_arch = "wasm32") { 2 } else { 1 };
         assert_eq!(probe::compiles() - c0, expected);
         // Different raw counts in the same buckets: all hits.

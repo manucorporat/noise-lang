@@ -569,10 +569,7 @@ fn moment(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
 /// not be the exact `c` for which `P(X > c) == 0.01`.
 fn quantile(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
     let QueryCtx {
-        graph,
-        check,
-        span,
-        ..
+        graph, check, span, ..
     } = *ctx;
     if arg_vals.len() < 2 || arg_vals.len() > 3 {
         return Err(NoiseError::runtime(
@@ -740,10 +737,7 @@ pub fn moment_cond(name: &str, root: RvId, tail: &[Value], ctx: &QueryCtx) -> Re
 /// chunked reduction as the unconditional `Q`), then sorting and interpolating centrally.
 pub fn quantile_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value> {
     let QueryCtx {
-        graph,
-        check,
-        span,
-        ..
+        graph, check, span, ..
     } = *ctx;
     if tail.is_empty() || tail.len() > 2 {
         return Err(NoiseError::runtime(
