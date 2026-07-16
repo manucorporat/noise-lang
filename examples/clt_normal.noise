@@ -17,7 +17,7 @@ P(Z > 1) \approx ${P(clt > 1) * 100}\% \qquad (\text{sum of } ${n} \text{ unifor
 ```
 
 // The tail from stacked-up noise lands on the same ~16% as the real thing.
-Z ~ normal(0, 1);
+Z ~ rand::normal(0, 1);
 ```latex
 P(Z > 1) = ${P(Z > 1) * 100}\% \qquad (\text{native normal})
 ```
