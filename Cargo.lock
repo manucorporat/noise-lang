@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "noise-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "ctrlc",
  "noise-core",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "noise-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "criterion",
  "pollster",
@@ -768,7 +768,7 @@ dependencies = [
 
 [[package]]
 name = "noise-wasm"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "noise-core",
  "serde",
