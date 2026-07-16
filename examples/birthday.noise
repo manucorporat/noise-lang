@@ -6,11 +6,10 @@ abstract: >
   year would suggest. Coincidences are much more likely than they feel.
 tags: [collections, classic]
 ---
-use rand;
 
 n = input::int(min: 2, max: 100, step: 1, default: 23);
 
-share ~[n] unif_int(1, 365);
+share ~[n] rand::unif_int(1, 365);
 matched = vec::has_duplicates(share);
 
 ```md

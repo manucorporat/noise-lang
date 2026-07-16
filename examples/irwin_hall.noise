@@ -7,12 +7,11 @@ abstract: >
   theorem you can watch happen.
 tags: [continuous, collections]
 ---
-use rand;   // unif
 
 // Slide n: one draw is flat, two make a triangle, a dozen round into a bell — the CLT in miniature.
-n     = input::int(min: 1, max: 12, step: 1, default: 3);
+n = input::int(min: 1, max: 12, step: 1, default: 3);
 
-draws ~[n] unif(0, 1);
+draws ~[n] rand::unif_int(0, 1);
 total = vec::sum(draws);
 ```latex
 P(\text{sum of } ${n} \text{ uniforms} > 2) = ${P(total > 2) * 100}\%

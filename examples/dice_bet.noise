@@ -7,9 +7,7 @@ abstract: >
 tags: [lifted if, risk]
 ---
 
-use rand;
-
-D ~ unif_int(1, 6);
+D ~ rand::unif_int(1, 6);
 payoff = if D == 6 { 10 } else { 0 - 2 };
 p = P(payoff > 0);
 

@@ -6,9 +6,8 @@ abstract: >
   on 4, 5, or 6, those three faces are equally in the running.
 tags: [probability, bayes]
 ---
-use rand;
 
-D ~ unif_int(1, 6);
+D ~ rand::unif_int(1, 6);
 
 ```md
 The chance a die known to have beaten 3 is actually a 6 is **${P(D == 6 | D > 3) * 100}%**.

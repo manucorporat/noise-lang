@@ -8,10 +8,9 @@ abstract: >
   draws they need to pin the answer down.
 tags: [risk, precision, tails]
 ---
-use rand;
 
 // A year of market returns, roughly bell-shaped: most years are ordinary.
-returns ~ normal(0, 1);
+returns ~ rand::normal(0, 1);
 
 // The catastrophe: a 3.7-sigma crash. It happens about once in ten thousand years.
 crash = returns < -3.7;

@@ -7,11 +7,9 @@ abstract: >
   trick is the seed of the TurboQuant sketch.
 tags: [research, continuous]
 ---
-use rand;   // normal
 use math;   // sqrt, pi
 
-sign(t) = if t > 0 { 1 } else { -1 };
-s ~ normal(0, 1);
+s ~ rand::normal(0, 1);
 estimate = sqrt(pi / 2) * s * sign(s);          // = sqrt(pi/2) * |s|
 ```latex
 E[\text{QJL 1-D estimate}] = ${E(estimate)} \qquad (\text{unbiased target} = 1.0)

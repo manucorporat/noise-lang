@@ -8,7 +8,6 @@ abstract: >
   we get by just simulating the year, week by week, a few hundred thousand times?
 tags: [finance, monte carlo]
 ---
-use rand;   // normal
 use math;   // exp, sqrt
 use vec;    // cumsum, cummax, any, min
 
@@ -27,7 +26,7 @@ t       = 1;
 // --- One simulated year, one week at a time ---
 n  = 52;
 dt = t / n;
-zs ~[n] normal(0, 1);
+zs ~[n] rand::normal(0, 1);
 logrets = (r - sigma^2 / 2) * dt + sigma * sqrt(dt) * zs;
 
 // Building the price in log-space makes this EXACT geometric Brownian motion: summing the weekly
@@ -42,6 +41,7 @@ knockout = if knocked { 0 } else { vanilla };                   // same payoff, 
 
 // --- Prices are discounted expected payoffs ---
 discount = exp(-r * t);
+
 ```latex
 \text{vanilla call} = ${E(discount * vanilla)} \qquad (\text{Black-Scholes says } 10.4506)
 \text{knock-out call} = ${E(discount * knockout)} \qquad (\text{cheaper: the trapdoor eats some payoffs})
@@ -51,6 +51,7 @@ P(\text{knocked out}) = ${P(knocked) * 100}\%
 // Bonus one-liner: cummax(path) is the running peak, so this is the worst peak-to-trough
 // drawdown the stock suffers along the way — a risk number for free from the same paths.
 drawdown = min(path / cummax(path)) - 1;
+
 ```latex
 \text{typical worst drawdown along the way} = ${E(drawdown)}
 ```

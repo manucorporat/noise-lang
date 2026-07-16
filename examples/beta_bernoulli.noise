@@ -7,11 +7,11 @@ abstract: >
   posterior. The data pulls your best guess to about 0.67, notably shy of the raw 7-in-10.
 tags: [bayesian, inference]
 ---
-use rand; use vec;
+use vec;
 
-bias  ~ unif(0, 1);            // prior: the bias could be anything in [0, 1], equally likely
-flips ~[10] bernoulli(bias);  // a RANDOM parameter feeding bernoulli — 10 flips of THIS coin
-next  ~ bernoulli(bias);      // an 11th flip from the same coin (for the prediction below)
+bias  ~ rand::unif(0, 1);            // prior: the bias could be anything in [0, 1], equally likely
+flips ~[10] rand::bernoulli(bias);  // a RANDOM parameter feeding bernoulli — 10 flips of THIS coin
+next  ~ rand::bernoulli(bias);      // an 11th flip from the same coin (for the prediction below)
 
 heads = count(flips);
 

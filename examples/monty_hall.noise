@@ -7,13 +7,12 @@ abstract: >
   like a coin toss.
 tags: [classic, modeling]
 ---
-use rand;
 
 // Slide the doors: with 3, switching wins 2/3; crank it to 100 and you win 99 times out of 100.
 doors = input::int(min: 3, max: 100, step: 1, default: 3);
 
-car  ~ unif_int(1, doors);
-pick ~ unif_int(1, doors);
+car  ~ rand::unif_int(1, doors);
+pick ~ rand::unif_int(1, doors);
 
 // Switching wins in exactly the worlds where your first guess missed the car.
 p = P(pick != car);

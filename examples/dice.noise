@@ -7,9 +7,8 @@ abstract: >
   point on the nose. Choosing the right kind of randomness is the whole game.
 tags: [basics, discrete]
 ---
-use rand;
 
-Dice ~ unif_int(1, 6);
+Dice ~ rand::unif_int(1, 6);
 p = P(Dice == 4);
 
 ```latex

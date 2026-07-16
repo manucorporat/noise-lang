@@ -1,0 +1,83 @@
+# One version, one release. `noise-core` + `noise-cli` (crates.io) and `@noiselang/core` (npm) all
+# ship together at the version in `packages/core/package.json`, which changesets owns.
+#
+# The loop: a PR adds a `.changeset/*.md` file describing its change. On merge to master this
+# workflow sees pending changesets and opens/updates a "📦 Release" PR that applies the version bump
+# (npm + Cargo, via ci:version) and the changelog. Merging *that* PR leaves no pending changesets,
+# so this workflow instead runs ci:publish — crates.io first, then npm, then git tags.
+#
+# Every push to master runs this. Pushes that release nothing fall through both paths harmlessly:
+# the publish step asks each registry what already exists and skips it.
+name: 📦 Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  # npm publishes via trusted publishing (OIDC) — no NPM_TOKEN. This permission is what mints the
+  # short-lived id-token npm trades for a publish credential; without it, npm falls back to looking
+  # for a token and the publish fails. It also turns on provenance attestation automatically.
+  id-token: write
+
+jobs:
+  release:
+    name: Version PR or publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A PAT, not GITHUB_TOKEN: pushes made with GITHUB_TOKEN don't trigger workflows, so the
+          # Release PR would never get a CI run.
+          token: ${{ secrets.RELEASE_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # pnpm 10, pinned by the root package.json `packageManager` field. Not a free choice: pnpm 11
+      # regressed OIDC publishing (pnpm/pnpm#11513, 404s on publish).
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm >= 11.5.1, and setup-node's Node 22 ships npm 10.x. This
+      # matters because of a three-link chain: `changeset publish` sees a pnpm workspace and spawns
+      # `pnpm publish`, and pnpm's `runNpm` shells out to plain `"npm"` off the PATH (it bundles no
+      # npm of its own). So the npm upgraded here is the one that performs the OIDC exchange.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest && npm --version
+
+      # Stable builds the crates and the single-threaded wasm; nightly + rust-src is what
+      # `-Z build-std` needs for the threaded wasm build (see packages/core/scripts/build-wasm.sh).
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+      - uses: jetli/wasm-pack-action@v0.4.0
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Create Release PR or publish
+        uses: changesets/action@v1
+        with:
+          version: pnpm run ci:version
+          publish: pnpm run ci:publish
+          title: "📦 Release"
+          commit: "📦 Release"
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          # Deliberately no NPM_TOKEN: the changesets action writes an .npmrc auth line when it
+          # finds one, and only falls through to trusted publishing when it doesn't. Setting it
+          # would silently take the token path instead.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

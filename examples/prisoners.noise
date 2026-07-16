@@ -7,13 +7,13 @@ abstract: >
   following chains from box to box frees them all about 31% of the time.
 tags: [classic, permutations]
 ---
-use rand;   // permutation
+
 use vec;
 
 // The boxes are a uniform random permutation: box k contains the number boxes[k].
 n     = 100;
 opens = 50;
-boxes ~ permutation(n);
+boxes ~ rand::permutation(n);
 
 // The escape succeeds exactly when the shuffle has no cycle longer than 50 — that's the whole secret.
 all_win = true;
@@ -29,7 +29,6 @@ for prisoner in 0..n {
 
 // Heavier than most examples: each sample chases pointers through 100 boxes. Asking for half-a-
 // percent relative precision keeps it snappy — the engine draws only what that costs.
-engine::set_precision(2e-3);
 ```md
-P(all 100 prisoners go free) = **${P(all_win) * 100}%** (analytic ≈ 31.2%)
+P(all 100 prisoners go free) = **${P(all_win, 2e-3) * 100}%** (analytic ≈ 31.2%)
 ```

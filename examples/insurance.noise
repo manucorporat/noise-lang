@@ -7,13 +7,12 @@ abstract: >
   fits any threshold-and-payout problem.
 tags: [risk, lifted if]
 ---
-use rand;
 
 // The two dials of the policy: the loss range, and the deductible the customer eats first.
 deductible = input::real(min: 0,   max: 1000, step: 50,  default: 200);
 max_loss   = input::real(min: 100, max: 5000, step: 100, default: 1000);
 
-loss ~ unif(0, max_loss);
+loss ~ rand::unif_int(0, max_loss);
 claim = if loss > deductible { loss - deductible } else { 0 };
 p = P(claim > 0);
 

@@ -6,10 +6,9 @@ abstract: >
   far more often than a single die's 1 in 6.
 tags: [lifted if]
 ---
-use rand;
 
-A ~ unif_int(1, 6);
-B ~ unif_int(1, 6);
+A ~ rand::unif_int(1, 6);
+B ~ rand::unif_int(1, 6);
 higher = if A > B { A } else { B };
 p = P(higher == 6);
 ```md

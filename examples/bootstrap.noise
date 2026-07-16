@@ -9,7 +9,6 @@ abstract: >
 tags: [statistics, resampling]
 ---
 
-use rand;
 use vec;
 
 // The data: 24 daily returns (0.012 = +1.2%). Days 11-14 are a panic streak around the -4%

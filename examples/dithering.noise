@@ -8,7 +8,6 @@ abstract: >
 tags: [signals, dsp]
 ---
 
-use rand;
 use math;
 
 // A 1-bit quantizer reports only the SIGN (+1 / -1) of its input. Ask it about a fixed level v and
@@ -26,7 +25,7 @@ no dither: E[sign(v)] = **${E(sign(v))}** (stuck at +1 — says nothing about v 
 // range and the average goes perfectly linear. At 1.0 the dither covers [-1, 1] and recovery is exact.
 dither = input::real(min: 0, max: 2, step: 0.1, default: 1);
 
-u ~ unif(-dither, dither);
+u ~ rand::unif(-dither, dither);
 
 ```md
 dithered: E[sign(v + u)] = **${E(sign(v + u))}** (recovers v = ${v})

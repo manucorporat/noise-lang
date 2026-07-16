@@ -7,11 +7,10 @@ abstract: >
   add up to something almost indistinguishable from a true standard normal.
 tags: [continuous, clt]
 ---
-use rand;   // unif, normal
 
 // Twelve is the magic count: a U(0,1) has variance 1/12, so twelve of them sum to variance exactly 1 — a ready-made standard normal.
 n     = 12;
-draws ~[n] unif(0, 1);
+draws ~[n] rand::unif(0, 1);
 clt   = vec::sum(draws) - n / 2;
 ```latex
 P(Z > 1) \approx ${P(clt > 1) * 100}\% \qquad (\text{sum of } ${n} \text{ uniforms})

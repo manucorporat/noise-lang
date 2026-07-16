@@ -2,14 +2,19 @@
   "name": "noise-lang-workspace",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.14.0",
   "description": "pnpm workspace root for the Noise language JS packages (the Rust crates live under crates/).",
   "scripts": {
     "build:core": "pnpm --filter @noiselang/core run build",
     "build:www": "pnpm --filter noise-www run build",
     "build": "pnpm run build:core && pnpm run build:www",
-    "dev": "pnpm --filter noise-www run dev"
+    "dev": "pnpm --filter noise-www run dev",
+    "changeset": "changeset",
+    "ci:version": "changeset version && node scripts/sync-cargo-version.mjs",
+    "ci:publish": "node scripts/publish-crates.mjs && changeset publish"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.31.1",
     "typescript": "^5.6.0"
   }
 }

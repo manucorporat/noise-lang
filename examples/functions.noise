@@ -7,13 +7,13 @@ abstract: >
   function twice is genuinely two independent dice, not one die counted twice.
 tags: [functions, language]
 ---
-use rand;
 
 max(a, b) = if a > b { a } else { b };
-roll() ~ unif_int(1, 6);
+roll() ~ rand::unif_int(1, 6);
 
-A ~ unif_int(1, 6);
-B ~ unif_int(1, 6);
+A ~ rand::unif_int(1, 6);
+B ~ rand::unif_int(1, 6);
+
 ```md
 P(higher of two d6 is a 6) = **${P(max(A, B) == 6) * 100}%**
 P(two independent rolls sum to 7) = **${P(roll() + roll() == 7) * 100}%**

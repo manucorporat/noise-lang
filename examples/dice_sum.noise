@@ -7,12 +7,11 @@ abstract: >
   into a bell.
 tags: [independence, collections]
 ---
-use rand;   // unif_int
 
 // Slide the number of dice: two make a lopsided triangle, but pile on more and the total rounds into a bell.
 num_dice = input::int(min: 1, max: 20, step: 1, default: 2);
 
-die   = unif_int(1, 6);
+die   = rand::unif_int(1, 6);
 
 // Each ~ draw is a fresh, independent roll — die + die would be one roll doubled, not two dice.
 dice  ~[num_dice] die;
