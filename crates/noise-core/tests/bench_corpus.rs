@@ -82,11 +82,7 @@ fn example_shapes() {
         let _ = eng.run_to_document(src);
         let s = eng.stats();
 
-        let per = if let Some(result) = s.samples.checked_div(s.forcings) {
-            result
-        } else {
-            0
-        };
+        let per = s.samples.checked_div(s.forcings).unwrap_or_default();
         println!(
             "{label:<20}{:>10}{:>12}{:>16}{:>14}",
             s.forcings, s.samples, per, s.ops
