@@ -10,7 +10,7 @@ const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 
 /** Highlight a single line of Noise into token-span HTML. */
 export function hlLine(line: string): string {
-  const ci = line.indexOf('#');
+  const ci = line.indexOf('//');
   const codePart = ci >= 0 ? line.slice(0, ci) : line;
   const comment = ci >= 0 ? line.slice(ci) : '';
   const hi = esc(codePart)

@@ -20,5 +20,5 @@ p = P(higher >= 15);
 The chance an advantage roll lands **≥ 15** is **${p * 100}%**.
 ```
 
-# Advantage leans the d20 toward the high end: big numbers get the tallest bars.
+// Advantage leans the d20 toward the high end: big numbers get the tallest bars.
 plot::histogram(higher)

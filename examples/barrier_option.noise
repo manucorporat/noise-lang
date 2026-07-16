@@ -12,39 +12,39 @@ extra:
   category: "Games & risk"
   analytic: "vanilla = 10.4506 (Black-Scholes)"
 ---
-use rand;   # normal
-use math;   # exp, sqrt
-use vec;    # cumsum, cummax, any, min
+use rand;   // normal
+use math;   // exp, sqrt
+use vec;    // cumsum, cummax, any, min
 
-# --- The contract ---
+// --- The contract ---
 s0      = 100;
-strike  = 100;    # at expiry you are paid max(S_T - strike, 0)
+strike  = 100;    // at expiry you are paid max(S_T - strike, 0)
 
-# Slide the trapdoor's height: raise it toward 100 and the option gets knocked out more (cheaper);
-# drop it toward 0 and knock-outs vanish, so the price climbs back up to the vanilla 10.4506.
-barrier = input::real(min: 50, max: 95, step: 5, default: 80);  # void if the stock EVER trades below this
+// Slide the trapdoor's height: raise it toward 100 and the option gets knocked out more (cheaper);
+// drop it toward 0 and knock-outs vanish, so the price climbs back up to the vanilla 10.4506.
+barrier = input::real(min: 50, max: 95, step: 5, default: 80);  // void if the stock EVER trades below this
 
 r       = 0.05;
-sigma   = 0.2;    # volatility: a ~20% swing in a typical year
+sigma   = 0.2;    // volatility: a ~20% swing in a typical year
 t       = 1;
 
-# --- One simulated year, one week at a time ---
+// --- One simulated year, one week at a time ---
 n  = 52;
 dt = t / n;
 zs ~[n] normal(0, 1);
 logrets = (r - sigma^2 / 2) * dt + sigma * sqrt(dt) * zs;
 
-# Building the price in log-space makes this EXACT geometric Brownian motion: summing the weekly
-# log-returns with cumsum has zero discretization error, unlike stepping the price directly.
+// Building the price in log-space makes this EXACT geometric Brownian motion: summing the weekly
+// log-returns with cumsum has zero discretization error, unlike stepping the price directly.
 path    = s0 * exp(cumsum(logrets));
 
-# --- The two legs ---
+// --- The two legs ---
 s_final = path[n - 1];
-vanilla = if s_final > strike { s_final - strike } else { 0 };  # plain call payoff
-knocked = any(path < barrier);                                  # did we ever touch the trapdoor?
-knockout = if knocked { 0 } else { vanilla };                   # same payoff, void if touched
+vanilla = if s_final > strike { s_final - strike } else { 0 };  // plain call payoff
+knocked = any(path < barrier);                                  // did we ever touch the trapdoor?
+knockout = if knocked { 0 } else { vanilla };                   // same payoff, void if touched
 
-# --- Prices are discounted expected payoffs ---
+// --- Prices are discounted expected payoffs ---
 discount = exp(-r * t);
 ```latex
 \text{vanilla call} = ${E(discount * vanilla)} \qquad (\text{Black-Scholes says } 10.4506)
@@ -52,12 +52,12 @@ discount = exp(-r * t);
 P(\text{knocked out}) = ${P(knocked) * 100}\%
 ```
 
-# Bonus one-liner: cummax(path) is the running peak, so this is the worst peak-to-trough
-# drawdown the stock suffers along the way — a risk number for free from the same paths.
+// Bonus one-liner: cummax(path) is the running peak, so this is the worst peak-to-trough
+// drawdown the stock suffers along the way — a risk number for free from the same paths.
 drawdown = min(path / cummax(path)) - 1;
 ```latex
 \text{typical worst drawdown along the way} = ${E(drawdown)}
 ```
 
-# The cone of possible price paths: week-by-week 5/25/50/75/95% bands of the simulated year.
+// The cone of possible price paths: week-by-week 5/25/50/75/95% bands of the simulated year.
 plot::fan(path)

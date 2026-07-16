@@ -22,5 +22,5 @@ P(higher of two d6 is a 6) = **${P(max(A, B) == 6) * 100}%**
 P(two independent rolls sum to 7) = **${P(roll() + roll() == 7) * 100}%**
 ```
 
-# The max of two dice leans high: a 6 is far likelier than a 1, since either die can supply it.
+// The max of two dice leans high: a 6 is far likelier than a 1, since either die can supply it.
 plot::histogram(max(A, B))

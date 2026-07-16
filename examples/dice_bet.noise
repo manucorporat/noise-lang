@@ -18,5 +18,5 @@ p = P(payoff > 0);
 The chance you come out ahead is **${p * 100}%**.
 ```
 
-# Two outcomes only: a tall -2 bar (you usually lose a bit) and a short +10 bar.
+// Two outcomes only: a tall -2 bar (you usually lose a bit) and a short +10 bar.
 plot::histogram(payoff)

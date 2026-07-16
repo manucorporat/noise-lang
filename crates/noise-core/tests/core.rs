@@ -129,13 +129,22 @@ fn string_cannot_enter_a_random_variable() {
 #[test]
 fn empty_and_comment_only_programs_are_unit() {
     assert_eq!(run("").unwrap(), Value::Unit);
-    assert_eq!(run("# just a comment").unwrap(), Value::Unit);
+    assert_eq!(run("// just a comment").unwrap(), Value::Unit);
+    assert_eq!(run("/* just a block comment */").unwrap(), Value::Unit);
     assert_eq!(run("  ;;  ").unwrap(), Value::Unit);
 }
 
 #[test]
 fn inline_comments_do_not_affect_evaluation() {
-    assert_eq!(num("1 + # plus\n 2 // two\n"), 3.0);
+    assert_eq!(num("1 + // plus\n 2 // two\n"), 3.0);
+    assert_eq!(num("1 + /* plus */ 2\n"), 3.0);
+}
+
+#[test]
+fn hash_comments_are_rejected_with_a_hint() {
+    let err = run("1 # nope").unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("`//`"), "should point at `//`; got: {msg}");
 }
 
 #[test]

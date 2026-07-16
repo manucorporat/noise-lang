@@ -10,15 +10,15 @@ extra:
   blurb: "White, pink, brown — sorted by how much each sample remembers the last."
   category: "Signals & DSP"
 ---
-use math;     # round
+use math;     // round
 
-n = 256;   # every color drawn at the same resolution
+n = 256;   // every color drawn at the same resolution
 
-# Lag-1 autocorrelation of a noise vector, averaged over many realizations. Built from the raw
-# spatial sums so it's E[<x_k x_{k+1}>] / E[<x_k^2>] — a clean ratio of means.
-# Each realization is already a 256-term sum (a huge amount of work per draw), so a few
-# thousand realizations pin the ratio to the 3 decimals we print — say so with a per-call
-# count instead of letting the default budget draw a million of these monsters.
+// Lag-1 autocorrelation of a noise vector, averaged over many realizations. Built from the raw
+// spatial sums so it's E[<x_k x_{k+1}>] / E[<x_k^2>] — a clean ratio of means.
+// Each realization is already a 256-term sum (a huge amount of work per draw), so a few
+// thousand realizations pin the ratio to the 3 decimals we print — say so with a per-call
+// count instead of letting the default budget draw a million of these monsters.
 pair_sum(x) = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i+1] }; acc };
 sq_sum(x)   = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i]   }; acc };
 neighbor_corr(x) = E(pair_sum(x), 15000) / E(sq_sum(x), 15000);
@@ -27,14 +27,14 @@ white ~[n] signal::noise_white(1);
 pink  ~[n] signal::noise_pink(1);
 brown ~[n] signal::noise_brown(1);
 
-# The spectrum reddens, the neighbor correlation climbs toward 1.
+// The spectrum reddens, the neighbor correlation climbs toward 1.
 ```md
 white (flat 1/f^0): **${round(neighbor_corr(white), 3)}** jagged hiss
 pink (~1/f): **${round(neighbor_corr(pink),  3)}**
 brown (1/f^2): **${round(neighbor_corr(brown), 3)}** smooth wander
 ```
 
-# OU is the tunable one: correlation = exp(-1/tau), checkable in closed form.
+// OU is the tunable one: correlation = exp(-1/tau), checkable in closed form.
 ou_short ~[n] signal::noise_ou(1, 4);
 ou_long  ~[n] signal::noise_ou(1, 32);
 ```md
@@ -44,11 +44,11 @@ tau = 4 : **${round(neighbor_corr(ou_short), 3)}** vs exp(-1/4)  = 0.779
 tau = 32: **${round(neighbor_corr(ou_long),  3)}** vs exp(-1/32) = 0.969
 ```
 
-# See the color: white noise is a jagged hiss, brown noise is a smooth wandering walk.
+// See the color: white noise is a jagged hiss, brown noise is a smooth wandering walk.
 plot::line(white);
 plot::line(brown);
-# And the structure behind it: white has no neighbor memory, brown's samples stay correlated
-# for a long stretch.
+// And the structure behind it: white has no neighbor memory, brown's samples stay correlated
+// for a long stretch.
 white_64 ~[64] signal::noise_white(1);
 brown_64 ~[64] signal::noise_brown(1);
 plot::corr(white_64);

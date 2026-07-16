@@ -13,13 +13,13 @@ extra:
 ---
 use rand;
 
-# Slide the doors: with 3, switching wins 2/3; crank it to 100 and you win 99 times out of 100.
+// Slide the doors: with 3, switching wins 2/3; crank it to 100 and you win 99 times out of 100.
 doors = input::int(min: 3, max: 100, step: 1, default: 3);
 
 car  ~ unif_int(1, doors);
 pick ~ unif_int(1, doors);
 
-# Switching wins in exactly the worlds where your first guess missed the car.
+// Switching wins in exactly the worlds where your first guess missed the car.
 p = P(pick != car);
 if p > 0.5 {
   Print(`Switch! You win ${p * 100}% of the time.`)

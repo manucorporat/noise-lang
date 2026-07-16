@@ -28,7 +28,13 @@
       {
         "language": "noise",
         "scopeName": "source.noise",
-        "path": "./syntaxes/noise.tmLanguage.json"
+        "path": "./syntaxes/noise.tmLanguage.json",
+        "embeddedLanguages": {
+          "source.yaml": "yaml",
+          "text.html.markdown": "markdown",
+          "text.tex.latex": "latex",
+          "meta.embedded.expression.noise": "noise"
+        }
       }
     ]
   }

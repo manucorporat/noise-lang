@@ -1387,7 +1387,7 @@ mod tests {
         let prog = parse("a = 1; b = 2\nc = 3").unwrap();
         assert_eq!(prog.stmts.len(), 3);
         // blank lines and comment-only lines don't create empty statements
-        let prog = parse("a = 1\n\n# note\nb = 2\n").unwrap();
+        let prog = parse("a = 1\n\n// note\nb = 2\n").unwrap();
         assert_eq!(prog.stmts.len(), 2);
         // line breaks separate statements inside a block, too
         match parse_one("{ a = 1\n b = 2\n a + b }") {

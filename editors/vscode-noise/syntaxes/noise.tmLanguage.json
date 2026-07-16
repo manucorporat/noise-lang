@@ -3,6 +3,9 @@
   "name": "Noise",
   "scopeName": "source.noise",
   "patterns": [
+    { "include": "#shebang" },
+    { "include": "#frontmatter" },
+    { "include": "#templates" },
     { "include": "#comments" },
     { "include": "#strings" },
     { "include": "#numbers" },
@@ -14,17 +17,115 @@
     { "include": "#operators" }
   ],
   "repository": {
+    "shebang": {
+      "name": "comment.line.shebang.noise",
+      "match": "\\A#!.*$"
+    },
+    "frontmatter": {
+      "name": "meta.embedded.block.frontmatter.noise",
+      "begin": "\\A(---)\\s*$",
+      "end": "^(---)\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.frontmatter.begin.noise" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.frontmatter.end.noise" }
+      },
+      "contentName": "source.yaml",
+      "patterns": [{ "include": "source.yaml" }]
+    },
     "comments": {
       "patterns": [
         {
-          "name": "comment.line.number-sign.noise",
-          "match": "#.*$"
-        },
-        {
           "name": "comment.line.double-slash.noise",
           "match": "//.*$"
+        },
+        {
+          "name": "comment.block.noise",
+          "begin": "/\\*",
+          "end": "\\*/"
         }
       ]
+    },
+    "templates": {
+      "patterns": [
+        { "include": "#template-fenced-md" },
+        { "include": "#template-fenced-latex" },
+        { "include": "#template-fenced" },
+        { "include": "#template-inline" }
+      ]
+    },
+    "template-hole": {
+      "name": "meta.embedded.expression.noise",
+      "begin": "\\$\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.embedded.begin.noise" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.embedded.end.noise" }
+      },
+      "patterns": [{ "include": "$self" }]
+    },
+    "template-fenced-md": {
+      "name": "meta.template.fenced.md.noise",
+      "begin": "(```)\\s*(md|markdown)\\s*$",
+      "end": "^\\s*(```)\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.template.begin.noise" },
+        "2": { "name": "fenced_code.block.language.noise" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.template.end.noise" }
+      },
+      "contentName": "text.html.markdown",
+      "patterns": [
+        { "include": "#template-hole" },
+        { "include": "text.html.markdown" }
+      ]
+    },
+    "template-fenced-latex": {
+      "name": "meta.template.fenced.latex.noise",
+      "begin": "(```)\\s*(latex|tex)\\s*$",
+      "end": "^\\s*(```)\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.template.begin.noise" },
+        "2": { "name": "fenced_code.block.language.noise" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.template.end.noise" }
+      },
+      "contentName": "text.tex.latex",
+      "patterns": [
+        { "include": "#template-hole" },
+        { "include": "text.tex.latex" }
+      ]
+    },
+    "template-fenced": {
+      "name": "meta.template.fenced.noise",
+      "begin": "(```)([^`\\n]*)$",
+      "end": "^\\s*(```)\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.template.begin.noise" },
+        "2": { "name": "fenced_code.block.language.noise" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.template.end.noise" }
+      },
+      "contentName": "string.unquoted.template.noise",
+      "patterns": [{ "include": "#template-hole" }]
+    },
+    "template-inline": {
+      "name": "string.quoted.template.noise",
+      "begin": "`",
+      "end": "`",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.template.begin.noise" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.template.end.noise" }
+      },
+      "patterns": [{ "include": "#template-hole" }]
     },
     "strings": {
       "name": "string.quoted.double.noise",
@@ -34,7 +135,7 @@
     },
     "numbers": {
       "name": "constant.numeric.noise",
-      "match": "\\b(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)\\b"
+      "match": "\\b(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?\\b"
     },
     "keywords": {
       "patterns": [
@@ -49,7 +150,7 @@
       ]
     },
     "namespaces": {
-      "match": "\\b(rand|vec|math|signal|builtin|engine|plot|stats)(::)",
+      "match": "\\b(rand|vec|math|signal|builtin|engine|plot|stats|input)(::)",
       "captures": {
         "1": { "name": "entity.name.namespace.noise" },
         "2": { "name": "keyword.operator.namespace.noise" }
@@ -75,7 +176,7 @@
         },
         {
           "name": "keyword.operator.noise",
-          "match": "\\*\\*|==|!=|<=|>=|&&|\\|\\||\\.\\.|[-+*/<>=!|]"
+          "match": "\\*\\*|==|!=|<=|>=|&&|\\|\\||\\.\\.|[-+*/<>=!|@]"
         }
       ]
     }

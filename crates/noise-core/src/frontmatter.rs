@@ -3,10 +3,10 @@
 //! for host-specific metadata. Frontmatter is **purely descriptive** — host-tunable parameters are
 //! no longer declared here; they are inline `input::…` calls in the program body (PLAN-INPUTS).
 //!
-//! The fence is recognized **only at byte 0** (line 1 is exactly `---`); anywhere else `---` keeps
-//! meaning three unary minuses, so no existing program breaks. The lexer treats the whole block as
-//! trivia — it skips it *in place* (see [`block_end`]) so every downstream span keeps pointing into
-//! the original source. This module is the separate entry a host calls to read the metadata without
+//! The fence is recognized **only at the top of the file** (line 1 is exactly `---`, or line 2 when
+//! line 1 is a `#!` shebang); anywhere else `---` keeps meaning three unary minuses, so no existing
+//! program breaks. The lexer treats the whole block as trivia — it skips it *in place* (see
+//! [`block_end`]) so every downstream span keeps pointing into the original source. This module is the separate entry a host calls to read the metadata without
 //! running the program (`meta(src)` in wasm, `validate` in the CLI).
 //!
 //! Content is parsed by `serde_norway` (the maintained `serde_yaml` fork; wasm-clean, pure-Rust
@@ -55,13 +55,29 @@ impl Frontmatter {
     }
 }
 
+/// The byte offset just past a `#!` shebang on line 1 (including its newline), or `0` when the
+/// file has no shebang. The shebang is pure trivia — it exists so a `.noise` file can be made
+/// executable (`#!/usr/bin/env noise`) — and it is the **only** place `#` is legal in a program.
+pub fn shebang_end(src: &str) -> usize {
+    if !src.starts_with("#!") {
+        return 0;
+    }
+    match src.find('\n') {
+        Some(nl) => nl + 1,
+        None => src.len(),
+    }
+}
+
 /// The byte offset where real source begins: the end of the `---`-fenced block (just past the
-/// newline after the closing `---`), or `0` when the file has no frontmatter.
+/// newline after the closing `---`), or `None` when the file has no frontmatter. The fence may sit
+/// at byte 0 or immediately after a line-1 `#!` shebang; callers that get `None` still need
+/// [`shebang_end`] to skip a bare shebang.
 ///
-/// `Ok(None)` — no opening fence (line 1 is not exactly `---`). `Ok(Some(end))` — a well-formed
-/// fence; the lexer sets its cursor to `end` and never emits a token for the block. `Err` — an
-/// opening fence with no matching close (a spanned parse error). This is the cheap scan the lexer
-/// runs; [`parse`] runs the same scan and then parses the content between the fences.
+/// `Ok(None)` — no opening fence (the first non-shebang line is not exactly `---`).
+/// `Ok(Some(end))` — a well-formed fence; the lexer sets its cursor to `end` and never emits a
+/// token for the block. `Err` — an opening fence with no matching close (a spanned parse error).
+/// This is the cheap scan the lexer runs; [`parse`] runs the same scan and then parses the content
+/// between the fences.
 pub fn block_end(src: &str) -> Result<Option<usize>> {
     match fence_content(src)? {
         Some((_content, _content_span, end)) => Ok(Some(end)),
@@ -71,15 +87,19 @@ pub fn block_end(src: &str) -> Result<Option<usize>> {
 
 /// Locate the fenced content. Returns `(content_str, content_span, block_end)` where `content_span`
 /// is the byte range of the text between the fences (for offset-correct error spans) and
-/// `block_end` is where the lexer resumes. `Ok(None)` when line 1 is not exactly `---`.
+/// `block_end` is where the lexer resumes. `Ok(None)` when the first non-shebang line is not
+/// exactly `---`.
 fn fence_content(src: &str) -> Result<Option<(&str, Span, usize)>> {
-    // The opening fence must be the very first line, exactly `---` (optionally `\r`-terminated).
-    let bytes = src.as_bytes();
+    // The opening fence must be the first line (or the line right after a `#!` shebang), exactly
+    // `---` (optionally `\r`-terminated).
+    let fence_start = shebang_end(src);
+    let bytes = &src.as_bytes()[fence_start..];
     if !starts_with_fence_line(bytes) {
         return Ok(None);
     }
+    let bytes = src.as_bytes();
     // Advance past the opening `---` line.
-    let mut i = 3;
+    let mut i = fence_start + 3;
     if i < bytes.len() && bytes[i] == b'\r' {
         i += 1;
     }
@@ -118,7 +138,7 @@ fn fence_content(src: &str) -> Result<Option<(&str, Span, usize)>> {
     }
     Err(NoiseError::parse(
         "unterminated frontmatter block: opening `---` has no matching closing `---`",
-        Span::new(0, content_start.min(bytes.len())),
+        Span::new(fence_start, content_start.min(bytes.len())),
     ))
 }
 
@@ -261,6 +281,20 @@ mod tests {
     fn dashes_mid_file_stay_minus() {
         // `---` not at byte 0 is not a fence.
         assert_eq!(block_end("y = 1\n---\n").unwrap(), None);
+    }
+
+    #[test]
+    fn shebang_then_frontmatter() {
+        let src = "#!/usr/bin/env noise\n---\ntitle: exec\n---\nx = 1\n";
+        let (fm, _) = parse(src).unwrap().unwrap();
+        assert_eq!(fm.title.as_deref(), Some("exec"));
+        let end = block_end(src).unwrap().unwrap();
+        assert_eq!(&src[end..end + 1], "x");
+        // A bare shebang with no fence: no frontmatter, shebang_end points past line 1.
+        let bare = "#!/usr/bin/env noise\nx = 1\n";
+        assert_eq!(block_end(bare).unwrap(), None);
+        assert_eq!(&bare[shebang_end(bare)..shebang_end(bare) + 1], "x");
+        assert_eq!(shebang_end("x = 1\n"), 0);
     }
 
     #[test]

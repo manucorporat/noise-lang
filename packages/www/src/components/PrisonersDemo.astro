@@ -8,19 +8,19 @@
 import CodePanel from './CodePanel.astro';
 
 const code = `n = 100; opens = 50;
-boxes ~ rand::permutation(n);   # box k holds slip boxes[k]
+boxes ~ rand::permutation(n);   // box k holds slip boxes[k]
 
 all_win = true;
 for prisoner in 0..n {
-  box = prisoner;               # open your own box first
+  box = prisoner;               // open your own box first
   found = false;
   for hop in 0..opens {
-    box = boxes[box];           # follow the chain
+    box = boxes[box];           // follow the chain
     found = found || (box == prisoner);
   };
   all_win = all_win && found;
 };
-P(all_win)               # ~ 0.3118`;
+P(all_win)               // ~ 0.3118`;
 ---
 
 <div class="scrolly pris-demo">

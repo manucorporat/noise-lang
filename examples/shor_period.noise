@@ -11,56 +11,56 @@ extra:
   blurb: "How a quantum computer factors numbers — and breaks RSA."
   category: "Quantum"
 ---
-use math;   # i, exp, pi (complex amplitudes), gcd, modpow (modular arithmetic — exact, no overflow)
-use vec;    # outer, normsq, count
+use math;   // i, exp, pi (complex amplitudes), gcd, modpow (modular arithmetic — exact, no overflow)
+use vec;    // outer, normsq, count
 
-# A 2^n simulation: gorgeous for small N, never efficient — what's faithful is the PHYSICS, the
-# amplitudes and their interference. (Efficient Shor needs a real quantum computer.)
+// A 2^n simulation: gorgeous for small N, never efficient — what's faithful is the PHYSICS, the
+// amplitudes and their interference. (Efficient Shor needs a real quantum computer.)
 
-# one-hot encode a value v as a length-`width` row: 1 in column v, 0 elsewhere.
+// one-hot encode a value v as a length-`width` row: 1 in column v, 0 elsewhere.
 onehot(v, width) = [for w in 0..width { if v == w { 1 } else { 0 } }];
 
-# the counting register: the smallest power of two >= N.
+// the counting register: the smallest power of two >= N.
 reg_size(N) = { Q = 1; for i in 0..16 { if Q < N { Q = Q * 2 } }; Q };
 
-# --- the QUANTUM subroutine: the period r of a^x mod N, read off the interference comb ---
-# Build the superposition over all inputs, inverse-QFT it, and the readout probabilities form a comb
-# of exactly r equally-spaced spikes — so the period is just the number of spikes.
+// --- the QUANTUM subroutine: the period r of a^x mod N, read off the interference comb ---
+// Build the superposition over all inputs, inverse-QFT it, and the readout probabilities form a comb
+// of exactly r equally-spaced spikes — so the period is just the number of spikes.
 period(a, N, Q) = {
   ks  = 0..Q;
-  fx  = [for x in 0..Q { math::modpow(a, x, N) }];          # the oracle on every input
-  Psi = [for x in 0..Q { onehot(fx[x], N) }] / Q ^ 0.5;     # entangle + normalize the state
-  # Same-residue amplitudes REINFORCE, the rest CANCEL — the one place ℂ is doing real work.
+  fx  = [for x in 0..Q { math::modpow(a, x, N) }];          // the oracle on every input
+  Psi = [for x in 0..Q { onehot(fx[x], N) }] / Q ^ 0.5;     // entangle + normalize the state
+  // Same-residue amplitudes REINFORCE, the rest CANCEL — the one place ℂ is doing real work.
   QFT = math::exp(math::i * (-2 * math::pi / Q) * vec::outer(ks, ks)) / Q ^ 0.5;
-  vec::count([for p in QFT @ Psi { vec::normsq(p) > 0.0001 }])   # r = number of spikes in the comb
+  vec::count([for p in QFT @ Psi { vec::normsq(p) > 0.0001 }])   // r = number of spikes in the comb
 };
 
-# --- Shor's algorithm: factor N ---
-# Try a handful of bases (a real machine picks them at random). If a already shares a factor, gcd
-# hands one over; otherwise use the quantum period r and read factors from gcd(a^(r/2) +- 1, N).
+// --- Shor's algorithm: factor N ---
+// Try a handful of bases (a real machine picks them at random). If a already shares a factor, gcd
+// hands one over; otherwise use the quantum period r and read factors from gcd(a^(r/2) +- 1, N).
 shor(N) = {
   Q = reg_size(N);
-  p = 1; q = N;                                       # p == 1 means "no nontrivial factor yet"
+  p = 1; q = N;                                       // p == 1 means "no nontrivial factor yet"
   for a in 2..14 { if a < N { if p == 1 {
     if math::gcd(a, N) > 1 { p = math::gcd(a, N); q = N / p }
     else {
-      r = period(a, N, Q);                            # the quantum step
-      if r % 2 == 0 {                                 # need an even period
+      r = period(a, N, Q);                            // the quantum step
+      if r % 2 == 0 {                                 // need an even period
         s = math::modpow(a, r / 2, N);
         g = math::gcd(s - 1, N);
-        if g > 1 { if g < N { p = g; q = N / g } }    # a nontrivial factor — done
+        if g > 1 { if g < N { p = g; q = N / g } }    // a nontrivial factor — done
       }
     }
   } } };
   [p, q]
 };
 
-# Composites split into their two primes; a prime returns itself — nothing to break, which is
-# exactly the wall RSA hides behind.
+// Composites split into their two primes; a prime returns itself — nothing to break, which is
+// exactly the wall RSA hides behind.
 n_to_factor = input::int(min: 15, max: 35, step: 2, default: 15);
 
-# The interference comb for 2^x mod N: Q readout slots where the amplitudes pile into evenly-spaced
-# spikes, one per period step. Counting the spikes IS the quantum measurement the whole trick rests on.
+// The interference comb for 2^x mod N: Q readout slots where the amplitudes pile into evenly-spaced
+// spikes, one per period step. Counting the spikes IS the quantum measurement the whole trick rests on.
 Q    = reg_size(n_to_factor);
 Psi  = [for x in 0..Q { onehot(math::modpow(2, x, n_to_factor), n_to_factor) }] / Q ^ 0.5;
 comb = [for y in (math::exp(math::i * (-2 * math::pi / Q) * vec::outer(0..Q, 0..Q)) / Q ^ 0.5) @ Psi { vec::normsq(y) }];

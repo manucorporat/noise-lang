@@ -13,31 +13,31 @@ extra:
 use math;
 use vec;
 
-engine::set_resolution(64);       # how many points per waveform
+engine::set_resolution(64);       // how many points per waveform
 
-am_modulate(msg)              = 1 + msg;               # message in the LENGTH (the angle stays 0)
-fm_modulate(msg, swing)       = exp(i * swing * msg);  # message in the ANGLE
-am_demodulate(carrier)        = abs(carrier) - 1;      # read the arrow's LENGTH, drop the carrier
-fm_demodulate(carrier, swing) = arg(carrier) / swing;  # read the arrow's ANGLE, undo the swing
+am_modulate(msg)              = 1 + msg;               // message in the LENGTH (the angle stays 0)
+fm_modulate(msg, swing)       = exp(i * swing * msg);  // message in the ANGLE
+am_demodulate(carrier)        = abs(carrier) - 1;      // read the arrow's LENGTH, drop the carrier
+fm_demodulate(carrier, swing) = arg(carrier) / swing;  // read the arrow's ANGLE, undo the swing
 
-# Drag: a wider swing spreads FM across more band, so it shrugs off static better. Kept <= 5 so the
-# angle never wraps past +/- 90 degrees (msg peaks at 0.3, and 5 * 0.3 < pi/2).
+// Drag: a wider swing spreads FM across more band, so it shrugs off static better. Kept <= 5 so the
+// angle never wraps past +/- 90 degrees (msg peaks at 0.3, and 5 * 0.3 < pi/2).
 fm_swing       = input::real(min: 1, max: 5, step: 0.5, default: 3);
-# Drag: crank the static up and watch AM fall apart faster than FM for the exact same storm.
+// Drag: crank the static up and watch AM fall apart faster than FM for the exact same storm.
 noise_strength = input::real(min: 0, max: 1, step: 0.05, default: 0.4);
 
-# A gentle 3-cycle tone, kept small so the FM angle never wraps past +/- 90 degrees.
+// A gentle 3-cycle tone, kept small so the FM angle never wraps past +/- 90 degrees.
 msg = 0.3 * signal::sine(3);
 
-# ONE draw of complex static. Every mention of `static` below is this same draw, so AM and FM
-# face the exact same storm — a perfectly fair fight.
+// ONE draw of complex static. Every mention of `static` below is this same draw, so AM and FM
+// face the exact same storm — a perfectly fair fight.
 static ~ signal::noise_white_complex(noise_strength);
 
 recovered_am = am_demodulate(am_modulate(msg)           + static);
 recovered_fm = fm_demodulate(fm_modulate(msg, fm_swing) + static, fm_swing);
 
-# How mangled did each message come back? mse averages over the waveform's points; E averages
-# that over many realizations of the static.
+// How mangled did each message come back? mse averages over the waveform's points; E averages
+// that over many realizations of the static.
 am_err = E(mse(recovered_am, msg));
 fm_err = E(mse(recovered_fm, msg));
 ```md
@@ -45,14 +45,14 @@ AM recovered-message error (MSE) = **${am_err}**
 FM recovered-message error (MSE) = **${fm_err}**
 ```
 
-# In the small-signal limit the advantage approaches swing^2; the simulation lands a bit under
-# that ideal because at finite noise the angle reading degrades on the wider swings.
+// In the small-signal limit the advantage approaches swing^2; the simulation lands a bit under
+// that ideal because at finite noise the angle reading degrades on the wider swings.
 ```md
 FM is **${am_err / fm_err}**x cleaner for the same static (ideal: swing^2 = **${fm_swing ^ 2}**)
 ```
 
-# The original tone, then what each scheme drags back out of the static: FM's recovered wave
-# hugs the message; AM's is visibly rattled by the same noise.
+// The original tone, then what each scheme drags back out of the static: FM's recovered wave
+// hugs the message; AM's is visibly rattled by the same noise.
 plot::line(msg);
 plot::line(recovered_am);
 plot::line(recovered_fm)

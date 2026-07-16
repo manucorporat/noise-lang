@@ -35,7 +35,7 @@ export function registerNoise(monaco: typeof Monaco): void {
   monaco.languages.register({ id: LANGUAGE_ID });
 
   monaco.languages.setLanguageConfiguration(LANGUAGE_ID, {
-    comments: { lineComment: '#' },
+    comments: { lineComment: '//', blockComment: ['/*', '*/'] },
     brackets: [
       ['{', '}'],
       ['[', ']'],
@@ -46,12 +46,14 @@ export function registerNoise(monaco: typeof Monaco): void {
       { open: '[', close: ']' },
       { open: '(', close: ')' },
       { open: '"', close: '"' },
+      { open: '`', close: '`' },
     ],
     surroundingPairs: [
       { open: '{', close: '}' },
       { open: '[', close: ']' },
       { open: '(', close: ')' },
       { open: '"', close: '"' },
+      { open: '`', close: '`' },
     ],
   });
 
@@ -71,9 +73,17 @@ export function registerNoise(monaco: typeof Monaco): void {
     symbols: /[=~!<>+\-*/&|.:@]+/,
     tokenizer: {
       root: [
-        // comments
-        [/#.*$/, 'comment'],
+        // `#!` shebang (only legal on line 1; the lexer skips it as trivia)
+        [/^#!.*$/, 'comment.shebang'],
+        // `---` frontmatter fence (YAML-ish metadata block at the top of the file)
+        [/^---\s*$/, { token: 'meta.frontmatter.delim', next: '@frontmatter' }],
+        // comments: `//` line, `/* … */` block (`#` is not a comment in Noise)
         [/\/\/.*$/, 'comment'],
+        [/\/\*/, { token: 'comment', next: '@blockComment' }],
+        // triple-fenced template with an optional syntax tag: ```latex … ```
+        [/```[^`\n]*$/, { token: 'string.template.delim', next: '@fencedTemplate' }],
+        // single-backtick template: `text ${expr}`
+        [/`/, { token: 'string.template.delim', next: '@inlineTemplate' }],
         // strings (no escapes in Noise yet)
         [/"[^"]*"/, 'string'],
         // numbers (float or int)
@@ -105,6 +115,36 @@ export function registerNoise(monaco: typeof Monaco): void {
         ],
         [/\s+/, 'white'],
       ],
+      blockComment: [
+        [/\*\//, { token: 'comment', next: '@pop' }],
+        [/[^*]+/, 'comment'],
+        [/./, 'comment'],
+      ],
+      // YAML-lite coloring for the metadata block; closes on a line that is exactly `---`.
+      frontmatter: [
+        [/^---\s*$/, { token: 'meta.frontmatter.delim', next: '@pop' }],
+        [/^(\s*)([\w-]+)(\s*:)/, ['white', 'meta.frontmatter.key', 'delimiter']],
+        [/#.*$/, 'comment'],
+        [/.+/, 'meta.frontmatter.value'],
+      ],
+      fencedTemplate: [
+        [/^\s*```\s*$/, { token: 'string.template.delim', next: '@pop' }],
+        [/\$\{/, { token: 'string.template.hole', next: '@templateHole' }],
+        [/[^$]+/, 'string.template'],
+        [/./, 'string.template'],
+      ],
+      inlineTemplate: [
+        [/`/, { token: 'string.template.delim', next: '@pop' }],
+        [/\$\{/, { token: 'string.template.hole', next: '@templateHole' }],
+        [/[^`$]+/, 'string.template'],
+        [/./, 'string.template'],
+      ],
+      // A `${…}` hole holds a full Noise expression; re-use the root rules and pop on `}`.
+      // (A `}` inside the hole — a block expression — pops early; templates rarely hold blocks.)
+      templateHole: [
+        [/\}/, { token: 'string.template.hole', next: '@pop' }],
+        { include: '@root' },
+      ],
     },
   } as Monaco.languages.IMonarchLanguage);
 
@@ -114,6 +154,13 @@ export function registerNoise(monaco: typeof Monaco): void {
     inherit: true,
     rules: [
       { token: 'comment', foreground: '8a8473', fontStyle: 'italic' },
+      { token: 'comment.shebang', foreground: '8a8473', fontStyle: 'italic' },
+      { token: 'meta.frontmatter.delim', foreground: 'bcb6a3' },
+      { token: 'meta.frontmatter.key', foreground: '6a6356', fontStyle: 'italic' },
+      { token: 'meta.frontmatter.value', foreground: '8a8473' },
+      { token: 'string.template', foreground: '4f7a2e' },
+      { token: 'string.template.delim', foreground: 'a8a08a' },
+      { token: 'string.template.hole', foreground: 'b5651d', fontStyle: 'bold' },
       { token: 'string', foreground: '4f7a2e' },
       { token: 'number', foreground: '9a5b00' },
       { token: 'number.float', foreground: '9a5b00' },

@@ -10,13 +10,13 @@ extra:
   blurb: "Aliasing by counterexample."
   category: "Signals & DSP"
 ---
-high = signal::cosine(7);   # a fast wave: 7 cycles per window
-low  = signal::cosine(3);   # a slow wave: 3 cycles per window  -- genuinely a different signal
+high = signal::cosine(7);   // a fast wave: 7 cycles per window
+low  = signal::cosine(3);   // a slow wave: 3 cycles per window  -- genuinely a different signal
 
-# Nyquist limit for the 7-cycle wave: you need > 2*7 = 14 samples per window.
-# Drag the sample count across 14: below it the fast wave aliases — at 10 its samples become
-# *identical* to the slow one's, so mse is 0 and the two are indistinguishable. Cross above 14 and
-# they pull apart. (7 folds to 10-7 = 3 exactly at 10, which is why that rate gives mse = 0.)
+// Nyquist limit for the 7-cycle wave: you need > 2*7 = 14 samples per window.
+// Drag the sample count across 14: below it the fast wave aliases — at 10 its samples become
+// *identical* to the slow one's, so mse is 0 and the two are indistinguishable. Cross above 14 and
+// they pull apart. (7 folds to 10-7 = 3 exactly at 10, which is why that rate gives mse = 0.)
 samples = input::int(min: 4, max: 64, step: 1, default: 10);
 
 ```md
@@ -31,8 +31,8 @@ oversampled (64 > 14 pts): mse(fast, slow) = **${vec::mse(signal::sample(high, 6
 Sample too slowly and a 7-cycle wave masquerades as a 3-cycle one (7 folds to 10-7 = 3).
 ```
 
-# Undersampled (at 10): the fast 7-cycle wave and the slow 3-cycle wave land on the SAME points — twins.
+// Undersampled (at 10): the fast 7-cycle wave and the slow 3-cycle wave land on the SAME points — twins.
 plot::line(signal::sample(high, samples));
 plot::line(signal::sample(low, samples));
-# Oversampled at 64: now the fast wave shows all 7 wiggles and is obviously a different signal.
+// Oversampled at 64: now the fast wave shows all 7 wiggles and is obviously a different signal.
 plot::line(signal::sample(high, 64))

@@ -12,18 +12,18 @@ extra:
   category: "Basics"
   analytic: "3.14159…"
 ---
-# Throw darts at a 2-by-2 square: each dart is a random (X, Y) point.
+// Throw darts at a 2-by-2 square: each dart is a random (X, Y) point.
 X ~ rand::unif(-1, 1);
 Y ~ rand::unif(-1, 1);
 
-# A dart lands inside the unit circle when X² + Y² < 1, and that circle covers
-# exactly π/4 of the square — so the hit fraction, times 4, IS π.
-# The second argument asks for DIGITS, not draws: keep sampling until the answer
-# is good to 1 part in 10,000. The engine works out how many darts that takes.
+// A dart lands inside the unit circle when X² + Y² < 1, and that circle covers
+// exactly π/4 of the square — so the hit fraction, times 4, IS π.
+// The second argument asks for DIGITS, not draws: keep sampling until the answer
+// is good to 1 part in 10,000. The engine works out how many darts that takes.
 pi = 4 * P(X^2 + Y^2 < 1, 1e-4);
 ```latex
 \pi \approx 4 \cdot P\!\left(X^2 + Y^2 < 1\right) = ${pi}
 ```
 
-# Every dart lands somewhere in the square, yet the hits alone trace out a circle no one drew.
+// Every dart lands somewhere in the square, yet the hits alone trace out a circle no one drew.
 plot::scatter(X, Y)

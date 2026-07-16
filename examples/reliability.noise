@@ -13,8 +13,8 @@ extra:
 ---
 part   = rand::bernoulli(0.9);
 
-# Each parallel spare multiplies the odds of a TOTAL failure by another 0.1, so reliability
-# marches 0.9 → 0.99 → 0.999: one extra nine bought per part.
+// Each parallel spare multiplies the odds of a TOTAL failure by another 0.1, so reliability
+// marches 0.9 → 0.99 → 0.999: one extra nine bought per part.
 n      = input::int(min: 1, max: 6, step: 1, default: 3);
 
 parts  ~[n] part;
@@ -23,7 +23,7 @@ up     = vec::any(parts);
 P(\text{system up}) = ${P(up) * 100}\% \qquad (\text{${n}-way parallel})
 ```
 
-# The nines pile up geometrically — reliability rockets toward certainty, then flattens
-# as each additional spare buys a smaller and smaller slice.
+// The nines pile up geometrically — reliability rockets toward certainty, then flattens
+// as each additional spare buys a smaller and smaller slice.
 reliab_by_count = [for k in 1..7 { 1 - 0.1 ^ k }];
 plot::line(reliab_by_count)

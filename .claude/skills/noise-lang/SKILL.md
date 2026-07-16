@@ -32,8 +32,8 @@ Four load-bearing rules. Internalize these and the rest follows.
    transform, a constant, or an undrawn *recipe*. **You cannot do arithmetic on an undrawn
    recipe:**
    ```noise
-   unif(0, 1) + 3        # ERROR — unif(...) is a recipe, not a number
-   X ~ unif(0, 1); X + 3 # correct — draw with ~, then transform with =
+   unif(0, 1) + 3        // ERROR — unif(...) is a recipe, not a number
+   X ~ unif(0, 1); X + 3 // correct — draw with ~, then transform with =
    ```
    `unif`, `unif_int`, `bernoulli`, `normal`, … all return an *undrawn recipe*. Bind a recipe with
    `=` to name it (`Die = unif_int(1, 6)`), then draw it with `~` (`a ~ Die`).
@@ -45,16 +45,17 @@ Four load-bearing rules. Internalize these and the rest follows.
 4. **Independence is explicit.** Two independent draws come from two `~` declarations, or from the
    shaped draw `~[n] dist` — never from repeating a name.
    ```noise
-   A ~ unif_int(1, 6); B ~ unif_int(1, 6)   # two independent dice
-   dice ~[2] unif_int(1, 6)                  # same thing, as a length-2 array
+   A ~ unif_int(1, 6); B ~ unif_int(1, 6)   // two independent dice
+   dice ~[2] unif_int(1, 6)                  // same thing, as a length-2 array
    ```
 
 Nothing is sampled until a query (`P`/`E`/`Var`/`Q`) forces it; everything upstream stays symbolic.
 
 ## Language reference
 
-**Lexical.** Whitespace is insignificant (separates tokens). Comments run to end of line, started
-by `#` or `//`. Numbers are `f64` integer or decimal literals — **no exponent syntax**, and a
+**Lexical.** Whitespace is insignificant (separates tokens). Comments are `//` (to end of line)
+or `/* … */` (block, non-nesting) — `#` is **not** a comment marker (only a `#!` shebang on
+line 1 is allowed). Numbers are `f64` integer or decimal literals — **no exponent syntax**, and a
 leading `-` is the unary-minus operator, not part of the literal. Identifiers are
 `[A-Za-z_][A-Za-z0-9_]*`, case-sensitive. Reserved words: `if else for in use true false`.
 Strings are double-quoted with **no escape sequences** (`"like this"`); they are a label/utility
@@ -111,8 +112,8 @@ path). Start each program with the `use` lines you need.
 | `engine`  | `use engine;` (or path) | `set_max_samples`, `set_max_opts`, `set_resolution` |
 
 ```noise
-use rand;            # unif, unif_int, …
-math::sqrt(2)        # or reach one item by its full path, no `use` needed
+use rand;            // unif, unif_int, …
+math::sqrt(2)        // or reach one item by its full path, no `use` needed
 ```
 
 A user definition shadows a module item of the same name. Module paths are single-level
@@ -123,12 +124,12 @@ A user definition shadows a module item of the same name. Module paths are singl
 recipe (`=`) → draw (`~` / `~[n]`) → transform (`=`) → query (`P`/`E`/`Var`/`Q`) → `Print`.
 
 ```noise
-use rand;   # unif_int
-use vec;    # has_duplicates
+use rand;   // unif_int
+use vec;    // has_duplicates
 
 n     = 23;
-bday  = unif_int(1, 365);   # a recipe
-days  ~[n] bday;            # n independent draws
+bday  = unif_int(1, 365);   // a recipe
+days  ~[n] bday;            // n independent draws
 match = has_duplicates(days);
 Print("P(shared birthday among", n, ") =", P(match))
 ```
@@ -204,10 +205,10 @@ a `vec` reducer — independence becomes a one-liner:
 
 ```noise
 use rand; use vec;
-dice  ~[2] unif_int(1, 6); Print("P(sum==7) =", P(sum(dice) == 7))      # two dice
-flips ~[3] bernoulli(0.5); Print("P(all heads) =", P(all(flips)))       # 3-coin streak
-flips ~[3] bernoulli(0.5); Print("P(exactly 2) =", P(count(flips)==2))  # count of true
-parts ~[3] bernoulli(0.9); Print("uptime =", P(any(parts)))             # at-least-one
+dice  ~[2] unif_int(1, 6); Print("P(sum==7) =", P(sum(dice) == 7))      // two dice
+flips ~[3] bernoulli(0.5); Print("P(all heads) =", P(all(flips)))       // 3-coin streak
+flips ~[3] bernoulli(0.5); Print("P(exactly 2) =", P(count(flips)==2))  // count of true
+parts ~[3] bernoulli(0.9); Print("uptime =", P(any(parts)))             // at-least-one
 ```
 
 **Paths & finance idioms (scans).** The scans `cumsum`/`cumprod`/`cummax`/`cummin` (running
@@ -216,19 +217,19 @@ path** — no loop needed:
 
 ```noise
 use rand; use vec; use math;
-rets ~[252] normal(0.0004, 0.01);          # a year of iid daily returns
-walk = cumsum(rets);                        # random walk = cumsum(increments)
-path = cumprod(1 + rets);                   # compounding wealth path
-# exact GBM, no discretization bias:  path = s0 * exp(cumsum(logrets))
-hit      = any(path < 0.9);                 # barrier: did it EVER dip 10%?
-asian    = mean(path);                      # Asian option averages the path
-lookback = max(path);                       # lookback takes its peak
-drawdown = min(path / cummax(path)) - 1;    # worst peak-to-trough
+rets ~[252] normal(0.0004, 0.01);          // a year of iid daily returns
+walk = cumsum(rets);                        // random walk = cumsum(increments)
+path = cumprod(1 + rets);                   // compounding wealth path
+// exact GBM, no discretization bias:  path = s0 * exp(cumsum(logrets))
+hit      = any(path < 0.9);                 // barrier: did it EVER dip 10%?
+asian    = mean(path);                      // Asian option averages the path
+lookback = max(path);                       // lookback takes its peak
+drawdown = min(path / cummax(path)) - 1;    // worst peak-to-trough
 final = path[251];
-var = Q(final, 0.05);                       # VaR — Q returns a plain number...
-Print("VaR95 =", var, " ES95 =", E(final | final < var));  # ...so it feeds ES/CVaR
-plot::fan(path)                             # the cone: q05/25/50/75/95 bands over the index
-bands = stats::fan(path);                   # ...and the same bands as a 6×252 matrix
+var = Q(final, 0.05);                       // VaR — Q returns a plain number...
+Print("VaR95 =", var, " ES95 =", E(final | final < var));  // ...so it feeds ES/CVaR
+plot::fan(path)                             // the cone: q05/25/50/75/95 bands over the index
+bands = stats::fan(path);                   // ...and the same bands as a 6×252 matrix
 ```
 
 `vec::prod` is the product reducer (`prod([]) == 1`). Scans work on any process whose **length
@@ -239,7 +240,7 @@ evaluated and reuse the condition's per-lane draws). Gives `max`/`min`/`abs` ove
 
 ```noise
 A ~ unif_int(1, 6); B ~ unif_int(1, 6);
-higher = if A > B { A } else { B };     # max of two dice
+higher = if A > B { A } else { B };     // max of two dice
 Print("P(higher==6) =", P(higher == 6))
 ```
 
@@ -249,7 +250,7 @@ is a *distinct* node, so it's a clean way to make many independent draws:
 
 ```noise
 use vec;
-acc = 0; for x in 1..5 { acc = acc + x }; acc      # 1+2+3+4 = 10
+acc = 0; for x in 1..5 { acc = acc + x }; acc      // 1+2+3+4 = 10
 ```
 
 **Comprehensions** `[for x in xs { body }]` build an array — it's the `for x in xs { body }` loop
@@ -259,8 +260,8 @@ element — that's how you *filter*:
 
 ```noise
 a = 7; N = 15;
-fx = [for x in 0..6 { (a ^ x) % N }];                  # body closes over a, N
-evens = [for x in 0..10 { if x % 2 != 0 { continue }; x }];  # filter via continue
+fx = [for x in 0..6 { (a ^ x) % N }];                  // body closes over a, N
+evens = [for x in 0..10 { if x % 2 != 0 { continue }; x }];  // filter via continue
 ```
 
 `continue` skips the rest of the loop body (in a `for` loop it drops that iteration's side effects;
@@ -273,9 +274,9 @@ for `n > 0` (clock/modular arithmetic): `-1 % 3 == 2`. `math::floor` / `math::ce
 
 ```noise
 use rand;
-max(a, b) = if a > b { a } else { b };   # pure
-roll() ~ unif_int(1, 6);                 # fresh draw each call
-P(roll() + roll() == 7)                  # two INDEPENDENT rolls
+max(a, b) = if a > b { a } else { b };   // pure
+roll() ~ unif_int(1, 6);                 // fresh draw each call
+P(roll() + roll() == 7)                  // two INDEPENDENT rolls
 ```
 Functions are **pure in their parameters** — the body sees only its args (plus `pi`/`e`), no outer
 variables, no closures. Calls unroll at build time, so recursion must terminate.
@@ -286,9 +287,9 @@ hand-written ratio:
 ```noise
 use rand;
 D ~ unif_int(1, 6);
-Print("P(D==6 | D>3) =", P(D == 6 | D > 3))               # = 1/3 (≡ P(A && C) / P(C))
-hi = D | D > 3;                                           # a conditioned value — bind & reuse
-Print("E(roll | >3)  =", E(hi), " median:", Q(hi, 0.5))   # 5, 5
+Print("P(D==6 | D>3) =", P(D == 6 | D > 3))               // = 1/3 (≡ P(A && C) / P(C))
+hi = D | D > 3;                                           // a conditioned value — bind & reuse
+Print("E(roll | >3)  =", E(hi), " median:", Q(hi, 0.5))   // 5, 5
 ```
 
 **Signals (lazy waveforms).** `signal::sine(f)` / `cosine(f)` describe a waveform by frequency
@@ -309,10 +310,10 @@ modulate → demodulate chain.
 
 ```noise
 use signal;
-engine::set_resolution(64);        # the one resolution knob — set once, next to the budget
-msg = 0.3 * sine(3);               # a waveform (no length anywhere in the math)
-static ~ noise_white_complex(0.4); # ONE drawn realization of complex static
-err = E(vec::mse(math::abs(1 + msg + static) - 1, msg));   # reducers render at the knob
+engine::set_resolution(64);        // the one resolution knob — set once, next to the budget
+msg = 0.3 * sine(3);               // a waveform (no length anywhere in the math)
+static ~ noise_white_complex(0.4); // ONE drawn realization of complex static
+err = E(vec::mse(math::abs(1 + msg + static) - 1, msg));   // reducers render at the knob
 ```
 
 **Complex numbers.** `complex` is a first-class scalar. There's no literal — it **emerges** from
@@ -326,10 +327,10 @@ err = E(vec::mse(math::abs(1 + msg + static) - 1, msg));   # reducers render at 
 
 ```noise
 use math; use rand; use vec;
-z = 2 + 3*math::i;                       # complex emerges from math::i
-math::abs(z); math::arg(z);              # magnitude & phase (reals)
-math::exp(math::i * math::pi)            # ≈ -1  (Euler's identity)
-static ~[64] rand::normal_complex(1);    # 64 iid complex-Gaussian static samples
+z = 2 + 3*math::i;                       // complex emerges from math::i
+math::abs(z); math::arg(z);              // magnitude & phase (reals)
+math::exp(math::i * math::pi)            // ≈ -1  (Euler's identity)
+static ~[64] rand::normal_complex(1);    // 64 iid complex-Gaussian static samples
 ```
 
 ## Hazards — what NOT to do

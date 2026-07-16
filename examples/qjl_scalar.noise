@@ -10,16 +10,16 @@ extra:
   blurb: "An unbiased 1-bit quantizer (TurboQuant building block)."
   category: "Functions & research"
 ---
-use rand;   # normal
-use math;   # sqrt, pi
+use rand;   // normal
+use math;   // sqrt, pi
 
 sign(t) = if t > 0 { 1 } else { -1 };
 s ~ normal(0, 1);
-estimate = sqrt(pi / 2) * s * sign(s);          # = sqrt(pi/2) * |s|
+estimate = sqrt(pi / 2) * s * sign(s);          // = sqrt(pi/2) * |s|
 ```latex
 E[\text{QJL 1-D estimate}] = ${E(estimate)} \qquad (\text{unbiased target} = 1.0)
 \mathrm{Var}[\text{estimate}] = ${Var(estimate)}
 ```
 
-# A folded normal — skewed and spread — yet its average is pinned to 1. One bit throws away a lot, but not the mean.
+// A folded normal — skewed and spread — yet its average is pinned to 1. One bit throws away a lot, but not the mean.
 plot::histogram(estimate)

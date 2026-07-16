@@ -389,20 +389,24 @@ fn report_capped(name: &str, out: &sampler::QueryRun, ctx: &QueryCtx) {
         Capped::Stopped(crate::exec::StopCause::User) => "stop()",
         Capped::Lanes => "the lane cap",
     };
+    // `out.count` — the draws the estimate is actually computed from (a soft-stopped stage folds
+    // only part of its requested range, and a conditional query's effective size is its
+    // in-condition m) — NOT `out.drawn`, which is the requested sweep and overstates a stopped run.
     let message = match out.target_se {
         Some(target) if target > 0.0 && out.se.is_finite() && out.se > 0.0 => {
-            // CLT: reaching `target` from the achieved se needs ~n·(se/target)² draws.
-            let need = out.drawn as f64 * (out.se / target) * (out.se / target);
+            // CLT: reaching `target` from the achieved se needs ~n·(se/target)² draws — in the
+            // same effective-draw units as `count`, so the two numbers are comparable.
+            let need = out.count as f64 * (out.se / target) * (out.se / target);
             format!(
                 "{name}: {bound} stopped sampling at n={:.3e} → se ±{:.1e} (the ±{:.1e} target \
-                 needs ~{need:.1e} draws) — raise --max-time or loosen the precision target",
-                out.drawn as f64, out.se, target
+                 needs ~{need:.1e} draws) — raise the max_time limit or loosen the precision target",
+                out.count as f64, out.se, target
             )
         }
         _ => format!(
-            "{name}: {bound} stopped sampling before the requested n={:.3e} completed; the \
+            "{name}: {bound} stopped sampling at n={:.3e} of the requested n={:.3e}; the \
              reported se is computed from the samples actually drawn",
-            out.drawn as f64
+            out.count as f64, out.drawn as f64
         ),
     };
     ctx.warnings.borrow_mut().push(Warning {
@@ -415,7 +419,7 @@ fn report_capped(name: &str, out: &sampler::QueryRun, ctx: &QueryCtx) {
 /// teaching error rather than a fabricated `0 ± ∞`.
 fn stopped_before_draws(name: &str, span: Span) -> NoiseError {
     NoiseError::runtime(
-        format!("{name} was stopped (max_time / stop) before any samples were drawn — raise --max-time or stop later"),
+        format!("{name} was stopped (max_time / stop) before any samples were drawn — raise the max_time limit or stop later"),
         span,
     )
 }

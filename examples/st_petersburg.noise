@@ -12,14 +12,14 @@ extra:
   analytic: "E ≈ rounds (unbounded)"
 ---
 
-# The trick behind the infinity: each round contributes exactly $1 to the expectation
-# (a 2^k prize paid with probability 1/2^k), so capping at N rounds gives E ≈ N — forever.
+// The trick behind the infinity: each round contributes exactly $1 to the expectation
+// (a 2^k prize paid with probability 1/2^k), so capping at N rounds gives E ≈ N — forever.
 play(rounds) = {
   flips  ~[rounds] rand::bernoulli(0.5);
   payout = 0;
   live   = true;
   for k in 0..rounds {
-    first  = flips[k] && live;            # the first head lands here — it ends the game
+    first  = flips[k] && live;            // the first head lands here — it ends the game
     payout = if first { 2 ^ (k + 1) } else { payout };
     live   = live && !flips[k];
   };
@@ -35,15 +35,15 @@ E[\text{payout up to 8 rounds}] = ${E(play(8))} \quad (\approx 8)
 E[\text{payout up to 12 rounds}] = ${E(play(12))} \quad (\approx 12)
 ```
 
-# Drag the cap on rounds: the expected payout just keeps climbing (~$1 per round), never settling
-# on a finite fair price — the "infinite" expectation is real, watch it refuse to converge.
+// Drag the cap on rounds: the expected payout just keeps climbing (~$1 per round), never settling
+// on a finite fair price — the "infinite" expectation is real, watch it refuse to converge.
 rounds = input::int(min: 1, max: 20, step: 1, default: 8);
 
 ```latex
 E[\text{payout up to } ${rounds} \text{ rounds}] = ${E(play(rounds))} \quad (\approx ${rounds})
 ```
 
-# The mean hides in rare jackpots — the histogram shows that long, heavy tail.
+// The mean hides in rare jackpots — the histogram shows that long, heavy tail.
 plot::histogram(play(rounds));
 ```md
 Each extra round adds about $1 of expected value forever, so no finite price is fair.

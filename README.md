@@ -53,9 +53,9 @@ statement. Four rules carry the whole mental model:
    node** — a transform, a constant, or an undrawn *recipe*:
 
    ```noise
-   Die = rand::unif_int(1, 6);   # a recipe — nothing drawn yet
-   a ~ Die;                      # draw it
-   b = a + 1;                    # transform the draw
+   Die = rand::unif_int(1, 6);   // a recipe — nothing drawn yet
+   a ~ Die;                      // draw it
+   b = a + 1;                    // transform the draw
    ```
 
 3. **One name = one fixed draw.** Every mention of a name is the *same* draw, exactly like `X`
@@ -65,8 +65,8 @@ statement. Four rules carry the whole mental model:
    the shaped draw `~[n] dist` — never from repeating a name:
 
    ```noise
-   A ~ unif_int(1, 6); B ~ unif_int(1, 6)   # two independent dice
-   dice ~[2] unif_int(1, 6)                 # same thing, as a length-2 array
+   A ~ unif_int(1, 6); B ~ unif_int(1, 6)   // two independent dice
+   dice ~[2] unif_int(1, 6)                 // same thing, as a length-2 array
    ```
 
 Nothing is sampled until a **query** forces it — `P(event)`, `E(x)`, `Var(x)`, `Q(x, q)` — and
@@ -114,13 +114,13 @@ The birthday paradox — give 23 people a random birthday each and ask how often
 ([`examples/birthday.noise`](examples/birthday.noise)):
 
 ```noise
-use rand;   # unif_int
+use rand;   // unif_int
 
 n     = 23;
 bday  = unif_int(1, 365);
-days  ~[n] bday;             # n independent draws, as an array
+days  ~[n] bday;             // n independent draws, as an array
 match = vec::has_duplicates(days);
-Print("P(shared birthday among", n, ") =", P(match))   # ≈ 0.507
+Print("P(shared birthday among", n, ") =", P(match))   // ≈ 0.507
 ```
 
 The [`examples/`](examples/) folder has ~30 more self-contained, commented programs — Monty Hall,

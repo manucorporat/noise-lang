@@ -694,16 +694,16 @@ mod tests {
 
     #[test]
     fn leading_run_annotates_whole_group() {
-        let d = doc("# doc\na = 1\nb = 2");
+        let d = doc("// doc\na = 1\nb = 2");
         assert_eq!(d.comments.len(), 1);
         let cs = d.comments[0].code_span.unwrap();
         // Spans the whole group: from `a` to the end of `b`.
-        assert_eq!(&"# doc\na = 1\nb = 2"[cs.start..cs.end], "a = 1\nb = 2");
+        assert_eq!(&"// doc\na = 1\nb = 2"[cs.start..cs.end], "a = 1\nb = 2");
     }
 
     #[test]
     fn interleaved_runs_annotate_their_own_line() {
-        let src = "# c1\na = 1\n# c2\nb = 2";
+        let src = "// c1\na = 1\n// c2\nb = 2";
         let d = doc(src);
         assert_eq!(d.comments.len(), 2);
         assert_eq!(
@@ -718,15 +718,15 @@ mod tests {
 
     #[test]
     fn blank_line_detaches_a_comment_run() {
-        let d = doc("# note\n\na = 1");
+        let d = doc("// note\n\na = 1");
         assert_eq!(d.comments.len(), 1);
         assert_eq!(d.comments[0].code_span, None, "a blank line detaches");
-        assert_eq!(d.comments[0].text, "# note");
+        assert_eq!(d.comments[0].text, "// note");
     }
 
     #[test]
     fn trailing_comment_annotates_its_own_statement() {
-        let src = "a = 1 # trailing";
+        let src = "a = 1 // trailing";
         let d = doc(src);
         assert_eq!(d.comments.len(), 1);
         let cs = d.comments[0].code_span.unwrap();
@@ -736,9 +736,9 @@ mod tests {
     #[test]
     fn mid_group_comment_does_not_split_the_code_block() {
         // One code block (only blank lines / templates split groups); the comment still annotates b.
-        let d = doc("a = 1\n# mid\nb = 2");
+        let d = doc("a = 1\n// mid\nb = 2");
         assert_eq!(kinds(&d), vec!["code"]);
-        let src = "a = 1\n# mid\nb = 2";
+        let src = "a = 1\n// mid\nb = 2";
         let cs = d.comments[0].code_span.unwrap();
         assert_eq!(&src[cs.start..cs.end], "b = 2");
     }

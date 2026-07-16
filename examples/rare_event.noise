@@ -13,15 +13,15 @@ extra:
 ---
 use rand;
 
-# A year of market returns, roughly bell-shaped: most years are ordinary.
+// A year of market returns, roughly bell-shaped: most years are ordinary.
 returns ~ normal(0, 1);
 
-# The catastrophe: a 3.7-sigma crash. It happens about once in ten thousand years.
+// The catastrophe: a 3.7-sigma crash. It happens about once in ten thousand years.
 crash = returns < -3.7;
 
-# Ask for the answer to 10% RELATIVE error — not for a sample count. A fixed budget
-# spends almost all of it on ordinary years; a relative target keeps drawing until
-# the rare corner of the distribution has been seen often enough to pin down.
+// Ask for the answer to 10% RELATIVE error — not for a sample count. A fixed budget
+// spends almost all of it on ordinary years; a relative target keeps drawing until
+// the rare corner of the distribution has been seen often enough to pin down.
 p_crash = P(crash, 0.1);
 ```md
 P(crash) = **${p_crash}** — about one year in ${math::round(1 / p_crash, 0)}.

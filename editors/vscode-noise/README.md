@@ -6,7 +6,9 @@ It's a pure [TextMate grammar](./syntaxes/noise.tmLanguage.json) — no build st
 dependencies, no language server. Token categories mirror the website palette in
 `packages/www/src/lib/highlight.ts`: keywords, module namespaces (`rand::`, `vec::`, …),
 distributions (`unif`, `normal`, `rotation`, …), queries/builtins (`P`, `E`, `Print`, …),
-the stochastic-bind operator `~`, comments (`#` and `//`), numbers, and strings.
+the stochastic-bind operator `~`, comments (`//` and `/* … */`), the line-1 `#!` shebang,
+`---` frontmatter (highlighted as YAML), inline and ``` fenced templates with `${…}` holes
+(md/latex bodies get their language's highlighting), numbers, and strings.
 
 ## Install
 

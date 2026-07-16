@@ -277,7 +277,22 @@
     background: var(--paper-2);
   }
   /* The Preview background is on the markup element, so it can stay scoped; its dynamically-built
-     children are styled by the `<style is:global>` block below (Astro scoping doesn't reach
+     children are styled by the `<style is:global>
+  /* Run warnings (PLAN-PRECISION): rendered dynamically inside .pg-paper, so they must be styled
+     here — Astro's scoped styles can't reach nodes created at runtime. */
+  .pg-warnings {
+    margin: 0 0 1rem;
+    padding: 0.55rem 0.8rem;
+    border: 1px solid #e5c56b;
+    border-left: 3px solid #d4a017;
+    background: #fdf6e3;
+    color: #6b5310;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    border-radius: 4px;
+  }
+  .pg-warnings div + div { margin-top: 0.3rem; }
+` block below (Astro scoping doesn't reach
      JS-created nodes). */
   .pg-output.is-preview { background: var(--paper); padding: 1.6rem 1.4rem 2.4rem; }
 
@@ -297,7 +312,22 @@
   .pg-metric.m-rate .m-val { color: var(--accent); }
   .m-sep { color: var(--ink-faint); opacity: 0.6; }
   /* The metrics container is a template element, so `position` scopes correctly here; the JS-created
-     summary/detail children are styled in the `<style is:global>` block (scoping can't reach them). */
+     summary/detail children are styled in the `<style is:global>
+  /* Run warnings (PLAN-PRECISION): rendered dynamically inside .pg-paper, so they must be styled
+     here — Astro's scoped styles can't reach nodes created at runtime. */
+  .pg-warnings {
+    margin: 0 0 1rem;
+    padding: 0.55rem 0.8rem;
+    border: 1px solid #e5c56b;
+    border-left: 3px solid #d4a017;
+    background: #fdf6e3;
+    color: #6b5310;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    border-radius: 4px;
+  }
+  .pg-warnings div + div { margin-top: 0.3rem; }
+` block (scoping can't reach them). */
   #pg-metrics { position: relative; }
 
   /* The right cluster of the Render header: the engine readout + the Share pill. */
@@ -374,6 +404,21 @@
   contained to the playground by the `#pg-output` id prefix. They typeset the Document as a paper.
 -->
 <style is:global>
+  /* Run warnings (PLAN-PRECISION): rendered dynamically inside .pg-paper, so they must be styled
+     here — Astro's scoped styles can't reach nodes created at runtime. */
+  .pg-warnings {
+    margin: 0 0 1rem;
+    padding: 0.55rem 0.8rem;
+    border: 1px solid #e5c56b;
+    border-left: 3px solid #d4a017;
+    background: #fdf6e3;
+    color: #6b5310;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    border-radius: 4px;
+  }
+  .pg-warnings div + div { margin-top: 0.3rem; }
+
   #pg-output.is-preview { container-type: inline-size; }
   #pg-output.is-preview .muted { color: var(--ink-faint); }
 
@@ -836,24 +881,51 @@
 
   // --- running ---
 
+  // The playground's wall-clock guard (PLAN-PRECISION): a pasted program can honestly need minutes
+  // (a tight precision target), but an interactive host should never look hung — past this the run
+  // soft-stops and renders what it sampled, with the "stopped early" warning saying so.
+  const PLAYGROUND_MAX_TIME_MS = 10_000;
+
+  /** The run in flight (the latest, if restarts overlapped) — its handle carries `stop()`. */
+  let running: { stop(): boolean } | null = null;
+
   async function execute() {
     const runBtn = $('pg-run') as HTMLButtonElement;
-    runBtn.disabled = true;
+    // A restart while running (switching examples, ⌘↵ on edited code): wrap the old run up — it
+    // resolves with its partial document, and the new run (queued behind it on the worker) renders
+    // over it when it lands.
+    running?.stop();
     if (!lastResult) outEl.innerHTML = '<span class="muted">running…</span>';
     metricsEl.hidden = true;
+    const handle = runNoiseWithIntrospection(editor.getValue(), [], {
+      inputs: inputValues,
+      profile: true,
+      maxTime: PLAYGROUND_MAX_TIME_MS,
+    });
+    running = handle;
+    runBtn.innerHTML = '<span class="btn-icon">◼</span> Stop';
+    runBtn.title = 'Stop — keep what was sampled so far';
     try {
-      const res = await runNoiseWithIntrospection(editor.getValue(), [], {
-        inputs: inputValues,
-        profile: true,
-      });
+      const res = await handle;
       lastResult = res;
       renderActive();
       renderMetrics(res);
     } catch (e) {
       outEl.innerHTML = `<span class="err">${escapeHtml(String(e))}</span>`;
     } finally {
-      runBtn.disabled = false;
+      if (running === handle) {
+        running = null;
+        runBtn.innerHTML = '<span class="btn-icon">▶</span> Run';
+        runBtn.title = 'Run (⌘↵)';
+      }
     }
+  }
+
+  /** The Run button doubles as Stop while a run is in flight (soft stop: the promise resolves
+   *  with the partial document — Track H). */
+  function onRunClick() {
+    if (running) running.stop();
+    else void execute();
   }
 
   // --- rendering (both tabs are filters over the same Document) ---
@@ -876,6 +948,19 @@
     const page = document.createElement('div');
     page.className = 'pg-paper';
     outEl.appendChild(page);
+
+    // Run warnings (PLAN-PRECISION Track C/H): a capped query, an early stop. Rendered first —
+    // they qualify every number below them.
+    if (res.warnings?.length) {
+      const warn = document.createElement('div');
+      warn.className = 'pg-warnings';
+      for (const line of res.warnings) {
+        const row = document.createElement('div');
+        row.textContent = `⚠ ${line}`;
+        warn.appendChild(row);
+      }
+      page.appendChild(warn);
+    }
 
     // The paper header — title + abstract + keywords from the file's frontmatter (single source of
     // truth; identical to the pre-run header, which reads the same fields from the gallery metadata).
@@ -1024,7 +1109,7 @@
     return head;
   }
 
-  const stripMarker = (raw: string) => raw.replace(/^\s*(#|\/\/)\s?/, '');
+  const stripMarker = (raw: string) => raw.replace(/^\s*\/\/\s?/, '');
 
   /** A code listing with its comments stripped from the page. If the block carries annotations, the
    * card is marked (a maroon spine + a corner tag) and reveals them on hover — like margin notes. */
@@ -1076,7 +1161,7 @@
     return lines.length > 0 && lines.every((l) => /^[A-Za-z_]\w*\s*=\s*input\s*::/.test(l));
   }
 
-  /** Strip line comments (`#` / `//`, outside strings) from a code listing for the typeset page,
+  /** Strip line comments (`//`, outside strings) from a code listing for the typeset page,
    * dropping any line that was comment-only, and trimming blank edges. */
   function stripComments(source: string): string {
     const out: string[] = [];
@@ -1089,7 +1174,7 @@
           if (c === '"') inStr = false;
         } else if (c === '"') {
           inStr = true;
-        } else if (c === '#' || (c === '/' && line[i + 1] === '/')) {
+        } else if (c === '/' && line[i + 1] === '/') {
           cut = i;
           break;
         }
@@ -1409,7 +1494,7 @@
   applyView();
 
   // --- wiring ---
-  $('pg-run').addEventListener('click', execute);
+  $('pg-run').addEventListener('click', onRunClick);
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, execute);
 
   // --- Share pill: a dropdown with a copy-the-link row + "Download as PDF" ---

@@ -8,11 +8,11 @@ import CodePanel from './CodePanel.astro';
 
 const code = `# 1 — a Galton board: 12 left/right bounces
 rights = vec::count(~[12] rand::bernoulli(0.5))
-P(rights == 6)        # centre bin -> 0.226
+P(rights == 6)        // centre bin -> 0.226
 
 # 2 — the same bell, from a sum of uniforms
 sum = vec::sum(~[12] rand::unif(0, 1)) - 6
-P(sum > 1)            # -> 0.159, Normal(0,1)`;
+P(sum > 1)            // -> 0.159, Normal(0,1)`;
 ---
 
 <div class="scrolly bell-demo">

@@ -10,22 +10,22 @@ extra:
   blurb: "How noise buys resolution for a 1-bit sensor."
   category: "Signals & DSP"
 ---
-use rand;   # unif
-use math;   # sign
+use rand;   // unif
+use math;   // sign
 
 
-# A 1-bit quantizer reports only the SIGN (+1 / -1) of its input. Ask it about a fixed level v and
-# it's useless: it answers "+1" for any positive v, telling you nothing about HOW big v is.
+// A 1-bit quantizer reports only the SIGN (+1 / -1) of its input. Ask it about a fixed level v and
+// it's useless: it answers "+1" for any positive v, telling you nothing about HOW big v is.
 v = 0.3;
 ```md
 no dither: E[sign(v)] = **${E(sign(v))}** (stuck at +1 — says nothing about v = ${v})
 ```
 
-# Now add uniform dither in [-1, 1] BEFORE the comparator and average many comparisons. The noise
-# randomizes the threshold crossing so that, for |v| < 1, E[sign(v + u)] = v EXACTLY: the average
-# of the 1-bit answers reconstructs the analog level. One noisy bit, repeated, becomes a ruler.
-# Drag the dither amount: too little (< the level) and the comparator stays stuck; enough to span the
-# range and the average goes perfectly linear. At 1.0 the dither covers [-1, 1] and recovery is exact.
+// Now add uniform dither in [-1, 1] BEFORE the comparator and average many comparisons. The noise
+// randomizes the threshold crossing so that, for |v| < 1, E[sign(v + u)] = v EXACTLY: the average
+// of the 1-bit answers reconstructs the analog level. One noisy bit, repeated, becomes a ruler.
+// Drag the dither amount: too little (< the level) and the comparator stays stuck; enough to span the
+// range and the average goes perfectly linear. At 1.0 the dither covers [-1, 1] and recovery is exact.
 dither = input::real(min: 0, max: 2, step: 0.1, default: 1);
 
 u ~ unif(-dither, dither);
@@ -33,7 +33,7 @@ u ~ unif(-dither, dither);
 dithered: E[sign(v + u)] = **${E(sign(v + u))}** (recovers v = ${v})
 ```
 
-# And it's not a fluke for one value — the response is LINEAR. Each level comes back on the nose.
+// And it's not a fluke for one value — the response is LINEAR. Each level comes back on the nose.
 ```md
 linearity check (dithered average should equal the input):
 v = -0.5 -> **${E(sign(-0.5 + u))}**
@@ -41,8 +41,8 @@ v =  0.0 -> **${E(sign( 0.0 + u))}**
 v =  0.8 -> **${E(sign( 0.8 + u))}**
 ```
 
-# Sweep the input from -1 to +1 and plot the dithered 1-bit average at each level: a clean straight
-# ramp, proof that the noisy comparator reconstructs the analog value linearly.
+// Sweep the input from -1 to +1 and plot the dithered 1-bit average at each level: a clean straight
+// ramp, proof that the noisy comparator reconstructs the analog value linearly.
 ramp = [sign(-1.0 + u), sign(-0.8 + u), sign(-0.6 + u), sign(-0.4 + u), sign(-0.2 + u),
         sign( 0.0 + u), sign( 0.2 + u), sign( 0.4 + u), sign( 0.6 + u), sign( 0.8 + u), sign( 1.0 + u)];
 plot::line(ramp)

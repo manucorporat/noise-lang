@@ -13,27 +13,27 @@ const ideas = [
   {
     k: 'Everything is a distribution',
     d: 'A number is just a distribution with all its weight on a single point — a Dirac delta. Operators lift over random variables automatically — so X below is random, and Y is random too, with no special syntax. Propagating uncertainty reads exactly like ordinary arithmetic.',
-    code: 'X ~ unif(-1, 1)\nY = 2 * X + 3   # Y is a distribution too',
+    code: 'X ~ unif(-1, 1)\nY = 2 * X + 3   // Y is a distribution too',
   },
   {
     k: 'The tilde draws; equals transforms',
     d: 'A name bound with ~ is one fixed random draw that every mention reuses — so X − X is exactly 0, never "two samples." Independence comes from separate ~ bindings, exactly like writing X₁, X₂ on paper. No hidden re-draws, no surprises.',
-    code: 'A ~ unif_int(1, 6)\nB ~ unif_int(1, 6)   # two independent dice\nA + B                # a genuine 2d6 distribution',
+    code: 'A ~ unif_int(1, 6)\nB ~ unif_int(1, 6)   // two independent dice\nA + B                // a genuine 2d6 distribution',
   },
   {
     k: 'Lazy until queried: P, E, Var, Q',
     d: 'Nothing is sampled until you ask. A query runs a fast columnar Monte-Carlo pass and reports an honest estimate — the printed digits reflect the standard error, and that error propagates through arithmetic, so 4·P(C) rounds itself correctly.',
-    code: 'C = X^2 + Y^2 < 1\n4 * P(C)   # ≈ 3.14',
+    code: 'C = X^2 + Y^2 < 1\n4 * P(C)   // ≈ 3.14',
   },
   {
     k: 'Independence is a shape',
     d: 'Put a shape on the tilde to draw a whole batch at once: ~[n] is an iid vector, ~[n, m] a matrix. A reducer collapses it back to one number — so the birthday paradox over 23 people, all 253 pairwise comparisons, is a single expression.',
-    code: 'days ~[23] unif_int(1, 365)\nP(has_duplicates(days))   # ≈ 0.51',
+    code: 'days ~[23] unif_int(1, 365)\nP(has_duplicates(days))   // ≈ 0.51',
   },
   {
     k: 'Branches are random variables',
     d: 'When the condition is random, if c { a } else { b } does not take a path — it builds a new random variable, choosing a or b per sample. That single rule hands you max, min, abs, clamps and payoffs over distributions for free.',
-    code: 'RandomVariableToo = if A > B { A } else { B }   # the larger of two dice',
+    code: 'RandomVariableToo = if A > B { A } else { B }   // the larger of two dice',
   },
 ];
 ---

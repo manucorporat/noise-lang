@@ -14,15 +14,15 @@ extra:
 ---
 use rand; use vec;
 
-# The data: 24 daily returns (0.012 = +1.2%). Days 11-14 are a panic streak around the -4%
-# crash — real markets have bad WEEKS, not just isolated bad days, and that will matter below.
+// The data: 24 daily returns (0.012 = +1.2%). Days 11-14 are a panic streak around the -4%
+// crash — real markets have bad WEEKS, not just isolated bad days, and that will matter below.
 rets = [ 0.004, -0.006,  0.012,  0.003, -0.002,
          0.007,  0.001, -0.005,  0.008,  0.002,
         -0.012, -0.040, -0.018, -0.009,  0.011,
          0.006, -0.003,  0.009, -0.001,  0.013,
         -0.007,  0.002,  0.010, -0.004 ];
 
-# Tomorrow is a uniformly-random day pulled straight from history (the iid bootstrap).
+// Tomorrow is a uniformly-random day pulled straight from history (the iid bootstrap).
 tomorrow ~ rand::empirical(rets);
 ```md
 E(tomorrow) = **${E(tomorrow)}** (sample mean: ${mean(rets)})
@@ -30,17 +30,17 @@ E(tomorrow) = **${E(tomorrow)}** (sample mean: ${mean(rets)})
 P(another -4% day) = **${P(tomorrow <= -0.04) * 100}%** (= 1/24, its share of history)
 ```
 
-# No bell curve anywhere: a spike at each of the 24 real days, the lone -4% crash out in the tail.
+// No bell curve anywhere: a spike at each of the 24 real days, the lone -4% crash out in the tail.
 plot::histogram(tomorrow);
 
-# A WEEK is not 5 independent days: losses cluster. Shuffling days one at a time (iid) destroys
-# those streaks, so it understates weekly risk. The BLOCK bootstrap instead glues random
-# contiguous 5-day runs of history together, keeping each streak intact.
+// A WEEK is not 5 independent days: losses cluster. Shuffling days one at a time (iid) destroys
+// those streaks, so it understates weekly risk. The BLOCK bootstrap instead glues random
+// contiguous 5-day runs of history together, keeping each streak intact.
 iid_days ~[5] rand::empirical(rets);
 iid_week = sum(iid_days);
 
-week ~ rand::block_bootstrap(rets, 5);            # a full resampled series, in 5-day blocks
-hist_week = sum([for j in 0..5 { week[j] }]);      # its first block = one real 5-day run
+week ~ rand::block_bootstrap(rets, 5);            // a full resampled series, in 5-day blocks
+hist_week = sum([for j in 0..5 { week[j] }]);      // its first block = one real 5-day run
 
 ```md
 iid week VaR (Q05) = **${Q(iid_week, 0.05)}** — streaks shuffled away

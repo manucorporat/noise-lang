@@ -11,28 +11,28 @@ extra:
   category: "Probability"
   analytic: "≈ 0.3118"
 ---
-use rand;   # permutation
+use rand;   // permutation
 use vec;
 
-# The boxes are a uniform random permutation: box k contains the number boxes[k].
+// The boxes are a uniform random permutation: box k contains the number boxes[k].
 n     = 100;
 opens = 50;
 boxes ~ permutation(n);
 
-# The escape succeeds exactly when the shuffle has no cycle longer than 50 — that's the whole secret.
+// The escape succeeds exactly when the shuffle has no cycle longer than 50 — that's the whole secret.
 all_win = true;
 for prisoner in 0..n {
-  box   = prisoner;       # start by opening your own numbered box
+  box   = prisoner;       // start by opening your own numbered box
   found = false;
   for hop in 0..opens {
-    box   = boxes[box];                  # open the box the last number pointed to
-    found = found || (box == prisoner);  # did we just uncover our own number?
+    box   = boxes[box];                  // open the box the last number pointed to
+    found = found || (box == prisoner);  // did we just uncover our own number?
   };
   all_win = all_win && found;
 };
 
-# Heavier than most examples: each sample chases pointers through 100 boxes. Asking for half-a-
-# percent relative precision keeps it snappy — the engine draws only what that costs.
+// Heavier than most examples: each sample chases pointers through 100 boxes. Asking for half-a-
+// percent relative precision keeps it snappy — the engine draws only what that costs.
 engine::set_precision(2e-3);
 ```md
 P(all 100 prisoners go free) = **${P(all_win) * 100}%** (analytic ≈ 31.2%)

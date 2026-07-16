@@ -13,31 +13,31 @@ extra:
 ---
 use rand; use vec;
 
-bias  ~ unif(0, 1);            # prior: the bias could be anything in [0, 1], equally likely
-flips ~[10] bernoulli(bias);  # a RANDOM parameter feeding bernoulli — 10 flips of THIS coin
-next  ~ bernoulli(bias);      # an 11th flip from the same coin (for the prediction below)
+bias  ~ unif(0, 1);            // prior: the bias could be anything in [0, 1], equally likely
+flips ~[10] bernoulli(bias);  // a RANDOM parameter feeding bernoulli — 10 flips of THIS coin
+next  ~ bernoulli(bias);      // an 11th flip from the same coin (for the prediction below)
 
 heads = count(flips);
 
-# Before any data, the bias averages 1/2 — that is just the flat prior showing through.
+// Before any data, the bias averages 1/2 — that is just the flat prior showing through.
 ```latex
 E[\text{bias}] = ${E(bias)} \quad (0.5)
 ```
 
-# Conditioning is the whole trick: `| heads == 7` keeps only the worlds that produced our data,
-# and the posterior mean of a flat prior after h of n heads is (h+1)/(n+2) = 8/12 = 0.6667.
+// Conditioning is the whole trick: `| heads == 7` keeps only the worlds that produced our data,
+// and the posterior mean of a flat prior after h of n heads is (h+1)/(n+2) = 8/12 = 0.6667.
 ```latex
 E[\text{bias} \mid 7/10] = ${E(bias | heads == 7)} \quad (0.6667)
 \text{90\% interval} = [\, ${Q(bias | heads == 7, 0.05)},\ ${Q(bias | heads == 7, 0.95)} \,]
 ```
 
-# The posterior predictive lands on the same 8/12: your belief about the coin IS your bet on it.
+// The posterior predictive lands on the same 8/12: your belief about the coin IS your bet on it.
 ```latex
 P(\text{next flip heads} \mid 7/10) = ${P(next | heads == 7)} \quad (0.6667)
 ```
 
-# Prior vs posterior, side by side: a flat slab of equal possibilities...
+// Prior vs posterior, side by side: a flat slab of equal possibilities...
 plot::histogram(bias);
 
-# ...collapsing into a clear peak near 0.7 once the 7-of-10 evidence lands.
+// ...collapsing into a clear peak near 0.7 once the 7-of-10 evidence lands.
 plot::histogram(bias | heads == 7)

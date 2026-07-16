@@ -11,21 +11,21 @@ extra:
   category: "Basics"
   analytic: "3.14159…"
 ---
-use rand;   # unif
-use math;   # pi, sin
+use rand;   // unif
+use math;   // pi, sin
 
-# When it lands, the needle's center falls a random distance from the nearest seam at a random tilt;
-# it crosses only when its half-length, leaning toward the line, reaches across that gap.
-d     ~ unif(0, 0.5);      # center-to-nearest-line distance, spacing t = 1 so d lands in [0, 1/2]
-angle ~ unif(0, pi / 2);   # tilt; by symmetry, [0, pi/2] already covers every case
+// When it lands, the needle's center falls a random distance from the nearest seam at a random tilt;
+// it crosses only when its half-length, leaning toward the line, reaches across that gap.
+d     ~ unif(0, 0.5);      // center-to-nearest-line distance, spacing t = 1 so d lands in [0, 1/2]
+angle ~ unif(0, pi / 2);   // tilt; by symmetry, [0, pi/2] already covers every case
 cross = d <= 0.5 * sin(angle);
 
-# Geometry pins the crossing chance to exactly 2/π, so inverting it turns a mere tally back into π.
+// Geometry pins the crossing chance to exactly 2/π, so inverting it turns a mere tally back into π.
 p = P(cross);
 ```latex
 P(\text{needle crosses a line}) = ${p} \approx \frac{2}{\pi} = ${2 / pi}
 \pi \approx \frac{2}{P(\text{cross})} \qquad (\text{true } \pi = ${pi})
 ```
 
-# The π squeezed out of the needle, shown with only the error bar it has earned.
+// The π squeezed out of the needle, shown with only the error bar it has earned.
 plot::value(2 / p)

@@ -10,7 +10,7 @@ extra:
   category: "Probability"
   analytic: "1/8 = 0.125"
 ---
-# How many coins we flip in a row — tune it and watch the all-heads chance halve each time.
+// How many coins we flip in a row — tune it and watch the all-heads chance halve each time.
 flip_count = input::int(min: 1, max: 20, step: 1, default: 3);
 
 flips  ~[flip_count] rand::bernoulli(0.5);
@@ -19,6 +19,6 @@ streak = vec::all(flips);
 P(all heads in a row) = **${P(streak) * 100}%**
 ```
 
-# The odds halve with every extra flip — the curve dives toward zero almost at once.
+// The odds halve with every extra flip — the curve dives toward zero almost at once.
 odds_by_length = [for k in 1..11 { 0.5 ^ k }];
 plot::line(odds_by_length)

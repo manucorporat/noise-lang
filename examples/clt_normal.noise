@@ -10,9 +10,9 @@ extra:
   blurb: "A normal built from twelve uniforms."
   category: "Continuous & CLT"
 ---
-use rand;   # unif, normal
+use rand;   // unif, normal
 
-# Twelve is the magic count: a U(0,1) has variance 1/12, so twelve of them sum to variance exactly 1 — a ready-made standard normal.
+// Twelve is the magic count: a U(0,1) has variance 1/12, so twelve of them sum to variance exactly 1 — a ready-made standard normal.
 n     = 12;
 draws ~[n] unif(0, 1);
 clt   = vec::sum(draws) - n / 2;
@@ -20,7 +20,7 @@ clt   = vec::sum(draws) - n / 2;
 P(Z > 1) \approx ${P(clt > 1) * 100}\% \qquad (\text{sum of } ${n} \text{ uniforms})
 ```
 
-# The tail from stacked-up noise lands on the same ~16% as the real thing.
+// The tail from stacked-up noise lands on the same ~16% as the real thing.
 Z ~ normal(0, 1);
 ```latex
 P(Z > 1) = ${P(Z > 1) * 100}\% \qquad (\text{native normal})

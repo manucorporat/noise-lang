@@ -11,9 +11,9 @@ extra:
   category: "Continuous & CLT"
   analytic: "1/6 ≈ 0.1667"
 ---
-use rand;   # unif
+use rand;   // unif
 
-# Slide n: one draw is flat, two make a triangle, a dozen round into a bell — the CLT in miniature.
+// Slide n: one draw is flat, two make a triangle, a dozen round into a bell — the CLT in miniature.
 n     = input::int(min: 1, max: 12, step: 1, default: 3);
 
 draws ~[n] unif(0, 1);

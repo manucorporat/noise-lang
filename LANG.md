@@ -66,9 +66,9 @@ X ~ unif_int(1, 6)
 Y ~ unif_int(1, 6)
 X + Y                 # two independent dice -> a real 2d6 distribution
 
-Die = unif_int(1, 6)  # a distribution (recipe), bound with `=`
-a ~ Die               # draw one
-b ~ Die               # draw another, independent
+Die = unif_int(1, 6)  // a distribution (recipe), bound with `=`
+a ~ Die               // draw one
+b ~ Die               // draw another, independent
 ```
 
 For N independent draws, give `~` a **shape**: `~[n] dist` draws an `n`-vector, `~[n, m] dist` a
@@ -77,7 +77,7 @@ the shape just says how many.)
 
 ```
 Bday = unif_int(1, 365)
-days ~[23] Bday            # 23 independent draws, one fresh node each
+days ~[23] Bday            // 23 independent draws, one fresh node each
 P(has_duplicates(days))
 ```
 
@@ -121,7 +121,9 @@ symbolic (a distribution) until then.
   (see grammar) — so `;` is optional and only needed to put several statements on one line. A
   newline *inside* an unfinished expression is insignificant, so an operator can lead a
   continuation line (`total = a\n  + b`).
-- **Comments** run to end of line, started by `#` or `//`.
+- **Comments**: `//` runs to end of line; `/* … */` is a block comment (C-style, non-nesting).
+  `#` is *not* a comment marker — its only legal use is a `#!` shebang on line 1 (so a `.noise`
+  file can be made executable), which the lexer skips as trivia along with the frontmatter block.
 - **Numbers**: `[0-9]+` or `[0-9]*.[0-9]+` / `[0-9]+.[0-9]*`, optionally followed by a
   **scientific-notation exponent** `[eE][+-]?[0-9]+` (`1e6`, `1.5e-3`, `2E10`), parsed as `f64`.
   A bare `e`/`E` with no exponent digits is *not* consumed into the number (so `math::e` and names
@@ -399,8 +401,8 @@ repeating a name. You **cannot do arithmetic on an undrawn distribution** — `~
 >   B ~ unif_int(1, 6)
 >   A + B            # two independent dice — a real 2d6 distribution
 >
->   Die = unif_int(1, 6)   # a recipe, bound with `=`; not yet drawn
->   a ~ Die; b ~ Die       # two independent draws of the same recipe
+>   Die = unif_int(1, 6)   // a recipe, bound with `=`; not yet drawn
+>   a ~ Die; b ~ Die       // two independent draws of the same recipe
 >   ```
 > Still to build: user-defined functions (§4) and the full value-type unification (§1).
 
@@ -747,9 +749,9 @@ use rand; use vec;
 X ~ normal(100, 15);
 h = stats::histogram(X, 6);
 m = stats::moments(X);
-Print("counts:  ", h[1]);      # [248, 11058, 76769, 92348, 18937, 640]
-Print("mean, sd:", m[1], m[2]);  # 100.00483911223 15.00450459098
-Print("VaR95:   ", stats::quantiles(X, [0.05])[0]);  # 75.269722471943
+Print("counts:  ", h[1]);      // [248, 11058, 76769, 92348, 18937, 640]
+Print("mean, sd:", m[1], m[2]);  // 100.00483911223 15.00450459098
+Print("VaR95:   ", stats::quantiles(X, [0.05])[0]);  // 75.269722471943
 ```
 
 **`engine::set_precision(rel[, abs])`** declares the program's **precision target**: every
@@ -764,10 +766,14 @@ the contract:
 
 - **A run that hits its target is fully deterministic**: the stop rule reads only drawn values, and
   draws are a pure function of `(seed, lane)` — same program, same digits, on every machine and
-  backend. The result is bit-identical to a fixed-count run at the same final `n`. (One edge: with a
-  `max_time` set, growth stages are sized against the remaining deadline, so a run that *brushes*
-  its deadline can settle on a different — still target-meeting — final `n` per machine. Runs that
-  finish comfortably inside the deadline, or with `--max-time 0`, are exactly reproducible.)
+  backend. The result is bit-identical to a fixed-count run at the same final `n`. (Two edges: with
+  a `max_time` set, growth stages are sized against the remaining deadline, so a run that *brushes*
+  its deadline can settle on a different — still target-meeting — final `n` per machine; runs that
+  finish comfortably inside the deadline, or with `--max-time 0`, are exactly reproducible. And on
+  the GPU the answer carries the backend's usual tier-2 qualification: the on-device fold is f32,
+  deterministic per device but ULP-different from the CPU's f64 fold — so a run whose stages
+  straddle a backend or fold-mode switch matches the single-backend run to ~1e-6 relative, not bit
+  for bit.)
 - **A run that hits the runtime `max_time` deadline is honest but machine-dependent**: it reports
   the estimate from the samples it drew, with the (wider) se those samples justify, plus a warning
   naming what bound it. A slower machine prints *fewer digits*, never wrong ones.

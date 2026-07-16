@@ -76,7 +76,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>> {
     tokenize_inner(src, None)
 }
 
-/// Tokenize *and* collect the spans of every line comment (`//` / `#`) as a side channel — trivia
+/// Tokenize *and* collect the spans of every comment (`//` line, `/* … */` block) as a side channel — trivia
 /// for the literate doc model (PLAN-LITERATE §D4). Comments inside strings, template bodies, and the
 /// frontmatter block are **not** trivia (they never reach the comment branch). The token stream is
 /// identical to [`tokenize`]'s.
@@ -88,11 +88,12 @@ pub fn tokenize_with_trivia(src: &str) -> Result<(Vec<Token>, Vec<Span>)> {
 
 fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec<Token>> {
     let bytes = src.as_bytes();
-    // A `---`-fenced frontmatter block at byte 0 is trivia: skip it *in place* so every token span
-    // keeps pointing into the original source (error messages and the doc model rely on it). Only
-    // a fence at the very start counts; `---` anywhere else stays three unary minuses.
-    // See `crate::frontmatter`.
-    let mut i = crate::frontmatter::block_end(src)?.unwrap_or(0);
+    // File-top trivia is skipped *in place* so every token span keeps pointing into the original
+    // source (error messages and the doc model rely on it): a `#!` shebang on line 1, then an
+    // optional `---`-fenced frontmatter block. Only a fence at the very top counts; `---` anywhere
+    // else stays three unary minuses. See `crate::frontmatter`.
+    let mut i = crate::frontmatter::block_end(src)?
+        .unwrap_or_else(|| crate::frontmatter::shebang_end(src));
     let mut out = Vec::new();
     let n = bytes.len();
 
@@ -105,8 +106,8 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
             continue;
         }
 
-        // line comments: `//` and `#`
-        if c == '#' || (c == '/' && i + 1 < n && bytes[i + 1] == b'/') {
+        // line comments: `//` to end of line
+        if c == '/' && i + 1 < n && bytes[i + 1] == b'/' {
             let cstart = i;
             while i < n && bytes[i] != b'\n' {
                 i += 1;
@@ -115,6 +116,45 @@ fn tokenize_inner(src: &str, mut comments: Option<&mut Vec<Span>>) -> Result<Vec
                 sink.push(Span::new(cstart, i));
             }
             continue;
+        }
+
+        // block comments: `/* … */` (C-style, non-nesting)
+        if c == '/' && i + 1 < n && bytes[i + 1] == b'*' {
+            let cstart = i;
+            i += 2;
+            loop {
+                if i + 1 >= n {
+                    return Err(NoiseError {
+                        kind: ErrorKind::Parse(
+                            "unterminated block comment: `/*` has no closing `*/`".into(),
+                        ),
+                        span: Span::new(cstart, n),
+                    });
+                }
+                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    i += 2;
+                    break;
+                }
+                i += 1;
+            }
+            if let Some(sink) = comments.as_deref_mut() {
+                sink.push(Span::new(cstart, i));
+            }
+            continue;
+        }
+
+        // `#` is not a comment marker (comments are `//` / `/* … */`); its only legal use is the
+        // `#!` shebang on line 1, which was skipped as trivia above. Catch it with a pointed error
+        // instead of the generic unexpected-character one.
+        if c == '#' {
+            return Err(NoiseError {
+                kind: ErrorKind::Parse(
+                    "`#` is not a comment — use `//` (or `/* … */`); `#!` is only allowed as a \
+                     shebang on line 1"
+                        .into(),
+                ),
+                span: Span::new(i, i + 1),
+            });
         }
 
         let start = i;
@@ -448,12 +488,43 @@ mod tests {
     }
 
     #[test]
-    fn line_comments_hash_and_slash_are_skipped() {
+    fn line_and_block_comments_are_skipped() {
         use TokKind::*;
         assert_eq!(
-            kinds("1 # comment\n2 // another\n3"),
+            kinds("1 // comment\n2 /* inline */ 3"),
             vec![Number(1.0), Number(2.0), Number(3.0), Eof]
         );
+        // Block comments may span lines.
+        assert_eq!(
+            kinds("1 /* a\nmulti-line\ncomment */ 2"),
+            vec![Number(1.0), Number(2.0), Eof]
+        );
+    }
+
+    #[test]
+    fn hash_is_not_a_comment() {
+        let err = tokenize("1 # not a comment\n").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("`//`"), "should point at `//`; got: {msg}");
+    }
+
+    #[test]
+    fn unterminated_block_comment_is_an_error() {
+        let err = tokenize("1 /* no close").unwrap_err();
+        assert!(format!("{err}").contains("unterminated block comment"));
+    }
+
+    #[test]
+    fn shebang_on_line_one_is_trivia() {
+        use TokKind::*;
+        assert_eq!(kinds("#!/usr/bin/env noise\n1"), vec![Number(1.0), Eof]);
+        // Shebang then frontmatter: both are skipped.
+        assert_eq!(
+            kinds("#!/usr/bin/env noise\n---\ntitle: t\n---\n1"),
+            vec![Number(1.0), Eof]
+        );
+        // A shebang-only file lexes to just EOF.
+        assert_eq!(kinds("#!/usr/bin/env noise"), vec![Eof]);
     }
 
     #[test]

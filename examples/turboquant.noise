@@ -11,34 +11,34 @@ extra:
   category: "Functions & research"
   analytic: "bias 2/π ≈ 0.637"
 ---
-use math;     # pi, sqrt, sign
-use vec;      # normalize, ones, iota, quantize, normsq, norm, transpose
+use math;     // pi, sqrt, sign
+use vec;      // normalize, ones, iota, quantize, normsq, norm, transpose
 
-# Each sample rotates and quantizes a 20-dimensional vector — a lot of work per draw. Ask for
-# the ~2 significant digits the paper comparison needs, and let every E() size itself.
+// Each sample rotates and quantizes a 20-dimensional vector — a lot of work per draw. Ask for
+// the ~2 significant digits the paper comparison needs, and let every E() size itself.
 engine::set_precision(5e-3);
 
-# A fixed unit vector x and unit query y (any fixed pair works); we estimate <y, x>.
+// A fixed unit vector x and unit query y (any fixed pair works); we estimate <y, x>.
 d = 20;
 x = normalize(ones(d));
 y = normalize(iota(d));
-true_ip = y @ x;          # `@` is the matrix product (here a vector dot)
+true_ip = y @ x;          // `@` is the matrix product (here a vector dot)
 
-# Optimal scalar (Lloyd-Max) codebooks for the rotated coordinates, which are ~Normal(0, 1/d). These
-# are the standard unit-Gaussian quantization levels, rescaled by 1/sqrt(d). b bits -> 2^b levels.
+// Optimal scalar (Lloyd-Max) codebooks for the rotated coordinates, which are ~Normal(0, 1/d). These
+// are the standard unit-Gaussian quantization levels, rescaled by 1/sqrt(d). b bits -> 2^b levels.
 s  = 1 / sqrt(d);
-L1 = [-0.7979, 0.7979] * s;                                                              # b=1: 2 levels
-L2 = [-1.5104, -0.4528, 0.4528, 1.5104] * s;                                             # b=2: 4 levels
-L3 = [-2.1520, -1.3439, -0.7560, -0.2451, 0.2451, 0.7560, 1.3439, 2.1520] * s;           # b=3: 8 levels
+L1 = [-0.7979, 0.7979] * s;                                                              // b=1: 2 levels
+L2 = [-1.5104, -0.4528, 0.4528, 1.5104] * s;                                             // b=2: 4 levels
+L3 = [-2.1520, -1.3439, -0.7560, -0.2451, 0.2451, 0.7560, 1.3439, 2.1520] * s;           // b=3: 8 levels
 L4 = [-2.7326, -2.0690, -1.6181, -1.2562, -0.9423, -0.6568, -0.3881, -0.1284,
-       0.1284,  0.3881,  0.6568,  0.9423,  1.2562,  1.6181,  2.0690,  2.7326] * s;        # b=4: 16 levels
+       0.1284,  0.3881,  0.6568,  0.9423,  1.2562,  1.6181,  2.0690,  2.7326] * s;        // b=4: 16 levels
 
-# === Algorithm 1: the MSE-optimal quantizer. Rotate, snap each coordinate to its nearest level,
-#     rotate back. Distortion D_mse = E||x - xhat||^2 should match the paper's table.
-Pi  ~ rand::rotation(d);                 # fresh random rotation per Monte Carlo sample (a draw)
-rot = Pi @ x;                      # rotated coordinates, each ~ Normal(0, 1/d)  (mat @ vec)
-PiT = transpose(Pi);          # rotate the reconstruction back
-mse1 = PiT @ quantize(rot, L1);   # 1-bit MSE reconstruction
+// === Algorithm 1: the MSE-optimal quantizer. Rotate, snap each coordinate to its nearest level,
+//     rotate back. Distortion D_mse = E||x - xhat||^2 should match the paper's table.
+Pi  ~ rand::rotation(d);                 // fresh random rotation per Monte Carlo sample (a draw)
+rot = Pi @ x;                      // rotated coordinates, each ~ Normal(0, 1/d)  (mat @ vec)
+PiT = transpose(Pi);          // rotate the reconstruction back
+mse1 = PiT @ quantize(rot, L1);   // 1-bit MSE reconstruction
 mse2 = PiT @ quantize(rot, L2);
 mse3 = PiT @ quantize(rot, L3);
 mse4 = PiT @ quantize(rot, L4);
@@ -50,35 +50,35 @@ D_{\text{mse}},\ b = 3 = ${E(normsq(x - mse3))} \qquad(\text{paper } 0.03)
 D_{\text{mse}},\ b = 4 = ${E(normsq(x - mse4))} \qquad(\text{paper } 0.009)
 ```
 
-# === The catch: that 1-bit MSE quantizer is BIASED for inner products by exactly 2/pi.
+// === The catch: that 1-bit MSE quantizer is BIASED for inner products by exactly 2/pi.
 ```latex
 \text{MSE } b = 1: \quad \frac{E[\text{est}]}{\text{true}} = ${E(y @ mse1) / true_ip} \qquad(\text{biased: } \tfrac{2}{\pi} = ${2 / pi})
 ```
 
-# === Algorithm 2: TurboQuant_prod. The MSE reconstruction `m` (at b-1 bits) plus a 1-bit QJL sketch
-#     of its residual r = x - m, using an independent Gaussian projection S, rescaled by ||r||.
-#     `tq_ip` returns the resulting estimate of <y, x>; it is provably unbiased (Theorem 2).
+// === Algorithm 2: TurboQuant_prod. The MSE reconstruction `m` (at b-1 bits) plus a 1-bit QJL sketch
+//     of its residual r = x - m, using an independent Gaussian projection S, rescaled by ||r||.
+//     `tq_ip` returns the resulting estimate of <y, x>; it is provably unbiased (Theorem 2).
 tq_ip(x, y, m, S, dd) =
     y @ m
   + sqrt(pi / 2) / dd * norm(x - m)
     * (y @ (transpose(S) @ sign(S @ (x - m))));
     
-# Target b spends (b-1) bits on the MSE stage and 1 bit on the QJL residual. Each stage draws its
-# own fresh rotation / projection per sample. (b=1 has a 0-bit MSE stage -> codebook {0} -> plain QJL.)
+// Target b spends (b-1) bits on the MSE stage and 1 bit on the QJL residual. Each stage draws its
+// own fresh rotation / projection per sample. (b=1 has a 0-bit MSE stage -> codebook {0} -> plain QJL.)
 S1 ~[d, d] rand::normal(0, 1);
 S2 ~[d, d] rand::normal(0, 1);  R2 ~ rand::rotation(d);
 S3 ~[d, d] rand::normal(0, 1);  R3 ~ rand::rotation(d);
 S4 ~[d, d] rand::normal(0, 1);  R4 ~ rand::rotation(d);
-m1 = zeros(d);                                                             # 0-bit MSE -> just QJL
-m2 = transpose(R2) @ quantize(R2 @ x, L1);    # 1-bit MSE + QJL
-m3 = transpose(R3) @ quantize(R3 @ x, L2);    # 2-bit MSE + QJL
-m4 = transpose(R4) @ quantize(R4 @ x, L3);    # 3-bit MSE + QJL
+m1 = zeros(d);                                                             // 0-bit MSE -> just QJL
+m2 = transpose(R2) @ quantize(R2 @ x, L1);    // 1-bit MSE + QJL
+m3 = transpose(R3) @ quantize(R3 @ x, L2);    // 2-bit MSE + QJL
+m4 = transpose(R4) @ quantize(R4 @ x, L3);    // 3-bit MSE + QJL
 prod1 = tq_ip(x, y, m1, S1, d);
 prod2 = tq_ip(x, y, m2, S2, d);
 prod3 = tq_ip(x, y, m3, S3, d);
 prod4 = tq_ip(x, y, m4, S4, d);
 
-# The fix lands on 1 — unbiased — and its squared error shrinks like 1/d as bits are added, a fraction of the biased quantizer's.
+// The fix lands on 1 — unbiased — and its squared error shrinks like 1/d as bits are added, a fraction of the biased quantizer's.
 ```latex
 \text{prod } b = 2: \quad \frac{E[\text{est}]}{\text{true}} = ${E(prod2) / true_ip} \qquad(\text{unbiased} \approx 1)
 D_{\text{prod}},\ b = 1 = ${E((prod1 - true_ip) ^ 2)} \qquad(\text{plain QJL};\ \le \text{ bound } \tfrac{\pi}{2d} = ${pi / 2 / d})

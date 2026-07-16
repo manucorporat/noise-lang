@@ -20,7 +20,7 @@ matched = vec::has_duplicates(share);
 With ${n} people, the chance that two share a birthday is **${P(matched) * 100}%**.
 ```
 
-# The exact odds against group size: a steep climb that clears 50% at just 23 people.
+// The exact odds against group size: a steep climb that clears 50% at just 23 people.
 chance(k) = { miss = 1.0; for i in 1..k { miss = miss * (365 - i) / 365 }; 1 - miss };
 odds_by_size = [for g in 1..61 { chance(g) }];
 plot::line(odds_by_size)

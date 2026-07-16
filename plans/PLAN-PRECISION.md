@@ -1,7 +1,43 @@
 # PLAN-PRECISION — stop at the answer, not at a sample count
 
-**Date:** 2026-07-15 · **Status: PHASE 1 LANDED (2026-07-16)** — grounded by a seam map (file:line below;
-line numbers predate the implementation).
+**Date:** 2026-07-15 · **Status: FULLY LANDED (2026-07-16)** — Phase 1, Phase 2 (precision
+default-on), Track F (on-GPU fold), and all of Track H (CLI Ctrl-C rungs + browser stop cell +
+playground `maxTime`/warnings UI). Grounded by a seam map (file:line below; line numbers predate
+the implementation).
+
+> **Phase 2 + F + H notes (what landed vs. the draft, second pass):**
+> - **Phase 2 (default-on):** untargeted `P`/`E`/`Var` now use `DrawBudget::Auto` — the target is
+>   `se ≤ 5e-3 · max(|est|, sd)` with `sd = se·√m`. The **sd floor** is the deviation from the
+>   draft's bare `rel` default: a pure relative target never terminates on a ≈0-mean quantity, and
+>   an `abs` floor isn't scale-free. The sd-floored rule solves to `m ≥ rel⁻² = 40k` *effective*
+>   draws (one 65k pilot for an easy query, ~25× less than the old 1M; honest extension for
+>   conditionals/rare events). Deliberately NOT expressible via `set_precision` (a declared target
+>   is a pure demand; the default is a bounded-effort heuristic). `P_DEFAULT_N`, the `samples`
+>   runtime setting (CLI/wasm/npm), and `Engine::set_max_samples` are all deleted; `Q` keeps its
+>   own fixed `Q_DEFAULT_N = 1M`; plots keep their visual budgets. Corpus total ~4.25 s (≈ Phase-1
+>   baseline; many small examples 2-4× faster, e.g. birthday 17→4 ms).
+> - **Track F (on-GPU fold):** `wgsl_emit::emit_reduce` — each workgroup folds 4096 lanes
+>   (64 threads × 64 sequential lanes + fixed-order tree reduce) and writes one `(Σx, Σx², count)`
+>   triple; readback drops ~1300×. Routed in `gpu::try_reduce` for `Reducer::moments_mode()`
+>   reducers at **n ≥ 1M lanes** (below that, column mode keeps its calibrated economics and a
+>   reduce dispatch would fill only n/64 threads). Gate: column-gate acceptances stay, plus a
+>   thin-cone amortization floor `n·ops ≥ 1e9` (cold-pipeline-safe; `prefer_runtime` uses `1e7` —
+>   warm-pipeline crossover measured at ~1M lanes). Workgroup slices nest in chunks, so staged ==
+>   single stays bit-identical *on the GPU's own fold* (unit test); the fold itself is f32 — tier 2
+>   vs the CPU's f64 fold (~1e-6 relative; LANG.md notes the backend/mode-straddling edge).
+>   Measured: π to 5 digits (2.7e9 draws) 1.46 s vs ~7 s CPU; the wasm bridge encodes reduce mode
+>   as `cols == 0` (`dispatchShape` mirrored in `gpu-host.ts`) — a browser run swept 34.4B draws
+>   (8 epochs) in a 10 s budget.
+> - **Track H (complete):** CLI two-rung Ctrl-C (`ctrlc` dep; first = `CancelToken::stop()` +
+>   partial doc + exit 0, second = exit 130). Browser: `exec::HOST_STOP` (a process-global cell
+>   read at the per-chunk stop cadence; `noise-wasm` exports `stop_cell_ptr()`), the threaded
+>   worker announces `{type:'stop-cell', sab, ptr}` once, and `pool.softStop(id)` is one
+>   `Atomics.store` into it. `run()`/`runWithIntrospection()` now return a **`RunHandle`**
+>   (`Promise` + `stop(): boolean` — `false` = unsupported/settled; single-threaded + Node fall
+>   back to abort). Playground: Run button doubles as **Stop** mid-run, `maxTime: 10s` default,
+>   and an amber warnings banner (`.pg-warnings`, in the `is:global` style block — scoped styles
+>   can't reach runtime-created nodes). Capped-query warnings now report the **folded count**
+>   (`out.count`), not the requested sweep — a soft-stopped GPU stage folds only part of its range.
 
 > **Implementation notes (what landed vs. the draft):**
 > - Tracks A, B, C, D (deadline-aware sizing off measured stage throughput), E (epoch reseeding),

@@ -12,11 +12,11 @@ extra:
   analytic: "f* = 0.2 → 0.0201/round"
 ---
 
-# Why maximize the LOG of growth, not the growth itself? Bankrolls MULTIPLY round to round,
-# so what actually compounds is the average log-return — and that peaks at f* = 2p - 1 = 0.2.
+// Why maximize the LOG of growth, not the growth itself? Bankrolls MULTIPLY round to round,
+// so what actually compounds is the average log-return — and that peaks at f* = 2p - 1 = 0.2.
 log_growth(f) = {
   win ~ rand::bernoulli(0.6);
-  g = if win { 1 + f } else { 1 - f };   # win: your stake f doubles; lose: it is gone
+  g = if win { 1 + f } else { 1 - f };   // win: your stake f doubles; lose: it is gone
   E(math::log(g))
 };
 
@@ -30,7 +30,7 @@ for k in 0..11 {
   Print(`  f = ${fractions[k]} -> ${growth[k]}`)
 };
 
-# Your turn: drag your stake and watch the growth rate climb to the peak at 0.2, then go negative.
+// Your turn: drag your stake and watch the growth rate climb to the peak at 0.2, then go negative.
 my_stake = input::real(min: 0, max: 0.5, step: 0.05, default: 0.2);
 
 Print(`your stake f = ${my_stake} -> growth ${log_growth(my_stake)}`);
@@ -41,5 +41,5 @@ overbetting a winning game loses money in the long run.
 (Analytic: E[log g] = p*log(1+f) + (1-p)*log(1-f); at f = 0.2 that's ~0.0201 per round.)
 ```
 
-# The Kelly curve made visible: log-growth against stake, cresting at 0.2 then plunging below zero.
+// The Kelly curve made visible: log-growth against stake, cresting at 0.2 then plunging below zero.
 plot::line(growth)

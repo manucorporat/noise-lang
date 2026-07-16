@@ -18,5 +18,5 @@ heads = vec::count(flips);
 P(exactly two heads of three) = **${P(heads == 2) * 100}%**
 ```
 
-# The whole shape at a glance — the bar at two heads is the 3/8 we asked for.
+// The whole shape at a glance — the bar at two heads is the 3/8 we asked for.
 plot::histogram(heads)
