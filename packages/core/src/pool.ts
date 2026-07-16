@@ -123,16 +123,27 @@ const pending = new Map<number, Pending>();
 const queue: { req: WorkerRequest; p: Pending }[] = [];
 
 async function spawn(): Promise<BrowserLikeWorker> {
-  const url = new URL('./worker.js', import.meta.url);
   if (isNode) {
     const { Worker: NodeWorker } = await import('node:worker_threads');
-    const w = new NodeWorker(url);
+    // The mirror image of the browser branch below: this URL is deliberately built from a variable
+    // so a bundler *cannot* pattern-match it. Node resolves it identically at runtime, but a literal
+    // here would make Vite emit a second, verbatim copy of worker.js into the browser build — dead
+    // weight the browser never loads, carrying the very broken import described below.
+    const workerFile = './worker.js';
+    const w = new NodeWorker(new URL(workerFile, import.meta.url));
     w.on('message', (res: WorkerResponse) => settle(res));
     // A worker that dies takes its in-flight job with it; fail that job rather than hang forever.
     w.on('error', (err: Error) => failAll(err));
     return w as unknown as BrowserLikeWorker;
   }
-  const w = new Worker(url, { type: 'module' });
+  // `new URL(...)` MUST stay inline inside `new Worker(...)`, however tempting it is to hoist it or
+  // share it with the Node branch above. Bundlers pattern-match this exact single expression to
+  // recognize a worker and bundle it with its imports; hoisting the URL into a variable downgrades
+  // it to a plain asset reference — the bundler then copies worker.js verbatim, leaving its own
+  // `import './gpu-protocol.js'` pointing at a file that was never emitted. That fails only in a
+  // production build (a dev server serves the real files from disk, so the bare import resolves),
+  // which is exactly how it reached noiselang.com as a 404 on /_astro/gpu-protocol.js.
+  const w = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
   // When the GPU host is up, give THIS worker its own control buffer and route its mid-forcing GPU
   // requests to the host. The SAB is per-worker so concurrent workers never collide on one (the
   // threaded path runs a single engine worker anyway, but a cancel-replacement spawns a fresh one).
