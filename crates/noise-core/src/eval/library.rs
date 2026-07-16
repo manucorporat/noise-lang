@@ -14,45 +14,63 @@ use crate::signal::{NoiseKind, NoiseSpec, SigExpr, SigUnOp};
 use crate::value::Value;
 
 impl Engine {
-    /// `engine::set_max_samples(N)` — set the default Monte Carlo budget (the sample count `P`/`E`/
-    /// `Var`/`Q` use when called without an explicit count) for the rest of the run. Lets a program
-    /// trade accuracy for speed once, up front, instead of threading `n` through every query; an
-    /// explicit per-call count still overrides it. Returns unit (it's a setting, not a value).
-    fn lib_set_max_samples(&mut self, args: &[Value], span: Span) -> Result<Value> {
-        let [n] = arity1("set_max_samples", args, span)?;
-        let n = self.count_arg("set_max_samples", n, span)?;
-        if n < 1 {
+    /// `engine::set_precision(rel[, abs])` — declare the program's **precision target**
+    /// (PLAN-PRECISION): every untargeted `P`/`E`/`Var` keeps drawing until
+    /// `se ≤ max(abs, rel·|est|)`, bounded by the runtime `max_time` guard. `rel` is scale-free
+    /// ("`1e-4` ≈ 4 significant digits"); `abs` rescues quantities whose mean is ≈ 0. Validation:
+    /// both ≥ 0, not both 0. A pragma is the program's declared default — a host override
+    /// ([`Engine::set_precision`]) pins the setting, in which case this evaluates but doesn't
+    /// change the effective value. Returns unit (it's a setting, not a value).
+    fn lib_set_precision(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        if args.is_empty() || args.len() > 2 {
             return Err(NoiseError::runtime(
-                "set_max_samples(N) needs N >= 1 (the Monte Carlo budget must draw at least once)"
-                    .to_string(),
+                format!(
+                    "set_precision expects (rel) or (rel, abs), got {} argument(s)",
+                    args.len()
+                ),
                 span,
             ));
         }
-        self.max_samples = n;
-        Ok(Value::Unit)
-    }
-
-    /// `engine::set_max_ops(N)` — cap the *operations* each `P`/`E`/`Var`/`Q` query may spend for
-    /// the rest of the run. A forcing over a cone of `C` distinct nodes costs `n×C` per-lane ops, so
-    /// the query auto-clamps its draw count to `N/C` (never below 1): a heavy cone simply draws
-    /// fewer samples (looser estimate) instead of doing unbounded work. This bounds each query's
-    /// complexity *deterministically*, independent of the model's size — a budget, not an error.
-    /// Pairs with `set_max_samples`, which caps draws; the query uses the smaller of the two.
-    /// Returns unit (it's a setting, not a value).
-    ///
-    /// `name` is the invoked spelling: `set_max_ops` (correct — it caps *operations*, matching
-    /// `MAX_OPS_DEFAULT`) or the retained back-compat alias `set_max_opts` (finding F9), so error
-    /// messages name whichever the program actually wrote.
-    fn lib_set_max_ops(&mut self, name: &str, args: &[Value], span: Span) -> Result<Value> {
-        let [n] = arity1(name, args, span)?;
-        let n = self.count_arg(name, n, span)?;
-        if n < 1 {
+        let rel = match &args[0] {
+            Value::Num(n) => *n,
+            Value::Est { val, .. } => *val,
+            other => {
+                return Err(NoiseError::type_mismatch(
+                    format!("set_precision needs numbers, got {}", other.type_name()),
+                    span,
+                ))
+            }
+        };
+        let abs = match args.get(1) {
+            Some(Value::Num(n)) => *n,
+            Some(Value::Est { val, .. }) => *val,
+            Some(other) => {
+                return Err(NoiseError::type_mismatch(
+                    format!("set_precision needs numbers, got {}", other.type_name()),
+                    span,
+                ))
+            }
+            None => 0.0,
+        };
+        if !rel.is_finite() || !abs.is_finite() || rel < 0.0 || abs < 0.0 || (rel == 0.0 && abs == 0.0)
+        {
             return Err(NoiseError::runtime(
-                format!("{name}(N) needs N >= 1 (the operation budget must allow at least one op)"),
+                format!(
+                    "set_precision(rel[, abs]) needs rel >= 0 and abs >= 0, not both 0 \
+                     (got rel = {rel}, abs = {abs}) — e.g. set_precision(1e-4) for ~4 digits"
+                ),
                 span,
             ));
         }
-        self.max_opts = n as u64;
+        if self.pinned_precision {
+            // A host override pinned the setting ("pragmas declare, run() overrides") — evaluated,
+            // recorded, but the effective value stands.
+            crate::profile::note(format!(
+                "set_precision({rel}, {abs}) shadowed by a host override (setting pinned)"
+            ));
+        } else {
+            self.precision = Some((rel, abs));
+        }
         Ok(Value::Unit)
     }
 
@@ -66,10 +84,9 @@ impl Engine {
         span: Span,
     ) -> Option<Result<Value>> {
         let r = match name {
-            "set_max_samples" => self.lib_set_max_samples(args, span),
-            // `set_max_ops` is the correct name (it caps operations); `set_max_opts` is a retained
-            // back-compat alias (finding F9). Both set the same knob.
-            "set_max_ops" | "set_max_opts" => self.lib_set_max_ops(name, args, span),
+            // The budget pragmas (`set_max_samples`/`set_max_ops`/`set_max_opts`) were removed by
+            // PLAN-PRECISION; `resolve_call` errors on them with a migration hint before dispatch.
+            "set_precision" => self.lib_set_precision(args, span),
             "set_resolution" => self.lib_set_resolution(args, span),
             // materializing a signal may draw noise RV nodes / read the realization cache, so
             // `sample` needs `&mut self` and can't live in the pure `builtins::call`.
@@ -249,8 +266,9 @@ impl Engine {
 
     /// `engine::set_resolution(N)` — set the ambient **sampling resolution**: the length reducers
     /// (`mse`/`mean`/`sum`/…) use to render a lazy signal that never met an explicit length. The
-    /// time-axis twin of `set_max_samples` (PLAN-SIGNALS §1.2): a measurement knob, set once, not
-    /// threaded through the math. `signal::sample(sig, n)` remains the explicit override.
+    /// time-axis measurement knob (PLAN-SIGNALS §1.2), set once, not threaded through the math.
+    /// `signal::sample(sig, n)` remains the explicit override. A host override
+    /// ([`Engine::set_resolution`]) pins it (PLAN-PRECISION precedence).
     fn lib_set_resolution(&mut self, args: &[Value], span: Span) -> Result<Value> {
         let [n] = arity1("set_resolution", args, span)?;
         let n = self.count_arg("set_resolution", n, span)?;
@@ -261,7 +279,13 @@ impl Engine {
                 span,
             ));
         }
-        self.resolution = n;
+        if self.pinned_resolution {
+            crate::profile::note(format!(
+                "set_resolution({n}) shadowed by a host override (setting pinned)"
+            ));
+        } else {
+            self.resolution = n;
+        }
         Ok(Value::Unit)
     }
 

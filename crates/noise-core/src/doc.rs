@@ -88,6 +88,11 @@ pub struct DocResult {
     /// declaration order. A host reads this to render controls and prune stale overrides. Empty
     /// when the program declares no inputs.
     pub inputs: Vec<ResolvedInput>,
+    /// Non-fatal, user-facing notes the run raised (PLAN-PRECISION Track C), rendered with their
+    /// 1-based source lines: a query the `max_time` deadline (or a `stop()`) cut short of its
+    /// precision target, a run whose trailing statements were skipped by a soft stop. The CLI
+    /// prints them to stderr; the playground surfaces them like its other diagnostics.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +166,7 @@ impl Document {
                 profile: None,
                 truncated: None,
                 inputs: Vec::new(),
+                warnings: Vec::new(),
             },
         }
     }
@@ -379,6 +385,7 @@ pub fn assemble(
     stats: RunStats,
     truncated: Option<(usize, Span)>,
     profile: Option<crate::profile::Timings>,
+    warnings: Vec<String>,
 ) -> Document {
     // Emissions in order; each consumed by the first segment whose span contains its stmt_span.
     let mut used = vec![false; emissions.len()];
@@ -468,6 +475,7 @@ pub fn assemble(
             profile,
             truncated,
             inputs,
+            warnings,
         },
     }
 }
@@ -606,6 +614,7 @@ impl DocResult {
             "profile": self.profile.as_ref().map(profile_json),
             "truncated": truncated,
             "inputs": inputs,
+            "warnings": self.warnings,
         })
     }
 }

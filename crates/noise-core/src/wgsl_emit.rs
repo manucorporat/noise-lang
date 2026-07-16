@@ -67,6 +67,108 @@ pub struct Unsupported(pub &'static str);
 /// `graph` must already be simplified (the caller does that, so the cache key and the ordinals agree
 /// with every other backend — see [`source_ordinals`]).
 pub fn emit(graph: &RvGraph, roots: &[RvId]) -> Result<String, Unsupported> {
+    let (body, vars) = emit_body(graph, roots)?;
+    let mut cols = String::new();
+    for (j, v) in vars.iter().enumerate() {
+        let _ = writeln!(cols, "    out[{j}u * P.n + i] = {v};");
+    }
+
+    Ok(format!(
+        "{PRELUDE}\n@compute @workgroup_size({WORKGROUP})\n\
+         fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
+         \x20   let i = gid.x;\n\
+         \x20   if (i >= P.n) {{ return; }}\n\
+         \x20   let lane = P.lane0 + i;\n\
+         \x20   let key = P.key;\n\
+         {body}{cols}}}\n"
+    ))
+}
+
+/// Lanes each thread of a **reduce-mode** shader folds sequentially (PLAN-PRECISION Track F).
+/// Bounds the f32 summation error a single thread can accumulate (~64·2⁻²⁴ of the magnitudes it
+/// folds, worst case) while keeping the thread count high enough to fill the machine.
+pub const REDUCE_LANES_PER_THREAD: u32 = 64;
+
+/// Lanes one reduce-mode workgroup covers: 64 threads × 64 lanes = 4096 — a divisor of the
+/// reducer chunk (16,384), so workgroup-partial boundaries always nest inside chunk boundaries and
+/// a chunk-aligned stage split never splits a workgroup. That alignment is what keeps the adaptive
+/// driver's staged-==-single bit-identity holding on the GPU's own fold.
+pub const REDUCE_WG_LANES: u32 = WORKGROUP * REDUCE_LANES_PER_THREAD;
+
+/// f32 values each reduce-mode workgroup writes back: `(Σx, Σx², count)`.
+pub const REDUCE_COLS: u32 = 3;
+
+/// Emit a **reduce-mode** compute shader (PLAN-PRECISION Track F): instead of one f32 per lane,
+/// each workgroup folds the quantity over its own [`REDUCE_WG_LANES`]-lane slice and writes back a
+/// single `(Σx, Σx², count)` partial at `out[3·wg ..]`. Readback shrinks ~1300× (12 bytes per 4096
+/// lanes instead of 4 per lane), which deletes the readback term from the GPU cost model — exactly
+/// what makes thin-cone/huge-n forcings (precision targets) GPU-profitable.
+///
+/// `skip_nan` mirrors [`crate::reduce::MomentsMode`]: NaN lanes are skipped and not counted (the
+/// conditioning sentinel), versus folded (where a NaN poisons the sums, as on the CPU).
+///
+/// Determinism: thread `t` of workgroup `w` folds lanes `(w·64 + t)·64 .. +64` sequentially, then
+/// the 64 thread-partials tree-reduce in shared memory in a fixed order — the fold order is a pure
+/// function of the lane index, never of scheduling. The sums are f32 (WGSL has no f64), so the
+/// result is deterministic per device but NOT bit-identical to the CPU's f64 fold; the estimate
+/// lands within ~1e-6 relative of it (tier 2 of the conformance contract). Lanes `≥ P.n`
+/// contribute the identity, so a partial tail workgroup is still a valid partial.
+pub fn emit_reduce(graph: &RvGraph, root: RvId, skip_nan: bool) -> Result<String, Unsupported> {
+    let (body, vars) = emit_body(graph, &[root])?;
+    let v = &vars[0];
+    let fold = if skip_nan {
+        format!("if (!nz_isnan({v})) {{ rs = rs + {v}; rq = rq + {v} * {v}; rc = rc + 1.0; }}")
+    } else {
+        format!("rs = rs + {v}; rq = rq + {v} * {v}; rc = rc + 1.0;")
+    };
+    let half = WORKGROUP / 2;
+    Ok(format!(
+        "{PRELUDE}\n\
+         var<workgroup> wg_s: array<f32, {WORKGROUP}u>;\n\
+         var<workgroup> wg_q: array<f32, {WORKGROUP}u>;\n\
+         var<workgroup> wg_c: array<f32, {WORKGROUP}u>;\n\
+         @compute @workgroup_size({WORKGROUP})\n\
+         fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t: u32) {{\n\
+         \x20   let key = P.key;\n\
+         \x20   var rs = 0.0;\n\
+         \x20   var rq = 0.0;\n\
+         \x20   var rc = 0.0;\n\
+         \x20   let tbase = (wg.x * {WORKGROUP}u + t) * {REDUCE_LANES_PER_THREAD}u;\n\
+         \x20   for (var rl = 0u; rl < {REDUCE_LANES_PER_THREAD}u; rl = rl + 1u) {{\n\
+         \x20       let i = tbase + rl;\n\
+         \x20       if (i < P.n) {{\n\
+         \x20           let lane = P.lane0 + i;\n\
+         {body}\
+         \x20           {fold}\n\
+         \x20       }}\n\
+         \x20   }}\n\
+         \x20   wg_s[t] = rs;\n\
+         \x20   wg_q[t] = rq;\n\
+         \x20   wg_c[t] = rc;\n\
+         \x20   workgroupBarrier();\n\
+         \x20   var stride = {half}u;\n\
+         \x20   loop {{\n\
+         \x20       if (stride == 0u) {{ break; }}\n\
+         \x20       if (t < stride) {{\n\
+         \x20           wg_s[t] = wg_s[t] + wg_s[t + stride];\n\
+         \x20           wg_q[t] = wg_q[t] + wg_q[t + stride];\n\
+         \x20           wg_c[t] = wg_c[t] + wg_c[t + stride];\n\
+         \x20       }}\n\
+         \x20       workgroupBarrier();\n\
+         \x20       stride = stride >> 1u;\n\
+         \x20   }}\n\
+         \x20   if (t == 0u) {{\n\
+         \x20       out[wg.x * 3u] = wg_s[0];\n\
+         \x20       out[wg.x * 3u + 1u] = wg_q[0];\n\
+         \x20       out[wg.x * 3u + 2u] = wg_c[0];\n\
+         \x20   }}\n\
+         }}\n"
+    ))
+}
+
+/// The shared post-order walk both entry points ride: draw loops first, then every root's cone,
+/// memoized into flat `let`s. Returns the emitted body plus each root's final WGSL variable.
+fn emit_body(graph: &RvGraph, roots: &[RvId]) -> Result<(String, Vec<String>), Unsupported> {
     let ords = source_ordinals(graph);
     let stream_ords = crate::kernel::cell_stream_ordinals(graph);
     let plan = plan_blocks(graph, roots)?;
@@ -89,22 +191,11 @@ pub fn emit(graph: &RvGraph, roots: &[RvId]) -> Result<String, Unsupported> {
         e.emit_draw_loop(arr);
     }
 
-    let mut cols = String::new();
-    for (j, &root) in roots.iter().enumerate() {
-        let v = e.emit_node(root)?;
-        let _ = writeln!(cols, "    out[{j}u * P.n + i] = {v};");
+    let mut vars = Vec::with_capacity(roots.len());
+    for &root in roots {
+        vars.push(e.emit_node(root)?);
     }
-
-    Ok(format!(
-        "{PRELUDE}\n@compute @workgroup_size({WORKGROUP})\n\
-         fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
-         \x20   let i = gid.x;\n\
-         \x20   if (i >= P.n) {{ return; }}\n\
-         \x20   let lane = P.lane0 + i;\n\
-         \x20   let key = P.key;\n\
-         {}{cols}}}\n",
-        e.body
-    ))
+    Ok((e.body, vars))
 }
 
 /// Which [`RvNode::ArrDraw`] blocks get a draw loop, and which get their reads inlined.

@@ -19,6 +19,24 @@ type GpuPipeline = any; // eslint-disable-line @typescript-eslint/no-explicit-an
 /** Workgroup size — must equal `wgsl_emit::WORKGROUP` (the shaders declare `@workgroup_size(64)`). */
 const WORKGROUP = 64;
 
+/** Lanes one reduce-mode workgroup covers — must equal `wgsl_emit::REDUCE_WG_LANES` (64 threads ×
+ *  64 lanes each). Reduce mode (PLAN-PRECISION Track F) is signalled by `cols === 0`: the shader
+ *  folds on-device and writes one `(Σx, Σx², count)` triple per workgroup instead of one f32 per
+ *  lane. Mirrors `dispatch_shape` in `gpu.rs` — if one drifts, the answers diverge. */
+const REDUCE_WG_LANES = 4096;
+
+/** f32 values per reduce-mode workgroup partial. Must equal `wgsl_emit::REDUCE_COLS`. */
+const REDUCE_COLS = 3;
+
+/** Output length + workgroup count for one dispatch — the JS mirror of `gpu.rs::dispatch_shape`. */
+function dispatchShape(n: number, cols: number): { outCount: number; workgroups: number } {
+  if (cols === 0) {
+    const workgroups = Math.ceil(n / REDUCE_WG_LANES);
+    return { outCount: workgroups * REDUCE_COLS, workgroups };
+  }
+  return { outCount: cols * n, workgroups: Math.ceil(n / WORKGROUP) };
+}
+
 /** Running tallies of what the GPU host actually did — surfaced in `result.diagnostics.gpu` so the
  *  playground (and any host) can see dispatch volume and, crucially, the exact shader-validation
  *  errors Chrome's Tint raises (which the wasm engine only ever sees as an opaque "declined"). */
@@ -139,7 +157,7 @@ async function runDispatch(
 ): Promise<Float32Array | null> {
   try {
     const { device, queue } = host;
-    const outCount = cols * n;
+    const { outCount, workgroups } = dispatchShape(n, cols);
     const bytes = outCount * 4;
 
     // Uniform `Params { key: vec2<u32>, lane0: u32, n: u32 }` — 16 bytes, same order as native.
@@ -161,7 +179,7 @@ async function runDispatch(
     const pass = enc.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bind);
-    pass.dispatchWorkgroups(Math.ceil(n / WORKGROUP));
+    pass.dispatchWorkgroups(workgroups);
     pass.end();
     enc.copyBufferToBuffer(out, 0, staging, 0, bytes);
     queue.submit([enc.finish()]);

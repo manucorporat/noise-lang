@@ -22,6 +22,12 @@ wasm-encoder = "0.252"
 serde_json = { workspace = true, features = ["preserve_order"] }
 serde_norway = "0.9.42"
 
+# A drop-in `Instant` everywhere clocks are needed (the profiler, the `max_time` deadline —
+# PLAN-PRECISION): `std::time::Instant::now()` panics on `wasm32-unknown-unknown` (no clock), so
+# `web-time` reads the browser's monotonic `performance.now()` there and transparently re-exports
+# `std::time` on native (zero-cost).
+web-time = "1"
+
 # Browser-only: the WASM-emitter's host seam (`wasm_host`) calls into JS (`WebAssembly.instantiate`
 # the emitted kernel + run it) via wasm-bindgen. Native builds never compile that module, so this
 # dependency is wasm32-gated and keeps the native crate wasm-bindgen-free.
@@ -31,10 +37,6 @@ wasm-bindgen.workspace = true
 # Workers over one shared linear memory — the JS host bootstraps it (see `noise-wasm`), because wasm
 # has no instruction that creates a thread.
 rayon = { version = "1.10", optional = true }
-# A drop-in `Instant` for the profiler on wasm32: `std::time::Instant::now()` panics on
-# `wasm32-unknown-unknown` (no clock), so `web-time` reads the browser's monotonic `performance.now()`
-# there. Lets the playground surface per-phase timings (`profile`); native uses `std::time` directly.
-web-time = "1"
 
 # The native WebGPU backend (PLAN-WEBGPU G2), behind `--features gpu`. Optional and native-only, so
 # the default build stays wasm-clean and dependency-light exactly as it was.

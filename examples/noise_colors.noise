@@ -16,9 +16,12 @@ n = 256;   # every color drawn at the same resolution
 
 # Lag-1 autocorrelation of a noise vector, averaged over many realizations. Built from the raw
 # spatial sums so it's E[<x_k x_{k+1}>] / E[<x_k^2>] — a clean ratio of means.
+# Each realization is already a 256-term sum (a huge amount of work per draw), so a few
+# thousand realizations pin the ratio to the 3 decimals we print — say so with a per-call
+# count instead of letting the default budget draw a million of these monsters.
 pair_sum(x) = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i+1] }; acc };
 sq_sum(x)   = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i]   }; acc };
-neighbor_corr(x) = E(pair_sum(x)) / E(sq_sum(x));
+neighbor_corr(x) = E(pair_sum(x), 15000) / E(sq_sum(x), 15000);
 
 white ~[n] signal::noise_white(1);
 pink  ~[n] signal::noise_pink(1);

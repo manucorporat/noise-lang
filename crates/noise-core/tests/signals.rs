@@ -101,8 +101,8 @@ fn am_vs_fm_all_in_signal_land() {
     // lazy; the two measurement knobs sit at the top, one per axis. The numbers must land on
     // the sampled-first pipeline's (AM ≈ σ²/2 + a small demod bias, FM ≈ AM/dev² in the
     // small-signal limit — measured 0.0777 / 0.0099 at these settings).
+    // (The `samples` budget moved to per-call counts — PLAN-PRECISION removed the pragma.)
     let src = "
-        engine::set_max_samples(8000);
         engine::set_resolution(64);
         am_modulate(m)        = 1 + m;
         fm_modulate(m, dev)   = exp(i * dev * m);
@@ -114,7 +114,7 @@ fn am_vs_fm_all_in_signal_land() {
         static ~ noise_white_complex(sigma);
         rec_am = am_demodulate(am_modulate(msg)      + static);
         rec_fm = fm_demodulate(fm_modulate(msg, dev) + static, dev);
-        [E(mse(rec_am, msg)), E(mse(rec_fm, msg))]
+        [E(mse(rec_am, msg), 8000), E(mse(rec_fm, msg), 8000)]
     ";
     let (am, fm) = match run(src).unwrap() {
         Value::Array(xs) => {

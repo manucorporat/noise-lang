@@ -18,6 +18,7 @@ name = "noise"
 path = "src/main.rs"
 
 [dependencies]
+ctrlc = "3.5.2"
 # Ship the native WebGPU backend in the released binary (PLAN-DROP-JIT D2). `noise-core`'s default
 # features stay empty — the crate must stay wasm-clean and dependency-light for `noise-wasm`, which
 # depends on it WITHOUT `gpu` — so the CLI opts in here rather than making `gpu` a core default. The

@@ -25,28 +25,62 @@ use wasm_bindgen::prelude::*;
 pub use wasm_bindgen_rayon::init_thread_pool;
 
 /// Run options a host may pass: input overrides (`{ "inputs": { name: value, … } }`), a `profile`
-/// flag to capture per-phase timings into the document, sample budget/seed later. Absent or empty →
-/// each input uses its declared default and profiling is off.
+/// flag to capture per-phase timings into the document, and the PLAN-PRECISION runtime settings —
+/// each of which **pins** its setting over the program's pragma ("pragmas declare, `run()`
+/// overrides"). Absent or empty → each input uses its declared default, profiling is off, and the
+/// program's own settings govern.
 #[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct Opts {
     #[serde(default)]
     inputs: serde_json::Map<String, serde_json::Value>,
     /// When `true`, the engine times each forcing's phases and returns them in `result.profile`.
     #[serde(default)]
     profile: bool,
+    /// Precision target: a number (`rel`) or a two-element array (`[rel, abs]`).
+    #[serde(default)]
+    precision: Option<serde_json::Value>,
+    /// The run's wall-clock ceiling in **milliseconds**; `0` = no deadline. Hosts that want a
+    /// snappy guard (the playground) pass a small value here.
+    #[serde(default)]
+    max_time: Option<f64>,
+    /// Ambient signal-sampling resolution.
+    #[serde(default)]
+    resolution: Option<f64>,
 }
 
-/// The engine-facing options parsed out of `opts_json`: the input overrides and whether to profile.
+/// The engine-facing options parsed out of `opts_json`.
 #[derive(Debug, Default, PartialEq)]
 struct ParsedOpts {
     overrides: Vec<(String, InputValue)>,
     profile: bool,
+    precision: Option<(f64, f64)>,
+    /// `Some(None)` = an explicit `maxTime: 0` (no deadline); `Some(Some(d))` = a deadline;
+    /// `None` = the host said nothing (engine default: no deadline).
+    max_time: Option<Option<std::time::Duration>>,
+    resolution: Option<usize>,
 }
 
-/// Parse the optional `opts_json` into engine options (input overrides + the profile flag). Returns
-/// an error string (surfaced as a failed document) if the JSON or an input value is malformed. Takes
-/// `&str` (borrowed) rather than an owned `Option<String>` so the host's JSON isn't copied just to be
-/// parsed (finding G4).
+impl ParsedOpts {
+    /// Apply the parsed options to a fresh engine (overrides pin their settings).
+    fn configure(&self, engine: &mut Engine) {
+        engine.set_input_overrides(self.overrides.clone());
+        engine.set_profiling(self.profile);
+        if let Some(t) = self.precision {
+            engine.set_precision(Some(t));
+        }
+        if let Some(mt) = self.max_time {
+            engine.set_max_time(mt);
+        }
+        if let Some(n) = self.resolution {
+            engine.set_resolution(n);
+        }
+    }
+}
+
+/// Parse the optional `opts_json` into engine options. Returns an error string (surfaced as a
+/// failed document) if the JSON or a value is malformed. Takes `&str` (borrowed) rather than an
+/// owned `Option<String>` so the host's JSON isn't copied just to be parsed (finding G4).
 fn parse_opts(opts_json: Option<&str>) -> Result<ParsedOpts, String> {
     let json = match opts_json {
         Some(j) if !j.trim().is_empty() => j,
@@ -65,9 +99,51 @@ fn parse_opts(opts_json: Option<&str>) -> Result<ParsedOpts, String> {
         };
         overrides.push((name, iv));
     }
+    let precision = match opts.precision {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => {
+            let pair = match &v {
+                serde_json::Value::Number(n) => n.as_f64().map(|rel| (rel, 0.0)),
+                serde_json::Value::Array(xs) if xs.len() == 2 => {
+                    match (xs[0].as_f64(), xs[1].as_f64()) {
+                        (Some(rel), Some(abs)) => Some((rel, abs)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let (rel, abs) = pair
+                .ok_or_else(|| "opts.precision must be a number or [rel, abs]".to_string())?;
+            if !rel.is_finite() || !abs.is_finite() || rel < 0.0 || abs < 0.0 || (rel == 0.0 && abs == 0.0)
+            {
+                return Err(
+                    "opts.precision needs rel >= 0 and abs >= 0, not both 0 (e.g. 1e-4)".into(),
+                );
+            }
+            Some((rel, abs))
+        }
+    };
+    let max_time = match opts.max_time {
+        None => None,
+        Some(0.0) => Some(None),
+        Some(ms) if ms.is_finite() && ms > 0.0 => {
+            Some(Some(std::time::Duration::from_secs_f64(ms / 1e3)))
+        }
+        Some(ms) => return Err(format!("opts.maxTime must be milliseconds >= 0, got {ms}")),
+    };
+    let count = |name: &str, v: Option<f64>| -> Result<Option<usize>, String> {
+        match v {
+            None => Ok(None),
+            Some(n) if n.is_finite() && n >= 1.0 && n.fract() == 0.0 => Ok(Some(n as usize)),
+            Some(n) => Err(format!("opts.{name} must be a whole number >= 1, got {n}")),
+        }
+    };
     Ok(ParsedOpts {
         overrides,
         profile: opts.profile,
+        precision,
+        max_time,
+        resolution: count("resolution", opts.resolution)?,
     })
 }
 
@@ -87,6 +163,7 @@ fn doc_error(message: String) -> serde_json::Value {
             "profile": null,
             "truncated": null,
             "inputs": [],
+            "warnings": [],
         },
     })
 }
@@ -94,7 +171,7 @@ fn doc_error(message: String) -> serde_json::Value {
 /// The hand-written last-resort document returned if serializing a real `Document` ever fails. It
 /// must stay shape-compatible with [`doc_error`] (asserted by a test) so the host never receives an
 /// unreadable payload.
-const SERIALIZATION_FALLBACK: &str = r#"{"meta":{"tags":[],"extra":{}},"blocks":[],"comments":[],"result":{"value":null,"error":{"message":"internal serialization error","span":{"start":0,"end":0},"line":1,"col":1,"code":"runtime_error"},"stats":{"forcings":0,"samples":0,"ops":0,"rng_draws":0},"profile":null,"truncated":null,"inputs":[]}}"#;
+const SERIALIZATION_FALLBACK: &str = r#"{"meta":{"tags":[],"extra":{}},"blocks":[],"comments":[],"result":{"value":null,"error":{"message":"internal serialization error","span":{"start":0,"end":0},"line":1,"col":1,"code":"runtime_error"},"stats":{"forcings":0,"samples":0,"ops":0,"rng_draws":0},"profile":null,"truncated":null,"inputs":[],"warnings":[]}}"#;
 
 fn to_json_string(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| SERIALIZATION_FALLBACK.into())
@@ -129,8 +206,7 @@ fn run_impl(src: &str, opts_json: Option<String>) -> String {
         Err(e) => return to_json_string(&doc_error(e)),
     };
     let mut engine = Engine::new();
-    engine.set_input_overrides(opts.overrides);
-    engine.set_profiling(opts.profile);
+    opts.configure(&mut engine);
     let document = engine.run_to_document(src);
     to_json_string(&document.to_json())
 }
@@ -162,6 +238,19 @@ pub fn meta(src: &str) -> String {
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// The address (byte offset into this module's linear memory) of the engine's **host stop cell**
+/// (PLAN-PRECISION Track H, browser half). On the threaded build the linear memory is a
+/// `SharedArrayBuffer`, so the JS main thread can soft-stop a run the worker is *blocked* inside:
+/// `Atomics.store(new Int32Array(memory.buffer, ptr, 1), 0, 1)`. The engine reads the cell at its
+/// per-chunk stop cadence, folds what completed, and returns the partial document with the
+/// "stopped early" warning; each new run clears the cell. On the single-threaded build the memory
+/// isn't shared, so the cell is unreachable mid-run — the JS side detects that and reports soft
+/// stop as unsupported (hard abort remains).
+#[wasm_bindgen]
+pub fn stop_cell_ptr() -> u32 {
+    noise_core::exec::host_stop_cell() as u32
 }
 
 // === variable introspection (the playground "inspect without editing the code" path) ============
@@ -291,8 +380,7 @@ fn run_with_introspection_impl(
         }
     };
     let mut engine = Engine::new();
-    engine.set_input_overrides(opts.overrides);
-    engine.set_profiling(opts.profile);
+    opts.configure(&mut engine);
     let document = engine.run_to_document(src);
     let ran_ok = document.result.error.is_none();
 

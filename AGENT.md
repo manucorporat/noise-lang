@@ -47,9 +47,15 @@ state is **Phases 0–3 plus core-model-rework Steps 1–4 complete** (see `plan
   `rotation` is a built-in rather than the earlier Gaussian shortcut. It is a **recipe** drawn with
   `~` (`Pi ~ rotation(d)`) like any distribution — a structured multivariate draw whose
   Gram–Schmidt source nodes are built in `Engine::draw_rotation` (`eval.rs`).
-- **Engine knobs:** `engine::set_max_samples(N)` (Monte-Carlo budget), `engine::set_max_opts(N)`
-  (per-query op ceiling), and `engine::set_resolution(N)` (ambient signal resolution, default 256 —
-  the time-axis twin of the budget).
+- **Engine settings (PLAN-PRECISION):** `engine::set_precision(rel[, abs])` — the precision target
+  (`P`/`E`/`Var` keep drawing until `se <= max(abs, rel*|est|)`); `engine::set_resolution(N)`
+  (ambient signal resolution, default 256). Per-call: `P(e, n)` with `n >= 1` is an exact count,
+  `0 < n < 1` a relative target. **Precision is default-on** (Phase 2): untargeted queries use the
+  auto target `se <= 5e-3·max(|est|, sd)` (≈ 40k effective draws; `sampler::DrawBudget::Auto`) —
+  the fixed 1M default and the `samples` runtime setting are gone (`Q` keeps its own fixed 1M).
+  Runtime-only: `max_time` (soft-stop deadline; CLI `--max-time`, default 60 s). The old budget
+  pragmas (`set_max_samples`/`set_max_ops`/`set_max_opts`) were **removed** — calling one errors
+  with the migration hint. Pragmas declare, `run()` overrides (an override pins the setting).
 - **Signal modeling + telecom/DSP examples (PLAN-SIGNALS, done):** `math::sin`/`cos`/`atan` are
   **ufuncs** (scalar / lifted over RVs / elementwise over arrays — `UnOp::Sin`/`Cos`/`Atan` in the
   VM), and **arithmetic broadcasts over arrays** (`binop_broadcast` in `eval.rs`). The **`signal`

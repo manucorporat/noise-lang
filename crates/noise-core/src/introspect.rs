@@ -27,7 +27,7 @@ use crate::sampler;
 /// Monte Carlo budget for an introspection pass. Deliberately below `P`'s `1e6`: a histogram, a set
 /// of quantiles, or a scatter is a *visual* — it doesn't need a probability's last digit, and the
 /// interactive playground issues many of these per run. Capped (not the engine's full
-/// `max_samples`) so a `describe` stays snappy and memory-light regardless of the configured budget.
+/// budget) so a `describe` stays snappy and memory-light regardless of what the queries draw.
 pub const INTROSPECT_N: usize = 200_000;
 
 /// Fixed seed — an introspection summary is reproducible like every other forcing path.

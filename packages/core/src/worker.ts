@@ -14,6 +14,8 @@ interface Engine {
   run_with_introspection(src: string, requestsJson: string, optsJson?: string): string;
   meta(src: string): string;
   version(): string;
+  /** Address of the engine's host stop cell in wasm linear memory (PLAN-PRECISION Track H). */
+  stop_cell_ptr(): number;
 }
 
 /** A job from the pool. `id` correlates the reply; the pool has no other way to match them. */
@@ -31,6 +33,18 @@ export interface GpuInit {
   type: 'gpu-init';
   sab: SharedArrayBuffer;
   ready: boolean;
+}
+
+/** The one-time stop-cell announcement (PLAN-PRECISION Track H), worker → main. On the threaded
+ *  build the wasm linear memory is a `SharedArrayBuffer`; `sab` is that memory's buffer and `ptr`
+ *  the byte offset of the engine's soft-stop flag inside it. The main thread soft-stops a run this
+ *  worker is *blocked* inside with one `Atomics.store` — the only signal that can reach a worker
+ *  whose event loop is frozen in a synchronous forcing. Never sent by the single-threaded build
+ *  (its memory isn't shared), so its absence is how the pool knows soft stop is unsupported. */
+export interface StopCellMsg {
+  type: 'stop-cell';
+  sab: SharedArrayBuffer;
+  ptr: number;
 }
 
 /** The reply. `raw` is the engine's JSON, left unparsed — see `elapsedMs` below. */
@@ -193,11 +207,24 @@ const canUseThreads =
 async function initEngine(): Promise<Engine> {
   if (canUseThreads) {
     const mt = await import('../wasm-mt/noise.js');
-    await mt.default();
+    const initOut = (await mt.default()) as { memory?: WebAssembly.Memory };
     // Spawn the rayon pool. Wasm cannot create a thread itself — the threads proposal leaves thread
     // *creation* to the embedder — so this is the call that actually does `new Worker()` N times and
     // hands the set to rayon. Until it resolves, the reducer runs single-threaded.
     await mt.initThreadPool(navigator.hardwareConcurrency);
+    // Announce the soft-stop cell (PLAN-PRECISION Track H): this build's memory is a SAB, so the
+    // main thread can flip the engine's stop flag while a run has this worker blocked. The cell
+    // sits in the module's static data (below the initial memory size), so this view stays valid
+    // across memory growth.
+    const buffer = initOut.memory?.buffer;
+    if (typeof SharedArrayBuffer !== 'undefined' && buffer instanceof SharedArrayBuffer) {
+      const msg: StopCellMsg = {
+        type: 'stop-cell',
+        sab: buffer,
+        ptr: (mt as unknown as Engine).stop_cell_ptr(),
+      };
+      (self as unknown as Worker).postMessage(msg);
+    }
     return mt as unknown as Engine;
   }
 

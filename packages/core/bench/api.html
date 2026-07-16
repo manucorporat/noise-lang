@@ -18,7 +18,7 @@ try {
   const timer = setInterval(() => ticks++, 4);
 
   const t0 = performance.now();
-  const r = await run('use rand; engine::set_max_samples(20000000); X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1)');
+  const r = await run('use rand; X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1, 20000000)');
   const wall = performance.now() - t0;
   clearInterval(timer);
 

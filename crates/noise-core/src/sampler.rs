@@ -8,12 +8,281 @@
 use crate::backend::{compile_root, compile_roots};
 use crate::dist::{RvGraph, RvId};
 use crate::error::{NoiseError, Result};
+use crate::exec::StopCause;
+use crate::reduce::{
+    run_reduction_range, CondMomentsReducer, MomentAcc, MomentsReducer, Reducer, CHUNK_SAMPLES,
+};
+use web_time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[must_use = "Moments carries the sampled mean/variance; computing them without using them wastes the sampling pass (finding F10)"]
 pub struct Moments {
     pub mean: f64,
     pub variance: f64,
+}
+
+// === the precision-targeted query driver (PLAN-PRECISION Tracks B + D) ==========================
+
+/// Which scalar a `P`/`E`/`Var` query estimates from the sampled moments — decides both the
+/// estimate and its standard error (the adaptive loop's stopping rule reads the se).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quantity {
+    /// `P`: the mean of a 0/1 indicator; binomial se with the rule-of-three floor.
+    Prob,
+    /// `E`: the mean; se = `sqrt(var / m)`.
+    Mean,
+    /// `Var`: the population variance; asymptotic se ≈ `var · sqrt(2/m)` (exact for Gaussian).
+    Variance,
+}
+
+/// How many draws a query takes: an explicit **count** (adaptivity off — exactly `n` lanes), a
+/// **precision target** (keep drawing until `se ≤ max(abs, rel·|est|)`, bounded by the run
+/// deadline — the standard numerical-integration contract, QUADPACK/GSL), or the **auto default**
+/// (PLAN-PRECISION Phase 2 — see [`DEFAULT_REL`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DrawBudget {
+    Fixed(u64),
+    ToPrecision { rel: f64, abs: f64 },
+    /// The untargeted default: `se ≤ DEFAULT_REL · max(|est|, sd)`, where `sd = se·√m` is the
+    /// quantity's per-draw spread. The `sd` floor is what a bare `rel` target lacks — it makes the
+    /// default **scale-free and always reachable** (a pure relative target never terminates on an
+    /// estimate of ≈ 0). In the sd-floored regime it solves to `m ≥ DEFAULT_REL⁻²` effective
+    /// draws; when `|est|` dominates the spread it stops earlier. Deliberately NOT expressible via
+    /// `set_precision`: a declared target is a pure demand ("this many digits"), the default is a
+    /// bounded-effort heuristic.
+    Auto,
+}
+
+/// The auto default's relative target (Phase 2: precision default-on). 5e-3 ≈ 2–3 significant
+/// digits; in the sd-floored regime it solves to `m ≥ rel⁻² = 40,000` effective draws — so an easy
+/// untargeted query costs one pilot (65,536 lanes, ~25× less than the old fixed 1M default), while
+/// a conditional/rare query honestly *extends* until its effective `m` gets there.
+pub const DEFAULT_REL: f64 = 5e-3;
+
+/// Why a query stopped short of its ask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Capped {
+    /// The run's soft-stop tripped: a user `stop()` or the `max_time` deadline.
+    Stopped(StopCause),
+    /// The adaptive loop hit its absolute lane ceiling ([`LANE_CAP`]) without meeting the target
+    /// (an unreachable target, e.g. a relative target on an estimate of exactly 0).
+    Lanes,
+}
+
+/// One query's outcome: the estimate, its honest standard error (from the **true folded count**,
+/// Track H), and how it ended. `count` is the effective sample size (the in-condition `m` for a
+/// conditional query); `drawn` is the lanes actually swept.
+pub struct QueryRun {
+    pub est: f64,
+    pub se: f64,
+    pub count: u64,
+    pub drawn: u64,
+    pub capped: Option<Capped>,
+    /// The se the stopping rule was targeting, when a precision target was in force (for the
+    /// capped-run warning: "target ±X needs ~N draws").
+    pub target_se: Option<f64>,
+}
+
+/// The adaptive pilot: 4 reducer chunks. Cheap (se-of-se ~0.3%), and already above the wasm
+/// codegen gate (`MIN_DRAWS_WASM`), so pilot and growth stages share one compiled artifact.
+const PILOT_N: u64 = 4 * CHUNK_SAMPLES as u64; // 65_536
+
+/// Per-stage growth ceiling (×64): bounds the damage of a noisy pilot se (a lucky pilot under-
+/// estimates variance → the CLT extrapolation overshoots). Two or three stages reach any realistic
+/// target.
+const GROWTH_CAP: u64 = 64;
+
+/// CLT extrapolation margin: ask for 10% more than `n · (se/target)²` so the common case finishes
+/// in one growth stage instead of a tail of tiny top-ups.
+const GROWTH_MARGIN: f64 = 1.1;
+
+/// Absolute lane ceiling of the adaptive loop — the backstop for an *unreachable* target (e.g. a
+/// purely relative target on an estimate of exactly 0, whose target se is 0). The run deadline
+/// (`max_time`) is the real guard; this only bounds a deadline-less run. 2⁴⁰ lanes ≈ 1.1e12 draws.
+const LANE_CAP: u64 = 1 << 40;
+
+/// The estimate and standard error `quantity` reads off a moments accumulator. `se = ∞` when no
+/// draws have been folded (a target can never be met by an empty accumulator).
+fn est_se(acc: &MomentAcc, quantity: Quantity) -> (f64, f64) {
+    let m = acc.count();
+    if m == 0 {
+        return (0.0, f64::INFINITY);
+    }
+    let mf = m as f64;
+    let mom = acc.into_moments();
+    match quantity {
+        Quantity::Prob => {
+            let p = mom.mean;
+            // Standard error of a Monte Carlo probability estimate; rule-of-three floor keeps it
+            // finite (and extrapolating) when p̂ is 0 or 1.
+            let se = (p * (1.0 - p) / mf).sqrt().max(0.5 / mf);
+            (p, se)
+        }
+        Quantity::Mean => (mom.mean, (mom.variance / mf).sqrt()),
+        Quantity::Variance => (mom.variance, mom.variance.abs() * (2.0 / mf).sqrt()),
+    }
+}
+
+/// Round `n` up to a whole number of reducer chunks — stage boundaries must be chunk-aligned so
+/// the staged fold is bit-identical to a single run (see [`run_reduction_range`]).
+fn chunk_align(n: u64) -> u64 {
+    n.div_ceil(CHUNK_SAMPLES as u64) * CHUNK_SAMPLES as u64
+}
+
+/// Drive one `P`/`E`/`Var` query to its budget — the single forcing path behind all three
+/// (PLAN-PRECISION Track B). `cond` selects the conditioning reducer (NaN lanes skipped, `count`
+/// = the in-condition `m`); the adaptive path needs no special casing for it, because the se is
+/// computed from `m` and the CLT extrapolation scales `drawn` (lanes) by the same factor as `m`.
+///
+/// * [`DrawBudget::Fixed`] — one reduction over exactly `0..n`: bit-identical to the old fixed-n
+///   behavior, including under a soft stop (partial fold, honest count).
+/// * [`DrawBudget::ToPrecision`] / [`DrawBudget::Auto`] — pilot, then extrapolate-and-extend
+///   (`n_need = n·(se/target)²·1.1`, per-stage growth ≤ ×64, chunk-aligned): each stage *extends*
+///   the previous accumulator over fresh lanes, so the final result is bit-identical to a fixed
+///   run at the same final n. The two differ only in the target se (pure demand vs the sd-floored
+///   default). The stage size is additionally capped by measured throughput against the run
+///   deadline (Track D): a stage is sized to roughly land on the deadline rather than overshoot it
+///   64×, and the in-stage per-chunk deadline check bounds any misprediction to one check
+///   granularity.
+pub fn query_moments(
+    graph: &RvGraph,
+    root: RvId,
+    cond: bool,
+    quantity: Quantity,
+    budget: DrawBudget,
+    seed: u64,
+) -> Result<QueryRun> {
+    // One reducer per conditioning mode; both accumulate `MomentAcc`, so the loop is shared.
+    let plain = MomentsReducer;
+    let condr = CondMomentsReducer;
+    let reduce = |lanes: std::ops::Range<u64>, carry: MomentAcc| {
+        if cond {
+            run_reduction_range(graph, root, lanes, seed, &condr, carry)
+        } else {
+            run_reduction_range(graph, root, lanes, seed, &plain, carry)
+        }
+    };
+    let identity = plain.identity();
+
+    if let DrawBudget::Fixed(n) = budget {
+        let out = reduce(0..n, identity)?;
+        let (est, se) = est_se(&out.acc, quantity);
+        return Ok(QueryRun {
+            est,
+            se,
+            count: out.acc.count(),
+            drawn: n,
+            capped: out.stopped.map(Capped::Stopped),
+            target_se: None,
+        });
+    }
+
+    // The stopping rule's target se, from the current estimate. A declared target is the pure
+    // QUADPACK contract; the auto default adds the sd floor (see [`DrawBudget::Auto`]) — `se·√m`
+    // reconstructs the estimator's per-draw spread whatever the quantity (binomial, mean, or the
+    // variance's own asymptotic se), so one formula serves all three.
+    let target_of = |est: f64, se: f64, m: u64| match budget {
+        DrawBudget::ToPrecision { rel, abs } => abs.max(rel * est.abs()),
+        DrawBudget::Auto => {
+            let sd = if m > 0 { se * (m as f64).sqrt() } else { 0.0 };
+            DEFAULT_REL * est.abs().max(sd)
+        }
+        DrawBudget::Fixed(_) => unreachable!("handled above"),
+    };
+
+    // Adaptive: pilot, then extrapolate-and-extend until the target, the deadline, or the cap.
+    let mut acc = identity;
+    let mut drawn = 0u64;
+    let mut next = PILOT_N;
+    loop {
+        let stage_t = Instant::now();
+        let out = reduce(drawn..next, acc)?;
+        let stage_secs = stage_t.elapsed().as_secs_f64();
+        acc = out.acc;
+        let stage_lanes = next - drawn;
+        drawn = next;
+        let (est, se) = est_se(&acc, quantity);
+        let target = target_of(est, se, acc.count());
+        if let Some(cause) = out.stopped {
+            return Ok(QueryRun {
+                est,
+                se,
+                count: acc.count(),
+                drawn,
+                capped: Some(Capped::Stopped(cause)),
+                target_se: Some(target),
+            });
+        }
+        if se <= target {
+            crate::profile::note(format!(
+                "precision: target ±{target:.2e} met at n={drawn} (se ±{se:.2e})"
+            ));
+            return Ok(QueryRun {
+                est,
+                se,
+                count: acc.count(),
+                drawn,
+                capped: None,
+                target_se: Some(target),
+            });
+        }
+        if drawn >= LANE_CAP {
+            return Ok(QueryRun {
+                est,
+                se,
+                count: acc.count(),
+                drawn,
+                capped: Some(Capped::Lanes),
+                target_se: Some(target),
+            });
+        }
+        // A conditional whose condition has not held ONCE by a generous sweep is (almost surely)
+        // structurally never-true — bail out so the caller raises the teaching error instead of
+        // sampling toward the lane cap. 2²⁴ lanes ≈ 16.8M draws, 16× the old fixed default.
+        const COND_NEVER_CAP: u64 = 1 << 24;
+        if cond && acc.count() == 0 && drawn >= COND_NEVER_CAP {
+            return Ok(QueryRun {
+                est,
+                se,
+                count: 0,
+                drawn,
+                capped: None,
+                target_se: Some(target),
+            });
+        }
+
+        // CLT sizing: se ∝ 1/√n (the rule-of-three floor regime extrapolates linearly, which this
+        // also covers — each stage re-derives from the *current* se, whichever regime it is in).
+        let need = if target > 0.0 && se.is_finite() {
+            (drawn as f64 * (se / target) * (se / target) * GROWTH_MARGIN).min(LANE_CAP as f64)
+        } else {
+            LANE_CAP as f64
+        };
+        let mut n_next = (need as u64).min(drawn.saturating_mul(GROWTH_CAP)).min(LANE_CAP);
+
+        // Track D (deadline-aware sizing): from THIS stage's measured throughput, cap the next
+        // stage at what the remaining deadline is predicted to afford. Throughput is per-backend
+        // state implicitly — the gate re-decides per stage, and a backend switch mispredicts one
+        // stage at most, which the in-stage per-chunk deadline check turns into "late by one chunk"
+        // rather than "late by a stage".
+        if let Some(deadline) = crate::exec::deadline() {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .map_or(0.0, |d| d.as_secs_f64());
+            if stage_secs > 0.0 && stage_lanes > 0 {
+                let rate = stage_lanes as f64 / stage_secs;
+                let affordable = drawn + (rate * remaining) as u64;
+                // Never size below one chunk: if the deadline is that close, the in-stage check
+                // stops the stage almost immediately anyway, and a zero-length stage would spin.
+                n_next = n_next.min(affordable.max(drawn + CHUNK_SAMPLES as u64));
+            }
+        }
+
+        next = chunk_align(n_next.max(drawn + CHUNK_SAMPLES as u64));
+        crate::profile::note(format!(
+            "precision: stage n={drawn} se ±{se:.2e} target ±{target:.2e} → extend to n={next}"
+        ));
+    }
 }
 
 /// Run `n` draws of `root`, calling `sink` with each batch's filled root column slice.
@@ -52,6 +321,11 @@ pub fn for_each_batch(
     while remaining > 0 {
         if crate::exec::cancelled() {
             return Err(NoiseError::cancelled());
+        }
+        // Soft stop / deadline (PLAN-PRECISION Track H): keep what the sink already consumed — a
+        // sparser collect is a valid smaller-sample pass; the engine raises the run-level warning.
+        if crate::exec::stop_cause().is_some() {
+            break;
         }
         let take = remaining.min(cap);
         sink(runner.next_batch(take));
@@ -108,23 +382,10 @@ pub fn moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Result<Momen
     )
 }
 
-/// Conditional moments — the forcing path behind `P(· | C)` / `E(· | C)` / `Var(· | C)`. `root`
-/// must be the conditioning root `select(C, quantity, NaN)`: NaN-valued lanes (where `C` is false)
-/// are skipped, so the moments are over the subpopulation where `C` holds. Returns those moments
-/// alongside the in-condition count `m` (≈ `n·P(C)`), which the caller uses for the standard error.
-/// `m == 0` means the condition never occurred in `n` draws (the conditional is undefined upstream).
-///
-/// KNOWN HOLE (finding B2): like [`cond_sample_n`], the NaN filter can't distinguish "condition
-/// false" from "the quantity is itself NaN on an in-condition lane" — an in-condition NaN quantity is
-/// *dropped* rather than propagated. So a conditional estimate over a quantity that can go NaN inside
-/// the condition (e.g. `E(math::log(X) | X > -1)` with `X ~ unif(-1, 1)`) is silently biased and
-/// reports a *tighter* SE than the honest one. The fix is a dedicated condition column (see
-/// `Engine::query_cond`); deferred for the interface-ripple reason noted on `cond_sample_n`.
-pub fn cond_moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Result<(Moments, u64)> {
-    let acc =
-        crate::reduce::run_reduction(graph, root, n, seed, &crate::reduce::CondMomentsReducer)?;
-    Ok((acc.into_moments(), acc.count()))
-}
+// (The old `cond_moments` fixed-n helper was absorbed into [`query_moments`] — the conditional
+// reducer rides the same driver, fixed or adaptive, and its KNOWN HOLE (finding B2: an
+// in-condition NaN quantity is dropped, not propagated) is unchanged and documented on
+// [`crate::reduce::CondMomentsReducer`].)
 
 /// Collect the in-condition draws of a conditioning root `select(C, quantity, NaN)` — every
 /// non-NaN lane, in stream order — for a conditional quantile `Q(· | C)`. NaN lanes (where `C` is
@@ -214,6 +475,11 @@ fn for_each_joint_batch(
     while remaining > 0 {
         if crate::exec::cancelled() {
             return Err(NoiseError::cancelled());
+        }
+        // Soft stop / deadline (Track H): a stopped plot/introspection pass renders what it
+        // collected rather than being dropped.
+        if crate::exec::stop_cause().is_some() {
+            break;
         }
         runner.next_batch();
         let take = remaining.min(cap);
@@ -550,6 +816,100 @@ mod tests {
         assert!(
             max_off < 0.03,
             "off-diagonal |corr| max = {max_off} — independent elements must not correlate"
+        );
+    }
+
+    /// The precision loop's correctness invariant (PLAN-PRECISION validation 1): a target-stopped
+    /// adaptive run is **bit-identical** to a fixed-n run at the same final n — the staged fold
+    /// walked exactly the chunks the single run would have.
+    #[test]
+    fn adaptive_run_is_bit_identical_to_fixed_run_at_its_final_n() {
+        let mut g = RvGraph::default();
+        let x = g.push(
+            RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
+            RvKind::Num,
+        );
+        let half = g.push(RvNode::ConstNum(0.5), RvKind::Num);
+        let hit = g.push(RvNode::Binary(BinOp::Lt, x, half), RvKind::Bool);
+
+        let adaptive = query_moments(
+            &g,
+            hit,
+            false,
+            Quantity::Prob,
+            DrawBudget::ToPrecision { rel: 2e-3, abs: 0.0 },
+            7,
+        )
+        .unwrap();
+        assert!(adaptive.capped.is_none(), "no deadline set — must hit the target");
+        assert!(
+            adaptive.se <= 2e-3 * adaptive.est.abs(),
+            "target missed: se {} est {}",
+            adaptive.se,
+            adaptive.est
+        );
+        assert!(
+            adaptive.drawn > PILOT_N,
+            "rel=2e-3 on p=0.5 needs more than the pilot, drew {}",
+            adaptive.drawn
+        );
+
+        let fixed = query_moments(
+            &g,
+            hit,
+            false,
+            Quantity::Prob,
+            DrawBudget::Fixed(adaptive.drawn),
+            7,
+        )
+        .unwrap();
+        assert_eq!(adaptive.est.to_bits(), fixed.est.to_bits());
+        assert_eq!(adaptive.se.to_bits(), fixed.se.to_bits());
+        assert_eq!(adaptive.count, fixed.count);
+    }
+
+    /// Validation 6 (PLAN-PRECISION): a tight conditioning no longer silently gets a fraction of
+    /// the budget — the loop reads the se off the in-condition count m, so a ~3%-acceptance
+    /// conditional reaches the same relative target as an unconditional query, by drawing
+    /// proportionally more lanes.
+    #[test]
+    fn conditional_query_reaches_the_target_by_drawing_more() {
+        let mut g = RvGraph::default();
+        let x = g.push(
+            RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
+            RvKind::Num,
+        );
+        // Condition: X < 0.03 (~3% acceptance). Quantity: X < 0.015 given that (p ≈ 0.5).
+        let c_thresh = g.push(RvNode::ConstNum(0.03), RvKind::Num);
+        let cond = g.push(RvNode::Binary(BinOp::Lt, x, c_thresh), RvKind::Bool);
+        let q_thresh = g.push(RvNode::ConstNum(0.015), RvKind::Num);
+        let event = g.push(RvNode::Binary(BinOp::Lt, x, q_thresh), RvKind::Bool);
+        let nan = g.push(RvNode::ConstNum(f64::NAN), RvKind::Num);
+        // Numeric event indicator under the condition sentinel: select(cond, event, NaN).
+        let root = g.push(
+            RvNode::Select { cond, a: event, b: nan },
+            RvKind::Num,
+        );
+
+        let rel = 5e-3;
+        let out = query_moments(
+            &g,
+            root,
+            true,
+            Quantity::Prob,
+            DrawBudget::ToPrecision { rel, abs: 0.0 },
+            7,
+        )
+        .unwrap();
+        assert!(out.capped.is_none());
+        assert!((out.est - 0.5).abs() < 0.02, "P(A|C) = {}", out.est);
+        assert!(out.se <= rel * out.est.abs(), "target missed: se {}", out.se);
+        // m is the in-condition count; the lanes swept must be ~1/0.03 ≈ 33× that.
+        assert!(
+            out.drawn > 10 * out.count,
+            "drawn {} should dwarf in-condition m {}",
+            out.drawn,
+            out.count
         );
     }
 

@@ -21,7 +21,7 @@ const BUILTINS = [
   'ones', 'zeros', 'iota', 'vsign', 'scale',
   'sine', 'cosine', 'noise_white', 'noise_white_complex', 'noise_brown', 'noise_pink',
   'noise_ou', 'sample',
-  'set_max_samples', 'set_max_opts', 'set_resolution',
+  'set_precision', 'set_resolution',
 ];
 const CONSTANTS = ['pi', 'e', 'i', 'j'];
 const MODULES = ['builtin', 'rand', 'math', 'vec', 'signal', 'engine', 'plot', 'stats'];

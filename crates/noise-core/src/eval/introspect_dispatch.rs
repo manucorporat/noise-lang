@@ -121,7 +121,7 @@ impl Engine {
             INTROSPECT_SEED,
         };
         // Introspection runs at its own modest, capped budget (a visual, not a probability).
-        let n = self.max_samples.min(INTROSPECT_N);
+        let n = INTROSPECT_N;
         let seed = INTROSPECT_SEED;
         let summary = |view, label, label_b, payload| {
             Ok(Value::Summary(Rc::new(Summary {
@@ -411,7 +411,7 @@ impl Engine {
                 sd: vec![],
             }));
         }
-        let n = self.max_samples.min(INTROSPECT_N);
+        let n = INTROSPECT_N;
         Ok(wrap(grid(
             &self.graph,
             &roots,
@@ -461,7 +461,7 @@ impl Engine {
             });
         }
         // The pairwise matrix needs fewer draws than a single estimate; cap it to stay snappy.
-        let n = self.max_samples.min(100_000);
+        let n = 100_000;
         corr_grid(&self.graph, &roots, n, INTROSPECT_SEED)
     }
 
@@ -779,7 +779,7 @@ impl Engine {
         if self.check_mode {
             return Ok(Value::Num(0.0));
         }
-        let n = self.max_samples.min(INTROSPECT_N);
+        let n = INTROSPECT_N;
         match dist2(&self.graph, a, b, None, n, INTROSPECT_SEED)? {
             Some(d) => Ok(Value::Num(d.corr)),
             None => Err(condition_never(n, span)),
@@ -800,7 +800,7 @@ impl Engine {
         if self.check_mode {
             return Ok(None);
         }
-        let n = self.max_samples.min(INTROSPECT_N);
+        let n = INTROSPECT_N;
         let d = draws(&self.graph, root, conditional, n, INTROSPECT_SEED)?;
         if d.is_empty() {
             return Err(condition_never(n, span));
@@ -885,7 +885,7 @@ impl Engine {
             return Ok(empty);
         }
         // The introspection budget, further clamped inside `fan` to its cols×n memory cap.
-        let n = self.max_samples.min(INTROSPECT_N);
+        let n = INTROSPECT_N;
         fan(&self.graph, &roots, n, INTROSPECT_SEED)
     }
 }

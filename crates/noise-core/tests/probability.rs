@@ -238,82 +238,200 @@ fn error_propagates_through_arithmetic() {
 }
 
 #[test]
-fn engine_set_max_samples_sets_the_default_budget() {
-    // `engine::set_max_samples(N)` is the global default for P/E/Var/Q — equivalent to passing N
-    // as the explicit count, but once, up front. At a small budget the standard error is wide,
-    // so the estimate displays to few digits; bumping the budget reveals more.
-    let coarse = display_of("engine::set_max_samples(1000); D ~ unif_int(1,6); P(D == 4)");
+fn untargeted_queries_default_to_the_auto_precision_target() {
+    // PLAN-PRECISION Phase 2: with no per-call argument and no `set_precision`, a query draws to
+    // the AUTO target `se <= 5e-3 * max(|est|, sd)`. In the sd-floored regime that solves to
+    // m >= 40,000 effective draws — one 65,536-lane pilot for an easy unconditional query, ~25x
+    // less than the old fixed 1M default.
+    let mut eng = Engine::new();
+    let v = eng
+        .run(&with_prelude("D ~ unif_int(1,6); P(D == 4)"))
+        .unwrap();
+    let Value::Est { val, se } = v else {
+        panic!("expected an estimate")
+    };
+    assert!((val - 1.0 / 6.0).abs() < 6.0 * se, "P(D==4) = {val} ± {se}");
     assert_eq!(
-        coarse, "0.2",
-        "1000 draws justifies one decimal, got {coarse}"
-    );
-    let fine = display_of("engine::set_max_samples(100000000); D ~ unif_int(1,6); P(D == 4)");
-    assert!(
-        fine.len() > 5,
-        "1e8 draws should reveal ~4 digits, got {fine}"
+        eng.stats().samples,
+        65_536,
+        "an easy untargeted P should stop at the pilot"
     );
 
-    // An explicit per-call count still overrides the engine default (here: tighten back up
-    // despite the coarse global setting).
-    let overridden =
-        display_of("engine::set_max_samples(1000); D ~ unif_int(1,6); P(D == 4, 100000000)");
+    // A conditional query keeps extending until the *effective* (in-condition) m reaches the
+    // target — the honest version of what the old fixed budget silently under-delivered.
+    let mut eng = Engine::new();
+    let v = eng
+        .run(&with_prelude(
+            "X ~ unif(0,1); Y ~ unif(0,1); P(Y < 0.5 | X < 0.05)",
+        ))
+        .unwrap();
+    let Value::Est { val, se } = v else {
+        panic!("expected an estimate")
+    };
+    assert!((val - 0.5).abs() < 6.0 * se, "P(Y<0.5 | X<0.05) = {val} ± {se}");
     assert!(
-        overridden.len() > 5,
-        "explicit count should override, got {overridden}"
+        eng.stats().samples > 500_000,
+        "a 5%-acceptance conditional must sweep far past the pilot to reach m >= 40k, swept {}",
+        eng.stats().samples
     );
+
+    // An explicit per-call count still pins the draw count exactly.
+    let mut eng = Engine::new();
+    eng.run(&with_prelude("D ~ unif_int(1,6); P(D == 4, 2000000)"))
+        .unwrap();
+    assert_eq!(eng.stats().samples, 2_000_000, "per-call count is exact");
 }
 
 #[test]
-fn engine_set_max_opts_clamps_query_cost_without_erroring() {
-    // `engine::set_max_opts(N)` caps `draws × cone-ops` per query: a tight budget forces few
-    // draws, so the estimate displays to fewer digits than the unclamped default. It degrades
-    // accuracy gracefully — it never errors, not even when a single draw already exceeds the
-    // budget (it floors at one draw).
-    let baseline = display_of("D ~ unif_int(1,6); P(D == 4)");
-    let clamped = display_of("engine::set_max_opts(10); D ~ unif_int(1,6); P(D == 4)");
-    assert!(
-        clamped.len() < baseline.len(),
-        "a tight op budget should give a coarser estimate: clamped={clamped} baseline={baseline}"
-    );
-    // Never errors, even at a budget below a single draw's cost (clamps down to one draw).
-    assert!(run_raw("use rand; engine::set_max_opts(1); X ~ unif(0,1); P(X < 0.5)").is_ok());
-    // Composes with set_max_samples — the query draws the smaller of the two budgets.
-    assert!(run_raw(
-        "use rand; engine::set_max_samples(100000); engine::set_max_opts(5); X ~ unif(0,1); E(X)"
-    )
-    .is_ok());
+fn removed_budget_pragmas_error_with_migration_hints() {
+    // PLAN-PRECISION deleted the three budget pragmas. Calling one — qualified, bare, or through
+    // `use engine` — is a spanned error naming its replacement, not a generic "unknown function".
+    for name in ["set_max_samples", "set_max_ops", "set_max_opts"] {
+        for form in [
+            format!("engine::{name}(1000); 1"),
+            format!("{name}(1000); 1"),
+            format!("use engine; {name}(1000); 1"),
+        ] {
+            let err = run_raw(&form).unwrap_err().to_string();
+            assert!(err.contains("was removed"), "{form}: {err}");
+            assert!(
+                err.contains("set_precision"),
+                "{form} should name the replacement: {err}"
+            );
+        }
+    }
 }
 
 #[test]
 fn engine_module_scoping_and_validation() {
-    // Reachable both as a `mod::name` path and (with `use`) unqualified, like any module.
-    assert!(run_raw("engine::set_max_samples(50); use rand; X ~ unif(0,1); P(X < 0.5)").is_ok());
-    assert!(run_raw("use engine; set_max_samples(50); 1").is_ok());
-    assert!(run_raw("use engine; set_max_opts(50); 1").is_ok());
-    // `set_max_ops` is the correctly-named knob (it caps operations); `set_max_opts` is a retained
-    // back-compat alias (finding F9). Both set the same budget and both remain reachable.
-    assert!(run_raw("use engine; set_max_ops(50); 1").is_ok());
-    assert!(run_raw("engine::set_max_ops(50); 1").is_ok());
-    // The new name's error text names the invoked spelling.
-    let err_ops = run_raw("engine::set_max_ops(0)").unwrap_err().to_string();
-    assert!(err_ops.contains("set_max_ops"), "{err_ops}");
+    // `set_precision` is reachable both as a `mod::name` path and (with `use`) unqualified.
+    assert!(run_raw("engine::set_precision(0.01); use rand; X ~ unif(0,1); P(X < 0.5)").is_ok());
+    assert!(run_raw("use engine; set_precision(0.01); 1").is_ok());
     // Out of scope without a `use`/path, with a fix-it message naming the module.
-    let err = run_raw("set_max_samples(50)").unwrap_err().to_string();
+    let err = run_raw("set_precision(0.01)").unwrap_err().to_string();
     assert!(err.contains("engine") && err.contains("use"), "{err}");
-    let err_opts = run_raw("set_max_opts(50)").unwrap_err().to_string();
+    // Validation: rel/abs >= 0, not both 0; numbers only.
+    assert!(run_raw("engine::set_precision(0)")
+        .unwrap_err()
+        .to_string()
+        .contains("not both 0"));
+    assert!(run_raw("engine::set_precision(0, 0)")
+        .unwrap_err()
+        .to_string()
+        .contains("not both 0"));
+    assert!(run_raw("engine::set_precision(-0.1)").is_err());
+    assert!(run_raw("engine::set_precision()").is_err());
+    // The abs-only form is legal (rescues quantities whose mean is ~0).
+    assert!(run_raw("engine::set_precision(0, 0.001); 1").is_ok());
+}
+
+#[test]
+fn precision_target_stops_early_and_goes_far() {
+    // Validation 2 (PLAN-PRECISION): a loose relative target on a fat probability stops with FAR
+    // fewer draws than the fixed 1M default — the stats counters record what was actually swept.
+    let mut eng = Engine::new();
+    let v = eng
+        .run("use rand; C ~ bernoulli(0.5); P(C, 0.01)")
+        .unwrap();
+    let (val, se) = match v {
+        Value::Est { val, se } => (val, se),
+        other => panic!("expected an estimate, got {other:?}"),
+    };
+    assert!((val - 0.5).abs() < 0.02, "P(C) = {val}");
+    assert!(se <= 0.01 * val, "target missed: se {se} vs {}", 0.01 * val);
+    let samples = eng.stats().samples;
     assert!(
-        err_opts.contains("engine") && err_opts.contains("use"),
-        "{err_opts}"
+        samples < 200_000,
+        "rel=1e-2 on p=0.5 needs ~1e4 draws, swept {samples}"
     );
-    // Both budgets must be at least 1.
-    assert!(run_raw("engine::set_max_samples(0)")
-        .unwrap_err()
-        .to_string()
-        .contains(">= 1"));
-    assert!(run_raw("engine::set_max_opts(0)")
-        .unwrap_err()
-        .to_string()
-        .contains(">= 1"));
+
+    // …and a tight target draws MORE than the old default would (it goes as far as the ask).
+    let mut eng = Engine::new();
+    let v = eng
+        .run("use rand; C ~ bernoulli(0.5); P(C, 0.0005)")
+        .unwrap();
+    let Value::Est { val, se } = v else {
+        panic!("expected an estimate")
+    };
+    assert!(se <= 0.0005 * val, "target missed: se {se}");
+    assert!(
+        eng.stats().samples > 1_000_000,
+        "rel=5e-4 needs >1M draws, swept {}",
+        eng.stats().samples
+    );
+}
+
+#[test]
+fn per_call_argument_splits_count_from_target() {
+    // Validation 7: `x >= 1` is an exact count, `0 < x < 1` a relative target, `x <= 0` an error.
+    let mut eng = Engine::new();
+    eng.run("use rand; X ~ unif(0,1); E(X, 3)").unwrap();
+    assert_eq!(eng.stats().samples, 3, "P(e, 3) must draw exactly 3");
+
+    assert!(run("X ~ unif(0,1); P(X < 0.5, 0.5)").is_ok(), "0.5 is a 50% relative target");
+    for bad in ["P(X < 0.5, 0)", "P(X < 0.5, -2)", "E(X, 0)", "Var(X, -0.5)"] {
+        let err = run(&format!("X ~ unif(0,1); {bad}")).unwrap_err().to_string();
+        assert!(
+            err.contains("sample count") && err.contains("precision"),
+            "{bad}: {err}"
+        );
+    }
+}
+
+#[test]
+fn set_precision_pragma_governs_untargeted_queries_and_overrides_pin() {
+    // Validation 9: the pragma applies when no override is passed…
+    let mut eng = Engine::new();
+    eng.run("use rand; engine::set_precision(0.01); C ~ bernoulli(0.5); P(C)")
+        .unwrap();
+    assert!(
+        eng.stats().samples < 200_000,
+        "pragma target should stop early, swept {}",
+        eng.stats().samples
+    );
+    // …and a host override PINS the setting: the program's tighter pragma no longer changes it.
+    let mut eng = Engine::new();
+    eng.set_precision(Some((0.05, 0.0)));
+    eng.run("use rand; engine::set_precision(0.0001); C ~ bernoulli(0.5); P(C)")
+        .unwrap();
+    assert!(
+        eng.stats().samples < 100_000,
+        "the looser (pinned) override must win, swept {}",
+        eng.stats().samples
+    );
+}
+
+#[test]
+fn max_time_caps_a_run_with_an_honest_warning() {
+    // Validation 4 + 8: an already-expired deadline soft-stops the run at the first statement
+    // boundary — the run completes with values-so-far semantics (no error) plus a "stopped early"
+    // warning; the query is skipped, never fabricated.
+    let mut eng = Engine::new();
+    eng.set_max_time(Some(std::time::Duration::from_nanos(1)));
+    eng.run("use rand; X ~ unif(0,1); P(X < 0.5, 100000000)")
+        .unwrap();
+    let warnings = eng.warnings();
+    assert!(
+        warnings.iter().any(|w| w.contains("stopped early")),
+        "{warnings:?}"
+    );
+
+    // A deadline generous enough for the pilot but not the full ask: the estimate flows with an
+    // honest (wide) se and the document carries the capped warning.
+    let mut eng = Engine::new();
+    eng.set_max_time(Some(std::time::Duration::from_millis(30)));
+    let doc = eng.run_to_document(
+        "use rand;\nX ~ unif(0,1);\nP(X < 0.5, 0.00001)", // a ~1e9-draw ask
+    );
+    assert!(doc.result.error.is_none(), "{:?}", doc.result.error);
+    assert!(
+        doc.result
+            .warnings
+            .iter()
+            .any(|w| w.contains("max_time")),
+        "warnings: {:?}",
+        doc.result.warnings
+    );
 }
 
 #[test]
@@ -323,7 +441,7 @@ fn check_builds_graph_but_skips_monte_carlo() {
     // because P/E/Var/Q hand back placeholders instead of forcing the cone.
     let prelude = "use rand; use math; use vec; use signal;\n";
     let heavy =
-        "engine::set_max_samples(100000000); X ~ normal(0,1); P(X < 0) + E(X) + Var(X) + Q(X, 0.5)";
+        "X ~ normal(0,1); P(X < 0, 100000000) + E(X, 100000000) + Var(X, 100000000) + Q(X, 0.5, 100000000)";
     assert!(Engine::new().check(&format!("{prelude}{heavy}")).is_ok());
 
     // The placeholder probability stays in range, so it's safe flowing into a range-checked
@@ -523,4 +641,22 @@ fn conditioning_drops_in_condition_nan_lanes_biased_deferred_b2() {
         "captured biased conditional mean = {val} (expected ≈ -1 under the current NaN-drop; \
          the correct value is NaN once B2 is fixed)"
     );
+}
+
+/// Track F gate calibration, CPU half — the multicore-interpreter timings the reduce-mode GPU gate
+/// (`MIN_WORK_GPU_REDUCE`) is calibrated against. Run WITHOUT `--features gpu` (a plain build takes
+/// every forcing on the CPU); pair with `bench_thin_cone_gpu` in `tests/gpu_backend.rs`. Ignored:
+/// `cargo test -p noise-core --release --test probability -- --ignored --nocapture bench_thin_cone_cpu`
+#[test]
+#[ignore]
+fn bench_thin_cone_cpu() {
+    for n in [1u64 << 20, 1 << 22, 1 << 24, 1 << 26, 1 << 28] {
+        let src = format!("use rand; X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1, {n})");
+        let _ = noise_core::Engine::new().run(&src).unwrap(); // warm: caches, allocator
+        let t = std::time::Instant::now();
+        let v = noise_core::Engine::new().run(&src).unwrap();
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        let noise_core::Value::Est { val, .. } = v else { panic!() };
+        println!("  cpu n={n:>11}  {ms:8.1} ms  ({:.0} M draws/s)  pi={val:.4}", n as f64 / ms / 1e3);
+    }
 }

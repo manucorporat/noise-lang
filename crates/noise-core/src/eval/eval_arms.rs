@@ -112,6 +112,11 @@ impl Engine {
     /// reachable under `module` (a `mod::base` path) or unqualified (`base` in an active module).
     /// A bare name not in any module is allowed through so dispatch can report "unknown function".
     fn resolve_call(&self, module: Option<&str>, base: &str, span: Span) -> Result<()> {
+        // A pragma PLAN-PRECISION deleted errors with its migration hint — qualified or bare —
+        // before any module lookup could reduce it to a generic "unknown function".
+        if let Some(msg) = removed_pragma(base) {
+            return Err(NoiseError::runtime(msg.to_string(), span));
+        }
         match module {
             Some(m) => {
                 if !is_module(m) {

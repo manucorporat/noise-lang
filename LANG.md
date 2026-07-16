@@ -502,13 +502,15 @@ hard error, not a wraparound.
   and **variance** of a *numeric* quantity (a number or a numeric/bool RV), the companions to
   `P` for non-events. Both return an `estimate`: `E` carries the standard error of the mean
   (`sqrt(Var/n)`), `Var` an asymptotic `var·sqrt(2/n)`; a deterministic value is exact
-  (`E(5) = 5 ± 0`). `E` of a bool-RV equals `P`. Default `n = 1e6` (set per-run with
-  `engine::set_max_samples`), fixed seed.
+  (`E(5) = 5 ± 0`). `E` of a bool-RV equals `P`. The second argument follows `P`'s rule: `n >= 1`
+  is an exact count, `0 < n < 1` a per-call relative precision target (see `P`). With neither, the
+  document-wide `engine::set_precision` target applies if declared, else the **auto default**
+  (see `P`). Fixed seed.
 - **`Q(x, q)`** / **`Q(x, q, n)`** — the **quantile** (inverse CDF) of a *numeric* quantity at
   level `q ∈ [0, 1]`: `Q(X, 0.5)` is the median, `Q(X, 0.95)` the 95th percentile, and
   `Q(X, 0)`/`Q(X, 1)` the min/max draw. The companion to `E`/`Var` for tail/spread questions.
-  Estimated by Monte Carlo — draw `n` samples (default `1e6`, or `engine::set_max_samples`; fixed
-  seed), sort, and linearly
+  Estimated by Monte Carlo — draw `n` samples (default `1e6`; fixed seed — `Q` is the one query
+  still on fixed counts, since a quantile cannot ride the adaptive precision loop), sort, and linearly
   interpolate between the bracketing order statistics. Returns a plain `number` (unlike `P`/`E`,
   it does *not* auto-round to a confidence precision: a sample quantile's error depends on the
   density there). A deterministic value is its own quantile at every level.
@@ -529,9 +531,21 @@ hard error, not a wraparound.
   deterministic-only — a random-variable argument is an error (no per-lane integer loop in the VM).
 - **`P(event)`** / **`P(event, n)`** — the probability that a bool-RV (or deterministic bool)
   is true, returned as a plain `number` in `[0,1]` so it composes in arithmetic (`4 * P(C)`).
-  `P` of a numeric (non-event) value is an error. Estimated by Monte Carlo over `n` samples
-  (default `1e6`, or set per-run with `engine::set_max_samples`) under a fixed seed, so a run is
-  reproducible.
+  `P` of a numeric (non-event) value is an error. Estimated by Monte Carlo under a fixed seed, so
+  a run is reproducible. The optional second argument is **a count or a target**:
+  - **`n >= 1` — an exact sample count**: draw exactly `n` (adaptivity off for this call).
+  - **`0 < n < 1` — a per-call relative precision target**: keep drawing until
+    `se <= n·|estimate|`. `P(hit, 1e-4)` reads as "this probability to 4 significant digits" —
+    ask for digits, not draws. Overrides the document-wide `engine::set_precision` for this call;
+    still bounded by the runtime `max_time` guard.
+  - With neither, the document-wide precision target applies if one is set
+    (`engine::set_precision`, or a host override); otherwise the **auto default**: keep drawing
+    until `se <= 5e-3 · max(|estimate|, sd)`, where `sd` is the quantity's per-draw spread. The
+    `sd` floor makes the default scale-free and always reachable (a bare relative target never
+    terminates on an estimate of ≈ 0): it solves to ~40,000 *effective* draws — one cheap pilot
+    for an easy query, honestly more for a conditional whose condition rarely holds. Programs that
+    need more digits say so (a per-call target or `set_precision`); the auto default is a
+    bounded-effort heuristic, deliberately not expressible through `set_precision`.
   - **`P` returns an *estimate*** — a number that carries its standard error
     `se = sqrt(p(1-p)/n)` (a *deterministic* event is exact, `se = 0`). The value keeps full
     precision; it **displays rounded to the digits the error justifies** (`floor(-log10(se))`
@@ -705,7 +719,7 @@ The modules:
 | `signal`  | `sine`, `cosine` (lazy waveforms), `noise_white`, `noise_white_complex`, `noise_brown`, `noise_pink`, `noise_ou` (undrawn noise generators — drawn with `~`), `sample` | needs `use signal;` |
 | `plot`    | `histogram`, `line`, `scatter`, `heatmap`, `corr`, `fan`, `explain`, `value` (charts, pushed to the output stream like `Print`) | path-only (`plot::fan(...)`) |
 | `stats`   | `histogram`, `quantiles`, `moments`, `fan`, `corr` — the same computations as `plot::`, returned as numbers | path-only (`stats::fan(...)`) |
-| `engine`  | `set_max_samples`, `set_max_opts`, `set_resolution` (run-time evaluator knobs) | needs `use engine;` |
+| `engine`  | `set_precision`, `set_resolution` (program-declared settings) | needs `use engine;` |
 
 **The `stats` module** is the raw-data twin of `plot`: every chart's numbers, without the chart.
 `stats::histogram(x)` returns the bins `plot::hist(x)` draws; `stats::fan(path)` returns the bands
@@ -738,29 +752,49 @@ Print("mean, sd:", m[1], m[2]);  # 100.00483911223 15.00450459098
 Print("VaR95:   ", stats::quantiles(X, [0.05])[0]);  # 75.269722471943
 ```
 
-**`engine::set_max_samples(N)`** sets the default Monte Carlo budget — the sample count `P`/`E`/
-`Var`/`Q` use when called *without* an explicit count — to `N` (an integer `>= 1`) for the rest of
-the run. It's the one-place alternative to threading `n` through every query when you want to trade
-accuracy for speed (or buy more digits): `engine::set_max_samples(20000);` then a bare `P(C)` draws
-20 000 samples instead of the `1e6` default. An explicit per-call count (`P(C, n)`) still overrides
-it. Returns `unit` — it's a setting, not a value.
+**`engine::set_precision(rel[, abs])`** declares the program's **precision target**: every
+`P`/`E`/`Var` called without an explicit count keeps drawing until `se <= max(abs, rel·|est|)` —
+the standard numerical-integration stopping rule (QUADPACK/GSL). `rel` is scale-free
+("`1e-4` ≈ 4 significant digits" — and because se and value scale together, relative precision on
+`P` *is* relative precision on anything proportional to it, like `4·P(…) ≈ π`); the optional `abs`
+rescues `E` of a quantity whose mean is ≈ 0. Both `>= 0`, not both 0. Returns `unit` — it's a
+setting, not a value. With no declared target, untargeted queries use the **auto default**
+(`se <= 5e-3 · max(|est|, sd)` — see `P`); a declared target replaces it wholesale. Three notes on
+the contract:
 
-**`engine::set_max_opts(N)`** caps the *operations* each `P`/`E`/`Var`/`Q` query may spend (`N` an
-integer `>= 1`), bounding complexity by the model's size rather than by a fixed draw count. A query
-over a cone of `C` distinct nodes costs `draws × C` per-lane operations, so it auto-clamps its draws
-to `N / C` (never below 1) — a heavier model simply draws *fewer* samples (a looser estimate)
-instead of doing unbounded work. Unlike `set_max_samples` it never errors and never changes a result
-exactly: it makes each query's worst-case cost **deterministic in the model size**. The query draws
-the smaller of the two budgets, so `set_max_samples` still bounds light cones and `set_max_opts`
-bounds heavy ones. Defaults to a built-in ceiling of `1e9` ops per query — high enough that ordinary
-small-cone queries (even at millions of draws) are never clamped, so only very large models feel it.
-Returns `unit` — it's a setting, not a value.
+- **A run that hits its target is fully deterministic**: the stop rule reads only drawn values, and
+  draws are a pure function of `(seed, lane)` — same program, same digits, on every machine and
+  backend. The result is bit-identical to a fixed-count run at the same final `n`. (One edge: with a
+  `max_time` set, growth stages are sized against the remaining deadline, so a run that *brushes*
+  its deadline can settle on a different — still target-meeting — final `n` per machine. Runs that
+  finish comfortably inside the deadline, or with `--max-time 0`, are exactly reproducible.)
+- **A run that hits the runtime `max_time` deadline is honest but machine-dependent**: it reports
+  the estimate from the samples it drew, with the (wider) se those samples justify, plus a warning
+  naming what bound it. A slower machine prints *fewer digits*, never wrong ones.
+- **A data-dependent stop technically biases the estimate**; with a 64k pilot and a few geometric
+  growth stages the effect is `O(1/n)` against a standard error of `O(1/√n)` — negligible, and
+  standard practice.
+
+`Q` (quantiles) is deliberately outside the loop — it collects the full draw vector and its se
+would need a density estimate — so it keeps fixed counts. Plots keep their fixed *visual* budgets
+(a chart's target is resolution, not digits).
+
+**Settings: pragmas declare, `run()` overrides.** An `engine::` pragma is the *program's* declared
+default ("π to five digits is this program's point"); how much machine time a run may spend belongs
+to whoever runs it. Hosts pass overrides at run time — `--precision` / `--resolution` /
+`--max-time` on the CLI, the same fields in the npm `run()` options — and an
+override **pins** its setting: the pragma is still evaluated but no longer changes the effective
+value. `max_time` deliberately has **no pragma form**: a deadline in program text would make a
+program's digits machine-dependent while *looking* like part of the question. (The old budget
+pragmas `set_max_samples`/`set_max_ops`/`set_max_opts` were removed; calling one is an error naming
+its replacement. The runtime `samples` setting is gone too — with precision default-on there is no
+fixed default count left to override; exactness is per-call: `P(e, n)`.)
 
 **`engine::set_resolution(N)`** sets the ambient **sampling resolution** — the length at which
 reducers (`mse`, `mean`, `sum`, `dot`, …) render a lazy signal that never met an explicit length
-(default `256`). It is the time-axis twin of `set_max_samples`: one measurement knob per axis, both
-set once at the top instead of threaded through the math. `signal::sample(sig, n)` remains the
-explicit per-site override. Returns `unit` — it's a setting, not a value. See "Signals".
+(default `256`). One measurement knob per axis, set once at the top instead of threaded through the
+math. `signal::sample(sig, n)` remains the explicit per-site override. Returns `unit` — it's a
+setting, not a value. See "Signals".
 
 Rules:
 - **`builtin` is active by default**; `rand`/`math`/`vec`/`signal`/`engine` are **strict** — a

@@ -1,0 +1,28 @@
+---
+title: "Pricing a rare event"
+abstract: >
+  How do you measure the chance of something that almost never happens? With a fixed
+  million samples, a once-in-ten-thousand-years crash shows up about a hundred times —
+  a rough count with ~10% wobble you can't see in the printed digits. Ask for relative
+  precision instead: the engine keeps sampling until the estimate itself is that good,
+  so rare events automatically get the extra draws they need.
+tags: [risk, precision, tails]
+extra:
+  blurb: "Ask for relative precision and let the engine find the tail."
+  category: "Games & risk"
+---
+use rand;
+
+# A year of market returns, roughly bell-shaped: most years are ordinary.
+returns ~ normal(0, 1);
+
+# The catastrophe: a 3.7-sigma crash. It happens about once in ten thousand years.
+crash = returns < -3.7;
+
+# Ask for the answer to 10% RELATIVE error — not for a sample count. A fixed budget
+# spends almost all of it on ordinary years; a relative target keeps drawing until
+# the rare corner of the distribution has been seen often enough to pin down.
+p_crash = P(crash, 0.1);
+```md
+P(crash) = **${p_crash}** — about one year in ${math::round(1 / p_crash, 0)}.
+```

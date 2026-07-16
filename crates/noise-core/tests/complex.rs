@@ -171,8 +171,9 @@ fn vec_consistency_over_complex() {
 fn am_vs_fm_complex_fm_wins() {
     // The headline payoff: FM recovers the message markedly cleaner than AM under identical
     // circularly-symmetric static. (The complex variant of examples/am_vs_fm.noise.)
+    // (The `samples` budget moved to per-call counts — PLAN-PRECISION removed the pragma.)
     let src = "
-        engine::set_max_samples(8000);
+
         am_modulate(m)      = 1 + m;
         fm_modulate(m, dev) = math::exp(math::i*dev*m);
         am_demodulate(z)      = math::abs(z) - 1;
@@ -180,8 +181,8 @@ fn am_vs_fm_complex_fm_wins() {
         dev = 3; sigma = 0.3;
         msg = signal::sample(0.3*signal::sine(3), 64);
         static ~[Len(msg)] rand::normal_complex(sigma);
-        am_err = E(vec::mse(am_demodulate(am_modulate(msg)      + static),      msg));
-        fm_err = E(vec::mse(fm_demodulate(fm_modulate(msg, dev) + static, dev), msg));
+        am_err = E(vec::mse(am_demodulate(am_modulate(msg)      + static),      msg), 8000);
+        fm_err = E(vec::mse(fm_demodulate(fm_modulate(msg, dev) + static, dev), msg), 8000);
         am_err / fm_err";
     let ratio = run_num(src);
     assert!(ratio > 3.0, "FM should be several× cleaner, got {ratio}x");

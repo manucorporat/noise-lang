@@ -52,10 +52,10 @@
   // Heavy enough that the reduction dominates: the parallel path only engages above
   // PAR_MIN_SAMPLES (262,144 draws), which is the point — small runs shouldn't pay for a fan-out.
   const CASES = {
-    pi: 'use rand; engine::set_max_samples(20000000); X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1)',
+    pi: 'use rand; X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1, 20000000)',
     normal_poly:
-      'use rand; engine::set_max_samples(5000000); Z ~ normal(0,1); E(Z*Z*Z*Z*Z + 2*Z*Z*Z*Z - 3*Z*Z*Z + 4*Z*Z - 5*Z + 6)',
-    birthday: 'use rand; engine::set_max_samples(2000000); days ~[23] unif_int(1,365); P(has_duplicates(days))',
+      'use rand; Z ~ normal(0,1); E(Z*Z*Z*Z*Z + 2*Z*Z*Z*Z - 3*Z*Z*Z + 4*Z*Z - 5*Z + 6, 5000000)',
+    birthday: 'use rand; days ~[23] unif_int(1,365); P(has_duplicates(days), 2000000)',
   };
 
   const median = (f, reps = 3) => {

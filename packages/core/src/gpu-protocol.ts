@@ -21,7 +21,9 @@ export const Ctrl = {
   WGSL_LEN: 3,
   /** Lanes in this dispatch. */
   N: 4,
-  /** Columns (roots) read back per lane — 1 for single-root, k for joint. */
+  /** Columns (roots) read back per lane — 1 for single-root, k for joint, **0 for reduce mode**
+   *  (PLAN-PRECISION Track F: the shader folds on-device; one `(Σx, Σx², count)` triple per
+   *  workgroup comes back — see `dispatchShape` in `gpu-host.ts`). */
   COLS: 5,
   /** RNG key low word. */
   K0: 6,
@@ -29,7 +31,7 @@ export const Ctrl = {
   K1: 7,
   /** First lane index of this dispatch. */
   LANE0: 8,
-  /** How many f32 the main thread wrote into the result region (= COLS × N). */
+  /** How many f32 the main thread wrote into the result region (`dispatchShape(n, cols).outCount`). */
   OUT_LEN: 9,
 } as const;
 

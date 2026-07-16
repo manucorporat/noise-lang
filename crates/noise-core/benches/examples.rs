@@ -6,7 +6,7 @@
 //! backends add. A real Noise program:
 //!
 //!   * forces **many** queries, each compiling its own cone (`noise_colors` forces 10, `kelly` 12),
-//!   * often draws **few** samples per query (`engine::set_max_samples(3000)`), so a codegen backend
+//!   * often draws **few** samples per query (small per-call counts), so a codegen backend
 //!     may never amortize its compile,
 //!   * spends real time in parse/eval building the graph (a `rotation(20)` expands to ~16k nodes
 //!     before a single draw), and

@@ -50,21 +50,188 @@ fn usage_error(msg: &str) -> ! {
     std::process::exit(EXIT_USAGE);
 }
 
-/// The parsed form of a run/validate invocation: an optional positional file path and the repeatable
-/// `--input name=value` overrides. Pure and testable (finding G6) — it never touches the filesystem
-/// or exits the process; the caller decides what to do with the result.
+/// The two-rung Ctrl-C ladder (PLAN-PRECISION Track H). The **first** Ctrl-C during a run
+/// soft-stops it: completed statements keep their values, the in-flight query folds the chunks it
+/// drew (an honest partial estimate), and the document renders normally with the "stopped early"
+/// warning — the same path the `max_time` deadline takes. The **second** kills the process the
+/// classic way (exit 130 = 128 + SIGINT). With no run active (REPL idle, reading stdin), Ctrl-C
+/// exits immediately, as it always did.
+mod interrupt {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Mutex;
+
+    /// The active run's soft-stop handle, registered for the duration of each `run_to_document`.
+    static ACTIVE: Mutex<Option<noise_core::exec::CancelToken>> = Mutex::new(None);
+    /// Ctrl-C presses during the current run (the ladder's rung).
+    static HITS: AtomicU8 = AtomicU8::new(0);
+
+    /// Install the process-wide handler once, before the first run. The handler runs on `ctrlc`'s
+    /// own thread, so locking / printing here is safe (this is not an async-signal context).
+    pub fn install() {
+        let _ = ctrlc::set_handler(|| {
+            let active = ACTIVE.lock().ok().and_then(|g| g.clone());
+            match active {
+                Some(token) if HITS.fetch_add(1, Ordering::SeqCst) == 0 => {
+                    eprintln!("\nstopping — showing what was sampled so far (Ctrl-C again to kill)");
+                    token.stop();
+                }
+                _ => std::process::exit(130),
+            }
+        });
+    }
+
+    /// Register `engine`'s token as the run the ladder stops; deregisters on drop. Resets the
+    /// rung, so each run gets its own first-soft/second-hard pair.
+    pub fn guard(engine: &noise_core::Engine) -> Guard {
+        HITS.store(0, Ordering::SeqCst);
+        if let Ok(mut g) = ACTIVE.lock() {
+            *g = Some(engine.cancel_token());
+        }
+        Guard
+    }
+
+    pub struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if let Ok(mut g) = ACTIVE.lock() {
+                *g = None;
+            }
+        }
+    }
+}
+
+/// The CLI's default `max_time` (PLAN-PRECISION: the runaway guard is a runtime deadline now that
+/// the op budget is gone). Lenient — every corpus example finishes orders of magnitude under it —
+/// and `--max-time 0` turns it off entirely (what corpus goldens pin for bit-reproducibility).
+const DEFAULT_MAX_TIME: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The parsed form of a run/validate invocation: an optional positional file path, the repeatable
+/// `--input name=value` overrides, and the PLAN-PRECISION runtime settings (`--precision`,
+/// `--max-time`, `--resolution` — each pins its setting over the program's pragma).
+/// Pure and testable (finding G6) — it never touches the filesystem or exits the process; the
+/// caller decides what to do with the result.
 #[derive(Debug, Default, PartialEq)]
 struct Args {
     file: Option<String>,
     inputs: Vec<(String, InputValue)>,
+    /// `--precision rel[,abs]`: keep drawing until `se <= max(abs, rel*|est|)`.
+    precision: Option<(f64, f64)>,
+    /// `--max-time <dur>`: the run's wall-clock ceiling. `None` = the default guard; `Some(None)`
+    /// is expressed as `max_time: None` + `max_time_off: true` (`--max-time 0`).
+    max_time: Option<std::time::Duration>,
+    max_time_off: bool,
+    /// `--resolution N`: the ambient signal-sampling resolution.
+    resolution: Option<usize>,
 }
 
-/// Parse `--input name=value` / `-i name=value` / `--input=name=value` overrides and a single
-/// positional file path out of `args`. An unknown `-`-prefixed argument is a usage error (rather
-/// than being silently treated as a file path — finding G1); a second positional is a usage error.
+
+impl Args {
+    /// Apply the runtime settings to an engine (each pins its setting — "pragmas declare, `run()`
+    /// overrides"). The `max_time` ladder: an explicit `--max-time 0` = no deadline, an explicit
+    /// duration = that deadline, nothing = the lenient default guard.
+    fn configure(&self, engine: &mut Engine) {
+        if let Some(t) = self.precision {
+            engine.set_precision(Some(t));
+        }
+        if let Some(n) = self.resolution {
+            engine.set_resolution(n);
+        }
+        engine.set_max_time(if self.max_time_off {
+            None
+        } else {
+            Some(self.max_time.unwrap_or(DEFAULT_MAX_TIME))
+        });
+    }
+}
+
+/// Parse a `--precision` value: `rel` or `rel,abs`, both finite and ≥ 0, not both 0.
+fn parse_precision(v: &str) -> Result<(f64, f64), String> {
+    let (rel_s, abs_s) = match v.split_once(',') {
+        Some((r, a)) => (r.trim(), Some(a.trim())),
+        None => (v.trim(), None),
+    };
+    let rel: f64 = rel_s
+        .parse()
+        .map_err(|_| format!("bad --precision {v:?}: {rel_s:?} is not a number"))?;
+    let abs: f64 = match abs_s {
+        Some(s) => s
+            .parse()
+            .map_err(|_| format!("bad --precision {v:?}: {s:?} is not a number"))?,
+        None => 0.0,
+    };
+    if !rel.is_finite() || !abs.is_finite() || rel < 0.0 || abs < 0.0 || (rel == 0.0 && abs == 0.0) {
+        return Err(format!(
+            "bad --precision {v:?}: needs rel >= 0 and abs >= 0, not both 0 (e.g. --precision 1e-4)"
+        ));
+    }
+    Ok((rel, abs))
+}
+
+/// Parse a `--max-time` value: `0` (off), a bare number of seconds (`2`, `1.5`), or a suffixed
+/// duration (`2s`, `500ms`, `3m`).
+fn parse_max_time(v: &str) -> Result<Option<std::time::Duration>, String> {
+    let v = v.trim();
+    let (num, scale) = if let Some(n) = v.strip_suffix("ms") {
+        (n, 1e-3)
+    } else if let Some(n) = v.strip_suffix('s') {
+        (n, 1.0)
+    } else if let Some(n) = v.strip_suffix('m') {
+        (n, 60.0)
+    } else {
+        (v, 1.0)
+    };
+    let secs: f64 = num
+        .trim()
+        .parse()
+        .map_err(|_| format!("bad --max-time {v:?}: expected 0, seconds, or e.g. 2s / 500ms / 3m"))?;
+    if !secs.is_finite() || secs < 0.0 {
+        return Err(format!("bad --max-time {v:?}: must be >= 0"));
+    }
+    let secs = secs * scale;
+    if secs == 0.0 {
+        return Ok(None); // 0 = no deadline
+    }
+    Ok(Some(std::time::Duration::from_secs_f64(secs)))
+}
+
+/// Parse a positive integer setting value (`--resolution`), accepting `3e3` notation.
+fn parse_count(flag: &str, v: &str) -> Result<usize, String> {
+    let n: f64 = v
+        .trim()
+        .parse()
+        .map_err(|_| format!("bad {flag} {v:?}: not a number"))?;
+    if !n.is_finite() || n < 1.0 || n.fract() != 0.0 {
+        return Err(format!("bad {flag} {v:?}: needs a whole number >= 1"));
+    }
+    Ok(n as usize)
+}
+
+/// Parse `--input name=value` overrides, the runtime settings flags, and a single positional file
+/// path out of `args`. An unknown `-`-prefixed argument is a usage error (rather than being
+/// silently treated as a file path — finding G1); a second positional is a usage error.
 fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut out = Args::default();
     let mut i = 0;
+    // A settings flag's value: `--flag value` or `--flag=value`.
+    fn flag_value<'a>(
+        args: &'a [String],
+        i: &mut usize,
+        name: &str,
+    ) -> Result<Option<&'a str>, String> {
+        let a = &args[*i];
+        if a == name {
+            let v = args
+                .get(*i + 1)
+                .ok_or_else(|| format!("`{name}` needs a value"))?;
+            *i += 2;
+            return Ok(Some(v));
+        }
+        if let Some(v) = a.strip_prefix(&format!("{name}=")) {
+            *i += 1;
+            return Ok(Some(v));
+        }
+        Ok(None)
+    }
     while i < args.len() {
         let a = &args[i];
         if a == "--input" || a == "-i" {
@@ -76,6 +243,15 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         } else if let Some(kv) = a.strip_prefix("--input=") {
             out.inputs.push(parse_input_arg(kv)?);
             i += 1;
+        } else if let Some(v) = flag_value(args, &mut i, "--precision")? {
+            out.precision = Some(parse_precision(v)?);
+        } else if let Some(v) = flag_value(args, &mut i, "--max-time")? {
+            match parse_max_time(v)? {
+                Some(d) => out.max_time = Some(d),
+                None => out.max_time_off = true,
+            }
+        } else if let Some(v) = flag_value(args, &mut i, "--resolution")? {
+            out.resolution = Some(parse_count("--resolution", v)?);
         } else if a.starts_with('-') && a != "-" {
             // An unknown flag is a usage error — not a file path (`noise --bogus`, finding G1).
             // (`-` alone is allowed through as a positional: the conventional "stdin" placeholder.)
@@ -97,14 +273,15 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
 /// (finding G2 — piped input no longer drops into the REPL and pollutes the stream with `»` prompts).
 fn run_or_repl(args: &[String]) {
     let parsed = parse_args(args).unwrap_or_else(|e| usage_error(&e));
-    match parsed.file {
-        Some(p) => run_file(&p, parsed.inputs),
-        None if !io::stdin().is_terminal() => run_stdin(parsed.inputs),
+    interrupt::install();
+    match parsed.file.clone() {
+        Some(p) => run_file(&p, &parsed),
+        None if !io::stdin().is_terminal() => run_stdin(&parsed),
         None => {
             if !parsed.inputs.is_empty() {
                 usage_error("`--input` needs a program (a file, or piped stdin) to run against");
             }
-            repl()
+            repl(&parsed)
         }
     }
 }
@@ -113,22 +290,26 @@ fn run_or_repl(args: &[String]) {
 /// `--input` overrides (finding G2) so a program's inputs can be validated at specific values.
 fn run_validate(args: &[String]) {
     let parsed = parse_args(args).unwrap_or_else(|e| usage_error(&e));
-    match parsed.file {
+    match parsed.file.clone() {
         Some(p) => validate_file(&p, parsed.inputs),
         None => usage_error("`validate` needs a file path: noise validate <file>"),
     }
 }
 
 /// Read a whole program from stdin and run it (the piped, non-interactive path).
-fn run_stdin(inputs: Vec<(String, InputValue)>) {
+fn run_stdin(args: &Args) {
     let mut src = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut src) {
         eprintln!("error: cannot read program from stdin: {e}");
         std::process::exit(EXIT_RUNTIME);
     }
     let mut engine = Engine::new();
-    engine.set_input_overrides(inputs);
-    let doc = engine.run_to_document(&src);
+    engine.set_input_overrides(args.inputs.clone());
+    args.configure(&mut engine);
+    let doc = {
+        let _stop = interrupt::guard(&engine);
+        engine.run_to_document(&src)
+    };
     if render_document(&doc, Some((&src, "<stdin>"))) {
         std::process::exit(EXIT_RUNTIME);
     }
@@ -171,6 +352,9 @@ fn print_help() {
     println!("  noise                       start a REPL (or run a program piped on stdin)");
     println!("  noise <file>                run a program file");
     println!("  noise <file> --input k=v    tune an inline input (repeatable; also -i k=v)");
+    println!("  noise <file> --precision p  sample until se <= p*|est| (or `rel,abs`); overrides pragmas");
+    println!("  noise <file> --max-time t   wall-clock ceiling (e.g. 2s, 500ms; 0 = off, default 60s)");
+    println!("  noise <file> --resolution n ambient signal resolution");
     println!("  noise validate <file>       parse and build the graph without producing output");
     println!("  noise ide-integration       install the VS Code / Cursor syntax extension");
     println!("  noise --version             print the version");
@@ -250,7 +434,7 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn run_file(path: &str, inputs: Vec<(String, InputValue)>) {
+fn run_file(path: &str, args: &Args) {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -259,8 +443,12 @@ fn run_file(path: &str, inputs: Vec<(String, InputValue)>) {
         }
     };
     let mut engine = Engine::new();
-    engine.set_input_overrides(inputs);
-    let doc = engine.run_to_document(&src);
+    engine.set_input_overrides(args.inputs.clone());
+    args.configure(&mut engine);
+    let doc = {
+        let _stop = interrupt::guard(&engine);
+        engine.run_to_document(&src)
+    };
     // Render the one `Document`: notes as text and plots as their one-line text cards, in emission
     // order, then the final value (or the error). The CLI is just another renderer of the same
     // structure the playground uses (PLAN-LITERATE §D5).
@@ -294,6 +482,11 @@ fn render_document(doc: &noise_core::doc::Document, source: Option<(&str, &str)>
     }
     if let Some(t) = &doc.result.truncated {
         println!("… {} more emissions not shown (output capped)", t.dropped);
+    }
+    // Run warnings (PLAN-PRECISION Track C): a query the deadline cut short of its precision
+    // target, a soft-stopped run. Stderr, so piped output stays clean.
+    for w in &doc.result.warnings {
+        eprintln!("warning: {w}");
     }
     match &doc.result.error {
         Some(e) => {
@@ -405,9 +598,10 @@ fn validate_file(path: &str, inputs: Vec<(String, InputValue)>) {
     }
 }
 
-fn repl() {
+fn repl(args: &Args) {
     println!("noise REPL — type expressions, Ctrl-D to exit");
     let mut engine = Engine::new();
+    args.configure(&mut engine);
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     loop {
@@ -429,7 +623,10 @@ fn repl() {
         if line.is_empty() {
             continue;
         }
-        let doc = engine.run_to_document(line);
+        let doc = {
+            let _stop = interrupt::guard(&engine);
+            engine.run_to_document(line)
+        };
         render_document(&doc, Some((line, "<repl>")));
     }
 }
@@ -561,6 +758,39 @@ u.noise:2:1: unexpected character 'π'
         assert!(parse_args(&s(&["a.noise", "b.noise"])).is_err());
         // a bad input value is surfaced as an error (routed to exit 2 by the caller)
         assert!(parse_args(&s(&["--input", "k=nope"])).is_err());
+    }
+
+    #[test]
+    fn parse_args_reads_the_precision_settings_flags() {
+        let got = parse_args(&s(&[
+            "p.noise",
+            "--precision",
+            "1e-4",
+            "--max-time",
+            "2s",
+            "--resolution=64",
+        ]))
+        .unwrap();
+        assert_eq!(got.precision, Some((1e-4, 0.0)));
+        assert_eq!(got.max_time, Some(std::time::Duration::from_secs(2)));
+        assert!(!got.max_time_off);
+        assert_eq!(got.resolution, Some(64));
+
+        // `rel,abs` form; `--max-time 0` = explicitly off; `500ms` and bare seconds parse.
+        let got = parse_args(&s(&["p.noise", "--precision=1e-3,1e-6", "--max-time=0"])).unwrap();
+        assert_eq!(got.precision, Some((1e-3, 1e-6)));
+        assert!(got.max_time_off);
+        assert_eq!(parse_max_time("500ms").unwrap(), Some(std::time::Duration::from_millis(500)));
+        assert_eq!(parse_max_time("1.5").unwrap(), Some(std::time::Duration::from_secs_f64(1.5)));
+        assert_eq!(parse_max_time("3m").unwrap(), Some(std::time::Duration::from_secs(180)));
+
+        // Validation: both-zero precision, negative durations, fractional counts.
+        assert!(parse_args(&s(&["p.noise", "--precision", "0"])).is_err());
+        assert!(parse_args(&s(&["p.noise", "--max-time", "-1s"])).is_err());
+        assert!(parse_args(&s(&["p.noise", "--resolution", "2.5"])).is_err());
+        assert!(parse_args(&s(&["p.noise", "--resolution", "0"])).is_err());
+        // A settings flag with no value is a usage error.
+        assert!(parse_args(&s(&["p.noise", "--precision"])).is_err());
     }
 
     #[test]

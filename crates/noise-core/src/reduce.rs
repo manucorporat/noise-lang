@@ -10,6 +10,27 @@
 //! never on thread scheduling, and per-chunk accumulators are merged in **chunk-index order**. So
 //! the result is identical for any thread count — bit for bit. Threads change only wall-clock.
 //!
+//! **Resumable ranges** (PLAN-PRECISION Track A): the driver's real entry point is
+//! [`run_reduction_range`], which reduces any chunk-aligned lane range `a..b` *into a carried
+//! accumulator*. Because a chunk is a pure lane range and the fold is chunk-ordered, a reduction
+//! over `0..n₁` extended by `n₁..n₂` is **bit-identical** to a single run over `0..n₂` — the
+//! adaptive precision driver ([`crate::sampler`]) is built on exactly this property.
+//!
+//! **Epochs** (PLAN-PRECISION Track E): the lane index is `u32` end-to-end below this driver, which
+//! caps a single stream at 2³² draws. Ranges beyond it split into **epochs** of 2³² lanes; epoch
+//! `e` draws under a seed derived from `(seed, e)` (statistically independent streams, epoch 0
+//! keeping the raw seed so every existing stream is unchanged), each epoch is an ordinary ≤ 2³²-lane
+//! reduction, and accumulators fold in epoch order. Deterministic, and nothing below the driver
+//! changes.
+//!
+//! **Soft-stop** (PLAN-PRECISION Track H): beside the hard [`CancelToken`] abort (everything
+//! discarded, `Err(cancelled)`), the driver honors the token's *soft* flag and the run's `max_time`
+//! deadline (see [`crate::exec`]): workers stop claiming chunks, the chunks that completed fold
+//! normally, and the caller gets `Ok` with the accumulator's true count plus a [`StopCause`]
+//! marker. Which chunks completed is timing-dependent, so a stopped run is explicitly *not*
+//! bit-reproducible — but it is statistically honest (iid chunks, timing never depends on drawn
+//! values), and the se downstream is computed from the true folded count.
+//!
 //! Executor — two of them, one monoid. Native uses `std::thread::scope` (zero-dependency
 //! work-stealing). In the browser, the `wasm-threads` feature fans the same chunks out over rayon,
 //! whose pool is Web Workers sharing one linear memory (bootstrapped by the JS host; see
@@ -20,29 +41,39 @@
 //! bit-identical results** — including a single thread. The executor is free to be whatever is
 //! fastest on the target; it can never be the reason an answer changed.
 
+use std::ops::Range;
+
 use crate::backend::{compile_root, Runner};
 use crate::error::{NoiseError, Result};
-use crate::exec::CancelToken;
+use crate::exec::{CancelToken, StopCause};
 // `Program` (the `&dyn` seam threads hand around) only exists on a threaded executor.
 #[cfg(threaded)]
 use crate::backend::Program;
 use crate::dist::{RvGraph, RvId};
 use crate::sampler::Moments;
+// The deadline `Instant` travels to workers explicitly (thread-locals are invisible inside a
+// scope), so the import is only needed where workers exist — and in the native tests.
+#[cfg(any(threaded, test))]
+use web_time::Instant;
 
 /// Samples per chunk: 16 batches. Small enough that even a default `N=1e6` run yields ~60 chunks
 /// — enough to keep a many-core machine load-balanced — yet large enough that per-chunk setup and
 /// accumulator-merge stay negligible against the sampling work. **Fixed** (not thread-derived) so
 /// chunking is deterministic: the load-bearing choice for core-count-invariant results.
-const CHUNK_SAMPLES: usize = 16 * crate::bytecode::BATCH; // 16_384
+pub const CHUNK_SAMPLES: usize = 16 * crate::bytecode::BATCH; // 16_384
+
+/// Lanes per **epoch** (Track E): the `u32` lane index below the driver caps a single keyed stream
+/// at 2³² draws. Ranges beyond it run as consecutive epochs under per-epoch derived seeds.
+const EPOCH_LANES: u64 = 1 << 32;
 
 /// Below this many draws, thread-spawn + per-thread compile overhead outweighs the win, so we run
 /// the (identical) sequential path. Determinism is unaffected — same chunks either way.
 #[cfg(threaded)]
-const PAR_MIN_SAMPLES: usize = 1 << 18; // 262_144
+const PAR_MIN_SAMPLES: u64 = 1 << 18; // 262_144
 
 /// A monoid over sample columns. Parallel soundness reduces to a single local property: `merge` is
 /// associative, and `absorb` depends only on the column (not global order). Commutativity is NOT
-/// required — the driver always folds in chunk-index order ([`combine_in_order`]) — so an
+/// required — the driver always folds in chunk-index order ([`fold_in_order`]) — so an
 /// order-preserving merge like concatenation ([`CollectReducer`]) is exactly as deterministic as a
 /// commutative one.
 pub trait Reducer: Sync {
@@ -55,25 +86,72 @@ pub trait Reducer: Sync {
     /// Combine two partial accumulators. Must be associative (with `identity` as the unit); the
     /// index-ordered fold supplies the ordering, so commutativity is optional.
     fn merge(&self, a: Self::Acc, b: Self::Acc) -> Self::Acc;
+
+    /// If this reducer is a plain moments fold (count, Σx, Σx²), say so — the GPU backend then
+    /// folds **on the device** and reads back per-workgroup partial sums instead of every lane
+    /// (PLAN-PRECISION Track F). `None` (the default) keeps the full-column readback path; a
+    /// reducer that returns `Some` must also implement [`Reducer::absorb_moments`].
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    fn moments_mode(&self) -> Option<MomentsMode> {
+        None
+    }
+
+    /// Fold one on-GPU partial — `count` lanes whose draws summed to `sum` / `sum_sq` — into `acc`.
+    /// Only called when [`Reducer::moments_mode`] returned `Some`.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    fn absorb_moments(&self, _acc: &mut Self::Acc, _count: u64, _sum: f64, _sum_sq: f64) {
+        unreachable!("absorb_moments requires moments_mode() == Some(_)")
+    }
 }
 
-/// Run chunk `chunk` (covering `[chunk*CHUNK .. )`, clamped to `n`) into a fresh accumulator,
-/// reusing this worker's `runner`. Counter keying (PLAN-PREGPU Track C) makes a chunk just a
-/// lane range: positioning the runner at `chunk * CHUNK_SAMPLES` IS the per-chunk isolation —
-/// no derived per-chunk seed, and thread-count invariance is by construction (the draw at lane
-/// `i` is a pure function of `(seed, i, source)`).
+/// How a reduce-mode GPU shader treats each lane's value (PLAN-PRECISION Track F). Mirrors the two
+/// moments reducers, which are the only reductions a shader can fold on-device. (Only the `gpu`
+/// feature consumes it — the trait hooks exist unconditionally so reducers don't fork on the
+/// feature.)
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MomentsMode {
+    /// Every lane folds ([`MomentsReducer`]) — a NaN draw poisons the sums, exactly as on the CPU.
+    All,
+    /// NaN lanes are skipped and not counted ([`CondMomentsReducer`]) — the conditioning sentinel.
+    SkipNan,
+}
+
+/// The result of a (possibly soft-stopped) reduction: the folded accumulator plus why it stopped
+/// short, if it did. `stopped == None` means the whole requested range was folded.
+pub struct Reduced<A> {
+    pub acc: A,
+    pub stopped: Option<StopCause>,
+}
+
+/// The derived seed of epoch `e` (Track E). Epoch 0 keeps the raw seed — so every stream that
+/// exists today is bit-unchanged — and later epochs hash `(seed, e)` through `squares64` (keyed by
+/// the run's own [`crate::rng::Key`]), giving statistically independent, deterministic streams.
+fn epoch_seed(seed: u64, e: u64) -> u64 {
+    if e == 0 {
+        seed
+    } else {
+        crate::rng::squares64(e, crate::rng::Key::from_seed(seed).as_u64())
+    }
+}
+
+/// Run chunk `chunk` (global index; covering epoch-local lanes `[chunk*CHUNK - epoch_base ..)`,
+/// clamped to `end`) into a fresh accumulator, reusing this worker's `runner`. Counter keying
+/// (PLAN-PREGPU Track C) makes a chunk just a lane range: positioning the runner at the chunk's
+/// epoch-local start IS the per-chunk isolation — no derived per-chunk seed, and thread-count
+/// invariance is by construction (the draw at lane `i` is a pure function of `(seed, i, source)`).
 fn reduce_chunk<R: Reducer>(
     runner: &mut dyn Runner,
     r: &R,
-    n: usize,
-    chunk: usize,
+    epoch_base: u64,
+    end: u64,
+    chunk: u64,
     seed: u64,
 ) -> R::Acc {
-    let start = chunk * CHUNK_SAMPLES;
-    let len = CHUNK_SAMPLES.min(n - start);
-    // One u32 of lane index caps a forcing at 2^32 draws (documented language boundary;
-    // far above the op budget's practical caps).
-    let lane = u32::try_from(start).expect("forcing exceeds 2^32 lanes");
+    let start = chunk * CHUNK_SAMPLES as u64;
+    let len = (CHUNK_SAMPLES as u64).min(end - start) as usize;
+    // Epoch-local lane (Track E): the driver split the range at 2³² boundaries, so this always fits.
+    let lane = u32::try_from(start - epoch_base).expect("epoch-local lane exceeds 2^32");
     runner.position(seed, lane);
     let cap = runner.batch_cap();
     let mut acc = r.identity();
@@ -86,26 +164,29 @@ fn reduce_chunk<R: Reducer>(
     acc
 }
 
-/// Merge per-chunk accumulators in **chunk-index order**, so the fold is identical regardless of
-/// how chunks were distributed across threads (the determinism guarantee).
-fn combine_in_order<R: Reducer>(r: &R, mut indexed: Vec<(usize, R::Acc)>) -> R::Acc {
+/// Merge per-chunk accumulators into `carry` in **chunk-index order**, so the fold is identical
+/// regardless of how chunks were distributed across threads (the determinism guarantee) — and, for
+/// a resumed range, identical to a single run over the union (the carry is the running left fold).
+/// (Only the parallel drivers need it — the sequential path folds in order by construction.)
+#[cfg(threaded)]
+fn fold_in_order<R: Reducer>(r: &R, mut carry: R::Acc, mut indexed: Vec<(u64, R::Acc)>) -> R::Acc {
     indexed.sort_by_key(|(i, _)| *i);
-    let mut acc = r.identity();
     for (_, a) in indexed {
-        acc = r.merge(acc, a);
+        carry = r.merge(carry, a);
     }
-    acc
+    carry
 }
 
-/// Drive a reduction over `n` draws of `root`. Parallel on native for large `n`, otherwise
-/// sequential — always over the same deterministic chunks, so the result never depends on the
-/// thread count.
-/// **Cancellable** (PLAN-PREGPU Track A): the thread's installed [`CancelToken`]
-/// ([`crate::exec`]) is checked once per chunk — one relaxed load per 16,384 samples, free against
-/// the sampling it guards — and a tripped token aborts with [`NoiseError::cancelled`]. The `Result`
-/// is the load-bearing part: a cancelled reduction has folded only *some* of its chunks, and that
-/// partial answer must never escape as though it were a real estimate. Returning `Err` makes that
-/// structural instead of a rule every caller has to remember.
+/// Drive a reduction over `n` draws of `root` — the fixed-`n` entry point ([`run_reduction_range`]
+/// over `0..n` from a fresh accumulator). Parallel on native for large `n`, otherwise sequential —
+/// always over the same deterministic chunks, so the result never depends on the thread count.
+///
+/// **Cancellable** (PLAN-PREGPU Track A): a tripped hard token aborts with
+/// [`NoiseError::cancelled`] — that partial answer must never escape. **Soft-stoppable**
+/// (PLAN-PRECISION Track H): a tripped soft flag or a passed `max_time` deadline folds the chunks
+/// that completed and returns them — the accumulator's own count is the honest sample size, and
+/// the run-level warning is raised by the engine (which sees the tripped flag). Callers that need
+/// the stop marker itself use [`run_reduction_range`].
 pub fn run_reduction<R: Reducer>(
     graph: &RvGraph,
     root: RvId,
@@ -113,37 +194,102 @@ pub fn run_reduction<R: Reducer>(
     seed: u64,
     r: &R,
 ) -> Result<R::Acc> {
-    if n == 0 {
-        return Ok(r.identity());
-    }
-    // Per-forcing phase timing (NOISE_PROFILE=1, PLAN-DROP-JIT D0). Inert otherwise.
-    let _prof = crate::profile::forcing("run_reduction", n);
-    let n_chunks = n.div_ceil(CHUNK_SAMPLES);
+    Ok(run_reduction_range(graph, root, 0..n as u64, seed, r, r.identity())?.acc)
+}
 
-    // Read the token ONCE here, on the driver thread: `exec`'s thread-local is invisible inside
-    // `thread::scope`/`rayon::scope`, so the `Arc` has to travel to the workers explicitly.
+/// Drive a reduction over the lane range `lanes` of `root`, folding into `carry` — the resumable
+/// entry point (PLAN-PRECISION Track A). `lanes.start` must be chunk-aligned (a multiple of
+/// [`CHUNK_SAMPLES`]); callers extend a previous range by passing its end and the accumulator it
+/// returned. Because chunks are pure lane ranges merged in index order into the running carry, the
+/// staged fold is **bit-identical** to a single run over the union range.
+///
+/// Ranges crossing a 2³² boundary split into epochs (Track E) — consecutive ≤ 2³²-lane reductions
+/// under per-epoch seeds, folded in epoch order.
+pub fn run_reduction_range<R: Reducer>(
+    graph: &RvGraph,
+    root: RvId,
+    lanes: Range<u64>,
+    seed: u64,
+    r: &R,
+    carry: R::Acc,
+) -> Result<Reduced<R::Acc>> {
+    debug_assert_eq!(
+        lanes.start % CHUNK_SAMPLES as u64,
+        0,
+        "range starts must be chunk-aligned"
+    );
+    let mut acc = carry;
+    if lanes.start >= lanes.end {
+        return Ok(Reduced { acc, stopped: None });
+    }
+    // Split at epoch boundaries (Track E). The common (< 2³² lanes) case is a single pass.
+    let (e0, e1) = (lanes.start / EPOCH_LANES, (lanes.end - 1) / EPOCH_LANES);
+    for e in e0..=e1 {
+        let base = e * EPOCH_LANES;
+        let sub = lanes.start.max(base)..lanes.end.min(base + EPOCH_LANES);
+        let out = run_epoch(graph, root, base, sub, epoch_seed(seed, e), r, acc)?;
+        acc = out.acc;
+        if out.stopped.is_some() {
+            return Ok(Reduced { acc, stopped: out.stopped });
+        }
+    }
+    Ok(Reduced { acc, stopped: None })
+}
+
+/// One epoch's reduction: global lanes `sub` (within the epoch starting at `epoch_base`), under
+/// this epoch's `seed`. This is the driver proper — GPU hook, compile-once, thread fan-out.
+fn run_epoch<R: Reducer>(
+    graph: &RvGraph,
+    root: RvId,
+    epoch_base: u64,
+    sub: Range<u64>,
+    seed: u64,
+    r: &R,
+    carry: R::Acc,
+) -> Result<Reduced<R::Acc>> {
+    let n = sub.end - sub.start;
+    // Per-forcing phase timing (NOISE_PROFILE=1, PLAN-DROP-JIT D0). Inert otherwise.
+    let _prof = crate::profile::forcing("run_reduction", usize::try_from(n).unwrap_or(usize::MAX));
+    let (c0, c1) = (
+        sub.start / CHUNK_SAMPLES as u64,
+        sub.end.div_ceil(CHUNK_SAMPLES as u64),
+    );
+
+    // Read token + deadline ONCE here, on the driver thread: `exec`'s thread-locals are invisible
+    // inside `thread::scope`/`rayon::scope`, so both have to travel to the workers explicitly.
     let token = crate::exec::current();
+    let deadline = crate::exec::deadline();
     // Cancelled before we even start (a host that aborted during parse/eval): don't compile.
     if is_cancelled(&token) {
         return Err(NoiseError::cancelled());
     }
-
-    // The GPU takes the WHOLE forcing or none of it (PLAN-WEBGPU G2). It hooks here rather than at
-    // `Runner` because a dispatch wants >=256k lanes to be worth its ~1.2ms fixed cost, where a
-    // `Runner` pulls 1024 at a time. A decline (no adapter, a cone it can't lower, or a gate saying
-    // the CPU finishes first) simply falls through to the code below, so this can only change speed.
-    #[cfg(feature = "gpu")]
-    if let Some(acc) = crate::gpu::try_reduce(graph, root, n, seed, r, token.as_ref())? {
-        return Ok(acc); // `try_reduce` records the run stats itself, off the SIMPLIFIED cone
+    // Already soft-stopped (a deadline passed between statements): don't draw either.
+    if let Some(cause) = crate::exec::stop_cause_of(token.as_ref(), deadline) {
+        return Ok(Reduced { acc: carry, stopped: Some(cause) });
     }
+
+    // The GPU takes the WHOLE epoch range or none of it (PLAN-WEBGPU G2). It hooks here rather than
+    // at `Runner` because a dispatch wants >=256k lanes to be worth its ~1.2ms fixed cost, where a
+    // `Runner` pulls 1024 at a time. A decline (no adapter, a cone it can't lower, or a gate saying
+    // the CPU finishes first) hands the carry back and falls through to the code below, so this can
+    // only change speed.
+    #[cfg(feature = "gpu")]
+    let carry = {
+        let local = (sub.start - epoch_base)..(sub.end - epoch_base);
+        match crate::gpu::try_reduce(graph, root, local, seed, r, token.as_ref(), deadline, carry)? {
+            // `try_reduce` records the run stats itself, off the SIMPLIFIED cone.
+            crate::gpu::GpuReduce::Done(out) => return Ok(out),
+            crate::gpu::GpuReduce::Declined(c) => c,
+        }
+    };
 
     // Compile ONCE; the resulting program is shared (by reference) across all workers. Record the
     // run-time counters here on the driver thread (before fan-out) so workers stay lock-free.
     let (program, cost) = {
         let _s = crate::profile::span("compile");
-        compile_root(graph, root, n)
+        compile_root(graph, root, usize::try_from(n).unwrap_or(usize::MAX))
     };
-    crate::stats::record(n, cost.ops, cost.sources);
+    crate::stats::record(usize::try_from(n).unwrap_or(usize::MAX), cost.ops, cost.sources);
     crate::profile::set_ops(cost.ops);
     crate::profile::note("backend=cpu (gpu declined or absent)");
     let _reduce = crate::profile::span("reduce");
@@ -154,22 +300,39 @@ pub fn run_reduction<R: Reducer>(
 
     #[cfg(threaded)]
     {
-        let threads = chosen_threads(n, n_chunks);
+        let threads = chosen_threads(n, c1 - c0);
         if threads > 1 {
-            return run_parallel(&*program, n, seed, r, n_chunks, threads, token.as_ref(), inputs);
+            return run_parallel(
+                &*program,
+                epoch_base,
+                sub.end,
+                seed,
+                r,
+                c0..c1,
+                threads,
+                token.as_ref(),
+                deadline,
+                inputs,
+                carry,
+            );
         }
     }
 
     // Sequential: one runner, every chunk in order.
     let mut runner = program.runner(inputs);
-    let mut indexed: Vec<(usize, R::Acc)> = Vec::with_capacity(n_chunks);
-    for i in 0..n_chunks {
+    let mut acc = carry;
+    let mut stopped = None;
+    for i in c0..c1 {
         if is_cancelled(&token) {
             return Err(NoiseError::cancelled());
         }
-        indexed.push((i, reduce_chunk(&mut *runner, r, n, i, seed)));
+        if let Some(cause) = crate::exec::stop_cause_of(token.as_ref(), deadline) {
+            stopped = Some(cause);
+            break;
+        }
+        acc = r.merge(acc, reduce_chunk(&mut *runner, r, epoch_base, sub.end, i, seed));
     }
-    Ok(combine_in_order(r, indexed))
+    Ok(Reduced { acc, stopped })
 }
 
 /// One relaxed load — the whole per-chunk cancellation cost.
@@ -181,7 +344,7 @@ fn is_cancelled(token: &Option<CancelToken>) -> bool {
 /// Worker count: clamp available cores to the chunk count, and stay single-threaded below the
 /// parallel threshold. Only the *speed* depends on this — never the result.
 #[cfg(threaded)]
-fn chosen_threads(n: usize, n_chunks: usize) -> usize {
+fn chosen_threads(n: u64, n_chunks: u64) -> usize {
     if n < PAR_MIN_SAMPLES || n_chunks < 2 {
         return 1;
     }
@@ -193,36 +356,40 @@ fn chosen_threads(n: usize, n_chunks: usize) -> usize {
     // is the only way to know, since `available_parallelism` is meaningless inside a worker.
     #[cfg(target_arch = "wasm32")]
     let cores = rayon::current_num_threads().max(1);
-    cores.min(n_chunks)
+    cores.min(usize::try_from(n_chunks).unwrap_or(usize::MAX))
 }
 
 /// Native parallel driver: the already-compiled `program` is shared by reference; each worker
 /// spins up a cheap [`Runner`] (no recompile) and steals chunks via an atomic counter. Per-chunk
-/// accumulators are collected and merged in index order.
+/// accumulators are collected and merged in index order into the carry.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 fn run_parallel<R: Reducer>(
     program: &dyn Program,
-    n: usize,
+    epoch_base: u64,
+    end: u64,
     seed: u64,
     r: &R,
-    n_chunks: usize,
+    chunks: Range<u64>,
     threads: usize,
     token: Option<&CancelToken>,
+    deadline: Option<Instant>,
     inputs: std::sync::Arc<[f64]>,
-) -> Result<R::Acc> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let next = AtomicUsize::new(0);
+    carry: R::Acc,
+) -> Result<Reduced<R::Acc>> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let next = AtomicU64::new(chunks.start);
     // Borrow the shared work counter so each `move` worker closure captures the reference (Copy),
     // not the counter itself (the `inputs` clone is what each worker moves).
     let next = &next;
-    let per_thread: Vec<Vec<(usize, R::Acc)>> = std::thread::scope(|scope| {
+    let per_thread: Vec<Vec<(u64, R::Acc)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
                 let inputs = inputs.clone();
                 scope.spawn(move || {
                     // Cheap per-worker runner (scratch + RNG) over the SHARED compiled program.
                     let mut runner = program.runner(inputs);
-                    let mut local: Vec<(usize, R::Acc)> = Vec::new();
+                    let mut local: Vec<(u64, R::Acc)> = Vec::new();
                     loop {
                         // Every worker drops out on cancel, so the scope joins promptly instead of
                         // finishing the whole chunk list. The claimed-but-unrun chunks simply never
@@ -230,11 +397,16 @@ fn run_parallel<R: Reducer>(
                         if token.is_some_and(CancelToken::is_cancelled) {
                             break;
                         }
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        if i >= n_chunks {
+                        // Soft stop / deadline (Track H): stop CLAIMING chunks; everything already
+                        // folded is kept. One flag load + (rarely) one clock read per 16,384 samples.
+                        if crate::exec::stop_cause_of(token, deadline).is_some() {
                             break;
                         }
-                        local.push((i, reduce_chunk(&mut *runner, r, n, i, seed)));
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= chunks.end {
+                            break;
+                        }
+                        local.push((i, reduce_chunk(&mut *runner, r, epoch_base, end, i, seed)));
                     }
                     local
                 })
@@ -245,12 +417,16 @@ fn run_parallel<R: Reducer>(
             .map(|h| h.join().expect("reduction worker panicked"))
             .collect()
     });
-    // Checked AFTER the join, not inside it: a worker that saw the flag left its chunks unfolded,
-    // so the collected set is partial and must not be combined into an answer.
+    // Checked AFTER the join, not inside it: a worker that saw the hard flag left its chunks
+    // unfolded, so the collected set is partial and must not be combined into an answer.
     if token.is_some_and(CancelToken::is_cancelled) {
         return Err(NoiseError::cancelled());
     }
-    Ok(combine_in_order(r, per_thread.into_iter().flatten().collect()))
+    let stopped = crate::exec::stop_cause_of(token, deadline);
+    Ok(Reduced {
+        acc: fold_in_order(r, carry, per_thread.into_iter().flatten().collect()),
+        stopped,
+    })
 }
 
 /// Browser parallel driver (`wasm-threads`): the same work-stealing shape as the native one, run on
@@ -263,23 +439,27 @@ fn run_parallel<R: Reducer>(
 /// wasm `Runner` instantiates the emitted kernel in its own worker's JS registry
 /// (see [`crate::wasm_host`]), so a per-chunk runner would re-instantiate per chunk.
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+#[allow(clippy::too_many_arguments)]
 fn run_parallel<R: Reducer>(
     program: &dyn Program,
-    n: usize,
+    epoch_base: u64,
+    end: u64,
     seed: u64,
     r: &R,
-    n_chunks: usize,
+    chunks: Range<u64>,
     threads: usize,
     token: Option<&CancelToken>,
+    deadline: Option<Instant>,
     inputs: std::sync::Arc<[f64]>,
-) -> Result<R::Acc> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    carry: R::Acc,
+) -> Result<Reduced<R::Acc>> {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
-    let next = AtomicUsize::new(0);
+    let next = AtomicU64::new(chunks.start);
     // `rayon::scope`'s spawns return `()`, so workers deposit their local runs here. Contended only
     // once per worker (at the end), not per chunk.
-    let collected: Mutex<Vec<(usize, R::Acc)>> = Mutex::new(Vec::with_capacity(n_chunks));
+    let collected: Mutex<Vec<(u64, R::Acc)>> = Mutex::new(Vec::new());
     // Borrow the shared counter/sink so each `move` worker captures references (the per-worker
     // `inputs` clone is what it moves).
     let (next, collected) = (&next, &collected);
@@ -290,16 +470,19 @@ fn run_parallel<R: Reducer>(
             scope.spawn(move |_| {
                 // Cheap per-worker runner (scratch + RNG) over the SHARED compiled program.
                 let mut runner = program.runner(inputs);
-                let mut local: Vec<(usize, R::Acc)> = Vec::new();
+                let mut local: Vec<(u64, R::Acc)> = Vec::new();
                 loop {
                     if token.is_some_and(CancelToken::is_cancelled) {
                         break;
                     }
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= n_chunks {
+                    if crate::exec::stop_cause_of(token, deadline).is_some() {
                         break;
                     }
-                    local.push((i, reduce_chunk(&mut *runner, r, n, i, seed)));
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= chunks.end {
+                        break;
+                    }
+                    local.push((i, reduce_chunk(&mut *runner, r, epoch_base, end, i, seed)));
                 }
                 collected.lock().expect("reduction mutex poisoned").append(&mut local);
             });
@@ -309,14 +492,18 @@ fn run_parallel<R: Reducer>(
     if token.is_some_and(CancelToken::is_cancelled) {
         return Err(NoiseError::cancelled());
     }
-    // Chunks come back in completion order; `combine_in_order` sorts by index, which is what makes
+    let stopped = crate::exec::stop_cause_of(token, deadline);
+    // Chunks come back in completion order; `fold_in_order` sorts by index, which is what makes
     // the answer identical to the sequential run bit for bit.
     // `collected` is a shared `&Mutex` here (reborrowed above so the `move` workers capture it by
     // reference), so take the Vec out through the lock rather than consuming the Mutex. Bind it to a
     // local first so the `MutexGuard` temporary drops here, not at the end of the block (where it
     // would outlive the owned `collected` — E0597).
     let runs = std::mem::take(&mut *collected.lock().expect("reduction mutex poisoned"));
-    Ok(combine_in_order(r, runs))
+    Ok(Reduced {
+        acc: fold_in_order(r, carry, runs),
+        stopped,
+    })
 }
 
 // --- the moments reducer (mean + population variance), powering P / E / Var ---
@@ -341,7 +528,8 @@ pub struct MomentAcc {
 
 impl MomentAcc {
     /// Number of draws folded in. For the conditional reducer this is the *in-condition* count
-    /// `m ≈ n·P(C)` — the effective sample size a conditional estimate's standard error uses.
+    /// `m ≈ n·P(C)` — the effective sample size a conditional estimate's standard error uses. For a
+    /// soft-stopped run it is the true folded count — what makes the reported se honest (Track H).
     pub fn count(&self) -> u64 {
         self.count
     }
@@ -422,6 +610,16 @@ impl Reducer for MomentsReducer {
             sum_sq: a.sum_sq + b.sum_sq,
         }
     }
+
+    fn moments_mode(&self) -> Option<MomentsMode> {
+        Some(MomentsMode::All)
+    }
+
+    fn absorb_moments(&self, acc: &mut MomentAcc, count: u64, sum: f64, sum_sq: f64) {
+        acc.count += count;
+        acc.sum += sum;
+        acc.sum_sq += sum_sq;
+    }
 }
 
 /// Like [`MomentsReducer`], but lanes whose draw is **NaN are skipped** rather than folded. This is
@@ -468,6 +666,16 @@ impl Reducer for CondMomentsReducer {
             sum: a.sum + b.sum,
             sum_sq: a.sum_sq + b.sum_sq,
         }
+    }
+
+    fn moments_mode(&self) -> Option<MomentsMode> {
+        Some(MomentsMode::SkipNan)
+    }
+
+    fn absorb_moments(&self, acc: &mut MomentAcc, count: u64, sum: f64, sum_sq: f64) {
+        acc.count += count;
+        acc.sum += sum;
+        acc.sum_sq += sum_sq;
     }
 }
 
@@ -540,6 +748,32 @@ mod tests {
         (eng, id)
     }
 
+    /// Drive the parallel driver over `0..n` from a fresh accumulator (the old test surface).
+    fn par<R: Reducer>(
+        program: &dyn Program,
+        n: usize,
+        seed: u64,
+        r: &R,
+        threads: usize,
+    ) -> R::Acc {
+        let n_chunks = (n as u64).div_ceil(CHUNK_SAMPLES as u64);
+        run_parallel(
+            program,
+            0,
+            n as u64,
+            seed,
+            r,
+            0..n_chunks,
+            threads,
+            None,
+            None,
+            std::sync::Arc::from(&[] as &[f64]),
+            r.identity(),
+        )
+        .unwrap()
+        .acc
+    }
+
     /// The determinism guarantee: the reduced moments are **bit-for-bit identical** for any thread
     /// count, because chunks are fixed-seeded and merged in chunk-index order. This is the property
     /// that makes the answer independent of the machine's core count.
@@ -548,18 +782,13 @@ mod tests {
         let (eng, id) = pi_graph();
         let g = eng.graph();
         let (n, seed) = (500_000usize, 12_345u64);
-        let n_chunks = n.div_ceil(CHUNK_SAMPLES);
         let r = MomentsReducer;
 
         // Compile once, share the program across all the thread-count variations.
         let (program, _cost) = compile_root(g, id, n);
-        let base = run_parallel(&*program, n, seed, &r, n_chunks, 1, None, std::sync::Arc::from(&[] as &[f64]))
-            .unwrap()
-            .into_moments();
+        let base = par(&*program, n, seed, &r, 1).into_moments();
         for t in [2usize, 3, 5, 8] {
-            let m = run_parallel(&*program, n, seed, &r, n_chunks, t, None, std::sync::Arc::from(&[] as &[f64]))
-                .unwrap()
-                .into_moments();
+            let m = par(&*program, n, seed, &r, t).into_moments();
             assert_eq!(
                 m.mean.to_bits(),
                 base.mean.to_bits(),
@@ -577,6 +806,111 @@ mod tests {
             "mean = {}",
             base.mean
         );
+    }
+
+    /// The Track A invariant everything hangs off: a reduction over `0..n₁` extended by `n₁..n₂`
+    /// (through the carried accumulator) is **bit-identical** to the single run over `0..n₂` — on
+    /// the public driver, at stage boundaries that are and are not thread-count-parallel.
+    #[test]
+    fn staged_range_reduction_is_bit_identical_to_single_run() {
+        let (eng, id) = pi_graph();
+        let g = eng.graph();
+        let (n1, n2, seed) = (65_536u64, 500_000u64, 7u64);
+        let r = MomentsReducer;
+
+        let single = run_reduction(g, id, n2 as usize, seed, &r).unwrap();
+
+        let stage1 = run_reduction_range(g, id, 0..n1, seed, &r, r.identity()).unwrap();
+        assert!(stage1.stopped.is_none());
+        let stage2 = run_reduction_range(g, id, n1..n2, seed, &r, stage1.acc).unwrap();
+        assert!(stage2.stopped.is_none());
+        let staged = stage2.acc;
+
+        assert_eq!(staged.count(), single.count());
+        assert_eq!(staged.sum.to_bits(), single.sum.to_bits());
+        assert_eq!(staged.sum_sq.to_bits(), single.sum_sq.to_bits());
+    }
+
+    /// Epoch seeds: epoch 0 must keep the raw seed (every existing stream unchanged); later epochs
+    /// must differ from it and from each other (independent streams).
+    #[test]
+    fn epoch_seeds_are_stable_and_distinct() {
+        assert_eq!(epoch_seed(42, 0), 42);
+        let e1 = epoch_seed(42, 1);
+        let e2 = epoch_seed(42, 2);
+        assert_ne!(e1, 42);
+        assert_ne!(e1, e2);
+        // Deterministic: same inputs, same seed.
+        assert_eq!(e1, epoch_seed(42, 1));
+    }
+
+    /// Track E: a range crossing the 2³² lane boundary — where the old driver panicked — runs as
+    /// two epochs, folds the full requested count, and a staged split at the boundary is
+    /// bit-identical to the single crossing run. Epoch 1 must also actually draw a *different*
+    /// stream than epoch 0's opening lanes (the derived seed at work).
+    #[test]
+    fn ranges_across_the_epoch_boundary_fold_and_stage_identically() {
+        let (eng, id) = pi_graph();
+        let g = eng.graph();
+        let r = MomentsReducer;
+        let seed = 5u64;
+        let lo = EPOCH_LANES - 2 * CHUNK_SAMPLES as u64;
+        let hi = EPOCH_LANES + 2 * CHUNK_SAMPLES as u64;
+
+        let single = run_reduction_range(g, id, lo..hi, seed, &r, r.identity()).unwrap();
+        assert!(single.stopped.is_none());
+        assert_eq!(single.acc.count(), hi - lo);
+
+        let stage1 = run_reduction_range(g, id, lo..EPOCH_LANES, seed, &r, r.identity()).unwrap();
+        let stage2 = run_reduction_range(g, id, EPOCH_LANES..hi, seed, &r, stage1.acc).unwrap();
+        assert_eq!(stage2.acc.count(), single.acc.count());
+        assert_eq!(stage2.acc.sum.to_bits(), single.acc.sum.to_bits());
+        assert_eq!(stage2.acc.sum_sq.to_bits(), single.acc.sum_sq.to_bits());
+
+        // Epoch 1's lanes 0.. are NOT epoch 0's lanes 0.. — the derived per-epoch seed gives an
+        // independent stream, not a replay.
+        let n = 2 * CHUNK_SAMPLES as u64;
+        let epoch0 = run_reduction_range(g, id, 0..n, seed, &r, r.identity()).unwrap();
+        let epoch1 = run_reduction_range(g, id, EPOCH_LANES..EPOCH_LANES + n, seed, &r, r.identity())
+            .unwrap();
+        assert_ne!(
+            epoch0.acc.sum.to_bits(),
+            epoch1.acc.sum.to_bits(),
+            "epoch 1 must draw an independent stream"
+        );
+    }
+
+    /// A soft-stopped reduction folds what completed and reports the cause — and the accumulator's
+    /// count is the true folded count (what makes the downstream se honest, Track H).
+    #[test]
+    fn soft_stop_returns_partial_fold_with_true_count() {
+        let (eng, id) = pi_graph();
+        let g = eng.graph();
+        let token = crate::exec::CancelToken::new();
+        token.stop();
+        let _g = crate::exec::install(&token);
+        let r = MomentsReducer;
+        let out = run_reduction_range(g, id, 0..1_000_000, 3, &r, r.identity()).unwrap();
+        assert_eq!(out.stopped, Some(StopCause::User));
+        // Stopped before the first chunk was claimed: zero draws, honestly reported.
+        assert_eq!(out.acc.count(), 0);
+    }
+
+    /// A passed deadline soft-stops the reduction with `StopCause::Time` and keeps the completed
+    /// chunks (here: none, since the deadline is already past when the run starts).
+    #[test]
+    fn deadline_soft_stops_with_time_cause() {
+        let (eng, id) = pi_graph();
+        let g = eng.graph();
+        let token = crate::exec::CancelToken::new();
+        let _g = crate::exec::install(&token);
+        let _d = crate::exec::install_deadline(Some(
+            Instant::now() - std::time::Duration::from_millis(1),
+        ));
+        let r = MomentsReducer;
+        let out = run_reduction_range(g, id, 0..1_000_000, 3, &r, r.identity()).unwrap();
+        assert_eq!(out.stopped, Some(StopCause::Time));
+        assert_eq!(out.acc.count(), 0);
     }
 
     /// Same-process A/B of the new Σx/Σx² absorb vs the old streaming-Welford absorb over an
@@ -645,14 +979,13 @@ mod tests {
         let (eng, id) = pi_graph();
         let g = eng.graph();
         let (n, seed) = (500_000usize, 9_876u64);
-        let n_chunks = n.div_ceil(CHUNK_SAMPLES);
         let r = CollectReducer { skip_nan: false };
 
         let (program, _cost) = compile_root(g, id, n);
-        let base = run_parallel(&*program, n, seed, &r, n_chunks, 1, None, std::sync::Arc::from(&[] as &[f64])).unwrap();
+        let base = par(&*program, n, seed, &r, 1);
         assert_eq!(base.len(), n);
         for t in [2usize, 3, 5, 8] {
-            let v = run_parallel(&*program, n, seed, &r, n_chunks, t, None, std::sync::Arc::from(&[] as &[f64])).unwrap();
+            let v = par(&*program, n, seed, &r, t);
             assert!(
                 v.len() == n && v.iter().zip(&base).all(|(a, b)| a.to_bits() == b.to_bits()),
                 "collected draws differ at {t} threads"
@@ -725,14 +1058,13 @@ mod tests {
         let g = eng.graph();
         let n = 64_000_000usize; // big enough that per-call thread spawn is negligible
         let seed = 0xC0FFEE;
-        let n_chunks = n.div_ceil(CHUNK_SAMPLES);
         let r = MomentsReducer;
         let (program, _cost) = compile_root(g, id, n); // compile ONCE, shared across thread counts
 
         let drive = |threads: usize| {
-            let _ = run_parallel(&*program, n, seed, &r, n_chunks, threads, None, std::sync::Arc::from(&[] as &[f64])); // warm up
+            let _ = par(&*program, n, seed, &r, threads); // warm up
             let t = Instant::now();
-            let m = run_parallel(&*program, n, seed, &r, n_chunks, threads, None, std::sync::Arc::from(&[] as &[f64])).unwrap();
+            let m = par(&*program, n, seed, &r, threads);
             std::hint::black_box(m);
             n as f64 / t.elapsed().as_secs_f64() / 1e6
         };

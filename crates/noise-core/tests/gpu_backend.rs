@@ -166,6 +166,50 @@ fn the_answer_does_not_depend_on_the_dispatch_split() {
 }
 
 
+/// Track F gate calibration: forced-GPU reduce-mode timings for a THIN cone (pi, ~7 ops/draw) across
+/// n — the numbers `MIN_WORK_GPU_REDUCE` is set from, paired with the CPU half in
+/// `tests/probability.rs` (`bench_thin_cone_cpu`, run WITHOUT `--features gpu`). Ignored; run with:
+/// `cargo test -p noise-core --features gpu --release --test gpu_backend -- --ignored --nocapture bench_thin_cone_gpu`
+#[test]
+#[ignore]
+fn bench_thin_cone_gpu() {
+    force();
+    for n in [1u64 << 20, 1 << 22, 1 << 24, 1 << 26, 1 << 28] {
+        let src = format!("use rand; X ~ unif(-1,1); Y ~ unif(-1,1); 4 * P(X^2 + Y^2 < 1, {n})");
+        let _ = Engine::new().run(&src).unwrap(); // warm: pipeline + caches
+        let t = std::time::Instant::now();
+        let v = Engine::new().run(&src).unwrap();
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        let Value::Est { val, .. } = v else { panic!() };
+        println!("  gpu n={n:>11}  {ms:8.1} ms  ({:.0} M draws/s)  pi={val:.4}", n as f64 / ms / 1e3);
+    }
+}
+
+/// PLAN-PRECISION validation 1, GPU leg: a precision-targeted query that stops at n* must be
+/// **bit-identical** to the fixed-count query at n* — the staged fold walks exactly the chunks the
+/// single run would, even when the stages are GPU dispatches (and the pilot may not be).
+#[test]
+fn adaptive_precision_is_bit_identical_to_fixed_on_the_gpu() {
+    force();
+    let mut eng = Engine::new();
+    let v = eng
+        .run("use rand; X ~ unif(0,1); P(X < 0.5, 0.002)")
+        .expect("adaptive run");
+    let Value::Est { val: a, se: sa } = v else {
+        panic!("expected an estimate")
+    };
+    // The stats counter records exactly the lanes swept across all stages — the final n*.
+    let n = eng.stats().samples;
+    let v2 = Engine::new()
+        .run(&format!("use rand; X ~ unif(0,1); P(X < 0.5, {n})"))
+        .expect("fixed run");
+    let Value::Est { val: b, se: sb } = v2 else {
+        panic!("expected an estimate")
+    };
+    assert_eq!(a.to_bits(), b.to_bits(), "estimate must match bit-for-bit");
+    assert_eq!(sa.to_bits(), sb.to_bits(), "se must match bit-for-bit");
+}
+
 /// **G4c: a rolled loop on the GPU** — prisoners' pointer-chase, the whole reason the Scan IR exists.
 /// The loop rolls to a WGSL `for`, and its answer must still be the interpreter's (analytic 0.3118).
 #[test]

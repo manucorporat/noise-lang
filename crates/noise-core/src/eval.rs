@@ -76,8 +76,8 @@ const MAX_DRAW_ELEMS: usize = 1 << 20;
 /// browser playground's introspection sidecar runs a program, then issues follow-up
 /// `describe`/`corr` queries against the *retained* scope of that run (the same graph and roots), so
 /// the results are consistent with what the program computed. Call [`Engine::new`] for a fresh,
-/// empty engine; drain buffered output with [`Engine::take_output`]. Program-tunable budgets
-/// (`engine::set_max_samples` / `set_max_opts` / `set_resolution`) are stored here too and likewise
+/// empty engine; drain buffered output with [`Engine::take_output`]. Program-tunable settings
+/// (`engine::set_precision` / `set_resolution`) are stored here too and likewise
 /// persist for the engine's lifetime.
 /// State of an in-progress shaped draw `~[n, …] recipe` — what turns `leaves` independent
 /// [`RvNode::Src`] nodes into ONE [`RvNode::ArrDraw`] block plus `leaves` cheap
@@ -139,16 +139,27 @@ pub struct Engine {
     /// Emissions dropped after the [`MAX_EMISSIONS`] cap, and the first dropped statement's span.
     dropped: usize,
     first_dropped_span: Option<Span>,
-    /// Default Monte Carlo budget for `P`/`E`/`Var`/`Q` when a call carries no explicit sample
-    /// count. Starts at [`builtins::P_DEFAULT_N`]; a program tunes it for the whole run with
-    /// `engine::set_max_samples(N)`. An explicit per-call count (`P(event, n)`) still wins over this.
-    max_samples: usize,
-    /// Per-query operation budget (`engine::set_max_opts(N)`; `0` = unlimited). A forcing over a
-    /// cone of `C` distinct nodes costs `n×C` per-lane ops, so each `P`/`E`/`Var`/`Q` query
-    /// auto-clamps its draw count to `N/C` (never below 1). Bounds each query's work so a program's
-    /// worst-case complexity stays deterministic regardless of cone size — without ever erroring.
-    /// Defaults to [`builtins::MAX_OPS_DEFAULT`] (a built-in safety ceiling), not unlimited.
-    max_opts: u64,
+    /// Document-wide **precision target** `(rel, abs)` (PLAN-PRECISION): an untargeted
+    /// `P`/`E`/`Var` keeps drawing until `se ≤ max(abs, rel·|est|)`, bounded by `max_time`.
+    /// `None` = the auto default (Phase 2: `se ≤ 5e-3·max(|est|, sd)` —
+    /// [`crate::sampler::DrawBudget::Auto`]). Declared by the `engine::set_precision` pragma; a host
+    /// override ([`Engine::set_precision`]) pins it (a pragma no longer changes the effective
+    /// value — "pragmas declare, `run()` overrides").
+    precision: Option<(f64, f64)>,
+    /// The run's wall-clock ceiling (PLAN-PRECISION): past it, the in-flight query soft-stops
+    /// (honest partial estimate + warning) and the remaining forcings are skipped. Runtime-only —
+    /// deliberately **no pragma** (a `max_time` in program text would make a program's digits
+    /// machine-dependent while looking like part of the question). `None` = no deadline.
+    max_time: Option<std::time::Duration>,
+    /// Which settings a host override has **pinned** (PLAN-PRECISION "pragmas declare, `run()`
+    /// overrides"): a pragma assignment to a pinned setting is evaluated but doesn't change the
+    /// effective value (a `NOISE_PROFILE=1` note records the shadowing).
+    pinned_precision: bool,
+    pinned_resolution: bool,
+    /// The run's **warnings** (PLAN-PRECISION Track C): capped queries ("max_time stopped it short
+    /// of the target"), soft-stopped runs. In a `RefCell` so the immutable `QueryCtx` can push
+    /// from inside a builtin dispatch. Drained into `DocResult.warnings` per run.
+    warnings: std::cell::RefCell<Vec<builtins::Warning>>,
     /// Validate-only mode (set by [`Engine::check`]). When on, the sampling estimators
     /// (`P`/`E`/`Var`/`Q`) skip their Monte Carlo loop and return a neutral placeholder — the
     /// program is still parsed, evaluated, and graph-built (so type/shape/scope errors surface),
@@ -164,7 +175,7 @@ pub struct Engine {
     next_realization: usize,
     /// Ambient **sampling resolution** (`engine::set_resolution(N)`, default
     /// [`builtins::RESOLUTION_DEFAULT`]): the length at which reducers render a lazy signal that
-    /// never met an explicit length — the time-axis twin of `max_samples`.
+    /// never met an explicit length — the time-axis measurement knob.
     resolution: usize,
     /// Constant data arrays interned by the bootstrap constructors (`rand::empirical` /
     /// `rand::block_bootstrap`), referenced by [`DataId`] so the recipes stay `Copy`.
@@ -282,8 +293,11 @@ impl Engine {
             current_stmt_span: Span::new(0, 0),
             dropped: 0,
             first_dropped_span: None,
-            max_samples: builtins::P_DEFAULT_N,
-            max_opts: builtins::MAX_OPS_DEFAULT,
+            precision: None,
+            max_time: None,
+            pinned_precision: false,
+            pinned_resolution: false,
+            warnings: std::cell::RefCell::new(Vec::new()),
             check_mode: false,
             realizations: HashMap::new(),
             next_realization: 0,
@@ -310,16 +324,49 @@ impl Engine {
     }
 
     /// Bundle the current engine knobs into a [`builtins::QueryCtx`] for a builtin/query dispatch at
-    /// `span` (finding F6). One place threads `graph`/`max_samples`/`max_opts`/`check_mode`, so the
+    /// `span` (finding F6). One place threads `graph`/`precision`/`check_mode`, so the
     /// dispatch call sites don't repeat the knob list.
     pub(crate) fn query_ctx(&self, span: Span) -> builtins::QueryCtx<'_> {
         builtins::QueryCtx {
             graph: &self.graph,
-            default_n: self.max_samples,
-            max_opts: self.max_opts,
+            precision: self.precision,
             check: self.check_mode,
             span,
+            warnings: &self.warnings,
         }
+    }
+
+    /// Host override: the **precision target** `(rel, abs)` — keep drawing until
+    /// `se ≤ max(abs, rel·|est|)` (PLAN-PRECISION). `None` turns targeting off. Pins the setting
+    /// over any `engine::set_precision` pragma in the program.
+    pub fn set_precision(&mut self, target: Option<(f64, f64)>) {
+        self.precision = target;
+        self.pinned_precision = true;
+    }
+
+    /// Host override: the run's wall-clock ceiling (**`max_time`**, PLAN-PRECISION). Past the
+    /// deadline the in-flight query soft-stops — partial results with honest se plus a warning —
+    /// and the remaining forcings are skipped. `None` = no deadline. Runtime-only by design (no
+    /// pragma twin: a deadline in program text would make a program's digits machine-dependent).
+    pub fn set_max_time(&mut self, limit: Option<std::time::Duration>) {
+        self.max_time = limit;
+    }
+
+    /// Host override: the ambient **sampling resolution** (the length reducers render a lazy
+    /// signal at when it never met an explicit length). Pins the setting over the program's
+    /// `engine::set_resolution` pragma.
+    pub fn set_resolution(&mut self, n: usize) {
+        self.resolution = n.max(1);
+        self.pinned_resolution = true;
+    }
+
+    /// Ask the running program to **soft-stop** (PLAN-PRECISION Track H): the in-flight forcing
+    /// folds the chunks that completed and returns an honest partial estimate, the remaining
+    /// forcings are skipped, and the run returns a complete document with a "stopped early"
+    /// warning. The counterpart of [`Engine::cancel`] (hard abort, everything discarded). Callable
+    /// from any thread via a clone of [`Engine::cancel_token`].
+    pub fn stop(&self) {
+        self.cancel.stop();
     }
 
     /// Set the host **input overrides** for the next run (PLAN-INPUTS §5): `name -> value`, applied
@@ -478,6 +525,15 @@ impl Engine {
         let _cache = crate::compile_cache::install(&self.compile_cache);
         let _cancel = crate::exec::install(&self.cancel);
         let _inputs = crate::input_rt::install(&self.inputs);
+        // The soft-stop flag and the deadline are per-run (PLAN-PRECISION): a fresh run starts
+        // unstopped, and `max_time` counts from here.
+        self.cancel.reset_stop();
+        crate::exec::reset_host_stop();
+        self.warnings.borrow_mut().clear();
+        let _deadline = crate::exec::install_deadline(
+            self.max_time
+                .map(|d| web_time::Instant::now() + d),
+        );
         self.stats.set(crate::stats::RunStats::default());
         self.dropped = 0;
         self.first_dropped_span = None;
@@ -493,6 +549,13 @@ impl Engine {
                 return Err(NoiseError::cancelled());
             }
             last = self.eval_top(stmt)?;
+            // Soft-stop boundary (Track H): a stopped/deadlined run keeps the values computed so
+            // far (the in-flight query already returned its honest partial estimate) and skips the
+            // remaining statements, returning a complete result plus a warning.
+            if let Some(cause) = crate::exec::stop_cause() {
+                self.warn_stopped_early(cause, stmt.span);
+                break;
+            }
         }
         self.check_input_overrides()?;
         // A program whose result is a bare tunable input (`sides = input::real(…); sides`) evaluates
@@ -500,6 +563,30 @@ impl Engine {
         // values are still installed (PLAN-UNIFORM-INPUTS). Intermediate `Sym`s stay symbolic — only
         // the returned value is concretized.
         Ok(self.realize_result(last))
+    }
+
+    /// Record the run-level "stopped early" warning (Track H): which rung stopped it, at which
+    /// statement. Complements (never replaces) a capped query's own warning: that one says what the
+    /// in-flight estimate got, this one says the rest of the program was skipped.
+    fn warn_stopped_early(&self, cause: crate::exec::StopCause, span: Span) {
+        let what = match cause {
+            crate::exec::StopCause::User => "stop()",
+            crate::exec::StopCause::Time => "max_time",
+        };
+        self.warnings.borrow_mut().push(builtins::Warning {
+            message: format!(
+                "run stopped early by {what} — statements after this one were skipped; values \
+                 computed so far are reported with their honest standard errors"
+            ),
+            span,
+        });
+    }
+
+    /// The warnings the most recent run raised (PLAN-PRECISION Track C): capped queries, an early
+    /// stop. Message text only; `run_to_document` also renders them with line numbers into
+    /// `DocResult.warnings`.
+    pub fn warnings(&self) -> Vec<String> {
+        self.warnings.borrow().iter().map(|w| w.message.clone()).collect()
     }
 
     /// Concretize a top-level `Value::Sym` to its current `Value::Num` (folded against the installed
@@ -569,6 +656,14 @@ impl Engine {
         let _cache = crate::compile_cache::install(&self.compile_cache);
         let _cancel = crate::exec::install(&self.cancel);
         let _inputs = crate::input_rt::install(&self.inputs);
+        // Per-run soft-stop + deadline (PLAN-PRECISION; see `run`).
+        self.cancel.reset_stop();
+        crate::exec::reset_host_stop();
+        self.warnings.borrow_mut().clear();
+        let _deadline = crate::exec::install_deadline(
+            self.max_time
+                .map(|d| web_time::Instant::now() + d),
+        );
         // Profiling is opt-in (`set_profiling`): only then do we reset + install the accumulator,
         // which is what turns per-phase timing on for this run. Off → the guard is `None` and every
         // `profile::span` stays inert.
@@ -613,6 +708,12 @@ impl Engine {
                     break;
                 }
             }
+            // Soft-stop boundary (Track H): keep everything computed so far, skip the rest, and
+            // return a COMPLETE document (values + honest se + the "stopped early" warning).
+            if let Some(cause) = crate::exec::stop_cause() {
+                self.warn_stopped_early(cause, stmt.span);
+                break;
+            }
         }
         // A stray input override is a post-run error (the manifest exists only now); it never
         // discards the blocks that ran, and defers to a real runtime error if one occurred first.
@@ -633,6 +734,17 @@ impl Engine {
         let profile = self
             .profile_enabled
             .then(|| self.profile.borrow().clone());
+        // Render the run's warnings with their 1-based source lines (PLAN-PRECISION Track C) —
+        // the CLI prints these to stderr, the playground shows them like its other diagnostics.
+        let warnings = self
+            .warnings
+            .borrow()
+            .iter()
+            .map(|w| {
+                let (line, _col) = w.span.line_col(src);
+                format!("line {line}: {}", w.message)
+            })
+            .collect();
         crate::doc::assemble(
             src,
             fm,
@@ -645,6 +757,7 @@ impl Engine {
             self.stats(),
             truncated,
             profile,
+            warnings,
         )
     }
 
@@ -1157,11 +1270,11 @@ const BUILTINS: &[(&str, &str)] = &[
     ("noise_brown", "signal"),
     ("noise_pink", "signal"),
     ("noise_ou", "signal"),
-    // --- engine: run-time knobs. `set_max_ops` is canonical; `set_max_opts` is a back-compat
-    //     alias (finding F9).
-    ("set_max_samples", "engine"),
-    ("set_max_ops", "engine"),
-    ("set_max_opts", "engine"),
+    // --- engine: program-declared settings (PLAN-PRECISION: pragmas declare, `run()` overrides).
+    //     The budget pragmas (`set_max_samples`/`set_max_ops`/`set_max_opts`) were REMOVED by
+    //     PLAN-PRECISION — calling one is a spanned error naming its replacement (see
+    //     `REMOVED_PRAGMAS`).
+    ("set_precision", "engine"),
     ("set_resolution", "engine"),
     // --- builtin: always-on core (capital-only). No `range`/`push` (arrays are fixed-size).
     ("P", "builtin"),
@@ -1183,6 +1296,35 @@ fn module_of(name: &str) -> Option<&'static str> {
     BUILTINS
         .iter()
         .find_map(|&(n, m)| if n == name { Some(m) } else { None })
+}
+
+/// Pragmas deleted by PLAN-PRECISION, each with the error naming its replacement. Calling one —
+/// qualified or bare — is a spanned error, so an old program fails with a migration hint rather
+/// than "unknown function".
+const REMOVED_PRAGMAS: &[(&str, &str)] = &[
+    (
+        "set_max_samples",
+        "engine::set_max_samples was removed — untargeted queries now draw to a default \
+         precision; ask for digits with `engine::set_precision(rel)` or pass a per-call count \
+         `P(e, n)`",
+    ),
+    (
+        "set_max_ops",
+        "engine::set_max_ops was removed — the op budget is gone; use `engine::set_precision(rel)` \
+         to ask for digits, and the runtime `max_time` guard (--max-time) to bound wall-clock",
+    ),
+    (
+        "set_max_opts",
+        "engine::set_max_opts was removed — the op budget is gone; use `engine::set_precision(rel)` \
+         to ask for digits, and the runtime `max_time` guard (--max-time) to bound wall-clock",
+    ),
+];
+
+/// The removal notice for a deleted pragma name, if `name` is one (see [`REMOVED_PRAGMAS`]).
+fn removed_pragma(name: &str) -> Option<&'static str> {
+    REMOVED_PRAGMAS
+        .iter()
+        .find_map(|&(n, msg)| if n == name { Some(msg) } else { None })
 }
 
 /// Built-in math constants, resolved as a fallback after variable lookup. Unlike a global

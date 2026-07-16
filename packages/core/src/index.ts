@@ -4,7 +4,7 @@
 // generated glue instantiates it via `new URL('noise_bg.wasm', import.meta.url)`, so any bundler
 // that understands that pattern (Vite, Rollup, webpack 5, esbuild) fingerprints the .wasm and
 // emits it as an asset of the *consuming* app's build — no copying, no CDN, no runtime config.
-import { call, start, stop } from './pool.js';
+import { call, start, stop, softStop } from './pool.js';
 import type { RunDiagnostics } from './worker.js';
 
 export type { RunDiagnostics } from './worker.js';
@@ -154,6 +154,10 @@ export interface DocResult {
   /** The run's **input manifest** (PLAN-INPUTS §3): every `input::` declared, resolved, in
    *  declaration order. A host reads this to render controls and prune stale overrides. */
   inputs: InputSpec[];
+  /** Non-fatal notes the run raised (PLAN-PRECISION), each prefixed with its source line: a query
+   *  the `maxTime` deadline cut short of its precision target, a soft-stopped run. Values still
+   *  flow with their honest (wider) standard errors; these say what bound the run. */
+  warnings: string[];
 }
 
 /** Frontmatter meta carried by a document (same shape as `meta()` minus `ok`). Purely descriptive —
@@ -189,6 +193,8 @@ export interface NoiseResult extends NoiseDocument {
   output: string;
   /** Error message (with a source span) on failure, else null. */
   error: string | null;
+  /** Run warnings (PLAN-PRECISION): capped queries, an early stop — see `DocResult.warnings`. */
+  warnings: string[];
   /** Engine run-time counters. */
   stats: NoiseStats;
   /** Per-phase timing breakdown when the run was profiled (`RunOpts.profile`), else `null`. */
@@ -224,6 +230,7 @@ function enrich(
     value: doc.result.value?.text ?? null,
     output: outputLines.join('\n'),
     error: doc.result.error?.message ?? null,
+    warnings: doc.result.warnings ?? [],
     stats: doc.result.stats ?? ZERO_STATS,
     profile: doc.result.profile ?? null,
     diagnostics,
@@ -258,10 +265,26 @@ export interface InputSpec {
 /** Input overrides keyed by input name. Values are clamped/snapped by the engine. */
 export type InputOverrides = Record<string, InputValue>;
 
-/** Run options: input overrides for now, sample budget/seed later. */
+/** Run options: input overrides + the PLAN-PRECISION runtime settings. Each setting **pins** its
+ *  value over the program's own `engine::` pragma ("pragmas declare, `run()` overrides"). */
 export interface RunOpts {
   /** Override inline `input::…` parameters by name. */
   inputs?: InputOverrides;
+  /**
+   * Precision target: keep drawing until `se <= max(abs, rel * |estimate|)` for every untargeted
+   * `P`/`E`/`Var`. A number is the relative half of the rule (`1e-4` ≈ 4 significant digits); a
+   * `[rel, abs]` pair adds the absolute floor (for quantities whose mean is ≈ 0).
+   */
+  precision?: number | [rel: number, abs: number];
+  /**
+   * Wall-clock ceiling for the run, in **milliseconds**. Past the deadline the in-flight query
+   * soft-stops (an honest partial estimate plus a warning in `result.warnings`) and the remaining
+   * statements are skipped. `0` = explicitly no deadline. A deadline-stopped run is
+   * machine-dependent by design — the guard role — while a target-stopped run stays deterministic.
+   */
+  maxTime?: number;
+  /** Ambient signal-sampling resolution (the length lazy signals render at). */
+  resolution?: number;
   /**
    * Capture a per-phase timing breakdown of the run, returned as `result.profile` (and the
    * convenience `profile` field on the result). Off by default — enabling it makes the engine time
@@ -285,20 +308,70 @@ export interface RunOpts {
 /** Serialize `RunOpts` to the JSON the WASM boundary expects (or `undefined` when empty). */
 function optsToJson(opts?: RunOpts): string | undefined {
   const hasInputs = opts?.inputs && Object.keys(opts.inputs).length > 0;
-  if (!hasInputs && !opts?.profile) return undefined;
-  const json: { inputs?: InputOverrides; profile?: boolean } = {};
+  const hasSettings =
+    opts?.precision !== undefined ||
+    opts?.maxTime !== undefined ||
+    opts?.resolution !== undefined;
+  if (!hasInputs && !opts?.profile && !hasSettings) return undefined;
+  const json: {
+    inputs?: InputOverrides;
+    profile?: boolean;
+    precision?: number | [number, number];
+    maxTime?: number;
+    resolution?: number;
+  } = {};
   if (hasInputs) json.inputs = opts!.inputs;
   if (opts?.profile) json.profile = true;
+  if (opts?.precision !== undefined) json.precision = opts.precision;
+  if (opts?.maxTime !== undefined) json.maxTime = opts.maxTime;
+  if (opts?.resolution !== undefined) json.resolution = opts.resolution;
   return JSON.stringify(json);
 }
 
+/**
+ * A run in flight: the result promise plus **`stop()`** (PLAN-PRECISION Track H). `await` it like
+ * the plain promise it also is.
+ */
+export interface RunHandle<T = NoiseResult> extends Promise<T> {
+  /**
+   * Ask the run to **soft-stop**: the engine folds the samples it has already drawn, keeps every
+   * completed statement, and the promise *resolves* with that partial document — honest (wider)
+   * standard errors and a "stopped early" note in `result.warnings`. The counterpart of the hard
+   * abort (`RunOpts.signal`), which terminates the worker and rejects with nothing.
+   *
+   * Requires the threaded engine (a cross-origin-isolated page): the stop flag lives in the
+   * engine's shared wasm memory — the only thing that can reach a worker blocked inside a
+   * synchronous forcing. Returns `true` when the signal was delivered; `false` when it can't be
+   * (single-threaded build, Node, the run hasn't started, or it already settled) — callers then
+   * fall back to `signal` abort if they must.
+   */
+  stop(): boolean;
+}
+
+/** Attach `stop()` to a result promise, targeting whatever job id `jobId()` reports. */
+function withStop<T>(promise: Promise<T>, jobId: () => number | null): RunHandle<T> {
+  return Object.assign(promise, {
+    stop: () => {
+      const id = jobId();
+      return id !== null ? softStop(id) : false;
+    },
+  });
+}
+
 /** Parse + evaluate a Noise program. `opts.inputs` tunes inline `input::…` parameters. Never throws
- * — failures come back in `error`. */
-export async function run(src: string, opts?: RunOpts): Promise<NoiseResult> {
-  // `elapsedMs` is measured inside the worker: it's engine time, not queueing + postMessage latency.
-  const res = await call({ op: 'run', src, optsJson: optsToJson(opts) }, opts?.signal);
-  const doc = JSON.parse(unwrap(res)) as NoiseDocument;
-  return enrich(doc, res.elapsedMs ?? 0, res.diag ?? null);
+ * — failures come back in `error`. The returned promise is a [`RunHandle`]: `handle.stop()` asks a
+ * long run to wrap up early with the partial (still honest) document. */
+export function run(src: string, opts?: RunOpts): RunHandle {
+  let id: number | null = null;
+  const promise = (async (): Promise<NoiseResult> => {
+    // `elapsedMs` is measured inside the worker: it's engine time, not queueing + postMessage latency.
+    const res = await call({ op: 'run', src, optsJson: optsToJson(opts) }, opts?.signal, (i) => {
+      id = i;
+    });
+    const doc = JSON.parse(unwrap(res)) as NoiseDocument;
+    return enrich(doc, res.elapsedMs ?? 0, res.diag ?? null);
+  })();
+  return withStop(promise, () => id);
 }
 
 // --- frontmatter (the "read metadata without running" path) ----------------------------------
@@ -409,26 +482,36 @@ export interface NoiseIntrospectResult extends NoiseResult {
  * `bindings`, so a plain run can populate a variable picker. Never throws; failures surface in
  * `result.error` (and per-request failures as `{ error }` entries in `introspections`).
  */
-export async function runWithIntrospection(
+export function runWithIntrospection(
   src: string,
   requests: IntrospectRequest[],
   opts?: RunOpts,
-): Promise<NoiseIntrospectResult> {
-  const res = await call({
-    op: 'runWithIntrospection',
-    src,
-    requestsJson: JSON.stringify(requests),
-    optsJson: optsToJson(opts),
-  });
-  const elapsedMs = res.elapsedMs ?? 0;
-  const parsed = JSON.parse(unwrap(res)) as {
-    document: NoiseDocument;
-    bindings?: Binding[];
-    introspections?: Plot[];
-  };
-  return {
-    ...enrich(parsed.document, elapsedMs, res.diag ?? null),
-    bindings: parsed.bindings ?? [],
-    introspections: parsed.introspections ?? [],
-  };
+): RunHandle<NoiseIntrospectResult> {
+  let id: number | null = null;
+  const promise = (async (): Promise<NoiseIntrospectResult> => {
+    const res = await call(
+      {
+        op: 'runWithIntrospection',
+        src,
+        requestsJson: JSON.stringify(requests),
+        optsJson: optsToJson(opts),
+      },
+      opts?.signal,
+      (i) => {
+        id = i;
+      },
+    );
+    const elapsedMs = res.elapsedMs ?? 0;
+    const parsed = JSON.parse(unwrap(res)) as {
+      document: NoiseDocument;
+      bindings?: Binding[];
+      introspections?: Plot[];
+    };
+    return {
+      ...enrich(parsed.document, elapsedMs, res.diag ?? null),
+      bindings: parsed.bindings ?? [],
+      introspections: parsed.introspections ?? [],
+    };
+  })();
+  return withStop(promise, () => id);
 }

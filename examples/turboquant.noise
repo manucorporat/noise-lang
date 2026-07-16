@@ -14,6 +14,10 @@ extra:
 use math;     # pi, sqrt, sign
 use vec;      # normalize, ones, iota, quantize, normsq, norm, transpose
 
+# Each sample rotates and quantizes a 20-dimensional vector — a lot of work per draw. Ask for
+# the ~2 significant digits the paper comparison needs, and let every E() size itself.
+engine::set_precision(5e-3);
+
 # A fixed unit vector x and unit query y (any fixed pair works); we estimate <y, x>.
 d = 20;
 x = normalize(ones(d));

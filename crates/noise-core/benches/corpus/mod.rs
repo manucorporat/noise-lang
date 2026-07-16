@@ -92,6 +92,7 @@ pub const EXAMPLES: &[(&str, &str)] = &[
     ("pi", include_str!("../../../../examples/pi.noise")),
     ("prisoners", include_str!("../../../../examples/prisoners.noise")),
     ("qjl_scalar", include_str!("../../../../examples/qjl_scalar.noise")),
+    ("rare_event", include_str!("../../../../examples/rare_event.noise")),
     ("reliability", include_str!("../../../../examples/reliability.noise")),
     ("secretary", include_str!("../../../../examples/secretary.noise")),
     ("shor_period", include_str!("../../../../examples/shor_period.noise")),

@@ -10,7 +10,7 @@
 // Workers are persistent because spawning one and instantiating the module costs tens of
 // milliseconds — fine once, absurd per keystroke in a playground.
 
-import type { WorkerRequest, WorkerResponse, RunDiagnostics } from './worker.js';
+import type { WorkerRequest, WorkerResponse, RunDiagnostics, StopCellMsg } from './worker.js';
 import {
   acquireGpuHost,
   serviceGpuRequest,
@@ -25,6 +25,12 @@ interface Slot {
   worker: BrowserLikeWorker;
   jobId: number | null;
 }
+
+/** Each threaded worker's soft-stop cell (PLAN-PRECISION Track H): an `Int32Array` view onto the
+ *  engine's stop flag inside that worker's shared wasm memory, announced once per worker via
+ *  `{ type: 'stop-cell' }` after its engine initializes. Absent for single-threaded workers (their
+ *  memory isn't shared), which is how [`softStop`] knows to report "unsupported". */
+const stopCells = new WeakMap<BrowserLikeWorker, Int32Array>();
 
 // === browser GPU host (PLAN-WEBGPU G3) ===========================================================
 //
@@ -131,9 +137,15 @@ async function spawn(): Promise<BrowserLikeWorker> {
   // requests to the host. The SAB is per-worker so concurrent workers never collide on one (the
   // threaded path runs a single engine worker anyway, but a cancel-replacement spawns a fresh one).
   const sab = gpuHost ? makeGpuSab() : null;
-  w.onmessage = (ev: MessageEvent<WorkerResponse | { type: 'gpu' }>) => {
+  w.onmessage = (ev: MessageEvent<WorkerResponse | { type: 'gpu' } | StopCellMsg>) => {
     if (gpuHost && sab && (ev.data as { type?: string }).type === 'gpu') {
       void serviceGpuRequest(gpuHost, sab);
+      return;
+    }
+    // The one-time stop-cell announcement from a threaded worker (PLAN-PRECISION Track H).
+    if ((ev.data as { type?: string }).type === 'stop-cell') {
+      const cell = ev.data as StopCellMsg;
+      stopCells.set(w, new Int32Array(cell.sab, cell.ptr, 1));
       return;
     }
     settle(ev.data as WorkerResponse);
@@ -283,10 +295,13 @@ function cancelJob(id: number, reason: unknown): void {
 export async function call(
   req: Omit<WorkerRequest, 'id'>,
   signal?: AbortSignal,
+  onId?: (id: number) => void,
 ): Promise<WorkerResponse> {
   if (signal?.aborted) throw abortError(signal.reason);
   await start();
   const id = nextId++;
+  // Hand the job id back before dispatch, so the caller can target this job (e.g. `softStop`).
+  onId?.(id);
   return new Promise<WorkerResponse>((resolve, reject) => {
     const onAbort = () => cancelJob(id, signal?.reason);
     const done = <T,>(f: (v: T) => void) => (v: T) => {
@@ -304,6 +319,25 @@ export async function call(
     queue.push({ req: full, p: { resolve: done(resolve), reject: done(reject) } });
     drain();
   });
+}
+
+/**
+ * Ask the RUNNING job `id` to **soft-stop** (PLAN-PRECISION Track H): one `Atomics.store` into the
+ * engine's stop flag inside the worker's shared wasm memory. The engine notices at its per-chunk
+ * stop cadence, folds the samples it has, and the job resolves normally with the partial document
+ * (a "stopped early" warning in `result.warnings`). Returns `false` — deliver nothing, change
+ * nothing — when the job isn't currently running on a stop-capable worker: already settled, still
+ * queued, or a single-threaded/Node worker (no shared memory to write into). Callers treat `false`
+ * as "fall back to a hard abort if you must".
+ */
+export function softStop(id: number): boolean {
+  if (!pending.has(id)) return false; // already settled
+  const slot = slots?.find((s) => s.jobId === id);
+  if (!slot) return false; // still queued: it hasn't started, there is nothing to stop
+  const cell = stopCells.get(slot.worker);
+  if (!cell) return false; // single-threaded worker: no shared memory, soft stop can't reach it
+  Atomics.store(cell, 0, 1);
+  return true;
 }
 
 /** Tear the pool down (tests, HMR, a Node script that wants to exit). */

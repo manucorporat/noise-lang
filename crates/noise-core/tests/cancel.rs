@@ -12,12 +12,10 @@ use noise_core::error::ErrorKind;
 use noise_core::Engine;
 
 /// A query that genuinely runs a long time: **8.2 s uncancelled** (measured, release, M4 Pro).
-///
-/// The raised op budget is load-bearing. Without it the default `max_opts` ceiling silently clamps
-/// the draw count and the whole thing finishes in ~0.3 s — at which point a "cancellation was
-/// prompt" assertion would pass whether or not cancellation worked at all. The margin between 8.2 s
-/// and the sub-second bounds below is what makes these tests able to fail.
-const BIG: &str = "use rand; engine::set_max_opts(1000000000000); \
+/// The 2e9-draw explicit count is load-bearing: the margin between 8.2 s and the sub-second bounds
+/// below is what makes these tests able to fail. (The op budget that used to clamp this away was
+/// removed by PLAN-PRECISION; an explicit per-call count now runs unclamped.)
+const BIG: &str = "use rand; \
                    X ~ unif(0,1); Y ~ unif(0,1); Z ~ normal(0,1); \
                    P(X*X + Y*Y + math::sin(Z) * math::cos(Z) < 1.5, 2000000000)";
 

@@ -23,21 +23,16 @@ use crate::value::Value;
 /// f64 `Value::Num`s that never enter a lane.
 pub const INT_LANE_MAX: f64 = (1u32 << 24) as f64;
 
-/// Default Monte Carlo budget for a language-surface `P`/`E`/`Var`/`Q` when the call carries no
-/// explicit sample count. Large enough that a probability estimate's standard error
-/// (`sqrt(p(1-p)/N) ≈ 5e-4`) is tight. A program can lower (or raise) this for the whole run with
-/// `engine::set_max_samples(N)`; an explicit per-call count (`P(event, n)`) still overrides both.
-pub const P_DEFAULT_N: usize = 1_000_000;
-/// Default per-query **operation** ceiling (`engine::set_max_opts`): a built-in cap so no single
-/// `P`/`E`/`Var`/`Q` spends more than ~1e9 per-lane ops, keeping worst-case runtime bounded out of
-/// the box. A query over a cone of `C` distinct nodes auto-clamps to `1e9 / C` draws, so the cap
-/// only bites for `C > 1000` (with the default `P_DEFAULT_N` draws) — ordinary small-cone queries,
-/// even at millions of draws, are never clamped; only genuinely large models are. A program raises
-/// it with `engine::set_max_samples`'s sibling `engine::set_max_opts(N)`.
-pub const MAX_OPS_DEFAULT: u64 = 1_000_000_000;
+/// Default draw count for `Q` (quantiles) when the call carries no explicit count. `Q` is the one
+/// query still on fixed-n (PLAN-PRECISION "out of scope": its collect reducer is O(n) memory and a
+/// quantile's se needs a density estimate, so it cannot ride the adaptive loop) — `P`/`E`/`Var`
+/// untargeted default to the auto precision target instead ([`sampler::DrawBudget::Auto`],
+/// Phase 2).
+pub const Q_DEFAULT_N: usize = 1_000_000;
 /// Default **sampling resolution** (`engine::set_resolution`, PLAN-SIGNALS §1.2): the length at
 /// which reducers (`mse`/`mean`/`sum`/…) render a lazy signal that never met an explicit length.
-/// The time-axis twin of [`P_DEFAULT_N`] — a measurement knob, not part of the question — sized
+/// The time-axis twin of the old fixed sampling default — a measurement knob, not part of the
+/// question — sized
 /// so toy programs never need to mention it.
 pub const RESOLUTION_DEFAULT: usize = 256;
 /// Maximum dimension of a `rotation(d)` draw (finding A6). The draw is `O(d²)` graph nodes now
@@ -57,26 +52,37 @@ const MAX_PERMUTATION_N: usize = 2048;
 /// refinement.
 const P_DEFAULT_SEED: u64 = 0;
 
+/// A non-fatal, user-facing note a query raises during a run (PLAN-PRECISION Track C): a capped
+/// query ("max_time stopped it short of the precision target"), a soft-stopped run. Collected on
+/// the engine, surfaced through `DocResult.warnings` (the CLI prints them to stderr, the playground
+/// shows them like its other diagnostics). The span lets the renderer name the line.
+#[derive(Debug, Clone)]
+pub struct Warning {
+    pub message: String,
+    pub span: Span,
+}
+
 /// The engine knobs a builtin/query dispatch needs, bundled into one parameter object (finding F6)
 /// so the `call`/`prob`/`moment`/`quantile` signatures don't grow a new positional argument every
 /// time a knob is added. The engine builds one per call and threads it by reference.
 ///
 /// - `graph` — the (immutable) sample-DAG a query reads to estimate a probability/moment/quantile.
-/// - `default_n` — the Monte Carlo budget when a call carries no explicit sample count (default
-///   [`P_DEFAULT_N`], set via `engine::set_max_samples`).
-/// - `max_opts` — the optional per-query operation budget (`engine::set_max_opts`, `0` = unlimited):
-///   each query auto-clamps its draw count so `draws × cone-node-count ≤ max_opts` (see
-///   [`clamp_to_op_budget`]).
+/// - `precision` — the document-wide precision target `(rel, abs)` (PLAN-PRECISION:
+///   `engine::set_precision` pragma or a host override): an untargeted `P`/`E`/`Var` keeps drawing
+///   until `se ≤ max(abs, rel·|est|)`, bounded by the run's `max_time` deadline. `None` = the
+///   auto default ([`sampler::DrawBudget::Auto`], Phase 2). A per-call argument overrides it
+///   either way.
 /// - `check` — validate-only mode: build/type-check the graph but skip the Monte Carlo pass,
 ///   handing back a neutral in-range placeholder.
 /// - `span` — the call site, for spanned errors.
+/// - `warnings` — the run's warning sink (a capped query reports what bound it).
 #[derive(Clone, Copy)]
 pub struct QueryCtx<'g> {
     pub graph: &'g RvGraph,
-    pub default_n: usize,
-    pub max_opts: u64,
+    pub precision: Option<(f64, f64)>,
     pub check: bool,
     pub span: Span,
+    pub warnings: &'g std::cell::RefCell<Vec<Warning>>,
 }
 
 /// Called from `eval.rs`'s `Expr::Call` arm.
@@ -337,60 +343,106 @@ pub fn call(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
     }
 }
 
-/// `P(event)` or `P(event, n)` — the probability that `event` is true, in `[0, 1]`. Accepts a
-/// bool random variable (estimated by Monte Carlo over `n` samples, default `1e6`) or a
-/// deterministic bool (0 or 1 exactly). A numeric argument is an error: a probability is only
-/// defined for an event.
+/// Resolve a query's [`DrawBudget`] from its optional trailing numeric argument (PLAN-PRECISION,
+/// "per-call targets"): the second argument of `P`/`E`/`Var` is a **count** when ≥ 1 (exactly as
+/// before — and it disables adaptivity for the call) and a **relative precision target** when in
+/// `(0, 1)` (`P(hit, 1e-4)` reads "this probability to 4 significant digits"; it overrides the
+/// document-wide setting for this call). The two ranges are disjoint by construction: a count
+/// below 1 was always an error, and a relative target ≥ 1 ("100%+ error") is meaningless. With no
+/// argument, the document-wide `precision` target applies if set, else the **auto default**
+/// (Phase 2: `se ≤ 5e-3·max(|est|, sd)` — see [`sampler::DrawBudget::Auto`]).
+fn query_budget(name: &str, arg: Option<&Value>, ctx: &QueryCtx) -> Result<sampler::DrawBudget> {
+    use sampler::DrawBudget;
+    match arg {
+        Some(v) => {
+            let x = as_num(v, ctx.span)?;
+            if !x.is_finite() || x <= 0.0 {
+                return Err(NoiseError::runtime(
+                    format!(
+                        "{name}'s second argument must be a sample count >= 1 or a relative \
+                         precision target in (0, 1), got {x}"
+                    ),
+                    ctx.span,
+                ));
+            }
+            if x < 1.0 {
+                Ok(DrawBudget::ToPrecision { rel: x, abs: 0.0 })
+            } else {
+                Ok(DrawBudget::Fixed(x as u64))
+            }
+        }
+        None => Ok(match ctx.precision {
+            Some((rel, abs)) => DrawBudget::ToPrecision { rel, abs },
+            None => DrawBudget::Auto,
+        }),
+    }
+}
+
+/// Report a query that stopped short of its ask (PLAN-PRECISION Track C): name what bound the run
+/// and what the time bought, into the run's warning sink. The estimate itself still flows — with
+/// its honest (wider) se — so a capped run degrades into fewer printed digits, never wrong ones.
+fn report_capped(name: &str, out: &sampler::QueryRun, ctx: &QueryCtx) {
+    use sampler::Capped;
+    let Some(capped) = out.capped else { return };
+    let bound = match capped {
+        Capped::Stopped(crate::exec::StopCause::Time) => "max_time",
+        Capped::Stopped(crate::exec::StopCause::User) => "stop()",
+        Capped::Lanes => "the lane cap",
+    };
+    let message = match out.target_se {
+        Some(target) if target > 0.0 && out.se.is_finite() && out.se > 0.0 => {
+            // CLT: reaching `target` from the achieved se needs ~n·(se/target)² draws.
+            let need = out.drawn as f64 * (out.se / target) * (out.se / target);
+            format!(
+                "{name}: {bound} stopped sampling at n={:.3e} → se ±{:.1e} (the ±{:.1e} target \
+                 needs ~{need:.1e} draws) — raise --max-time or loosen the precision target",
+                out.drawn as f64, out.se, target
+            )
+        }
+        _ => format!(
+            "{name}: {bound} stopped sampling before the requested n={:.3e} completed; the \
+             reported se is computed from the samples actually drawn",
+            out.drawn as f64
+        ),
+    };
+    ctx.warnings.borrow_mut().push(Warning {
+        message,
+        span: ctx.span,
+    });
+}
+
+/// A query that was soft-stopped before folding a single draw has no estimate to report — a
+/// teaching error rather than a fabricated `0 ± ∞`.
+fn stopped_before_draws(name: &str, span: Span) -> NoiseError {
+    NoiseError::runtime(
+        format!("{name} was stopped (max_time / stop) before any samples were drawn — raise --max-time or stop later"),
+        span,
+    )
+}
+
+/// `P(event)`, `P(event, n)` (an explicit count), or `P(event, rel)` with `0 < rel < 1` (a per-call
+/// relative precision target — see [`query_budget`]). The probability that `event` is true, in
+/// `[0, 1]`. Accepts a bool random variable (estimated by Monte Carlo) or a deterministic bool
+/// (0 or 1 exactly). A numeric argument is an error: a probability is only defined for an event.
 ///
 /// The estimate is **auto-rounded to its confidence precision**: a Monte Carlo estimate from
 /// `n` samples has standard error `sqrt(p(1-p)/n)`, so only the digits above that error are
-/// meaningful. More samples → smaller error → more digits, with no manual `round`.
-/// Auto-clamp a query's draw count to the per-query operation budget (`engine::set_max_opts`).
-/// A forcing over `root`'s cone costs `n × C` per-lane ops, where `C` is the cone's distinct-node
-/// count ([`crate::kernel::cost`]). With a budget `max_opts > 0`, cap `n` at `max_opts / C` so the
-/// query never spends more than the budget — but never below 1 (a query always draws at least once,
-/// even if a single draw already exceeds the budget). `max_opts == 0` means unlimited (no clamp).
-/// This makes each query's complexity deterministic in the model size: a heavier cone simply draws
-/// fewer samples (a looser estimate) instead of doing unbounded work.
-fn clamp_to_op_budget(n: usize, graph: &RvGraph, root: RvId, max_opts: u64) -> usize {
-    if max_opts == 0 {
-        return n;
-    }
-    let cone = crate::kernel::cost(graph, root).ops.max(1);
-    let cap = (max_opts / cone).max(1) as usize;
-    n.min(cap)
-}
-
+/// meaningful. More samples → smaller error → more digits, with no manual `round` — and a
+/// precision target simply chooses n so the digits you asked for are the digits you get.
 fn prob(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
     let QueryCtx {
-        graph,
-        default_n,
-        max_opts,
-        check,
-        span,
+        graph, check, span, ..
     } = *ctx;
     if arg_vals.is_empty() || arg_vals.len() > 2 {
         return Err(NoiseError::runtime(
             format!(
-                "P expects 1 or 2 arguments (event, optional sample count), got {}",
+                "P expects 1 or 2 arguments (event, optional sample count or precision target), got {}",
                 arg_vals.len()
             ),
             span,
         ));
     }
-    let n = match arg_vals.get(1) {
-        Some(v) => {
-            let n = as_num(v, span)?;
-            if n < 1.0 || !n.is_finite() {
-                return Err(NoiseError::runtime(
-                    format!("P sample count must be a finite number >= 1, got {n}"),
-                    span,
-                ));
-            }
-            n as usize
-        }
-        None => default_n,
-    };
+    let budget = query_budget("P", arg_vals.get(1), ctx)?;
     match &arg_vals[0] {
         // A deterministic event is exact — no sampling, no error.
         Value::Bool(b) => Ok(Value::Est {
@@ -404,13 +456,22 @@ fn prob(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
             if check {
                 return Ok(Value::Est { val: 0.5, se: 0.0 });
             }
-            let n = clamp_to_op_budget(n, graph, *id, max_opts);
-            let p_hat = sampler::moments(graph, *id, n, P_DEFAULT_SEED)?.mean;
-            // Standard error of a Monte Carlo probability estimate; rule-of-three floor keeps
-            // it finite when p_hat is 0 or 1. Display rounds to the digits this justifies.
-            let nf = n as f64;
-            let se = (p_hat * (1.0 - p_hat) / nf).sqrt().max(0.5 / nf);
-            Ok(Value::Est { val: p_hat, se })
+            let out = sampler::query_moments(
+                graph,
+                *id,
+                false,
+                sampler::Quantity::Prob,
+                budget,
+                P_DEFAULT_SEED,
+            )?;
+            if out.count == 0 {
+                return Err(stopped_before_draws("P", span));
+            }
+            report_capped("P", &out, ctx);
+            Ok(Value::Est {
+                val: out.est,
+                se: out.se,
+            })
         }
         Value::Dist(id) => Err(NoiseError::runtime(
             format!(
@@ -429,37 +490,23 @@ fn prob(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
 /// `E(x)` / `Var(x)` — the Monte Carlo expectation or variance of a *numeric* quantity, with a
 /// standard error (`E` ↔ mean, `Var` ↔ population variance). `P` is the special case for
 /// events; `E`/`Var` are total over any number or numeric RV (a bool RV works too — its mean is
-/// `P`). A deterministic number is exact: `E(5) = 5 ± 0`, `Var(5) = 0 ± 0`.
+/// `P`). A deterministic number is exact: `E(5) = 5 ± 0`, `Var(5) = 0 ± 0`. The optional second
+/// argument is a count (≥ 1) or a per-call relative precision target in `(0, 1)` — see
+/// [`query_budget`].
 fn moment(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
     let QueryCtx {
-        graph,
-        default_n,
-        max_opts,
-        check,
-        span,
+        graph, check, span, ..
     } = *ctx;
     if arg_vals.is_empty() || arg_vals.len() > 2 {
         return Err(NoiseError::runtime(
             format!(
-                "{name} expects 1 or 2 arguments (quantity, optional sample count), got {}",
+                "{name} expects 1 or 2 arguments (quantity, optional sample count or precision target), got {}",
                 arg_vals.len()
             ),
             span,
         ));
     }
-    let n = match arg_vals.get(1) {
-        Some(v) => {
-            let n = as_num(v, span)?;
-            if n < 1.0 || !n.is_finite() {
-                return Err(NoiseError::runtime(
-                    format!("{name} sample count must be a finite number >= 1, got {n}"),
-                    span,
-                ));
-            }
-            n as usize
-        }
-        None => default_n,
-    };
+    let budget = query_budget(name, arg_vals.get(1), ctx)?;
     let want_var = name == "Var";
     match &arg_vals[0] {
         // A deterministic value is exact: mean = it, variance = 0, no sampling.
@@ -475,16 +522,18 @@ fn moment(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
             if check {
                 return Ok(Value::Est { val: 0.0, se: 0.0 });
             }
-            let n = clamp_to_op_budget(n, graph, *id, max_opts);
-            let m = sampler::moments(graph, *id, n, P_DEFAULT_SEED)?;
-            let nf = n as f64;
-            if want_var {
-                // Asymptotic SE of a variance estimate ≈ var·sqrt(2/n) (exact for Gaussian).
-                Ok(Value::Est { val: m.variance, se: m.variance.abs() * (2.0 / nf).sqrt() })
+            let quantity = if want_var {
+                sampler::Quantity::Variance
             } else {
-                // Standard error of the mean: sqrt(Var / n). A point mass (Var=0) is exact.
-                Ok(Value::Est { val: m.mean, se: (m.variance / nf).sqrt() })
+                sampler::Quantity::Mean
+            };
+            let out =
+                sampler::query_moments(graph, *id, false, quantity, budget, P_DEFAULT_SEED)?;
+            if out.count == 0 {
+                return Err(stopped_before_draws(name, span));
             }
+            report_capped(name, &out, ctx);
+            Ok(Value::Est { val: out.est, se: out.se })
         }
         // Complex `E`/`Var` are deferred (PLAN-COMPLEX §5): query the channels separately.
         Value::Complex { .. } => Err(NoiseError::runtime(
@@ -517,10 +566,9 @@ fn moment(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
 fn quantile(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
     let QueryCtx {
         graph,
-        default_n,
-        max_opts,
         check,
         span,
+        ..
     } = *ctx;
     if arg_vals.len() < 2 || arg_vals.len() > 3 {
         return Err(NoiseError::runtime(
@@ -549,7 +597,7 @@ fn quantile(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
             }
             n as usize
         }
-        None => default_n,
+        None => Q_DEFAULT_N,
     };
     match &arg_vals[0] {
         // A deterministic value is a point mass: its quantile is itself at every level.
@@ -561,8 +609,13 @@ fn quantile(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
             if check {
                 return Ok(Value::Num(0.0));
             }
-            let n = clamp_to_op_budget(n, graph, *id, max_opts);
+            // `Q` keeps fixed-n (PLAN-PRECISION "out of scope": the collect reducer is O(n) memory
+            // and a quantile's se needs a density estimate). A soft-stopped collect is a smaller —
+            // still valid — sample; the run-level warning names the stop.
             let mut draws = sampler::sample_n_par(graph, *id, n, P_DEFAULT_SEED)?;
+            if draws.is_empty() {
+                return Err(stopped_before_draws("Q", span));
+            }
             draws.sort_by(f64::total_cmp);
             Ok(Value::Num(crate::num::quantile_sorted(&draws, q)))
         }
@@ -594,35 +647,15 @@ fn cond_never(n: usize, span: Span) -> NoiseError {
     )
 }
 
-/// Resolve an optional trailing sample-count `Value` for a conditional query (mirrors the validation
-/// in `prob`/`moment`/`quantile`). `None` → `default_n`.
-fn opt_count(name: &str, v: Option<&Value>, default_n: usize, span: Span) -> Result<usize> {
-    match v {
-        Some(v) => {
-            let n = as_num(v, span)?;
-            if n < 1.0 || !n.is_finite() {
-                return Err(NoiseError::runtime(
-                    format!("{name} sample count must be a finite number >= 1, got {n}"),
-                    span,
-                ));
-            }
-            Ok(n as usize)
-        }
-        None => Ok(default_n),
-    }
-}
-
 /// `P(event | cond)` — the conditional probability over the worlds where `cond` holds. `root` is the
 /// conditioning root `select(cond, event_indicator, NaN)` (built in `eval.rs`); `tail` is the
-/// optional `[n]` sample count after the `|`-expression. The estimate is a probability with the
-/// standard error of `m ≈ n·P(cond)` in-condition draws (so it self-rounds like an unconditional `P`).
+/// optional `[n]` sample count (or per-call precision target) after the `|`-expression. The
+/// estimate's standard error uses the **in-condition** sample size `m ≈ n·P(cond)` — and under a
+/// precision target the loop simply keeps drawing until `m` is large enough, so a tight
+/// conditioning no longer silently gets a fraction of the nominal budget (PLAN-PRECISION).
 pub fn prob_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value> {
     let QueryCtx {
-        graph,
-        default_n,
-        max_opts,
-        check,
-        span,
+        graph, check, span, ..
     } = *ctx;
     if tail.len() > 1 {
         return Err(NoiseError::runtime(
@@ -636,28 +669,34 @@ pub fn prob_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value> {
     if check {
         return Ok(Value::Est { val: 0.5, se: 0.0 });
     }
-    let n = opt_count("P", tail.first(), default_n, span)?;
-    let n = clamp_to_op_budget(n, graph, root, max_opts);
-    let (m, count) = sampler::cond_moments(graph, root, n, P_DEFAULT_SEED)?;
-    if count == 0 {
-        return Err(cond_never(n, span));
+    let budget = query_budget("P", tail.first(), ctx)?;
+    let out = sampler::query_moments(
+        graph,
+        root,
+        true,
+        sampler::Quantity::Prob,
+        budget,
+        P_DEFAULT_SEED,
+    )?;
+    if out.count == 0 {
+        if matches!(out.capped, Some(sampler::Capped::Stopped(_))) {
+            return Err(stopped_before_draws("P", span));
+        }
+        return Err(cond_never(out.drawn as usize, span));
     }
-    let p_hat = m.mean;
-    let cf = count as f64;
-    let se = (p_hat * (1.0 - p_hat) / cf).sqrt().max(0.5 / cf);
-    Ok(Value::Est { val: p_hat, se })
+    report_capped("P", &out, ctx);
+    Ok(Value::Est {
+        val: out.est,
+        se: out.se,
+    })
 }
 
 /// `E(x | cond)` / `Var(x | cond)` — the conditional mean/variance over the worlds where `cond`
-/// holds. `root` is `select(cond, x, NaN)`; `tail` is the optional `[n]`. The standard error uses the
-/// in-condition sample size.
+/// holds. `root` is `select(cond, x, NaN)`; `tail` is the optional `[n]` (count or per-call
+/// precision target). The standard error uses the in-condition sample size.
 pub fn moment_cond(name: &str, root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value> {
     let QueryCtx {
-        graph,
-        default_n,
-        max_opts,
-        check,
-        span,
+        graph, check, span, ..
     } = *ctx;
     if tail.len() > 1 {
         return Err(NoiseError::runtime(
@@ -671,24 +710,24 @@ pub fn moment_cond(name: &str, root: RvId, tail: &[Value], ctx: &QueryCtx) -> Re
     if check {
         return Ok(Value::Est { val: 0.0, se: 0.0 });
     }
-    let n = opt_count(name, tail.first(), default_n, span)?;
-    let n = clamp_to_op_budget(n, graph, root, max_opts);
-    let (m, count) = sampler::cond_moments(graph, root, n, P_DEFAULT_SEED)?;
-    if count == 0 {
-        return Err(cond_never(n, span));
-    }
-    let cf = count as f64;
-    if name == "Var" {
-        Ok(Value::Est {
-            val: m.variance,
-            se: m.variance.abs() * (2.0 / cf).sqrt(),
-        })
+    let budget = query_budget(name, tail.first(), ctx)?;
+    let quantity = if name == "Var" {
+        sampler::Quantity::Variance
     } else {
-        Ok(Value::Est {
-            val: m.mean,
-            se: (m.variance / cf).sqrt(),
-        })
+        sampler::Quantity::Mean
+    };
+    let out = sampler::query_moments(graph, root, true, quantity, budget, P_DEFAULT_SEED)?;
+    if out.count == 0 {
+        if matches!(out.capped, Some(sampler::Capped::Stopped(_))) {
+            return Err(stopped_before_draws(name, span));
+        }
+        return Err(cond_never(out.drawn as usize, span));
     }
+    report_capped(name, &out, ctx);
+    Ok(Value::Est {
+        val: out.est,
+        se: out.se,
+    })
 }
 
 /// `Q(x | cond, q)` / `Q(x | cond, q, n)` — the conditional quantile over the worlds where `cond`
@@ -698,10 +737,9 @@ pub fn moment_cond(name: &str, root: RvId, tail: &[Value], ctx: &QueryCtx) -> Re
 pub fn quantile_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value> {
     let QueryCtx {
         graph,
-        default_n,
-        max_opts,
         check,
         span,
+        ..
     } = *ctx;
     if tail.is_empty() || tail.len() > 2 {
         return Err(NoiseError::runtime(
@@ -722,8 +760,20 @@ pub fn quantile_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value
     if check {
         return Ok(Value::Num(0.0));
     }
-    let n = opt_count("Q", tail.get(1), default_n, span)?;
-    let n = clamp_to_op_budget(n, graph, root, max_opts);
+    // `Q` takes counts only (see `quantile` — quantiles are out of the precision loop's scope).
+    let n = match tail.get(1) {
+        Some(v) => {
+            let n = as_num(v, span)?;
+            if n < 1.0 || !n.is_finite() {
+                return Err(NoiseError::runtime(
+                    format!("Q sample count must be a finite number >= 1, got {n}"),
+                    span,
+                ));
+            }
+            n as usize
+        }
+        None => Q_DEFAULT_N,
+    };
     let mut draws = sampler::cond_sample_n_par(graph, root, n, P_DEFAULT_SEED)?;
     if draws.is_empty() {
         return Err(cond_never(n, span));

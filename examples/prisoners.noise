@@ -31,8 +31,9 @@ for prisoner in 0..n {
   all_win = all_win && found;
 };
 
-# Heavier than most examples: a random box index is a per-lane gather that runs on the
-# interpreter, so we use a smaller sample budget here.
+# Heavier than most examples: each sample chases pointers through 100 boxes. Asking for half-a-
+# percent relative precision keeps it snappy — the engine draws only what that costs.
+engine::set_precision(2e-3);
 ```md
 P(all 100 prisoners go free) = **${P(all_win) * 100}%** (analytic ≈ 31.2%)
 ```

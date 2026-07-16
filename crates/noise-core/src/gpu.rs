@@ -33,8 +33,9 @@ use std::sync::Mutex;
 use crate::dist::{RvGraph, RvId};
 use crate::error::{NoiseError, Result};
 use crate::exec::CancelToken;
-use crate::reduce::Reducer;
+use crate::reduce::{MomentsMode, Reduced, Reducer};
 use crate::wgsl_emit;
+use web_time::Instant;
 
 /// Lanes per dispatch. Big enough to bury the ~1.2 ms fixed cost of a dispatch + readback (G0), and a
 /// whole number of 16,384-sample reducer chunks, so the fold below is chunk-for-chunk identical to
@@ -57,9 +58,32 @@ const GPU_JOINT_ELEMS: usize = 8 << 20;
 /// cleanly between. Below it the joint pass declines to the (batch-streaming, no-readback) interpreter.
 const JOINT_MIN_OPS_PER_ROOT: u64 = 4;
 
-/// The reducer's chunk size — mirrored from `reduce` so the GPU folds on exactly the same boundaries
-/// (`combine_in_order`'s determinism guarantee is about *chunks*, not threads).
-const CHUNK_SAMPLES: usize = 16 * crate::bytecode::BATCH;
+/// The reducer's chunk size — shared with `reduce` so the GPU folds on exactly the same boundaries
+/// (the index-ordered fold's determinism guarantee is about *chunks*, not threads).
+const CHUNK_SAMPLES: usize = crate::reduce::CHUNK_SAMPLES;
+
+/// Reduce-mode dispatch sizing (PLAN-PRECISION Track F): with the per-lane readback gone, bigger
+/// dispatches only amortize the fixed dispatch cost better — what bounds them is GPU *time*, since
+/// the soft-stop/deadline check sits between dispatches. One dispatch is sized to roughly this many
+/// cost-model units (`ops + ~150·sources` per lane, the same proxy [`emitted_instrs`] uses for the
+/// hash emulation), clamped to [`REDUCE_DISPATCH_MIN`]..[`REDUCE_DISPATCH_MAX`] lanes and
+/// chunk-aligned. On an M4 Pro this lands around 5–20 ms per dispatch across the corpus's cones.
+const REDUCE_WORK_PER_DISPATCH: f64 = 2e9;
+/// Never dispatch fewer lanes than this in reduce mode (16 chunks): below it the fixed dispatch
+/// cost dominates whatever the sizing model hoped to save.
+const REDUCE_DISPATCH_MIN: usize = 16 * CHUNK_SAMPLES;
+/// …and never more than this (16M lanes — still only a 192 KB readback of partials).
+const REDUCE_DISPATCH_MAX: usize = 1 << 24;
+
+/// Below this many lanes a moments forcing stays on the **column** path even though reduce mode
+/// could fold it. Each reduce-mode thread folds 64 lanes sequentially, so a small-n forcing fills
+/// only `n/64` threads — a 15k-lane dispatch runs on 256 threads. Measured (`noise_colors`, 67k
+/// ops/draw at n=15,000) the two modes tie anyway (~3.5 s warm — that cone is ALU-bound, not
+/// occupancy-bound), but column readback is `4·n` bytes, which is exactly the term that is *cheap*
+/// at small n — so small forcings keep the calibrated, battle-tested column economics and reduce
+/// mode takes over where its readback win is real. 1M lanes = a 16,384-thread reduce dispatch and
+/// 4 MB of column readback: comfortably past both concerns.
+const REDUCE_MIN_LANES: usize = 1 << 20;
 
 /// Emitted-instruction ceiling. **Not a node cap** — the unit that matters is what the *shader
 /// compiler* sees, and each RNG draw call inlines ~150 ALU ops of emulated `squares64` (WGSL has no
@@ -137,6 +161,60 @@ fn profitable(instrs: usize, ops_per_draw: u64, n: usize) -> bool {
     let work_ok = crate::kernel::prefer_runtime()
         || (n as f64 * ops_per_draw as f64) >= MIN_WORK_GPU;
     instrs <= MAX_WGSL_INSTRS && ops_per_draw >= MIN_CONE_OPS && work_ok
+}
+
+/// The **reduce-mode** gate's extra acceptance region (PLAN-PRECISION Track F). [`MIN_CONE_OPS`]
+/// was a readback-era number: its calibration measured a 4-byte-per-lane readback plus a CPU-side
+/// fold of every lane, which is why thin cones could never win at any `n`. Reduce mode reads back
+/// 12 bytes per 4096 lanes and folds ~nothing, so a thin cone becomes purely an **amortization**
+/// question: enough total work to pay the pipeline compile and beat the multicore CPU outright.
+///
+/// Calibrated on M4 Pro (release, pi's ~7-op cone — `bench_thin_cone_gpu` /
+/// `bench_thin_cone_cpu`): warm-pipeline the GPU wins from n ≈ 1M (3.0 vs 4.3 ms) and holds ~9× at
+/// 256M (109 vs 993 ms); a **fully cold** pipeline compile costs ~0.5 s (Metal's on-disk shader
+/// cache usually absorbs it after the first-ever run, but the gate must price the worst case). The
+/// strict floor sits where the CPU alternative costs several × the cold compile; `prefer_runtime`
+/// (interactive hosts that keep pipelines alive) uses the warm crossover instead.
+const MIN_WORK_GPU_REDUCE: f64 = 1e9;
+/// The warm-pipeline (interactive-host) floor for reduce mode — dispatch overhead + the CPU's
+/// small-n advantage, no compile term.
+const MIN_WORK_REDUCE_RUNTIME: f64 = 1e7;
+
+/// Whether reduce mode is expected to beat the CPU on this forcing. Everything the column gate
+/// accepted stays accepted (reduce mode strictly dominates it — same shader body, ~no readback), and
+/// thin cones additionally win once total work clears the amortization floor above.
+fn profitable_reduce(instrs: usize, ops_per_draw: u64, n: usize) -> bool {
+    if profitable(instrs, ops_per_draw, n) {
+        return true;
+    }
+    let floor = if crate::kernel::prefer_runtime() {
+        MIN_WORK_REDUCE_RUNTIME
+    } else {
+        MIN_WORK_GPU_REDUCE
+    };
+    instrs <= MAX_WGSL_INSTRS && (n as f64 * ops_per_draw as f64) >= floor
+}
+
+/// The reduce-mode gate decision, with the failing term (`NOISE_PROFILE=1`). Mirrors
+/// [`profitable_reduce`] exactly.
+fn gate_reason_reduce(instrs: usize, ops_per_draw: u64, n: usize) -> String {
+    let runtime = crate::kernel::prefer_runtime();
+    let floor = if runtime { MIN_WORK_REDUCE_RUNTIME } else { MIN_WORK_GPU_REDUCE };
+    if instrs > MAX_WGSL_INSTRS {
+        format!("gate(reduce): DECLINE — cone too big ({instrs} instrs > {MAX_WGSL_INSTRS})")
+    } else if profitable(instrs, ops_per_draw, n) {
+        format!(
+            "gate(reduce): ACCEPT (column-gate terms) — {instrs} instrs, {ops_per_draw} ops/draw, {n} draws"
+        )
+    } else if (n as f64 * ops_per_draw as f64) < floor {
+        format!(
+            "gate(reduce): DECLINE — work too small ({:.2e} < {floor:.0e})",
+            n as f64 * ops_per_draw as f64
+        )
+    } else {
+        let mode = if runtime { " (prefer-runtime)" } else { "" };
+        format!("gate(reduce): ACCEPT{mode} — {instrs} instrs, {ops_per_draw} ops/draw, {n} draws")
+    }
 }
 
 /// The gate decision with the reason the failing term (for `NOISE_PROFILE=1`, PLAN-DROP-JIT D0): the
@@ -247,12 +325,12 @@ impl Device {
         Some(pipeline)
     }
 
-    /// Dispatch lanes `lane0 .. lane0 + n` and read back `cols` columns (root `j`'s lane `i` at
-    /// `out[j*n + i]` — the layout [`wgsl_emit::emit`] writes). `cols == 1` is the single-root reducer
-    /// path; `cols > 1` is the joint driver (D4b). One thread per lane writes all `cols` outputs, so
-    /// the workgroup count is unchanged — only the output buffer widens to `cols × n`.
+    /// Dispatch lanes `lane0 .. lane0 + n` and read back what the shader wrote — see
+    /// [`dispatch_shape`] for the two output layouts (`cols >= 1` column mode, `cols == 0` reduce
+    /// mode).
     fn dispatch(&self, pipe: &wgpu::ComputePipeline, key: crate::rng::Key, lane0: u32, n: u32, cols: u32) -> Vec<f32> {
-        let bytes = u64::from(cols) * u64::from(n) * 4;
+        let (out_len, workgroups) = dispatch_shape(n, cols);
+        let bytes = out_len as u64 * 4;
         let params: [u32; 4] = [key.k0, key.k1, lane0, n];
         // SAFETY: `[u32; 4]` is 16 contiguous bytes, no padding; every bit pattern is a valid `u8`.
         let pbytes = unsafe { std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), 16) };
@@ -289,7 +367,7 @@ impl Device {
             let mut pass = enc.begin_compute_pass(&Default::default());
             pass.set_pipeline(pipe);
             pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(n.div_ceil(wgsl_emit::WORKGROUP), 1, 1);
+            pass.dispatch_workgroups(workgroups, 1, 1);
         }
         enc.copy_buffer_to_buffer(&out, 0, &staging, 0, bytes);
         {
@@ -319,6 +397,22 @@ impl Device {
 // Backend seam. `try_reduce` / `try_joint` below are target-agnostic; these three primitives are the
 // only device-touching operations, implemented once per target.
 // ---------------------------------------------------------------------------
+
+/// The output length and workgroup count of one dispatch, from the `cols` word that already rides
+/// the wasm bridge (`gpu-host.ts` mirrors this function — if one drifts, the answers diverge):
+///
+/// * `cols >= 1` — **column mode**: one thread per lane, `cols × n` f32 out
+///   (root `j`'s lane `i` at `out[j*n + i]`, the layout [`wgsl_emit::emit`] writes).
+/// * `cols == 0` — **reduce mode** (Track F): one thread per [`wgsl_emit::REDUCE_LANES_PER_THREAD`]
+///   lanes, one `(Σx, Σx², count)` triple per workgroup ([`wgsl_emit::emit_reduce`]'s layout).
+fn dispatch_shape(n: u32, cols: u32) -> (usize, u32) {
+    if cols == 0 {
+        let wgs = n.div_ceil(wgsl_emit::REDUCE_WG_LANES);
+        (wgs as usize * wgsl_emit::REDUCE_COLS as usize, wgs)
+    } else {
+        (cols as usize * n as usize, n.div_ceil(wgsl_emit::WORKGROUP))
+    }
+}
 
 /// A compiled, ready-to-dispatch pipeline. Native carries the `wgpu` object; wasm carries the shader
 /// text (the main-thread host is keyed on it — a content-addressed pipeline cache lives over there).
@@ -355,8 +449,8 @@ fn prepare(wgsl: &str) -> Option<(Prepared, bool)> {
     (nz_gpu_prepare(wgsl) == 1).then(|| (Prepared(wgsl.to_string()), false))
 }
 
-/// Dispatch lanes `lane0 .. lane0 + n` and read back `cols × n` f32 (root `j`'s lane `i` at `j*n+i`,
-/// the layout [`wgsl_emit::emit`] writes). `cols == 1` is the single-root path; `cols > 1` is joint.
+/// Dispatch lanes `lane0 .. lane0 + n` and read back what the shader wrote — [`dispatch_shape`]
+/// gives the layout per `cols` (`>= 1` column mode, `== 0` reduce mode).
 #[cfg(not(target_arch = "wasm32"))]
 fn dispatch(prep: &Prepared, key: crate::rng::Key, lane0: u32, n: u32, cols: u32) -> Vec<f32> {
     device()
@@ -369,7 +463,8 @@ fn dispatch(prep: &Prepared, key: crate::rng::Key, lane0: u32, n: u32, cols: u32
     // `Atomics.wait`, copy the column back — since the worker is blocked for all of it (the native
     // path splits this into `gpu.dispatch` + `gpu.readback`, which don't exist as phases here).
     let _s = crate::profile::span("gpu.dispatch");
-    let mut out = vec![0.0f32; cols as usize * n as usize];
+    let (out_len, _wgs) = dispatch_shape(n, cols);
+    let mut out = vec![0.0f32; out_len];
     let ok = nz_gpu_dispatch(&prep.0, &mut out, n, cols, key.k0, key.k1, lane0);
     debug_assert_eq!(ok, 1, "nz_gpu_dispatch failed after prepare succeeded (device loss?)");
     out
@@ -402,25 +497,40 @@ extern "C" {
     ) -> i32;
 }
 
-/// Try to run this whole forcing on the GPU.
+/// The outcome of offering a forcing to the GPU: it either ran the whole range ([`Done`]) or
+/// declined and handed the caller's carry accumulator back untouched ([`Declined`]) — the caller
+/// then proceeds exactly as if this module did not exist, so a decline is never an error and never
+/// changes an answer.
 ///
-/// `Ok(None)` means "not this backend's job" — no adapter, an unsupported cone, or the gate saying
-/// the CPU finishes first. The caller then proceeds exactly as if this module did not exist, so a
-/// decline is never an error and never changes an answer.
+/// [`Done`]: GpuReduce::Done
+/// [`Declined`]: GpuReduce::Declined
+pub enum GpuReduce<A> {
+    Done(Reduced<A>),
+    Declined(A),
+}
+
+/// Try to run this whole forcing (epoch-local lanes `lanes`, PLAN-PRECISION Track A/E) on the GPU,
+/// folding into `carry` on the reducer's own chunk boundaries.
 ///
-/// `Err` is reserved for **cancellation**, which must propagate: a cancelled forcing has folded only
-/// some of its chunks, and that partial answer must never escape as though it were an estimate.
+/// `Err` is reserved for **hard cancellation**, which must propagate: a cancelled forcing has
+/// folded only some of its chunks, and that partial answer must never escape as though it were an
+/// estimate. A **soft** stop (the token's soft flag, or the run deadline — checked between
+/// dispatches, ~1M-lane granularity) folds what was read back and returns it with its cause,
+/// exactly like the CPU driver (Track H).
+#[allow(clippy::too_many_arguments)]
 pub fn try_reduce<R: Reducer>(
     graph: &RvGraph,
     root: RvId,
-    n: usize,
+    lanes: std::ops::Range<u64>,
     seed: u64,
     r: &R,
     token: Option<&CancelToken>,
-) -> Result<Option<R::Acc>> {
+    deadline: Option<Instant>,
+    carry: R::Acc,
+) -> Result<GpuReduce<R::Acc>> {
     if !available() {
         crate::profile::note("gpu: no adapter → cpu");
-        return Ok(None);
+        return Ok(GpuReduce::Declined(carry));
     }
 
     // The same simplify the other backends get, so the cone — and therefore the draw ordinals — are
@@ -429,21 +539,34 @@ pub fn try_reduce<R: Reducer>(
         let _s = crate::profile::span("gpu.simplify");
         crate::simplify::simplify(graph, root)
     };
+
+    // A big-n moments fold (P/E/Var and their conditional twins) runs in **reduce mode** (Track F):
+    // the fold happens in the shader and only per-workgroup partials come back, which removes the
+    // readback term that made thin cones GPU-hostile at scale. Small-n forcings stay on the column
+    // path below — their readback is cheap and a reduce dispatch would fill only n/64 threads
+    // ([`REDUCE_MIN_LANES`]) — as does everything non-moments (Q's collect).
+    if (lanes.end - lanes.start) as usize >= REDUCE_MIN_LANES {
+        if let Some(mode) = r.moments_mode() {
+            return reduce_on_gpu(&g, root, mode, lanes, seed, r, token, deadline, carry);
+        }
+    }
+
     let emitted = {
         let _s = crate::profile::span("gpu.emit");
         wgsl_emit::emit(&g, &[root])
     };
     let Ok(wgsl) = emitted else {
         crate::profile::note("gpu: cone unsupported (Poisson/Rotation) → cpu");
-        return Ok(None); // Poisson / Rotation (f64 Gram–Schmidt) → CPU; see wgsl_emit::plan_blocks
+        return Ok(GpuReduce::Declined(carry)); // Poisson / Rotation (f64 Gram–Schmidt) → CPU
     };
 
+    let n = (lanes.end - lanes.start) as usize;
     let cost = crate::kernel::cost(&g, root);
     crate::profile::set_ops(cost.ops);
     let instrs = emitted_instrs(&wgsl);
     if !forced() && !profitable(instrs, cost.ops, n) {
         crate::profile::note(gate_reason(instrs, cost.ops, n));
-        return Ok(None);
+        return Ok(GpuReduce::Declined(carry));
     }
     crate::profile::note(gate_reason(instrs, cost.ops, n));
     let prepared = {
@@ -452,7 +575,7 @@ pub fn try_reduce<R: Reducer>(
     };
     let Some((pipe, hit)) = prepared else {
         crate::profile::note("gpu: driver rejected shader → cpu");
-        return Ok(None); // a shader the driver rejected: fall back rather than fail the program
+        return Ok(GpuReduce::Declined(carry)); // driver rejected: fall back rather than fail
     };
     crate::profile::note(if hit {
         "gpu.pipeline: cache HIT"
@@ -465,35 +588,133 @@ pub fn try_reduce<R: Reducer>(
     crate::stats::record(n, cost.ops, cost.sources);
 
     let key = crate::rng::Key::from_seed(seed);
-    let mut accs: Vec<R::Acc> = Vec::new();
+    let mut acc = carry;
     let mut done = 0usize;
+    let mut stopped = None;
     while done < n {
         if token.is_some_and(CancelToken::is_cancelled) {
             return Err(NoiseError::cancelled());
         }
+        // Soft stop / deadline between dispatches (~1M-lane / ~ms granularity, Track H): keep the
+        // chunks already folded, report the cause.
+        if let Some(cause) = crate::exec::stop_cause_of(token, deadline) {
+            stopped = Some(cause);
+            break;
+        }
         let take = GPU_DISPATCH.min(n - done);
-        // One u32 of lane index caps a forcing at 2^32 draws — the same documented boundary the CPU
-        // reducer has.
-        let lane0 = u32::try_from(done).expect("forcing exceeds 2^32 lanes");
+        // Epoch-local lanes fit u32 by construction (the reduce driver split at 2³² boundaries).
+        let lane0 = u32::try_from(lanes.start + done as u64).expect("epoch-local lane exceeds 2^32");
         let col = dispatch(&pipe, key, lane0, take as u32, 1);
 
-        // Fold on the reducer's OWN chunk boundaries, in order — so the accumulation is the same
-        // sequence of `absorb`/`merge` calls the CPU reducer would have made, and the answer doesn't
-        // depend on how big a dispatch happened to be.
+        // Fold on the reducer's OWN chunk boundaries, in order, into the running carry — so the
+        // accumulation is the same sequence of `absorb`/`merge` calls the CPU reducer would have
+        // made, and the answer doesn't depend on how big a dispatch happened to be.
         let _s = crate::profile::span("gpu.fold");
         for slice in col.chunks(CHUNK_SAMPLES) {
-            let mut acc = r.identity();
-            r.absorb(&mut acc, slice);
-            accs.push(acc);
+            let mut chunk = r.identity();
+            r.absorb(&mut chunk, slice);
+            acc = r.merge(acc, chunk);
         }
         done += take;
     }
 
-    let mut acc = r.identity();
-    for a in accs {
-        acc = r.merge(acc, a);
+    Ok(GpuReduce::Done(Reduced { acc, stopped }))
+}
+
+/// The reduce-mode driver (PLAN-PRECISION Track F): dispatch big lane ranges whose shader folds
+/// `(Σx, Σx², count)` per workgroup ([`wgsl_emit::emit_reduce`]), then fold the partials into the
+/// carry **in workgroup (= lane) order**. A workgroup covers a fixed 4096-lane slice and stage
+/// boundaries are chunk-aligned (16,384 = 4 workgroups), so a staged adaptive run folds exactly the
+/// partials a single run would — the staged-==-single bit-identity holds on the GPU's own fold.
+///
+/// The partial sums are f32 on the device (tier 2: deterministic per device, ~1e-6-relative of the
+/// CPU's f64 fold); the cross-partial fold here is f64, so precision loss is bounded per 4096-lane
+/// slice and does not grow with `n`.
+#[allow(clippy::too_many_arguments)]
+fn reduce_on_gpu<R: Reducer>(
+    g: &RvGraph,
+    root: RvId,
+    mode: MomentsMode,
+    lanes: std::ops::Range<u64>,
+    seed: u64,
+    r: &R,
+    token: Option<&CancelToken>,
+    deadline: Option<Instant>,
+    carry: R::Acc,
+) -> Result<GpuReduce<R::Acc>> {
+    let emitted = {
+        let _s = crate::profile::span("gpu.emit");
+        wgsl_emit::emit_reduce(g, root, mode == MomentsMode::SkipNan)
+    };
+    let Ok(wgsl) = emitted else {
+        crate::profile::note("gpu: cone unsupported (Poisson/Input) → cpu");
+        return Ok(GpuReduce::Declined(carry));
+    };
+
+    let n = (lanes.end - lanes.start) as usize;
+    let cost = crate::kernel::cost(g, root);
+    crate::profile::set_ops(cost.ops);
+    let instrs = emitted_instrs(&wgsl);
+    if !forced() && !profitable_reduce(instrs, cost.ops, n) {
+        crate::profile::note(gate_reason_reduce(instrs, cost.ops, n));
+        return Ok(GpuReduce::Declined(carry));
     }
-    Ok(Some(acc))
+    crate::profile::note(gate_reason_reduce(instrs, cost.ops, n));
+    let prepared = {
+        let _s = crate::profile::span("gpu.pipeline");
+        prepare(&wgsl)
+    };
+    let Some((pipe, hit)) = prepared else {
+        crate::profile::note("gpu: driver rejected shader → cpu");
+        return Ok(GpuReduce::Declined(carry));
+    };
+    crate::profile::note(if hit {
+        "gpu.pipeline: cache HIT"
+    } else {
+        "gpu.pipeline: cache MISS (compiled)"
+    });
+    crate::stats::record(n, cost.ops, cost.sources);
+
+    // Size each dispatch to roughly constant GPU *time* (the stop/deadline check granularity),
+    // using the same per-lane cost proxy as the compile estimate: the cone's ops plus ~150 emulated
+    // ALU per draw. Chunk-aligned so the fold boundaries stay nested in reducer chunks.
+    let per_lane = (cost.ops + 150 * cost.sources).max(1) as f64;
+    let dispatch_lanes = ((REDUCE_WORK_PER_DISPATCH / per_lane) as usize)
+        .clamp(REDUCE_DISPATCH_MIN, REDUCE_DISPATCH_MAX)
+        / CHUNK_SAMPLES
+        * CHUNK_SAMPLES;
+
+    let key = crate::rng::Key::from_seed(seed);
+    let mut acc = carry;
+    let mut done = 0usize;
+    let mut stopped = None;
+    while done < n {
+        if token.is_some_and(CancelToken::is_cancelled) {
+            return Err(NoiseError::cancelled());
+        }
+        if let Some(cause) = crate::exec::stop_cause_of(token, deadline) {
+            stopped = Some(cause);
+            break;
+        }
+        let take = dispatch_lanes.min(n - done);
+        // Epoch-local lanes fit u32 by construction (the reduce driver split at 2³² boundaries).
+        let lane0 = u32::try_from(lanes.start + done as u64).expect("epoch-local lane exceeds 2^32");
+        let partials = dispatch(&pipe, key, lane0, take as u32, 0);
+
+        // One `(Σx, Σx², count)` triple per workgroup, in workgroup order — which IS lane order,
+        // so folding them sequentially into the carry keeps the fold a pure function of the lane
+        // ranges, independent of how the range was split into dispatches or stages.
+        let _s = crate::profile::span("gpu.fold");
+        for p in partials.chunks_exact(wgsl_emit::REDUCE_COLS as usize) {
+            let mut wg = r.identity();
+            // The count is exact: a workgroup covers ≤ 4096 lanes, far inside f32's integer range.
+            r.absorb_moments(&mut wg, p[2] as u64, f64::from(p[0]), f64::from(p[1]));
+            acc = r.merge(acc, wg);
+        }
+        done += take;
+    }
+
+    Ok(GpuReduce::Done(Reduced { acc, stopped }))
 }
 
 /// Try to run a **joint** forcing (several roots drawn together) on the GPU — the D4b driver behind
@@ -574,6 +795,11 @@ pub fn try_joint<F: FnMut(&[&[f32]], usize)>(
         if token.is_some_and(CancelToken::is_cancelled) {
             return Err(NoiseError::cancelled());
         }
+        // Soft stop / deadline (Track H): a stopped plot pass renders what it collected — the
+        // caller's sink already holds the completed chunks, a valid smaller-sample pass.
+        if crate::exec::stop_cause().is_some() {
+            break;
+        }
         let take = max_lanes.min(n - done);
         let lane0 = u32::try_from(done).expect("forcing exceeds 2^32 lanes");
         let buf = dispatch(&pipe, key, lane0, take as u32, k as u32);
@@ -585,4 +811,53 @@ pub fn try_joint<F: FnMut(&[&[f32]], usize)>(
         done += take;
     }
     Ok(Some(()))
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::reduce::{MomentsReducer, Reducer};
+
+    /// Track F: the reduce-mode fold is a pure function of the lane ranges. Workgroup partials
+    /// cover fixed 4096-lane slices and fold in lane order, so a range split into stages folds
+    /// exactly the partials the single range would — **bit-identical**, the same carry-fold
+    /// invariant the CPU driver gives the adaptive precision driver. The ranges here are big
+    /// enough that the reduce-mode gate accepts each stage *naturally* (no test-only forcing,
+    /// which would leak into this whole test binary through the `FORCE` OnceLock).
+    #[test]
+    fn reduce_mode_staged_fold_is_bit_identical_to_single() {
+        if !available() {
+            return; // no adapter: nothing to test, and try_reduce would just decline
+        }
+        let mut eng = crate::eval::Engine::new();
+        let v = eng
+            .run_rv("use rand; X ~ unif(-1,1); Y ~ unif(-1,1); X*X + Y*Y < 1")
+            .unwrap();
+        let crate::Value::Dist(root) = v else { panic!("expected a dist") };
+        let g = eng.graph();
+        let r = MomentsReducer;
+        let seed = 11u64;
+        let (mid, end) = (1u64 << 28, (1u64 << 28) + (1u64 << 28)); // 2 × 268M lanes, both gate-accepted
+
+        let run = |lanes: std::ops::Range<u64>, carry| {
+            match try_reduce(g, root, lanes, seed, &r, None, None, carry).unwrap() {
+                GpuReduce::Done(out) => {
+                    assert!(out.stopped.is_none());
+                    out.acc
+                }
+                GpuReduce::Declined(_) => panic!("gate must accept a 268M-lane thin cone"),
+            }
+        };
+        let single = run(0..end, r.identity());
+        let staged = {
+            let s1 = run(0..mid, r.identity());
+            run(mid..end, s1)
+        };
+        assert_eq!(staged.count(), single.count());
+        let (a, b) = (staged.into_moments(), single.into_moments());
+        assert_eq!(a.mean.to_bits(), b.mean.to_bits(), "staged mean must match bit-for-bit");
+        assert_eq!(a.variance.to_bits(), b.variance.to_bits(), "staged variance must match");
+        // …and it is still π/4.
+        assert!((a.mean - std::f64::consts::FRAC_PI_4).abs() < 1e-4, "mean = {}", a.mean);
+    }
 }
