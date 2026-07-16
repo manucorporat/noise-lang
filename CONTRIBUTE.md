@@ -54,6 +54,24 @@ nothing: the next release overwrites it.
 The website (`packages/www`) is deployed via Netlify, is `private`, and is ignored by changesets — it
 never takes a version bump.
 
+### The website runs the released engine
+
+`packages/www` depends on `@noiselang/core` from **npm** (`^0.5.1`), not `workspace:*`. The published
+tarball ships both prebuilt `.wasm` binaries, so the Netlify build needs no Rust, no nightly and no
+wasm-pack — it installs and runs `astro build` (~8s instead of a full engine compile).
+
+The consequence is the thing to remember: **noiselang.com runs the last released engine, not master.**
+Engine work reaches the site only after it ships to npm, so a site-visible engine fix needs a
+changeset and a Release PR merge like any other release. To preview unreleased engine work on the
+site locally, point it back at the workspace for the duration:
+
+```sh
+pnpm --filter noise-www add @noiselang/core@workspace:*   # revert before committing
+```
+
+(pnpm 10 defaults `link-workspace-packages` to false, which is what makes the `^0.5.1` specifier
+resolve from the registry rather than silently linking `packages/core`.)
+
 ### Repo secrets the workflow needs
 
 | Secret | What for |

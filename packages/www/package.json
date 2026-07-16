@@ -5,15 +5,14 @@
   "private": true,
   "description": "The Noise language website + in-browser playground (Astro + Monaco + WASM).",
   "scripts": {
-    "predev": "pnpm --filter @noiselang/core run build",
-    "prebuild": "pnpm --filter @noiselang/core run build && pnpm run check:flint",
+    "prebuild": "pnpm run check:flint",
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
     "check:flint": "node scripts/check-flint-names.mjs"
   },
   "dependencies": {
-    "@noiselang/core": "workspace:*",
+    "@noiselang/core": "^0.5.1",
     "astro": "^5.13.0",
     "flint-chart": "0.2.0",
     "monaco-editor": "^0.52.2",

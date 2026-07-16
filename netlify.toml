@@ -1,22 +1,20 @@
 # Netlify deploy config for the Noise website (packages/www/).
 #
-# The site embeds the real Noise engine compiled to WebAssembly. The `prebuild`
-# hook in packages/www/package.json runs `wasm-pack`, which is NOT present in Netlify's
-# build image — so we install it (and ensure the Rust toolchain) before building.
-# The wasm-pack installer drops a prebuilt binary into $HOME/.cargo/bin, which
-# the `wasm` npm script already prepends to PATH.
+# The site embeds the real Noise engine compiled to WebAssembly, but it does NOT compile it: it
+# installs the published `@noiselang/core` from npm, whose tarball ships both prebuilt .wasm
+# binaries. So this build needs no Rust, no nightly, and no wasm-pack — just an npm install.
+#
+# The trade that buys: the site runs the last RELEASED engine, not the working tree. An engine
+# change reaches noiselang.com only after it ships to npm (see CONTRIBUTE.md — merge a changeset,
+# merge the Release PR). To preview unreleased engine work locally, point the site back at the
+# workspace for the duration:
+#
+#   pnpm --filter noise-www add @noiselang/core@workspace:*   # then revert before committing
 
 [build]
   base = "packages/www"
   publish = "dist"
-  command = "../../netlify/install-wasm-pack.sh && pnpm build"
-
-[build.environment]
-  # Toolchain for the install script. Use "stable" (some deps require a recent
-  # Cargo, e.g. edition2024 needs Rust >= 1.85), or pin a specific version.
-  # NOTE: the multi-threaded wasm build additionally needs nightly (it rebuilds std with atomics —
-  # see packages/core/scripts/build-wasm.sh), which the install script provisions.
-  RUST_VERSION = "stable"
+  command = "pnpm build"
 
 # Cross-origin isolation. These two headers are what make the browser hand the page a
 # SharedArrayBuffer, which is the foundation wasm threads are built on — without them the engine
