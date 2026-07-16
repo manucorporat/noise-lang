@@ -2,7 +2,7 @@
   "name": "noise-lang-workspace",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@10.14.0",
+  "packageManager": "pnpm@10.34.5",
   "description": "pnpm workspace root for the Noise language JS packages (the Rust crates live under crates/).",
   "scripts": {
     "build:core": "pnpm --filter @noiselang/core run build",

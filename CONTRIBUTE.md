@@ -67,17 +67,29 @@ repo's `release.yml`, and the workflow's `id-token: write` permission mints the 
 credential. Set it up once on npmjs.com under the package's **Settings → Trusted publisher**:
 GitHub Actions, repo `manucorporat/noise-lang`, workflow filename `release.yml`, no environment.
 
-Three preconditions, all already wired up, each of which silently breaks the publish if disturbed:
+The publish chain is `changeset publish` → (it detects the pnpm workspace) → `pnpm publish` →
+plain `npm` off the `PATH`, which performs the OIDC exchange. pnpm bundles no npm of its own and
+forwards the whole process env, so the OIDC variables reach npm intact. Five preconditions hold that
+chain together, each of which breaks the publish in a way that names none of them:
 
 - **Never set an `NPM_TOKEN` secret.** The changesets action writes an `.npmrc` auth line whenever it
   sees one and only uses OIDC when it doesn't — a stray token quietly reverts you to token auth.
-- **npm >= 11.5.1 on `PATH`.** `changeset publish` detects the pnpm workspace and spawns
-  `pnpm publish`, which shells out to plain `npm` off the `PATH` (pnpm bundles no npm of its own),
-  and that npm does the OIDC exchange. Node 22 ships npm 10.x, hence the upgrade step.
-- **pnpm 10**, pinned via the root `packageManager` field. pnpm 11 regressed OIDC publishing
-  ([pnpm/pnpm#11513](https://github.com/pnpm/pnpm/issues/11513)).
+- **Never add `registry-url` to `setup-node`.** It writes an `.npmrc` with
+  `_authToken=${NODE_AUTH_TOKEN}` and a placeholder token; npm prefers that empty token over OIDC and
+  fails with a misleading `E404` ([npm/cli#8730](https://github.com/npm/cli/issues/8730)).
+- **npm >= 11.5.1 on `PATH`** — the floor for trusted publishing. Node 22 ships npm 10.x, hence the
+  install step.
+- **pnpm >= 10.34, < 11**, pinned via the root `packageManager`. Both bounds are load-bearing: pnpm 11
+  regressed OIDC publishing ([pnpm/pnpm#11513](https://github.com/pnpm/pnpm/issues/11513)), while
+  pnpm < 10.34 forwards changesets' `--no-git-checks` to npm as a CLI flag — which npm 12 rejects with
+  `EUNKNOWNCONFIG`, since it made unknown flags fatal rather than a warning. That combination burned
+  a real release: the crates published, then npm failed.
+- **No `git+` prefix on `repository.url`** in `packages/core/package.json`. npm's OIDC matching is
+  sensitive to the normalized URL.
 
 Provenance attestation comes free with OIDC on a public repo — no `NPM_CONFIG_PROVENANCE` needed.
+(It is incompatible with private repos, so if this repo ever goes private, provenance must go off or
+publishes fail with an `E422` disguised as an `E404`.)
 
 #### The optional PAT
 

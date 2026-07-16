@@ -38,20 +38,24 @@ jobs:
           # Release PR would never get a CI run.
           token: ${{ secrets.RELEASE_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
 
-      # pnpm 10, pinned by the root package.json `packageManager` field. Not a free choice: pnpm 11
-      # regressed OIDC publishing (pnpm/pnpm#11513, 404s on publish).
+      # pnpm 10, pinned by the root package.json `packageManager` field. Both bounds are load-bearing:
+      # pnpm 11 regressed OIDC publishing (pnpm/pnpm#11513), and pnpm < 10.34 passes changesets'
+      # `--no-git-checks` to npm as a CLI flag, which npm 12 rejects outright (see below).
       - uses: pnpm/action-setup@v4
+      # NOTE: deliberately no `registry-url`. It looks helpful and is actively harmful here: it makes
+      # setup-node write an .npmrc containing `_authToken=${NODE_AUTH_TOKEN}` plus a placeholder
+      # NODE_AUTH_TOKEN, and npm prefers that empty token over the OIDC exchange — surfacing as a
+      # baffling E404 on publish. See npm/cli#8730, actions/setup-node#1477.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
-          registry-url: https://registry.npmjs.org
 
-      # Trusted publishing needs npm >= 11.5.1, and setup-node's Node 22 ships npm 10.x. This
-      # matters because of a three-link chain: `changeset publish` sees a pnpm workspace and spawns
-      # `pnpm publish`, and pnpm's `runNpm` shells out to plain `"npm"` off the PATH (it bundles no
-      # npm of its own). So the npm upgraded here is the one that performs the OIDC exchange.
-      - name: Upgrade npm for trusted publishing
+      # Trusted publishing needs npm >= 11.5.1 and Node 22 ships npm 10.x, so the npm installed here
+      # is the one doing the OIDC exchange — a three-link chain: `changeset publish` sees a pnpm
+      # workspace and spawns `pnpm publish`, whose `runNpm` shells out to plain `"npm"` off the PATH
+      # (pnpm bundles no npm of its own) and forwards the full process env, OIDC vars included.
+      - name: Install npm for trusted publishing
         run: npm install -g npm@latest && npm --version
 
       # Stable builds the crates and the single-threaded wasm; nightly + rust-src is what

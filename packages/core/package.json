@@ -6,7 +6,7 @@
   "author": "Manu Mtz.-Almeida <manu.valladolid@gmail.com>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/manucorporat/noise-lang.git",
+    "url": "https://github.com/manucorporat/noise-lang.git",
     "directory": "packages/core"
   },
   "type": "module",
