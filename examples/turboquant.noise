@@ -6,10 +6,6 @@ abstract: >
   to its nearest level, quietly shrinks every inner product by a factor of 2/π. This
   reproduces that hidden bias from a recent paper, and the one-bit sketch that fixes it.
 tags: [research, capstone]
-extra:
-  blurb: "Reproducing a quantization bias (and its fix) from an arXiv paper."
-  category: "Functions & research"
-  analytic: "bias 2/π ≈ 0.637"
 ---
 use math;     // pi, sqrt, sign
 use vec;      // normalize, ones, iota, quantize, normsq, norm, transpose

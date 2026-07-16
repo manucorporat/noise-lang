@@ -6,10 +6,6 @@ abstract: >
   the needle again and again and counting the crossings, you can measure π with
   nothing but a needle and a tally. A 250-year-old Monte Carlo trick.
 tags: [monte carlo, geometry]
-extra:
-  blurb: "Measure π by dropping a needle on a lined floor."
-  category: "Basics"
-  analytic: "3.14159…"
 ---
 use rand;   // unif
 use math;   // pi, sin

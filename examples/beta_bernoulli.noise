@@ -6,10 +6,6 @@ abstract: >
   "the bias could be anything at all" and let the 10 flips reshape that belief into a
   posterior. The data pulls your best guess to about 0.67, notably shy of the raw 7-in-10.
 tags: [bayesian, inference]
-extra:
-  blurb: "A Bayesian update: from a flat prior to a coin's posterior bias."
-  category: "Statistics"
-  analytic: "E[bias | 7/10] = 0.6667"
 ---
 use rand; use vec;
 

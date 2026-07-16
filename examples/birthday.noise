@@ -5,10 +5,6 @@ abstract: >
   birthday? The surprising answer is just 23 — far fewer than the 365 days in a
   year would suggest. Coincidences are much more likely than they feel.
 tags: [collections, classic]
-extra:
-  blurb: "How often does a group share a birthday?"
-  category: "Probability"
-  analytic: "23 people → 50.7%"
 ---
 use rand;
 
@@ -16,6 +12,7 @@ n = input::int(min: 2, max: 100, step: 1, default: 23);
 
 share ~[n] unif_int(1, 365);
 matched = vec::has_duplicates(share);
+
 ```md
 With ${n} people, the chance that two share a birthday is **${P(matched) * 100}%**.
 ```

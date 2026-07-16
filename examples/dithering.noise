@@ -6,17 +6,15 @@ abstract: >
   answers, and the exact analog value falls out. Counterintuitively, a pinch of noise buys
   real resolution — the trick inside 1-bit audio and stochastic ADCs.
 tags: [signals, dsp]
-extra:
-  blurb: "How noise buys resolution for a 1-bit sensor."
-  category: "Signals & DSP"
 ---
-use rand;   // unif
-use math;   // sign
 
+use rand;
+use math;
 
 // A 1-bit quantizer reports only the SIGN (+1 / -1) of its input. Ask it about a fixed level v and
 // it's useless: it answers "+1" for any positive v, telling you nothing about HOW big v is.
 v = 0.3;
+
 ```md
 no dither: E[sign(v)] = **${E(sign(v))}** (stuck at +1 — says nothing about v = ${v})
 ```
@@ -29,6 +27,7 @@ no dither: E[sign(v)] = **${E(sign(v))}** (stuck at +1 — says nothing about v 
 dither = input::real(min: 0, max: 2, step: 0.1, default: 1);
 
 u ~ unif(-dither, dither);
+
 ```md
 dithered: E[sign(v + u)] = **${E(sign(v + u))}** (recovers v = ${v})
 ```

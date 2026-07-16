@@ -7,12 +7,10 @@ abstract: >
   interference is reproduced exactly with complex arithmetic; pick a number and watch its factors
   fall out.
 tags: [quantum, classic]
-extra:
-  blurb: "How a quantum computer factors numbers — and breaks RSA."
-  category: "Quantum"
 ---
-use math;   // i, exp, pi (complex amplitudes), gcd, modpow (modular arithmetic — exact, no overflow)
-use vec;    // outer, normsq, count
+
+use math;
+use vec;
 
 // A 2^n simulation: gorgeous for small N, never efficient — what's faithful is the PHYSICS, the
 // amplitudes and their interference. (Efficient Shor needs a real quantum computer.)

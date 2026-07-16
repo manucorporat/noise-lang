@@ -6,9 +6,6 @@ abstract: >
   times cleaner. The difference is where each hides the message: AM in the wave's height,
   which noise hits head-on, and FM in its angle, which a wider swing can defend.
 tags: [signals, dsp, complex]
-extra:
-  blurb: "Why FM survives noise better than AM."
-  category: "Signals & DSP"
 ---
 use math;
 use vec;
@@ -40,6 +37,7 @@ recovered_fm = fm_demodulate(fm_modulate(msg, fm_swing) + static, fm_swing);
 // that over many realizations of the static.
 am_err = E(mse(recovered_am, msg));
 fm_err = E(mse(recovered_fm, msg));
+
 ```md
 AM recovered-message error (MSE) = **${am_err}**
 FM recovered-message error (MSE) = **${fm_err}**

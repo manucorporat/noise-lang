@@ -5,16 +5,14 @@ abstract: >
   single time? Each extra flip cuts the chances in half, so a run of just three is
   already down to one in eight. Long streaks of luck are far rarer than they feel.
 tags: [independence, modeling]
-extra:
-  blurb: "Model the event, don’t multiply probabilities by hand."
-  category: "Probability"
-  analytic: "1/8 = 0.125"
 ---
+
 // How many coins we flip in a row — tune it and watch the all-heads chance halve each time.
 flip_count = input::int(min: 1, max: 20, step: 1, default: 3);
 
 flips  ~[flip_count] rand::bernoulli(0.5);
 streak = vec::all(flips);
+
 ```md
 P(all heads in a row) = **${P(streak) * 100}%**
 ```

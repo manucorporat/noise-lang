@@ -50,7 +50,10 @@ export default defineConfig({
   vite: {
     plugins: [crossOriginIsolation],
     server: {
-      fs: { allow: ['..'] },
+      // The repo root, not '..' (= packages/): setting fs.allow replaces Vite's default
+      // workspace-root allowance, and dev-served files resolve into the ROOT node_modules/.pnpm
+      // (e.g. astro's dev-toolbar entrypoint) — plus the top-level examples/ raw-imports.
+      fs: { allow: [fileURLToPath(new URL('../..', import.meta.url))] },
     },
     worker: {
       format: 'es',

@@ -4,12 +4,9 @@ abstract: >
   How do you measure the chance of something that almost never happens? With a fixed
   million samples, a once-in-ten-thousand-years crash shows up about a hundred times —
   a rough count with ~10% wobble you can't see in the printed digits. Ask for relative
-  precision instead: the engine keeps sampling until the estimate itself is that good,
-  so rare events automatically get the extra draws they need.
+  precision instead of a sample count, and rare events automatically get the extra
+  draws they need to pin the answer down.
 tags: [risk, precision, tails]
-extra:
-  blurb: "Ask for relative precision and let the engine find the tail."
-  category: "Games & risk"
 ---
 use rand;
 

@@ -6,9 +6,6 @@ abstract: >
   the same inputs, but a random one draws anew on every call — so rolling the same die
   function twice is genuinely two independent dice, not one die counted twice.
 tags: [functions, language]
-extra:
-  blurb: "Deterministic (=) vs stochastic (~) functions."
-  category: "Functions & research"
 ---
 use rand;
 

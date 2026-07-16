@@ -6,10 +6,6 @@ abstract: >
   mathematically fair ticket would cost more than all the money in the world. So why would
   nobody in their right mind pay more than a few dollars to play?
 tags: [paradox, expectation]
-extra:
-  blurb: "A game with infinite expected value that nobody would pay for."
-  category: "Games & risk"
-  analytic: "E ≈ rounds (unbounded)"
 ---
 
 // The trick behind the infinity: each round contributes exactly $1 to the expectation
@@ -45,6 +41,7 @@ E[\text{payout up to } ${rounds} \text{ rounds}] = ${E(play(rounds))} \quad (\ap
 
 // The mean hides in rare jackpots — the histogram shows that long, heavy tail.
 plot::histogram(play(rounds));
+
 ```md
 Each extra round adds about $1 of expected value forever, so no finite price is fair.
 (The mean lives in ever-rarer jackpots, so longer games need exponentially more samples.)

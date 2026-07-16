@@ -7,12 +7,10 @@ abstract: >
   it makes tomorrow a random draw from the history itself, so the fat tails stay fat and
   the crash keeps exactly its 1-in-24 share of the future.
 tags: [statistics, resampling]
-extra:
-  blurb: "Model tomorrow by resampling real history, not a bell curve."
-  category: "Statistics"
-  analytic: "P(-4% day) = 1/24 ≈ 4.2%"
 ---
-use rand; use vec;
+
+use rand;
+use vec;
 
 // The data: 24 daily returns (0.012 = +1.2%). Days 11-14 are a panic streak around the -4%
 // crash — real markets have bad WEEKS, not just isolated bad days, and that will matter below.
@@ -24,6 +22,7 @@ rets = [ 0.004, -0.006,  0.012,  0.003, -0.002,
 
 // Tomorrow is a uniformly-random day pulled straight from history (the iid bootstrap).
 tomorrow ~ rand::empirical(rets);
+
 ```md
 E(tomorrow) = **${E(tomorrow)}** (sample mean: ${mean(rets)})
 1-day VaR (Q05) = **${Q(tomorrow, 0.05)}** — straight from history, crash included

@@ -5,15 +5,14 @@ abstract: >
   do you actually walk away ahead? Only 1 roll in 6 — winning is rare even when the
   prize looks tempting.
 tags: [lifted if, risk]
-extra:
-  blurb: "Build a payoff distribution, then ask about profit."
-  category: "Games & risk"
 ---
+
 use rand;
 
 D ~ unif_int(1, 6);
 payoff = if D == 6 { 10 } else { 0 - 2 };
 p = P(payoff > 0);
+
 ```md
 The chance you come out ahead is **${p * 100}%**.
 ```

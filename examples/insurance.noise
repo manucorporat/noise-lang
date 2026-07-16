@@ -6,9 +6,6 @@ abstract: >
   writes fewer checks — so how often do they actually end up paying at all? The same shape
   fits any threshold-and-payout problem.
 tags: [risk, lifted if]
-extra:
-  blurb: "A deductible as a lifted if over a loss."
-  category: "Games & risk"
 ---
 use rand;
 
@@ -19,6 +16,7 @@ max_loss   = input::real(min: 100, max: 5000, step: 100, default: 1000);
 loss ~ unif(0, max_loss);
 claim = if loss > deductible { loss - deductible } else { 0 };
 p = P(claim > 0);
+
 ```md
 The chance the insurer pays a claim is **${p * 100}%**.
 ```

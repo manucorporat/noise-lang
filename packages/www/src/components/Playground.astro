@@ -154,7 +154,10 @@
     display: grid;
     grid-template-columns: minmax(220px, var(--pg-left, 40%)) 10px minmax(280px, 1fr);
     align-items: stretch;
-    min-height: clamp(460px, calc(100vh - 13rem), 940px);
+    /* Fixed height filling the viewport below the topbar (not min-height: the panes must NOT grow
+       with content — the editor and the Preview each scroll internally instead). 6.25rem = topbar
+       + the page's vertical padding around the playground. */
+    height: max(460px, calc(100dvh - 6.25rem));
   }
   /* Single-pane views: collapse to one column and hide the resizer + the pane being focused away. */
   .pg-split[data-view='code'],
@@ -165,7 +168,7 @@
   .pg-split[data-view='render'] .pg-editor-wrap { display: none; }
 
   @media (max-width: 880px) {
-    .pg-split { grid-template-columns: 1fr; min-height: 0; gap: 1rem; }
+    .pg-split { grid-template-columns: 1fr; height: auto; gap: 1rem; }
     .pg-resizer { display: none; }
     .pg-viewtab-split { display: none; }
   }
@@ -271,28 +274,13 @@
   }
 
   .pg-output {
-    margin: 0; padding: 0.85rem; flex: 1; overflow: auto;
+    margin: 0; padding: 0.85rem; flex: 1; overflow: auto; overscroll-behavior: contain;
     font-family: var(--mono); font-size: 0.86rem; line-height: 1.5;
     color: var(--ink); word-break: break-word;
     background: var(--paper-2);
   }
   /* The Preview background is on the markup element, so it can stay scoped; its dynamically-built
-     children are styled by the `<style is:global>
-  /* Run warnings (PLAN-PRECISION): rendered dynamically inside .pg-paper, so they must be styled
-     here — Astro's scoped styles can't reach nodes created at runtime. */
-  .pg-warnings {
-    margin: 0 0 1rem;
-    padding: 0.55rem 0.8rem;
-    border: 1px solid #e5c56b;
-    border-left: 3px solid #d4a017;
-    background: #fdf6e3;
-    color: #6b5310;
-    font-size: 0.82rem;
-    line-height: 1.45;
-    border-radius: 4px;
-  }
-  .pg-warnings div + div { margin-top: 0.3rem; }
-` block below (Astro scoping doesn't reach
+     children are styled by the `<style is:global>` block below (Astro scoping doesn't reach
      JS-created nodes). */
   .pg-output.is-preview { background: var(--paper); padding: 1.6rem 1.4rem 2.4rem; }
 
@@ -312,22 +300,7 @@
   .pg-metric.m-rate .m-val { color: var(--accent); }
   .m-sep { color: var(--ink-faint); opacity: 0.6; }
   /* The metrics container is a template element, so `position` scopes correctly here; the JS-created
-     summary/detail children are styled in the `<style is:global>
-  /* Run warnings (PLAN-PRECISION): rendered dynamically inside .pg-paper, so they must be styled
-     here — Astro's scoped styles can't reach nodes created at runtime. */
-  .pg-warnings {
-    margin: 0 0 1rem;
-    padding: 0.55rem 0.8rem;
-    border: 1px solid #e5c56b;
-    border-left: 3px solid #d4a017;
-    background: #fdf6e3;
-    color: #6b5310;
-    font-size: 0.82rem;
-    line-height: 1.45;
-    border-radius: 4px;
-  }
-  .pg-warnings div + div { margin-top: 0.3rem; }
-` block (scoping can't reach them). */
+     summary/detail children are styled in the `<style is:global>` block (scoping can't reach them). */
   #pg-metrics { position: relative; }
 
   /* The right cluster of the Render header: the engine readout + the Share pill. */

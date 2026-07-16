@@ -4,13 +4,8 @@ abstract: >
   Scatter darts at random across a square and count how many land inside a circle
   drawn in it. That fraction alone is enough to recover π — no formula for the
   circle, just a tally of hits. It's the classic first taste of Monte Carlo:
-  turning a question about geometry into a number by sampling — and of asking the
-  engine for digits instead of guessing how many darts you'd need.
+  turning a question about geometry into a number by sampling.
 tags: [basics, monte carlo, precision]
-extra:
-  blurb: "Monte Carlo π from random darts in a square."
-  category: "Basics"
-  analytic: "3.14159…"
 ---
 // Throw darts at a 2-by-2 square: each dart is a random (X, Y) point.
 X ~ rand::unif(-1, 1);

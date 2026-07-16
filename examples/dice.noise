@@ -6,10 +6,6 @@ abstract: >
   landing exactly on 4 drops to zero, because a real number never hits a single
   point on the nose. Choosing the right kind of randomness is the whole game.
 tags: [basics, discrete]
-extra:
-  blurb: "Why dice need unif_int, not unif."
-  category: "Basics"
-  analytic: "1/6 ≈ 0.1667"
 ---
 use rand;
 

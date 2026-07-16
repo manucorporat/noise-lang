@@ -6,10 +6,6 @@ abstract: >
   Random guessing makes escape essentially impossible. Yet one clever strategy of
   following chains from box to box frees them all about 31% of the time.
 tags: [classic, permutations]
-extra:
-  blurb: "Follow the cycle and beat impossible odds."
-  category: "Probability"
-  analytic: "≈ 0.3118"
 ---
 use rand;   // permutation
 use vec;

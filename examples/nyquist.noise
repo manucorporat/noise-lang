@@ -6,9 +6,6 @@ abstract: >
   samples become identical to a slow 3-cycle wave: nothing can tell them apart. Sample faster
   and they separate again. The sampling theorem, something you can watch happen.
 tags: [signals, dsp]
-extra:
-  blurb: "Aliasing by counterexample."
-  category: "Signals & DSP"
 ---
 high = signal::cosine(7);   // a fast wave: 7 cycles per window
 low  = signal::cosine(3);   // a slow wave: 3 cycles per window  -- genuinely a different signal

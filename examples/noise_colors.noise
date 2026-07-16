@@ -6,9 +6,6 @@ abstract: >
   number on that memory — the thing that makes pink noise turn up everywhere from electronics to
   neurons to music? Count how alike neighboring samples are, and the colors sort themselves out.
 tags: [signals, dsp]
-extra:
-  blurb: "White, pink, brown — sorted by how much each sample remembers the last."
-  category: "Signals & DSP"
 ---
 use math;     // round
 

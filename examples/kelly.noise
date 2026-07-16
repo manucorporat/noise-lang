@@ -6,10 +6,6 @@ abstract: >
   streak wipes you out. There is a single magic fraction in between that grows your money
   fastest over the long run, and it is smaller than most people guess.
 tags: [betting, optimization]
-extra:
-  blurb: "How much of your bankroll to stake on a winning bet."
-  category: "Games & risk"
-  analytic: "f* = 0.2 → 0.0201/round"
 ---
 
 // Why maximize the LOG of growth, not the growth itself? Bankrolls MULTIPLY round to round,

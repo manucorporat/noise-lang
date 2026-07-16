@@ -6,14 +6,12 @@ abstract: >
   place two heads among three coins. Counting the arrangements is what separates
   the gut feeling from the real odds.
 tags: [modeling, collections]
-extra:
-  blurb: "A tiny Binomial built from boolean events."
-  category: "Probability"
-  analytic: "3/8 = 0.375"
 ---
+
 coin  = rand::bernoulli(0.5);
 flips ~[3] coin;
 heads = vec::count(flips);
+
 ```md
 P(exactly two heads of three) = **${P(heads == 2) * 100}%**
 ```

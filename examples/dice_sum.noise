@@ -6,10 +6,6 @@ abstract: >
   other number. Keep adding dice and that lopsided triangle of totals rounds itself
   into a bell.
 tags: [independence, collections]
-extra:
-  blurb: "Independence is a separate ~ draw, not a repeated name."
-  category: "Basics"
-  analytic: "1/6 ≈ 0.1667"
 ---
 use rand;   // unif_int
 

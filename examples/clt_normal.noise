@@ -6,9 +6,6 @@ abstract: >
   shape, whatever the pieces look like. Here twelve flat, featureless random numbers
   add up to something almost indistinguishable from a true standard normal.
 tags: [continuous, clt]
-extra:
-  blurb: "A normal built from twelve uniforms."
-  category: "Continuous & CLT"
 ---
 use rand;   // unif, normal
 

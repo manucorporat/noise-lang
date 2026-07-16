@@ -5,10 +5,6 @@ abstract: >
   show a 6? Just over 1 in 3 — because a 6 turns up whenever either die rolls it,
   far more often than a single die's 1 in 6.
 tags: [lifted if]
-extra:
-  blurb: "max over random variables via a lifted if."
-  category: "Games & risk"
-  analytic: "11/36 ≈ 0.3056"
 ---
 use rand;
 

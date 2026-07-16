@@ -7,10 +7,6 @@ abstract: >
   than a plain option. Wall Street prices it with a page of stochastic calculus; how close can
   we get by just simulating the year, week by week, a few hundred thousand times?
 tags: [finance, monte carlo]
-extra:
-  blurb: "Pricing a knock-out option by brute-force simulation."
-  category: "Games & risk"
-  analytic: "vanilla = 10.4506 (Black-Scholes)"
 ---
 use rand;   // normal
 use math;   // exp, sqrt

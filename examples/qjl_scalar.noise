@@ -6,9 +6,6 @@ abstract: >
   by √(π/2) makes the average land exactly on the true size, with no bias. This one-bit
   trick is the seed of the TurboQuant sketch.
 tags: [research, continuous]
-extra:
-  blurb: "An unbiased 1-bit quantizer (TurboQuant building block)."
-  category: "Functions & research"
 ---
 use rand;   // normal
 use math;   // sqrt, pi

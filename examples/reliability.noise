@@ -6,10 +6,6 @@ abstract: >
   failure rate collapses from 1-in-10 to 1-in-1000 — a flaky 90% part becomes three nines.
   How many spares does it take to buy each extra nine of reliability?
 tags: [engineering, collections]
-extra:
-  blurb: "Three parallel components, each 90% reliable."
-  category: "Games & risk"
-  analytic: "0.999"
 ---
 part   = rand::bernoulli(0.9);
 

@@ -6,10 +6,6 @@ abstract: >
   the more you add the more that hump sharpens into a bell. This is the central limit
   theorem you can watch happen.
 tags: [continuous, collections]
-extra:
-  blurb: "The Irwin–Hall distribution by simulation."
-  category: "Continuous & CLT"
-  analytic: "1/6 ≈ 0.1667"
 ---
 use rand;   // unif
 

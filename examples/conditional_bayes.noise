@@ -5,14 +5,11 @@ abstract: >
   how likely is it actually a 6? The answer is 1 in 3 — once you know the roll landed
   on 4, 5, or 6, those three faces are equally in the running.
 tags: [probability, bayes]
-extra:
-  blurb: "P(A | B) as a ratio of probabilities."
-  category: "Probability"
-  analytic: "1/3 ≈ 0.3333"
 ---
 use rand;
 
 D ~ unif_int(1, 6);
+
 ```md
 The chance a die known to have beaten 3 is actually a 6 is **${P(D == 6 | D > 3) * 100}%**.
 ```

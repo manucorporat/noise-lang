@@ -6,10 +6,6 @@ abstract: >
   wins two times out of three — twice as often as staying — even though it feels
   like a coin toss.
 tags: [classic, modeling]
-extra:
-  blurb: "Switching doors wins 2/3 of the time."
-  category: "Probability"
-  analytic: "2/3 ≈ 0.6667"
 ---
 use rand;
 
