@@ -8,27 +8,42 @@ abstract: >
 tags: [classic, permutations]
 ---
 
-use vec;
+use vec
 
-// The boxes are a uniform random permutation: box k contains the number boxes[k].
-n     = 100;
-opens = 50;
-boxes ~ rand::permutation(n);
-
-// The escape succeeds exactly when the shuffle has no cycle longer than 50 — that's the whole secret.
-all_win = true;
-for prisoner in 0..n {
-  box   = prisoner;       // start by opening your own numbered box
-  found = false;
-  for hop in 0..opens {
-    box   = boxes[box];                  // open the box the last number pointed to
-    found = found || (box == prisoner);  // did we just uncover our own number?
-  };
-  all_win = all_win && found;
-};
-
-// Heavier than most examples: each sample chases pointers through 100 boxes. Asking for half-a-
-// percent relative precision keeps it snappy — the engine draws only what that costs.
 ```md
-P(all 100 prisoners go free) = **${P(all_win, 2e-3) * 100}%** (analytic ≈ 31.2%)
+**The shuffle.** Box k holds number `boxes[k]` — a uniform random permutation
+of all one hundred numbers.
+```
+n     = 100
+opens = 50
+boxes ~ rand::permutation(n)
+
+```md
+**The chain strategy.** Each prisoner opens their own numbered box first, then
+follows wherever the number inside points. The escape succeeds exactly when
+the shuffle has no cycle longer than 50 — that is the whole secret.
+```
+all_win = true
+for prisoner in 0..n {
+  box   = prisoner
+  found = false
+  for hop in 0..opens {
+    box   = boxes[box]
+    found = found || (box == prisoner)
+  }
+  all_win = all_win && found
+}
+
+// Heavier than most examples: each sample chases pointers through 100 boxes. Half-a-percent
+// relative precision keeps it snappy — the engine draws only what that costs.
+p_free = P(all_win, 2e-3)
+
+```md
+**The verdict.** All hundred walk free **${p_free * 100}%** of the time —
+absurdly far above the 0.5^100 of random guessing. The law behind it: the
+strategy fails only when the shuffle contains a cycle longer than half the
+boxes:
+```
+```latex
+P(\text{all free}) = 1 - \sum_{k=51}^{100} \frac{1}{k} \approx ${p_free}
 ```

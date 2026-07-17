@@ -7,33 +7,50 @@ abstract: >
   posterior. The data pulls your best guess to about 0.67, notably shy of the raw 7-in-10.
 tags: [bayesian, inference]
 ---
-use vec;
+use vec
 
-bias  ~ rand::unif(0, 1);            // prior: the bias could be anything in [0, 1], equally likely
-flips ~[10] rand::bernoulli(bias);  // a RANDOM parameter feeding bernoulli — 10 flips of THIS coin
-next  ~ rand::bernoulli(bias);      // an 11th flip from the same coin (for the prediction below)
+```md
+**Start ignorant.** The bias could be anything in [0, 1], equally likely.
+The evidence is 10 flips of *that* coin — a random parameter feeding a
+Bernoulli — plus an 11th flip saved for a prediction later.
+```
+bias  ~ rand::unif(0, 1)
+flips ~[10] rand::bernoulli(bias)
+next  ~ rand::bernoulli(bias)
+heads = count(flips)
+prior_mean = E(bias)
 
-heads = count(flips);
-
-// Before any data, the bias averages 1/2 — that is just the flat prior showing through.
-```latex
-E[\text{bias}] = ${E(bias)} \quad (0.5)
+```md
+Before any data, the belief averages **${prior_mean}** — the flat prior
+showing through.
 ```
 
-// Conditioning is the whole trick: `| heads == 7` keeps only the worlds that produced our data,
-// and the posterior mean of a flat prior after h of n heads is (h+1)/(n+2) = 8/12 = 0.6667.
+```md
+**Let the data reshape it.** Conditioning on `heads == 7` keeps only the
+worlds that produced our data. For a flat prior the answer has a closed form
+to check against:
+```
+posterior      = bias | heads == 7
+posterior_mean = E(posterior)
+low90          = Q(posterior, 0.05)
+high90         = Q(posterior, 0.95)
 ```latex
-E[\text{bias} \mid 7/10] = ${E(bias | heads == 7)} \quad (0.6667)
-\text{90\% interval} = [\, ${Q(bias | heads == 7, 0.05)},\ ${Q(bias | heads == 7, 0.95)} \,]
+E[\text{bias} \mid h \text{ of } n] = \frac{h+1}{n+2} = \frac{8}{12} \approx ${posterior_mean},
+\qquad 90\%\ \text{interval:}\ [\,${low90},\ ${high90}\,]
 ```
 
-// The posterior predictive lands on the same 8/12: your belief about the coin IS your bet on it.
+```md
+**Your belief is your bet.** The chance the 11th flip lands heads is the same
+8/12 — the posterior predictive:
+```
+p_next_heads = P(next | heads == 7)
 ```latex
-P(\text{next flip heads} \mid 7/10) = ${P(next | heads == 7)} \quad (0.6667)
+P(\text{next flip heads} \mid 7/10) \approx ${p_next_heads}
 ```
 
-// Prior vs posterior, side by side: a flat slab of equal possibilities...
-plot::histogram(bias);
-
-// ...collapsing into a clear peak near 0.7 once the 7-of-10 evidence lands.
-plot::histogram(bias | heads == 7)
+```md
+**Watch the collapse.** The prior is a flat slab of equal possibilities; the
+posterior is what 7-of-10 leaves of it — a clear peak near 0.7.
+```
+plot::histogram(bias)
+plot::histogram(posterior)

@@ -7,14 +7,23 @@ abstract: >
   trick is the seed of the TurboQuant sketch.
 tags: [research, continuous]
 ---
-use math;   // sqrt, pi
+use math   // sqrt, pi
 
-s ~ rand::normal(0, 1);
-estimate = sqrt(pi / 2) * s * sign(s);          // = sqrt(pi/2) * |s|
+```md
+**Keep one bit.** Draw a standard normal, throw away everything but its sign,
+then rescale by √(π/2). The magnitude looks gone — but on average it isn't:
+```
+s ~ rand::normal(0, 1)
+estimate = sqrt(pi / 2) * s * sign(s)
+mean_estimate = E(estimate)
+spread        = Var(estimate)
 ```latex
-E[\text{QJL 1-D estimate}] = ${E(estimate)} \qquad (\text{unbiased target} = 1.0)
-\mathrm{Var}[\text{estimate}] = ${Var(estimate)}
+E[\text{QJL 1-D estimate}] = ${mean_estimate} \qquad (\text{unbiased target} = 1.0),
+\qquad \mathrm{Var} = ${spread}
 ```
 
-// A folded normal — skewed and spread — yet its average is pinned to 1. One bit throws away a lot, but not the mean.
+```md
+**The price of the bit.** A folded normal — skewed and spread — yet its
+average is pinned to 1. One bit throws away a lot, but not the mean.
+```
 plot::histogram(estimate)

@@ -7,23 +7,39 @@ abstract: >
 tags: [probability, bayes]
 ---
 
-D ~ rand::unif_int(1, 6);
+```md
+**The hint.** A die roll, and one clue: it beat 3.
+```
+roll ~ rand::unif_int(1, 6)
+p_six_given_high = P(roll == 6 | roll > 3)
 
 ```md
-The chance a die known to have beaten 3 is actually a 6 is **${P(D == 6 | D > 3) * 100}%**.
+Given the hint, the chance it's actually a 6 is **${p_six_given_high * 100}%**
+— knowing it landed on 4, 5, or 6 leaves those three equally in the running.
 ```
 
-// A conditioned value is first-class: bind it once, then ask several questions of it.
-high = D | D > 3;                       // the roll, restricted to the worlds where D > 3
+```md
+**A conditioned value is first-class.** Bind "the roll, in the worlds where it
+beat 3" once, then ask it anything:
+```
+high = roll | roll > 3
+mean_high   = E(high)
+median_high = Q(high, 0.5)
 ```latex
-E[\text{roll} \mid \text{roll} > 3] = ${E(high)} \qquad(\text{mean of } 4,5,6 = 5)
-\mathrm{median}(\text{roll} \mid {>}\,3) = ${Q(high, 0.5)} \qquad(= 5)
+E[\text{roll} \mid {>}\,3] = ${mean_high}, \qquad
+\mathrm{median} = ${median_high} \qquad (\text{mean of } 4,5,6 = 5)
 ```
 
-// Same answer the long way — `P(A | C)` is exactly `P(A && C) / P(C)`, just less ceremony:
+```md
+**The same answer, the long way.** The bar is exactly the textbook ratio, with
+less ceremony:
+```
+p_ratio = P(roll == 6 && roll > 3) / P(roll > 3)
 ```latex
-P(D = 6 \mid D > 3) = \frac{P(D = 6 \cap D > 3)}{P(D > 3)} = ${P(D == 6 && D > 3) / P(D > 3)}
+\frac{P(\text{roll}=6 \,\cap\, \text{roll}>3)}{P(\text{roll}>3)} = ${p_ratio}
 ```
 
-// Once we know the roll beat 3, only 4, 5 and 6 are left — see them share the chances evenly.
+```md
+**Only three faces left.** 4, 5 and 6, sharing the chances evenly:
+```
 plot::histogram(high)

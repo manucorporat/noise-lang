@@ -495,10 +495,14 @@ fn quantile_domain_and_arity_are_checked() {
 #[test]
 fn quantile_is_always_active_like_other_builtins() {
     // `Q` lives in the always-on `builtin` module — no `use vec/math` needed (mirrors P/E/Var);
-    // only `rand` is needed for the distribution constructor.
+    // only `rand` is needed for the distribution constructor. Like P/E/Var it returns an
+    // estimate, with a density-free order-statistic standard error.
     match run_raw("use rand; X ~ unif(0, 1); Q(X, 0.5)").unwrap() {
-        Value::Num(m) => assert!((m - 0.5).abs() < 5e-3, "median = {m}"),
-        other => panic!("expected a number, got {other:?}"),
+        Value::Est { val, se } => {
+            assert!((val - 0.5).abs() < 5e-3, "median = {val}");
+            assert!(se > 0.0 && se < 5e-3, "median se = {se}");
+        }
+        other => panic!("expected an estimate, got {other:?}"),
     }
 }
 

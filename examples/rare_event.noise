@@ -9,16 +9,22 @@ abstract: >
 tags: [risk, precision, tails]
 ---
 
-// A year of market returns, roughly bell-shaped: most years are ordinary.
-returns ~ rand::normal(0, 1);
+```md
+**The catastrophe.** A year of market returns, roughly bell-shaped — and the
+crash is a 3.7-sigma day in the far left tail, about once in ten thousand
+years.
+```
+returns ~ rand::normal(0, 1)
+crash = returns < -3.7
 
-// The catastrophe: a 3.7-sigma crash. It happens about once in ten thousand years.
-crash = returns < -3.7;
+```md
+**Ask for precision, not draws.** A fixed budget spends almost everything on
+ordinary years. Asking for 10% *relative* error instead keeps the engine
+drawing until the rare corner of the distribution has been seen often enough
+to pin down.
+```
+p_crash = P(crash, 0.1)
 
-// Ask for the answer to 10% RELATIVE error — not for a sample count. A fixed budget
-// spends almost all of it on ordinary years; a relative target keeps drawing until
-// the rare corner of the distribution has been seen often enough to pin down.
-p_crash = P(crash, 0.1);
 ```md
 P(crash) = **${p_crash}** — about one year in ${math::round(1 / p_crash, 0)}.
 ```

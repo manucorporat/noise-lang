@@ -8,53 +8,71 @@ abstract: >
   we get by just simulating the year, week by week, a few hundred thousand times?
 tags: [finance, monte carlo]
 ---
-use math;   // exp, sqrt
-use vec;    // cumsum, cummax, any, min
+use math   // exp, sqrt
+use vec    // cumsum, cummax, any, min
 
-// --- The contract ---
-s0      = 100;
-strike  = 100;    // at expiry you are paid max(S_T - strike, 0)
+```md
+**The contract.** The stock starts at 100 and the call is struck at 100 — at
+year's end it pays whatever the stock finishes above the strike. Then the
+trapdoor: drag the barrier up toward the stock price and knock-outs multiply,
+making the option cheaper; drop it and the price climbs back to the vanilla
+value.
+```
+start_price = 100
+strike      = 100
+barrier     = input::real(min: 50, max: 95, step: 5, default: 80)
 
-// Slide the trapdoor's height: raise it toward 100 and the option gets knocked out more (cheaper);
-// drop it toward 0 and knock-outs vanish, so the price climbs back up to the vanilla 10.4506.
-barrier = input::real(min: 50, max: 95, step: 5, default: 80);  // void if the stock EVER trades below this
+```md
+**A year of prices, week by week.** Draw 52 weekly shocks and compound them.
+Summing log-returns keeps the simulation *exact* geometric Brownian motion —
+no discretization error blurring the price.
+```
+rate       = 0.05
+volatility = 0.2
+weeks      = 52
+dt         = 1 / weeks
+shocks ~[weeks] rand::normal(0, 1)
+logrets = (rate - volatility^2 / 2) * dt + volatility * sqrt(dt) * shocks
+path    = start_price * exp(cumsum(logrets))
 
-r       = 0.05;
-sigma   = 0.2;    // volatility: a ~20% swing in a typical year
-t       = 1;
+```md
+**The two legs.** The same simulated paths price both contracts: the plain
+call, and the knock-out — identical payoff, voided if the stock *ever* trades
+below the barrier.
+```
+final_price = path[weeks - 1]
+vanilla  = if final_price > strike { final_price - strike } else { 0 }
+knocked  = any(path < barrier)
+knockout = if knocked { 0 } else { vanilla }
 
-// --- One simulated year, one week at a time ---
-n  = 52;
-dt = t / n;
-zs ~[n] rand::normal(0, 1);
-logrets = (r - sigma^2 / 2) * dt + sigma * sqrt(dt) * zs;
-
-// Building the price in log-space makes this EXACT geometric Brownian motion: summing the weekly
-// log-returns with cumsum has zero discretization error, unlike stepping the price directly.
-path    = s0 * exp(cumsum(logrets));
-
-// --- The two legs ---
-s_final = path[n - 1];
-vanilla = if s_final > strike { s_final - strike } else { 0 };  // plain call payoff
-knocked = any(path < barrier);                                  // did we ever touch the trapdoor?
-knockout = if knocked { 0 } else { vanilla };                   // same payoff, void if touched
-
-// --- Prices are discounted expected payoffs ---
-discount = exp(-r * t);
-
+```md
+**The prices.** A price is the discounted expected payoff. The vanilla leg has
+a closed form to check against — Black–Scholes says 10.4506 — and the trapdoor
+shows up as pure discount:
+```
+discount       = exp(-rate)
+price_vanilla  = E(discount * vanilla)
+price_knockout = E(discount * knockout)
+p_knocked      = P(knocked)
 ```latex
-\text{vanilla call} = ${E(discount * vanilla)} \qquad (\text{Black-Scholes says } 10.4506)
-\text{knock-out call} = ${E(discount * knockout)} \qquad (\text{cheaper: the trapdoor eats some payoffs})
-P(\text{knocked out}) = ${P(knocked) * 100}\%
+\text{vanilla} \approx ${price_vanilla}, \qquad
+\text{knock-out} \approx ${price_knockout}, \qquad
+P(\text{knocked out}) \approx ${p_knocked * 100}\%
 ```
 
-// Bonus one-liner: cummax(path) is the running peak, so this is the worst peak-to-trough
-// drawdown the stock suffers along the way — a risk number for free from the same paths.
-drawdown = min(path / cummax(path)) - 1;
+```md
+**A free risk number.** The running peak is one `cummax` away, so the worst
+peak-to-trough drawdown of the year falls out of the same paths:
+```
+drawdown         = min(path / cummax(path)) - 1
+typical_drawdown = E(drawdown)
 
-```latex
-\text{typical worst drawdown along the way} = ${E(drawdown)}
+```md
+Typical worst drawdown along the way: **${typical_drawdown * 100}%**
 ```
 
-// The cone of possible price paths: week-by-week 5/25/50/75/95% bands of the simulated year.
+```md
+**The cone.** Week-by-week 5–95% bands of the simulated year — the barrier is
+a floor some of these paths quietly fall through.
+```
 plot::fan(path)

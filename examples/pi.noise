@@ -12,11 +12,11 @@ Throw darts at random at a 2-by-2 square with the unit circle drawn inside.
 The circle covers π/4 of the square's area, so the fraction of darts that land
 in it, times 4, is π. No formula for the circle — just a tally of hits.
 ```
-X ~ rand::unif(-1, 1);
-Y ~ rand::unif(-1, 1);
+X ~ rand::unif(-1, 1)
+Y ~ rand::unif(-1, 1)
 
 // 1e-4 asks for precision, not a draw count: the engine throws as many darts as that takes.
-pi = 4 * P(X^2 + Y^2 < 1, 1e-4);
+pi = 4 * P(X^2 + Y^2 < 1, 1e-4)
 ```latex
 \pi \approx 4 \cdot P\!\left(X^2 + Y^2 < 1\right) = ${pi}
 ```

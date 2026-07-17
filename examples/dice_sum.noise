@@ -8,16 +8,19 @@ abstract: >
 tags: [independence, collections]
 ---
 
-// Slide the number of dice: two make a lopsided triangle, but pile on more and the total rounds into a bell.
-num_dice = input::int(min: 1, max: 20, step: 1, default: 2);
+```md
+**The roll.** Slide the number of dice: two make a lopsided triangle of
+totals, but pile on more and the shape rounds into a bell.
+```
+num_dice = input::int(min: 1, max: 20, step: 1, default: 2)
 
-die   = rand::unif_int(1, 6);
-
-// Each ~ draw is a fresh, independent roll — die + die would be one roll doubled, not two dice.
-dice  ~[num_dice] die;
-total = vec::sum(dice);
+// Each ~ draw is a fresh, independent roll — `die + die` would be one roll doubled, not two dice.
+die   = rand::unif_int(1, 6)
+dice  ~[num_dice] die
+total = vec::sum(dice)
+p_seven = P(total == 7)
 ```latex
-P(\text{${num_dice} dice sum to } 7) = ${P(total == 7) * 100}\%
+P(\text{${num_dice} dice sum to } 7) = ${p_seven * 100}\%
 ```
 
 plot::histogram(total)

@@ -559,8 +559,10 @@ fn moment(name: &str, arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
 /// central) — then sort and linearly interpolate between the two bracketing order statistics. A
 /// deterministic value is its own quantile at every level.
 ///
-/// Returns a plain `Num` (not an `Est`): a sample quantile's standard error depends on the density
-/// at that point, so we don't claim auto-rounded precision the way `P`/`E` do.
+/// Returns an `Est` like `P`/`E`/`Var`, so the printed digits are the ones the sample justifies.
+/// The standard error is density-free ([`crate::num::quantile_se_sorted`]): the quantile's rank is
+/// Binomial(n, q), so the spread between the order statistics one rank-sd apart is a ±1σ band —
+/// no density estimate needed. A deterministic input still returns a plain `Num` (exact).
 ///
 /// Note: `P` and `Q` on the *same* underlying event/quantity each force their **own independent
 /// sampling pass** over a *different* cone — an event-indicator graph for `P`, the numeric quantity
@@ -608,17 +610,18 @@ fn quantile(arg_vals: &[Value], ctx: &QueryCtx) -> Result<Value> {
         Value::Dist(id) => {
             // Validate-only mode: the quantity's graph is built and type-checked; skip sampling.
             if check {
-                return Ok(Value::Num(0.0));
+                return Ok(Value::Est { val: 0.0, se: 0.0 });
             }
-            // `Q` keeps fixed-n (PLAN-PRECISION "out of scope": the collect reducer is O(n) memory
-            // and a quantile's se needs a density estimate). A soft-stopped collect is a smaller —
-            // still valid — sample; the run-level warning names the stop.
+            // `Q` keeps fixed-n (PLAN-PRECISION "out of scope": the collect reducer is O(n)
+            // memory). A soft-stopped collect is a smaller — still valid — sample; the run-level
+            // warning names the stop.
             let mut draws = sampler::sample_n_par(graph, *id, n, P_DEFAULT_SEED)?;
             if draws.is_empty() {
                 return Err(stopped_before_draws("Q", span));
             }
             draws.sort_by(f64::total_cmp);
-            Ok(Value::Num(crate::num::quantile_sorted(&draws, q)))
+            let (val, se) = quantile_est(&draws, q);
+            Ok(Value::Est { val, se })
         }
         other => Err(NoiseError::runtime(
             format!(
@@ -756,7 +759,7 @@ pub fn quantile_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value
         ));
     }
     if check {
-        return Ok(Value::Num(0.0));
+        return Ok(Value::Est { val: 0.0, se: 0.0 });
     }
     // `Q` takes counts only (see `quantile` — quantiles are out of the precision loop's scope).
     let n = match tail.get(1) {
@@ -777,7 +780,21 @@ pub fn quantile_cond(root: RvId, tail: &[Value], ctx: &QueryCtx) -> Result<Value
         return Err(cond_never(n, span));
     }
     draws.sort_by(f64::total_cmp);
-    Ok(Value::Num(crate::num::quantile_sorted(&draws, q)))
+    let (val, se) = quantile_est(&draws, q);
+    Ok(Value::Est { val, se })
+}
+
+/// Quantile value + standard error from **sorted, non-empty** draws, shared by `Q` and
+/// `Q(x | cond, q)`. The se is the density-free order-statistic band
+/// ([`crate::num::quantile_se_sorted`]), floored at the sampling lanes' resolution: lanes sample
+/// in f32, so a collected draw carries ~1e-7 *relative* float dust, and on a quantile plateau
+/// (discrete/empirical data) the band collapses to 0 — which would print that dust as if it were
+/// exact digits. The floor makes the display round the dust away instead of exhibiting it.
+fn quantile_est(sorted: &[f64], q: f64) -> (f64, f64) {
+    const LANE_RESOLUTION_REL: f64 = 2e-6;
+    let val = crate::num::quantile_sorted(sorted, q);
+    let se = crate::num::quantile_se_sorted(sorted, q).max(val.abs() * LANE_RESOLUTION_REL);
+    (val, se)
 }
 
 /// `iota(n)` — `[0, 1, …, n-1]` (the same array as `0..n`; a handy alias).
@@ -962,6 +979,10 @@ fn as_num(v: &Value, span: Span) -> Result<f64> {
     match v {
         Value::Num(n) => Ok(*n),
         Value::Est { val, .. } => Ok(*val),
+        // A symbolic input (`input::real`) in a context that needs a concrete number folds to its
+        // current value — the *structural* materialization (see `crate::sym`): `round(slider, 2)`
+        // legitimately depends on the slider, and the folded constant rebuilds on change.
+        Value::Sym(s) => Ok(s.force_scalar(&crate::input_rt::current())),
         other => Err(NoiseError::type_mismatch(
             format!("expected a number, got {}", other.type_name()),
             span,

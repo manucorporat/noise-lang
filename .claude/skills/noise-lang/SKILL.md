@@ -7,7 +7,7 @@ description: Write correct, idiomatic Noise — an expression-based probabilisti
 
 Noise is a small, expression-based **probabilistic** language: every value is a probability
 distribution, and you compute probabilities and expectations by Monte Carlo. A program is a
-sequence of `;`-separated statements — and when compiled, it is rendered as a **document**: a
+sequence of statements, one per line — and when compiled, it is rendered as a **document**: a
 short live article with prose, code cells, typeset math, plots, and interactive controls, in the
 spirit of a really good Jupyter notebook. You are always writing two things at once: a correct
 model, and a readable article. This guide is self-contained — the language first, then how to
@@ -107,13 +107,20 @@ the document renders a slider/checkbox at that point. Changing it re-runs the pr
 `${…}` hole downstream updates. Use one wherever the reader should ask "what if I change this?"
 
 ```noise
-r = input::int(min: 1, max: 19, step: 1, default: 7);
+r = input::int(min: 1, max: 19, step: 1, default: 7)
 ```
 
 **Plots** — `plot::histogram/line/scatter/heatmap/corr/fan/…` push chart cards into the document
 at their statement's position.
 
 ## Language reference
+
+**Statements.** A statement normally ends at the end of its line — do NOT write trailing
+semicolons. `;` exists for exactly two cases: separating several statements on one line
+(`p = 1; q = N`, a one-line block body `{ acc = 0; for … }`), and guarding the one ambiguity —
+a line that *starts* with `[` continues the previous expression as an *index*, so a statement
+before a line like `[for p in QFT @ Psi { … }]` or `[p, q]` must end in `;`. Multi-line
+expressions (arrays, function bodies, chained `+`/`*` continuations) work without any marker.
 
 **Lexical.** Whitespace is insignificant (separates tokens). Comments are `//` (to end of line)
 or `/* … */` (block, non-nesting) — `#` is **not** a comment marker (only a `#!` shebang on
@@ -175,7 +182,7 @@ path). Start each program with the `use` lines you need.
 | `engine`  | `use engine;` (or path) | `set_max_samples`, `set_max_opts`, `set_resolution` |
 
 ```noise
-use rand;            // unif, unif_int, …
+use rand            // unif, unif_int, …
 math::sqrt(2)        // or reach one item by its full path, no `use` needed
 ```
 
@@ -188,14 +195,14 @@ recipe (`=`) → draw (`~` / `~[n]`) → transform (`=`) → query (`P`/`E`/`Var
 through ```md / ```latex templates (see "Writing the article"). In the REPL the last statement's
 value prints by itself.
 
-    use rand;   // unif_int
-    use vec;    // has_duplicates
+    use rand   // unif_int
+    use vec    // has_duplicates
 
-    class_size = 23;
-    birthday   = unif_int(1, 365);        // a recipe
-    birthdays  ~[class_size] birthday;    // class_size independent draws
-    shared     = has_duplicates(birthdays);
-    p_shared   = P(shared);
+    class_size = 23
+    birthday   = unif_int(1, 365)        // a recipe
+    birthdays  ~[class_size] birthday    // class_size independent draws
+    shared     = has_duplicates(birthdays)
+    p_shared   = P(shared)
 
     ```md
     A class of ${class_size} shares a birthday **${p_shared * 100}%** of the time.
@@ -243,7 +250,8 @@ value prints by itself.
 - `E(x[, n])` / `Var(x[, n])` — expectation / variance of a numeric (or bool) quantity. `E` of a
   bool equals `P`.
 - `Q(x, q[, n])` — quantile (inverse CDF): `Q(X, 0.5)` median, `Q(X, 0.95)` 95th pct, `Q(X, 0)` /
-  `Q(X, 1)` min/max draw. Returns a plain number.
+  `Q(X, 1)` min/max draw. Returns an estimate (self-rounding, like `P`/`E`/`Var`) whose standard
+  error comes from the order-statistic band — density-free.
 - **`event | given` — conditioning** (Bayes, scoped to one query, no `observe`/side effect):
   `P(A | C)` is "P(A) given C holds", `E(X | C)` / `Q(X | C, q)` likewise. The `|` binds looser than
   everything (below `||`). `given` must be an event; for `P`, the left side must be an event too.
@@ -274,11 +282,11 @@ mapped over arrays).
 a `vec` reducer — independence becomes a one-liner:
 
 ```noise
-use rand; use vec;
-dice  ~[2] unif_int(1, 6);  p_seven    = P(sum(dice) == 7);       // two dice
-flips ~[3] bernoulli(0.5);  p_streak   = P(all(flips));           // 3-coin streak
-p_two_heads = P(count(flips) == 2);                               // count of true
-parts ~[3] bernoulli(0.9);  p_uptime   = P(any(parts));           // at-least-one
+use rand; use vec
+dice  ~[2] unif_int(1, 6);  p_seven    = P(sum(dice) == 7)       // two dice
+flips ~[3] bernoulli(0.5);  p_streak   = P(all(flips))           // 3-coin streak
+p_two_heads = P(count(flips) == 2)                               // count of true
+parts ~[3] bernoulli(0.9);  p_uptime   = P(any(parts))           // at-least-one
 ```
 
 **Paths & finance idioms (scans).** The scans `cumsum`/`cumprod`/`cummax`/`cummin` (running
@@ -286,20 +294,20 @@ folds: element `t` is the fold of `xs[0..=t]`) turn a shaped draw into a whole *
 path** — no loop needed:
 
 ```noise
-use rand; use vec; use math;
-rets ~[252] normal(0.0004, 0.01);          // a year of iid daily returns
-walk = cumsum(rets);                        // random walk = cumsum(increments)
-path = cumprod(1 + rets);                   // compounding wealth path
+use rand; use vec; use math
+rets ~[252] normal(0.0004, 0.01)          // a year of iid daily returns
+walk = cumsum(rets)                        // random walk = cumsum(increments)
+path = cumprod(1 + rets)                   // compounding wealth path
 // exact GBM, no discretization bias:  path = s0 * exp(cumsum(logrets))
-hit      = any(path < 0.9);                 // barrier: did it EVER dip 10%?
-asian    = mean(path);                      // Asian option averages the path
-lookback = max(path);                       // lookback takes its peak
-drawdown = min(path / cummax(path)) - 1;    // worst peak-to-trough
-final = path[251];
-var95 = Q(final, 0.05);                     // VaR — Q returns a plain number...
-es95  = E(final | final < var95);           // ...so it feeds ES/CVaR
+hit      = any(path < 0.9)                 // barrier: did it EVER dip 10%?
+asian    = mean(path)                      // Asian option averages the path
+lookback = max(path)                       // lookback takes its peak
+drawdown = min(path / cummax(path)) - 1    // worst peak-to-trough
+final = path[251]
+var95 = Q(final, 0.05)                     // VaR — a numeric estimate...
+es95  = E(final | final < var95)           // ...that feeds straight into ES/CVaR
 plot::fan(path)                             // the cone: q05/25/50/75/95 bands over the index
-bands = stats::fan(path);                   // ...and the same bands as a 6×252 matrix
+bands = stats::fan(path)                   // ...and the same bands as a 6×252 matrix
 ```
 
 `vec::prod` is the product reducer (`prod([]) == 1`). Scans work on any process whose **length
@@ -309,8 +317,8 @@ is known up front**; a random-length process is not expressible (see Hazards).
 evaluated and reuse the condition's per-lane draws). Gives `max`/`min`/`abs` over RVs for free:
 
 ```noise
-A ~ unif_int(1, 6); B ~ unif_int(1, 6);
-higher = if A > B { A } else { B };     // max of two dice
+A ~ unif_int(1, 6); B ~ unif_int(1, 6)
+higher = if A > B { A } else { B }     // max of two dice
 p_six  = P(higher == 6)
 ```
 
@@ -319,7 +327,7 @@ leak** (blocks don't scope) — that's exactly how an accumulator persists. Each
 is a *distinct* node, so it's a clean way to make many independent draws:
 
 ```noise
-use vec;
+use vec
 acc = 0; for x in 1..5 { acc = acc + x }; acc      // 1+2+3+4 = 10
 ```
 
@@ -329,9 +337,9 @@ has no closures, so this is how you "map with captured state"). Use **`continue`
 element — that's how you *filter*:
 
 ```noise
-a = 7; N = 15;
-fx = [for x in 0..6 { (a ^ x) % N }];                  // body closes over a, N
-evens = [for x in 0..10 { if x % 2 != 0 { continue }; x }];  // filter via continue
+a = 7; N = 15
+fx = [for x in 0..6 { (a ^ x) % N }]                  // body closes over a, N
+evens = [for x in 0..10 { if x % 2 != 0 { continue }; x }]  // filter via continue
 ```
 
 `continue` skips the rest of the loop body (in a `for` loop it drops that iteration's side effects;
@@ -343,9 +351,9 @@ for `n > 0` (clock/modular arithmetic): `-1 % 3 == 2`. `math::floor` / `math::ce
 **User functions.** `f(a) = expr` is pure (lifts over RVs); `f() ~ dist` draws fresh per call:
 
 ```noise
-use rand;
-max(a, b) = if a > b { a } else { b };   // pure
-roll() ~ unif_int(1, 6);                 // fresh draw each call
+use rand
+max(a, b) = if a > b { a } else { b }   // pure
+roll() ~ unif_int(1, 6)                 // fresh draw each call
 P(roll() + roll() == 7)                  // two INDEPENDENT rolls
 ```
 Functions are **pure in their parameters** — the body sees only its args (plus `pi`/`e`), no outer
@@ -355,10 +363,10 @@ variables, no closures. Calls unroll at build time, so recursion must terminate.
 hand-written ratio:
 
 ```noise
-use rand;
-D ~ unif_int(1, 6);
-p_six_given_high = P(D == 6 | D > 3);   // = 1/3 (≡ P(A && C) / P(C))
-high = D | D > 3;                       // a conditioned value — bind & reuse
+use rand
+D ~ unif_int(1, 6)
+p_six_given_high = P(D == 6 | D > 3)   // = 1/3 (≡ P(A && C) / P(C))
+high = D | D > 3                       // a conditioned value — bind & reuse
 mean_high = E(high); median_high = Q(high, 0.5)   // 5, 5
 ```
 
@@ -379,11 +387,11 @@ static with `E|z|² = sigma²` — combine with `math::exp(i*θ)`/`abs`/`arg` fo
 modulate → demodulate chain.
 
 ```noise
-use signal;
-engine::set_resolution(64);        // the one resolution knob — set once, next to the budget
-msg = 0.3 * sine(3);               // a waveform (no length anywhere in the math)
-static ~ noise_white_complex(0.4); // ONE drawn realization of complex static
-err = E(vec::mse(math::abs(1 + msg + static) - 1, msg));   // reducers render at the knob
+use signal
+engine::set_resolution(64)        // the one resolution knob — set once, next to the budget
+msg = 0.3 * sine(3)               // a waveform (no length anywhere in the math)
+static ~ noise_white_complex(0.4) // ONE drawn realization of complex static
+err = E(vec::mse(math::abs(1 + msg + static) - 1, msg))   // reducers render at the knob
 ```
 
 **Complex numbers.** `complex` is a first-class scalar. There's no literal — it **emerges** from
@@ -396,11 +404,11 @@ err = E(vec::mse(math::abs(1 + msg + static) - 1, msg));   // reducers render at
 `dot` is bilinear while `vdot` conjugates (Hermitian), plus `outer` and `adjoint`.
 
 ```noise
-use math; use rand; use vec;
-z = 2 + 3*math::i;                       // complex emerges from math::i
-math::abs(z); math::arg(z);              // magnitude & phase (reals)
+use math; use rand; use vec
+z = 2 + 3*math::i                       // complex emerges from math::i
+math::abs(z); math::arg(z)              // magnitude & phase (reals)
 math::exp(math::i * math::pi)            // ≈ -1  (Euler's identity)
-static ~[64] rand::normal_complex(1);    // 64 iid complex-Gaussian static samples
+static ~[64] rand::normal_complex(1)    // 64 iid complex-Gaussian static samples
 ```
 
 ## Hazards — what NOT to do
@@ -469,6 +477,9 @@ two as the canonical models):
   Symbolic constants (π/4, 1/e, r = n/e) are fine as *symbols*.
 - **Templates hold references, not expressions.** Compute in code (`p_win = P(win);`), then
   interpolate `${p_win * 100}` — trivial arithmetic in a hole is fine, big expressions are not.
+- **Queries self-round; deterministic arithmetic doesn't.** `P`/`E`/`Var`/`Q` all return
+  estimates that print the digits their sample justifies. A *deterministic* computation
+  (`mean(rets)`, a folded constant) prints full float junk — wrap those holes in `round(x, d)`.
 - **Don't re-derive the analytic answer numerically in a hole** (no `${sum([for k in r..n
   {1/k}]) * …}`) — that's not the point of Noise. State the law symbolically in latex and let the
   simulation supply the number. The canonical latex shape is **symbolic law ≈ ${simulated}**:
@@ -487,24 +498,24 @@ two as the canonical models):
     tags: [classic, optimal stopping]
     ---
 
-    use vec;
+    use vec
 
     ```md
     **The pool.** Twenty applicants walk in, one at a time, each with a hidden
     quality score. Nothing short of hiring the *best of all of them* counts.
     ```
-    total_candidates = 20;
-    quality ~[total_candidates] rand::unif(0, 1);
-    best_candidate = max(quality);
+    total_candidates = 20
+    quality ~[total_candidates] rand::unif(0, 1)
+    best_candidate = max(quality)
 
     ```md
     **The cutoff.** The whole strategy hinges on one number … Try dragging **r**.
     ```
-    r = input::int(min: 1, max: 19, step: 1, default: 7);
+    r = input::int(min: 1, max: 19, step: 1, default: 7)
 
     … observation & hiring cells, each with a bold md lead-in …
-    win   = hired_candidate == best_candidate;
-    p_win = P(win);
+    win   = hired_candidate == best_candidate
+    p_win = P(win)
 
     ```md
     **The verdict.** Rejecting the first ${r} of ${total_candidates} lands the very

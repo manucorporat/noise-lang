@@ -9,39 +9,58 @@ abstract: >
 tags: [statistics, resampling]
 ---
 
-use vec;
+use math   // round
+use vec
 
-// The data: 24 daily returns (0.012 = +1.2%). Days 11-14 are a panic streak around the -4%
-// crash — real markets have bad WEEKS, not just isolated bad days, and that will matter below.
+```md
+**The history.** 24 daily returns (0.012 = +1.2%). Days 11–14 are a panic
+streak around the −4% crash — real markets have bad *weeks*, not just isolated
+bad days, and that will matter below.
+```
 rets = [ 0.004, -0.006,  0.012,  0.003, -0.002,
          0.007,  0.001, -0.005,  0.008,  0.002,
         -0.012, -0.040, -0.018, -0.009,  0.011,
          0.006, -0.003,  0.009, -0.001,  0.013,
-        -0.007,  0.002,  0.010, -0.004 ];
-
-// Tomorrow is a uniformly-random day pulled straight from history (the iid bootstrap).
-tomorrow ~ rand::empirical(rets);
+        -0.007,  0.002,  0.010, -0.004 ]
 
 ```md
-E(tomorrow) = **${E(tomorrow)}** (sample mean: ${mean(rets)})
-1-day VaR (Q05) = **${Q(tomorrow, 0.05)}** — straight from history, crash included
-P(another -4% day) = **${P(tomorrow <= -0.04) * 100}%** (= 1/24, its share of history)
+**Tomorrow, resampled.** No curve fitting: tomorrow is a uniformly random day
+pulled straight from the history, so the crash keeps its exact 1-in-24 share
+of the future.
+```
+tomorrow      ~ rand::empirical(rets)
+mean_tomorrow = E(tomorrow)
+var_1day      = Q(tomorrow, 0.05)
+p_crash_again = P(tomorrow <= -0.04)
+
+```md
+E(tomorrow) = **${mean_tomorrow}** (sample mean: ${round(mean(rets), 4)})
+1-day VaR (Q05) = **${var_1day}** — straight from history, crash included
+P(another −4% day) = **${p_crash_again * 100}%** (= 1/24, its share of history)
 ```
 
-// No bell curve anywhere: a spike at each of the 24 real days, the lone -4% crash out in the tail.
-plot::histogram(tomorrow);
-
-// A WEEK is not 5 independent days: losses cluster. Shuffling days one at a time (iid) destroys
-// those streaks, so it understates weekly risk. The BLOCK bootstrap instead glues random
-// contiguous 5-day runs of history together, keeping each streak intact.
-iid_days ~[5] rand::empirical(rets);
-iid_week = sum(iid_days);
-
-week ~ rand::block_bootstrap(rets, 5);            // a full resampled series, in 5-day blocks
-hist_week = sum([for j in 0..5 { week[j] }]);      // its first block = one real 5-day run
+```md
+**No bell curve anywhere.** A spike at each of the 24 real days, the lone −4%
+crash out in the tail — exactly as fat as history says it is.
+```
+plot::histogram(tomorrow)
 
 ```md
-iid week VaR (Q05) = **${Q(iid_week, 0.05)}** — streaks shuffled away
-real week VaR (Q05) = **${Q(hist_week, 0.05)}** — the panic week stays glued together
-Blocks matter whenever returns are autocorrelated: same days, scarier (honest) tail.
+**A week is not five independent days.** Losses cluster. Resampling days one
+at a time shuffles the panic streak away; the *block* bootstrap instead glues
+random contiguous 5-day runs of history together, keeping each streak intact.
+```
+iid_days ~[5] rand::empirical(rets)
+iid_week = sum(iid_days)
+week ~ rand::block_bootstrap(rets, 5)
+streak_week = sum([for j in 0..5 { week[j] }])
+var_iid_week    = Q(iid_week, 0.05)
+var_streak_week = Q(streak_week, 0.05)
+
+```md
+iid week VaR (Q05) = **${var_iid_week}** — streaks shuffled away
+block week VaR (Q05) = **${var_streak_week}** — the panic week stays glued together
+
+Same 24 days, scarier (honest) tail: blocks matter whenever returns remember
+yesterday.
 ```

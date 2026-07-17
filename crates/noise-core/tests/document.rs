@@ -24,6 +24,18 @@ fn input_resolves_to_its_default_value() {
 }
 
 #[test]
+fn input_folds_in_builtin_numeric_arguments() {
+    // A symbolic input handed to an eager numeric builtin (math::round, a sample count, …) folds
+    // to its current value — the structural materialization — instead of a type error. The
+    // regression: `math::round(2 * slider - 1, 2)` used to fail with "expected a number, got
+    // number".
+    assert_eq!(
+        num("p = input::real(min: 0.5, max: 1, default: 0.6); math::round(2 * p - 1, 2)"),
+        0.2
+    );
+}
+
+#[test]
 fn input_override_is_clamped_and_snapped() {
     let mut e = Engine::new();
     e.set_input_overrides(vec![(

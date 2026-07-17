@@ -27,8 +27,8 @@ fn array_slicing_with_index_arrays() {
     assert_eq!(display_of("[10, 20, 30, 40][1..3]"), "[20, 30]");
     assert_eq!(display_of("[10, 20, 30][[2, 0, 0]]"), "[30, 10, 10]");
     assert_eq!(display_of("[1, 2, 3][0..0]"), "[]"); // empty range → empty slice
-    // Slicing a vector of random draws: max over the first r elements equals the running max
-    // at r-1 (every lane), and E[max of 3 uniforms] = 3/4.
+                                                     // Slicing a vector of random draws: max over the first r elements equals the running max
+                                                     // at r-1 (every lane), and E[max of 3 uniforms] = 3/4.
     assert_eq!(
         num("xs ~[5] unif(0, 1); P(max(xs[0..3]) == cummax(xs)[2])"),
         1.0
