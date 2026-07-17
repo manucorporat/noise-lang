@@ -21,6 +21,28 @@ fn array_literals_index_and_len() {
 }
 
 #[test]
+fn array_slicing_with_index_arrays() {
+    // A deterministic index *array* selects into a new array. `a..b` is already an array, so
+    // `xs[0..r]` is the take-the-first-r slice; any index list reorders/repeats.
+    assert_eq!(display_of("[10, 20, 30, 40][1..3]"), "[20, 30]");
+    assert_eq!(display_of("[10, 20, 30][[2, 0, 0]]"), "[30, 10, 10]");
+    assert_eq!(display_of("[1, 2, 3][0..0]"), "[]"); // empty range → empty slice
+    // Slicing a vector of random draws: max over the first r elements equals the running max
+    // at r-1 (every lane), and E[max of 3 uniforms] = 3/4.
+    assert_eq!(
+        num("xs ~[5] unif(0, 1); P(max(xs[0..3]) == cummax(xs)[2])"),
+        1.0
+    );
+    assert!((num("xs ~[5] unif(0, 1); E(max(xs[0..3]))") - 0.75).abs() < 0.01);
+    // Matrix rows slice like any elements: M[1..3] is rows 1 and 2.
+    assert_eq!(display_of("[[1, 2], [3, 4], [5, 6]][1..2]"), "[[3, 4]]");
+    // Errors: an element out of bounds, and a random index inside the array (a per-lane
+    // multi-gather is not a thing — the scalar-index rules apply element-wise).
+    assert!(run("[1, 2, 3][1..5]").is_err());
+    assert!(run("i ~ unif_int(0, 1); [1, 2, 3][[i, 0]]").is_err());
+}
+
+#[test]
 fn array_index_errors() {
     assert!(run("[1, 2, 3][5]").is_err()); // out of bounds
     assert!(run("[1, 2, 3][1.5]").is_err()); // non-integer index

@@ -837,6 +837,13 @@ just an array of `dist`.
   a per-lane **gather** — each Monte Carlo lane picks its own element (`boxes[box]` in
   `prisoners.noise`, and the machinery under `rand::empirical`). Gathers run on the interpreter
   only (the codegen backends decline them).
+- **Slicing.** A deterministic **array** of indices selects into a new array. Since `a..b` is an
+  array, `xs[0..r]` is the first-`r` slice (Rust-style half-open — the same shape as Rust's
+  `&xs[0..r]` or Julia's `xs[inds]`), and any index list works: `xs[[2, 0, 0]]` reorders and
+  repeats, `xs[perm]` applies a deterministic permutation. Each index obeys the scalar rules
+  (constant non-negative integer, in bounds — checked element-wise), so an array of *random*
+  indices is an error. It is pure build-time sugar for `[for i in inds { xs[i] }]`:
+  `bar = max(quality[0..r])` is "the best of the first `r`".
 - **Arithmetic broadcasts over arrays** (NumPy-style): `[1,2,3] + [10,20,30] = [11,22,33]`,
   `1 + [1,2,3] = [2,3,4]`, `[2,4,6] / 2 = [1,2,3]`, `[1,2,3] ^ 2 = [1,4,9]`. It nests, so an
   array-of-arrays (a matrix, or an `[I, Q]` signal pair) broadcasts recursively. Lengths must match.

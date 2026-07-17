@@ -1,23 +1,28 @@
 ---
 name: noise-lang
-description: Write correct, idiomatic Noise — an expression-based probabilistic language where every value is a probability distribution and you compute probabilities / expectations by Monte Carlo (run via the `noise` CLI). Use when authoring or editing .noise programs, or when modeling a probability / Monte-Carlo question in Noise.
+description: Write correct, idiomatic Noise — an expression-based probabilistic language where every value is a probability distribution and you compute probabilities / expectations by Monte Carlo. A .noise program compiles to a literate document — a short, live, optionally interactive article. Use when authoring or editing .noise programs, or when modeling a probability / Monte-Carlo question in Noise.
 ---
 
 # Writing Noise
 
 Noise is a small, expression-based **probabilistic** language: every value is a probability
 distribution, and you compute probabilities and expectations by Monte Carlo. A program is a
-sequence of `;`-separated statements and its result is the value of the **last** statement. This
-guide is self-contained — everything you need to write correct, idiomatic Noise is below.
+sequence of `;`-separated statements — and when compiled, it is rendered as a **document**: a
+short live article with prose, code cells, typeset math, plots, and interactive controls, in the
+spirit of a really good Jupyter notebook. You are always writing two things at once: a correct
+model, and a readable article. This guide is self-contained — the language first, then how to
+make the compiled document read well.
 
 ## Run it
 
 ```sh
-cargo run -p noise-cli -- file.noise   # run a program; prints the LAST statement's value
+cargo run -p noise-cli -- file.noise   # run a program; renders the document (prose + results) to the terminal
 cargo run -p noise-cli                 # REPL (one line at a time, persistent env)
 ```
 
-(If a `noise` binary is installed, `noise file.noise` / `noise` work the same way.)
+(If a `noise` binary is installed, `noise file.noise` / `noise` work the same way. The web
+playground renders the same document with full typography: abstract, margin notes, LaTeX,
+sliders, charts.)
 
 ## The mental model
 
@@ -51,6 +56,63 @@ Four load-bearing rules. Internalize these and the rest follows.
 
 Nothing is sampled until a query (`P`/`E`/`Var`/`Q`) forces it; everything upstream stays symbolic.
 
+## The literate layer — a program compiles to an article
+
+A run produces one flat, ordered document: frontmatter meta, then blocks (code cells, prose
+notes, plots, input controls), plus a margin-comment layer. The pieces:
+
+**Frontmatter** — an optional `---`-fenced YAML block at the very top with `title`, `abstract`,
+and `tags`. It renders as the article's title, abstract paragraph, and keywords line. **The
+abstract IS the article's introduction** — hook, setup, and the headline claim.
+
+```noise
+---
+title: "Estimate π"
+abstract: >
+  Scatter darts at random across a square and count how many land inside a circle
+  drawn in it. That fraction alone is enough to recover π.
+tags: [basics, monte carlo]
+---
+```
+
+**Code cells** — consecutive top-level statements with no blank line between them render as one
+code block. A **blank line splits cells**; a template statement also splits. Comments never
+split a cell. Group statements into cells deliberately: one cell = one step of the story.
+
+**Templates — prose and math blocks.** A triple-backtick fence with a syntax tag, written as a
+*statement*, emits a rendered block at that point in the document:
+
+    ```md
+    **The verdict.** Rejecting the first ${r} of ${n} applicants wins **${p_win * 100}%** of the time.
+    ```
+    ```latex
+    P(\text{win}) = \frac{r}{n}\sum_{k=r}^{n-1}\frac{1}{k} \approx ${p_win}
+    ```
+
+- ` ```md ` renders as body prose (full Markdown: **bold**, *italics*, inline code).
+- ` ```latex ` renders as display math (KaTeX/LaTeX source).
+- `${expr}` holes interpolate any Noise expression, evaluated in the current scope. An
+  **estimate** value (from `P`/`E`/`Var`) prints self-rounded to its justified digits.
+- A single-backtick template `` `…` `` is the inline/untagged form; in expression position a
+  template is just a string value.
+
+**Comments become margin notes.** A `//` comment run attaches to the code cell below it and
+renders as a *side note* in the margin — physically small and off to the side. That placement is
+the design constraint: margin notes are for asides, never for the narrative.
+
+**Inputs — interactive controls.** `input::real(…)` / `input::int(…)` / `input::bool(…)` declare
+a host-tunable parameter inline, with named args `min:`, `max:`, `step:`, `default:`, and
+optional `label:`/`name:`. The call evaluates to its current value (a plain number/bool), and
+the document renders a slider/checkbox at that point. Changing it re-runs the program — every
+`${…}` hole downstream updates. Use one wherever the reader should ask "what if I change this?"
+
+```noise
+r = input::int(min: 1, max: 19, step: 1, default: 7);
+```
+
+**Plots** — `plot::histogram/line/scatter/heatmap/corr/fan/…` push chart cards into the document
+at their statement's position.
+
 ## Language reference
 
 **Lexical.** Whitespace is insignificant (separates tokens). Comments are `//` (to end of line)
@@ -59,7 +121,7 @@ line 1 is allowed). Numbers are `f64` integer or decimal literals — **no expon
 leading `-` is the unary-minus operator, not part of the literal. Identifiers are
 `[A-Za-z_][A-Za-z0-9_]*`, case-sensitive. Reserved words: `if else for in use true false`.
 Strings are double-quoted with **no escape sequences** (`"like this"`); they are a label/utility
-type for `Print` and messages — a string can never enter a random-variable expression.
+type — a string can never enter a random-variable expression.
 
 **Operators** (precedence low → high; all left-associative except `^` and binding, which are
 right-associative; prefix `-`/`!` bind tighter than everything below `^`, so `-2 ^ 2 == -4`):
@@ -96,19 +158,20 @@ carrying a standard error, produced by `P`/`E`/`Var`), and `signal` (a lazy wave
 
 ## Modules & `use`
 
-`builtin` is **always active**: `P`, `Q`, `E`, `Var`, `Print`, `Len` (capitalized). Everything
+`builtin` is **always active**: `P`, `Q`, `E`, `Var`, `Len` (capitalized). Everything
 else is **strict** — a bare name errors until you `use` its module (or write the `mod::name`
 path). Start each program with the `use` lines you need.
 
 | Module    | `use`?   | Items |
 |-----------|----------|-------|
-| `builtin` | always   | `P`, `Q`, `E`, `Var`, `Print`, `Len` |
+| `builtin` | always   | `P`, `Q`, `E`, `Var`, `Len` |
 | `rand`    | `use rand;` | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `normal_complex`, `exponential`, `exponential_int`, `poisson`, `geometric`, `categorical`, `empirical`, `block_bootstrap`, `rotation`, `permutation` |
 | `math`    | `use math;` | `pi`, `e`, `i`/`j` (imaginary unit), `sqrt`, `exp`, `abs`, `arg`, `conj`, `re`, `im`, `floor`, `ceil`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign`, `gcd`, `modpow` — `exp`/`log`/`log10` lift over RVs like `sin`/`cos` |
 | `vec`     | `use vec;`  | `sum`, `prod`, `count`, `any`, `all`, `max`, `min`, `mean`, `cumsum`, `cumprod`, `cummax`, `cummin`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` |
 | `signal`  | `use signal;` | `sine`, `cosine`, `sample`, `noise_white`, `noise_white_complex`, `noise_brown`, `noise_pink`, `noise_ou` |
-| `plot`    | path-only | `histogram`, `line`, `scatter`, `heatmap`, `corr`, `fan` (quantile-band cone of a path), `explain`, `value` — write the path (`plot::fan(...)`); charts are pushed to the output stream like `Print` |
+| `plot`    | path-only | `histogram`, `line`, `scatter`, `heatmap`, `corr`, `fan` (quantile-band cone of a path), `explain`, `value` — write the path (`plot::fan(...)`); charts are pushed into the document at their statement's position |
 | `stats`   | path-only | `histogram(x[, bins])` → `[[midpoints],[counts]]`, `quantiles(x, [q…])`, `moments(x)` → `[n, mean, sd, min, max]`, `fan(path)` → 6×cols (`q05,q25,q50,q75,q95,mean`), `corr(a, b)` → number / `corr(v)` → n×n matrix. The numbers behind the `plot::` charts — same computation, so `stats::quantiles(x, [0.05])[0]` *is* the `q05` the card prints. Forces sampling; takes `x | cond`. |
+| `input`   | path-only | `real`, `int`, `bool` — inline tunable parameters (see the literate layer above) |
 | `engine`  | `use engine;` (or path) | `set_max_samples`, `set_max_opts`, `set_resolution` |
 
 ```noise
@@ -121,18 +184,22 @@ A user definition shadows a module item of the same name. Module paths are singl
 
 ## The standard workflow
 
-recipe (`=`) → draw (`~` / `~[n]`) → transform (`=`) → query (`P`/`E`/`Var`/`Q`) → `Print`.
+recipe (`=`) → draw (`~` / `~[n]`) → transform (`=`) → query (`P`/`E`/`Var`/`Q`) → present
+through ```md / ```latex templates (see "Writing the article"). In the REPL the last statement's
+value prints by itself.
 
-```noise
-use rand;   // unif_int
-use vec;    // has_duplicates
+    use rand;   // unif_int
+    use vec;    // has_duplicates
 
-n     = 23;
-bday  = unif_int(1, 365);   // a recipe
-days  ~[n] bday;            // n independent draws
-match = has_duplicates(days);
-Print("P(shared birthday among", n, ") =", P(match))
-```
+    class_size = 23;
+    birthday   = unif_int(1, 365);        // a recipe
+    birthdays  ~[class_size] birthday;    // class_size independent draws
+    shared     = has_duplicates(birthdays);
+    p_shared   = P(shared);
+
+    ```md
+    A class of ${class_size} shares a birthday **${p_shared * 100}%** of the time.
+    ```
 
 ## Distributions & queries
 
@@ -171,7 +238,8 @@ Print("P(shared birthday among", n, ") =", P(match))
 - `P(event[, n])` — probability a bool-RV is true. Returns an **estimate** carrying its standard
   error: it **self-rounds to the digits the sample size justifies**, and the error **propagates
   through arithmetic** (`4 * P(C)` shows one fewer digit). Pass a bigger `n` to reveal more digits.
-  `P` of a non-event (numeric) is an error.
+  A fractional second argument (`P(hit, 1e-4)`) asks for **precision** instead of a sample count —
+  the engine keeps sampling until the answer is that good. `P` of a non-event (numeric) is an error.
 - `E(x[, n])` / `Var(x[, n])` — expectation / variance of a numeric (or bool) quantity. `E` of a
   bool equals `P`.
 - `Q(x, q[, n])` — quantile (inverse CDF): `Q(X, 0.5)` median, `Q(X, 0.95)` 95th pct, `Q(X, 0)` /
@@ -182,7 +250,6 @@ Print("P(shared birthday among", n, ") =", P(match))
   `X | C` is also a **first-class value**: bind it (`hi = D | D > 3`), query it later (`P(hi < 5)`),
   and operate on it (`2*(X|C)+1` is `(2X+1) | C`). You **cannot** combine two values conditioned on
   *different* events — condition once, at the end (`(X + Y) | C`).
-- `Print(args…)` — space-separated, then newline; combine with string `+` and `round(x, d)`.
 - `Len(xs)` — element count of an array (a build-time constant).
 
 ## Collections, arrays & idioms
@@ -192,7 +259,10 @@ the range `a..b` (half-open: `0..n` is `0 … n-1`), the shaped draw `~[n] d`, o
 constructors (`ones(n)`, `zeros(n)`, `iota(n)`). Index with `xs[i]` (chains: `M[i][j]`); the index
 is normally a **constant non-negative integer in range** — a *random* numeric index lifts to a
 per-lane **gather** (each lane picks its own element; interpreter-only, not codegen-eligible). There is no
-append/push.
+append/push. A deterministic **array** of indices **slices**: `xs[0..r]` takes the first `r`
+elements (so `max(quality[0..r])` is "the best of the first r"), `xs[[2, 0, 0]]` reorders/repeats,
+`xs[perm]` applies a deterministic permutation — sugar for `[for i in inds { xs[i] }]`; random
+indices inside the array are an error.
 
 **Arithmetic broadcasts** over arrays (NumPy-style, nesting for matrices):
 `[1,2,3] + [10,20,30]` → `[11,22,33]`, `1 + [1,2,3]` → `[2,3,4]`, `[1,2,3] ^ 2` → `[1,4,9]`.
@@ -205,10 +275,10 @@ a `vec` reducer — independence becomes a one-liner:
 
 ```noise
 use rand; use vec;
-dice  ~[2] unif_int(1, 6); Print("P(sum==7) =", P(sum(dice) == 7))      // two dice
-flips ~[3] bernoulli(0.5); Print("P(all heads) =", P(all(flips)))       // 3-coin streak
-flips ~[3] bernoulli(0.5); Print("P(exactly 2) =", P(count(flips)==2))  // count of true
-parts ~[3] bernoulli(0.9); Print("uptime =", P(any(parts)))             // at-least-one
+dice  ~[2] unif_int(1, 6);  p_seven    = P(sum(dice) == 7);       // two dice
+flips ~[3] bernoulli(0.5);  p_streak   = P(all(flips));           // 3-coin streak
+p_two_heads = P(count(flips) == 2);                               // count of true
+parts ~[3] bernoulli(0.9);  p_uptime   = P(any(parts));           // at-least-one
 ```
 
 **Paths & finance idioms (scans).** The scans `cumsum`/`cumprod`/`cummax`/`cummin` (running
@@ -226,8 +296,8 @@ asian    = mean(path);                      // Asian option averages the path
 lookback = max(path);                       // lookback takes its peak
 drawdown = min(path / cummax(path)) - 1;    // worst peak-to-trough
 final = path[251];
-var = Q(final, 0.05);                       // VaR — Q returns a plain number...
-Print("VaR95 =", var, " ES95 =", E(final | final < var));  // ...so it feeds ES/CVaR
+var95 = Q(final, 0.05);                     // VaR — Q returns a plain number...
+es95  = E(final | final < var95);           // ...so it feeds ES/CVaR
 plot::fan(path)                             // the cone: q05/25/50/75/95 bands over the index
 bands = stats::fan(path);                   // ...and the same bands as a 6×252 matrix
 ```
@@ -241,7 +311,7 @@ evaluated and reuse the condition's per-lane draws). Gives `max`/`min`/`abs` ove
 ```noise
 A ~ unif_int(1, 6); B ~ unif_int(1, 6);
 higher = if A > B { A } else { B };     // max of two dice
-Print("P(higher==6) =", P(higher == 6))
+p_six  = P(higher == 6)
 ```
 
 **Ranges & `for` (build-time unroll).** `for x in xs { }` runs the body once per element; **bindings
@@ -287,9 +357,9 @@ hand-written ratio:
 ```noise
 use rand;
 D ~ unif_int(1, 6);
-Print("P(D==6 | D>3) =", P(D == 6 | D > 3))               // = 1/3 (≡ P(A && C) / P(C))
-hi = D | D > 3;                                           // a conditioned value — bind & reuse
-Print("E(roll | >3)  =", E(hi), " median:", Q(hi, 0.5))   // 5, 5
+p_six_given_high = P(D == 6 | D > 3);   // = 1/3 (≡ P(A && C) / P(C))
+high = D | D > 3;                       // a conditioned value — bind & reuse
+mean_high = E(high); median_high = Q(high, 0.5)   // 5, 5
 ```
 
 **Signals (lazy waveforms).** `signal::sine(f)` / `cosine(f)` describe a waveform by frequency
@@ -359,21 +429,109 @@ static ~[64] rand::normal_complex(1);    // 64 iid complex-Gaussian static sampl
   inference: conditioning on a continuous measurement (`X == 4.7`, probability ~0) or a rare event
   won't work; that's the separate inference track.
 
-## Style conventions
+## Writing the article
 
-- Open with a comment stating the question and, where one exists, the analytic answer to check
-  against.
-- Use **readable, named intermediate steps**, not nested one-liners (`days`, `match`, `total`,
-  `higher` — one idea per binding).
-- Put the needed `use` lines at the top.
-- **End in `Print(...)`**, building the message with string `+` and `round(x, d)`.
+A finished `.noise` example must read, compiled, like a short live article — a really good
+notebook. The recipe (converged on `examples/pi.noise` and `examples/secretary.noise`; read those
+two as the canonical models):
+
+**Structure**
+
+- **The abstract is the introduction.** Hook, setup, headline claim — in the frontmatter. Never
+  open the body with an ```md block that restates it.
+- **One cell = one step of the story.** Split cells with blank lines deliberately. Give each code
+  cell a SHORT ```md lead-in (1–3 sentences) that advances the story at the idea/math/game level.
+  Bare code with nothing between cells is as wrong as walls of prose.
+- **Open each md lead-in with a bold step name** — `**The pool.**`, `**Observation phase.**`,
+  `**The verdict.**` — so the article skeleton is scannable. Italics for key terms.
+- **Structure the code for the narrative.** Unwrap helper functions so each phase of the model is
+  its own cell in reading order (pool → cutoff → observe → hire → verdict), rather than one
+  `trial()` blob. No orphan cells (`n = 20;` alone between prose) — group constants with the cell
+  that uses them, or inline them.
+- **End with a verdict.** A closing ```md that weaves the computed result into a sentence, plus —
+  when a law/closed form exists — a ```latex display of it.
+
+**Prose discipline**
+
+- md prose must ADD something: the idea, the math, the rules of the game. Never narrate what code
+  lines do — a comment or sentence that paraphrases code is an excuse for unclear code
+  (clean-code rule); rename variables or restructure instead.
+- **Margin comments (`//`) are rare asides**: at most 1–2 per file, each saying something the code
+  *can't* (e.g. "1e-4 asks for precision, not a draw count", or a quip beside a plot). If it's
+  narrative, it belongs in an ```md block; if it's obvious, delete it.
+- **Sentence-like variable names** make the code read as prose: `win = hired_candidate ==
+  best_candidate`, `quality`, `bar` — not `c`, `pk`, `tmp`.
+
+**Live numbers**
+
+- **Never hardcode a result in prose or comments — the whole point is that it's computed.** Every
+  number a reader sees must come from a `${…}` hole so it tracks sliders and parameter edits.
+  Symbolic constants (π/4, 1/e, r = n/e) are fine as *symbols*.
+- **Templates hold references, not expressions.** Compute in code (`p_win = P(win);`), then
+  interpolate `${p_win * 100}` — trivial arithmetic in a hole is fine, big expressions are not.
+- **Don't re-derive the analytic answer numerically in a hole** (no `${sum([for k in r..n
+  {1/k}]) * …}`) — that's not the point of Noise. State the law symbolically in latex and let the
+  simulation supply the number. The canonical latex shape is **symbolic law ≈ ${simulated}**:
+  `\pi \approx 4 \cdot P(X^2+Y^2<1) = ${pi}`, or
+  `P(\text{win}) = \frac{r}{n}\sum_{k=r}^{n-1}\frac{1}{k} \approx ${p_win}`. Cheap *locations* of
+  a law are fine to compute (`r = \frac{n}{e} \approx ${math::round(n / math::e, 0)}`).
+- **Make it interactive where a parameter invites play**: an `input::` slider on the quantity the
+  reader will wonder about ("what if I observe more first?"), with the verdict recomputing live.
+
+**A compiled-article skeleton** (abridged from `examples/secretary.noise`):
+
+    ---
+    title: "The secretary problem"
+    abstract: >
+      You interview applicants one at a time … about 37% of the time.
+    tags: [classic, optimal stopping]
+    ---
+
+    use vec;
+
+    ```md
+    **The pool.** Twenty applicants walk in, one at a time, each with a hidden
+    quality score. Nothing short of hiring the *best of all of them* counts.
+    ```
+    total_candidates = 20;
+    quality ~[total_candidates] rand::unif(0, 1);
+    best_candidate = max(quality);
+
+    ```md
+    **The cutoff.** The whole strategy hinges on one number … Try dragging **r**.
+    ```
+    r = input::int(min: 1, max: 19, step: 1, default: 7);
+
+    … observation & hiring cells, each with a bold md lead-in …
+    win   = hired_candidate == best_candidate;
+    p_win = P(win);
+
+    ```md
+    **The verdict.** Rejecting the first ${r} of ${total_candidates} lands the very
+    best applicant **${p_win * 100}%** of the time…
+    ```
+    ```latex
+    P(\text{win}) = \frac{r}{n}\sum_{k=r}^{n-1}\frac{1}{k} \approx ${p_win},
+    \qquad \text{maximized at } r = \frac{n}{e} \approx ${math::round(total_candidates / math::e, 0)}
+    ```
 
 ## Pre-flight checklist
 
 - [ ] Every random variable is introduced with `~` (no arithmetic on a bare recipe).
 - [ ] Independence comes from `~[n]` or separate `~` — not from repeating a name.
 - [ ] Equality / counting uses a **discrete** distribution (`unif_int`/`bernoulli`/`*_int`).
-- [ ] `use` lines present for every non-`builtin` name; queries are capitalized (`P`/`E`/`Var`/`Q`/`Print`/`Len`).
+- [ ] `use` lines present for every non-`builtin` name; queries are capitalized (`P`/`E`/`Var`/`Q`/`Len`).
 - [ ] No random-length / early-stopping recurrence (fixed-horizon paths via scans are fine), no
       expectation of block scoping.
-- [ ] Program ends in `Print(...)`; run it and sanity-check against the analytic value.
+- [ ] Run it and sanity-check the result against the analytic value.
+
+For an example/demo (the article form), additionally:
+
+- [ ] Frontmatter with title + abstract; the abstract is the intro and is never restated.
+- [ ] Each code cell has a short bold-led ```md lead-in that adds idea/math, not code narration.
+- [ ] At most 1–2 margin `//` comments, each saying something the code can't.
+- [ ] No number appears in prose that isn't a `${…}` hole (symbols like 1/e are fine); templates
+      reference precomputed variables; no closed-form re-derivations in holes.
+- [ ] Ends with a verdict ```md (and a ```latex `law ≈ ${simulated}` when a law exists).
+- [ ] Rendered check: cells alternate prose/code cleanly, no orphan blocks, sliders where play is
+      natural.
