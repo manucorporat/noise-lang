@@ -19,7 +19,7 @@ engine::set_precision(5e-3)
 we must preserve through compression: their inner product.
 ```
 d = 20
-x = normalize(ones(d))
+x = normalize([for i in 0..d { 2 + sin(i) }])   // an arbitrary fixed vector — the rotation makes the choice irrelevant
 y = normalize(iota(d))
 true_ip = y @ x
 
