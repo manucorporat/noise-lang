@@ -614,7 +614,7 @@ mod tests {
         assert_eq!(rows[0]["st"], 0.5);
         assert_eq!(rows[3]["st"], 3.5);
         assert_eq!(rows[0]["share"], 0.1); // 100 of 1000 draws
-        // The text card carries every number the bars encode.
+                                           // The text card carries every number the bars encode.
         assert!(
             p.text.contains("n=1000") && p.text.contains("mean=2") && p.text.contains("q95=3.5"),
             "{}",
