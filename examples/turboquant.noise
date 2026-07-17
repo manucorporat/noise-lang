@@ -7,8 +7,8 @@ abstract: >
   reproduces that hidden bias from a recent paper, and the one-bit sketch that fixes it.
 tags: [research, capstone]
 ---
-use math     // pi, sqrt, sign
-use vec      // normalize, ones, iota, quantize, normsq, norm, transpose
+use math     // pi, sqrt, sign, round
+use vec      // normalize, ones, iota, quantize, normsq, norm, transpose, zeros
 
 // Each sample rotates and quantizes a 20-dimensional vector — a lot of work per draw. Ask for
 // the ~2 significant digits the paper comparison needs, and let every E() size itself.
@@ -24,38 +24,25 @@ y = normalize(iota(d))
 true_ip = y @ x
 
 ```md
-**The codebooks.** After a random rotation each coordinate is ~Normal(0, 1/d),
+**The codebook.** After a random rotation each coordinate is ~Normal(0, 1/d),
 so the optimal (Lloyd–Max) quantization levels are the standard unit-Gaussian
-ones, rescaled by 1/√d. b bits buy 2^b levels.
+ones, rescaled by 1/√d. One bit buys two levels — just the sign.
 ```
 s  = 1 / sqrt(d)
 L1 = [-0.7979, 0.7979] * s
-L2 = [-1.5104, -0.4528, 0.4528, 1.5104] * s
-L3 = [-2.1520, -1.3439, -0.7560, -0.2451, 0.2451, 0.7560, 1.3439, 2.1520] * s
-L4 = [-2.7326, -2.0690, -1.6181, -1.2562, -0.9423, -0.6568, -0.3881, -0.1284,
-       0.1284,  0.3881,  0.6568,  0.9423,  1.2562,  1.6181,  2.0690,  2.7326] * s
 
 ```md
 **Algorithm 1 — the obvious quantizer.** Rotate, snap every coordinate to its
-nearest level, rotate back. Reconstruction distortion lands right on the
-paper's table:
+nearest level, rotate back — at one bit that is exactly its sign. Reconstruction
+distortion lands right on the paper's table:
 ```
 Pi  ~ rand::rotation(d)
 rot = Pi @ x
 PiT = transpose(Pi)
 mse1 = PiT @ quantize(rot, L1)
-mse2 = PiT @ quantize(rot, L2)
-mse3 = PiT @ quantize(rot, L3)
-mse4 = PiT @ quantize(rot, L4)
 d_mse1 = E(normsq(x - mse1))
-d_mse2 = E(normsq(x - mse2))
-d_mse3 = E(normsq(x - mse3))
-d_mse4 = E(normsq(x - mse4))
 ```latex
 D_{\text{mse}},\ b = 1 = ${d_mse1} \qquad(\text{paper } 0.36)
-D_{\text{mse}},\ b = 2 = ${d_mse2} \qquad(\text{paper } 0.117)
-D_{\text{mse}},\ b = 3 = ${d_mse3} \qquad(\text{paper } 0.03)
-D_{\text{mse}},\ b = 4 = ${d_mse4} \qquad(\text{paper } 0.009)
 ```
 
 ```md
@@ -69,11 +56,11 @@ bias_ratio = E(y @ mse1) / true_ip
 ```
 
 ```md
-**Algorithm 2 — TurboQuant.** Spend b−1 bits on the MSE stage, then sketch its
+**Algorithm 2 — TurboQuant.** Spend b−1 bits on an MSE stage, then sketch its
 *residual* with the one-bit QJL trick: an independent Gaussian projection S,
-signs only, rescaled by ‖r‖ and √(π/2). Provably unbiased (Theorem 2); each
-stage draws its own fresh rotation / projection per sample. (b = 1 has a
-0-bit MSE stage — a codebook of {0} — so it's plain QJL.)
+signs only, rescaled by ‖r‖ and √(π/2). Provably unbiased (Theorem 2). At b = 1
+the MSE stage is 0-bit — a codebook of {0}, so the residual is x itself and the
+scheme is plain QJL.
 ```
 tq_ip(x, y, m, S, dd) =
     y @ m
@@ -81,31 +68,16 @@ tq_ip(x, y, m, S, dd) =
     * (y @ (transpose(S) @ sign(S @ (x - m))))
 
 S1 ~[d, d] rand::normal(0, 1)
-S2 ~[d, d] rand::normal(0, 1);  R2 ~ rand::rotation(d)
-S3 ~[d, d] rand::normal(0, 1);  R3 ~ rand::rotation(d)
-S4 ~[d, d] rand::normal(0, 1);  R4 ~ rand::rotation(d)
 m1 = zeros(d)
-m2 = transpose(R2) @ quantize(R2 @ x, L1)
-m3 = transpose(R3) @ quantize(R3 @ x, L2)
-m4 = transpose(R4) @ quantize(R4 @ x, L3)
 prod1 = tq_ip(x, y, m1, S1, d)
-prod2 = tq_ip(x, y, m2, S2, d)
-prod3 = tq_ip(x, y, m3, S3, d)
-prod4 = tq_ip(x, y, m4, S4, d)
 
 ```md
-**The verdict.** The fix lands on 1 — unbiased — and its squared error
-shrinks like 1/d as bits are added, a fraction of the biased quantizer's:
+**The verdict.** The fix lands on 1 — unbiased — and its squared error stays
+under the plain-QJL bound π/(2d):
 ```
-unbias_ratio = E(prod2) / true_ip
+unbias_ratio = E(prod1) / true_ip
 d_prod1 = E((prod1 - true_ip) ^ 2)
-d_prod2 = E((prod2 - true_ip) ^ 2)
-d_prod3 = E((prod3 - true_ip) ^ 2)
-d_prod4 = E((prod4 - true_ip) ^ 2)
 ```latex
-\text{prod } b = 2: \quad \frac{E[\text{est}]}{\text{true}} = ${unbias_ratio} \qquad(\text{unbiased} \approx 1)
+\text{prod } b = 1: \quad \frac{E[\text{est}]}{\text{true}} = ${unbias_ratio} \qquad(\text{unbiased} \approx 1)
 D_{\text{prod}},\ b = 1 = ${d_prod1} \qquad(\text{plain QJL};\ \le \text{ bound } \tfrac{\pi}{2d} = ${round(pi / 2 / d, 4)})
-D_{\text{prod}},\ b = 2 = ${d_prod2} \qquad(\text{paper } \tfrac{0.56}{d} = ${0.56 / d})
-D_{\text{prod}},\ b = 3 = ${d_prod3} \qquad(\text{paper } \tfrac{0.18}{d} = ${0.18 / d})
-D_{\text{prod}},\ b = 4 = ${d_prod4} \qquad(\text{paper } \tfrac{0.047}{d} = ${0.047 / d})
 ```
