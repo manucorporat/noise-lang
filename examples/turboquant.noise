@@ -46,6 +46,17 @@ D_{\text{mse}},\ b = 1 = ${d_mse1} \qquad(\text{paper } 0.36)
 ```
 
 ```md
+**Why the rotation?** Drop `Pi` and the error becomes a property of this one x:
+around 0.04 when x is well-aligned, but over 1.0 — worse than returning zeros —
+when it is spiky. A random rotation sends any fixed x to a uniform point on the
+sphere, so the number settles at 0.36 whatever x you pick. The rotation doesn't
+make the error smaller — it makes it stop depending on x, which is what an
+online quantizer needs: it has to fix its codebook before seeing the data. It
+is also the only randomness in this stage (each E averages over it), and what
+creates the 2/π bias below.
+```
+
+```md
 **The catch.** Great at reconstruction — yet for *inner products* the 1-bit
 MSE quantizer is biased by exactly 2/π:
 ```
