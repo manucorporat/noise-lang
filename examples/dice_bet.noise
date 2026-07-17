@@ -7,12 +7,12 @@ abstract: >
 tags: [lifted if, risk]
 ---
 
-D ~ rand::unif_int(1, 6);
-payoff = if D == 6 { 10 } else { 0 - 2 };
-p = P(payoff > 0);
+roll ~ rand::unif_int(1, 6)
+payoff = if roll == 6 { 10 } else { -2 }
+p_ahead = P(payoff > 0)
 
 ```md
-The chance you come out ahead is **${p * 100}%**.
+The chance you come out ahead is **${p_ahead * 100}%**.
 ```
 
 // Two outcomes only: a tall -2 bar (you usually lose a bit) and a short +10 bar.

@@ -7,46 +7,59 @@ abstract: >
   neurons to music? Count how alike neighboring samples are, and the colors sort themselves out.
 tags: [signals, dsp]
 ---
-use math;     // round
+use math     // round, exp
 
-n = 256;   // every color drawn at the same resolution
-
-// Lag-1 autocorrelation of a noise vector, averaged over many realizations. Built from the raw
-// spatial sums so it's E[<x_k x_{k+1}>] / E[<x_k^2>] — a clean ratio of means.
-// Each realization is already a 256-term sum (a huge amount of work per draw), so a few
-// thousand realizations pin the ratio to the 3 decimals we print — say so with a per-call
-// count instead of letting the default budget draw a million of these monsters.
-pair_sum(x) = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i+1] }; acc };
-sq_sum(x)   = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i]   }; acc };
-neighbor_corr(x) = E(pair_sum(x), 15000) / E(sq_sum(x), 15000);
-
-white ~[n] signal::noise_white(1);
-pink  ~[n] signal::noise_pink(1);
-brown ~[n] signal::noise_brown(1);
-
-// The spectrum reddens, the neighbor correlation climbs toward 1.
 ```md
-white (flat 1/f^0): **${round(neighbor_corr(white), 3)}** jagged hiss
-pink (~1/f): **${round(neighbor_corr(pink),  3)}**
-brown (1/f^2): **${round(neighbor_corr(brown), 3)}** smooth wander
+**The yardstick.** How alike is each sample to its neighbor? Take the ratio of
+"sample times next sample" to "sample squared", averaged over thousands of
+realizations — the lag-1 autocorrelation. It reads 0 for pure hiss and climbs
+toward 1 as the noise smooths out.
+```
+// Each realization is already a 256-term sum, so 15k draws pin 3 decimals — cap the budget per call.
+pair_sum(x) = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i+1] }; acc }
+sq_sum(x)   = { acc = 0; for i in 0..Len(x)-1 { acc = acc + x[i] * x[i]   }; acc }
+neighbor_corr(x) = E(pair_sum(x), 15000) / E(sq_sum(x), 15000)
+
+```md
+**Three colors, one ruler.** As the spectrum reddens from white through pink
+to brown, the neighbor memory climbs toward 1.
+```
+n = 256
+white ~[n] signal::noise_white(1)
+pink  ~[n] signal::noise_pink(1)
+brown ~[n] signal::noise_brown(1)
+white_memory = neighbor_corr(white)
+pink_memory  = neighbor_corr(pink)
+brown_memory = neighbor_corr(brown)
+
+```md
+white (flat 1/f⁰): **${round(white_memory, 3)}** — jagged hiss
+pink (~1/f): **${round(pink_memory, 3)}**
+brown (1/f²): **${round(brown_memory, 3)}** — smooth wander
 ```
 
-// OU is the tunable one: correlation = exp(-1/tau), checkable in closed form.
-ou_short ~[n] signal::noise_ou(1, 4);
-ou_long  ~[n] signal::noise_ou(1, 32);
 ```md
-
-OU colored noise — neighbor corr should track exp(-1/tau):
-tau = 4 : **${round(neighbor_corr(ou_short), 3)}** vs exp(-1/4)  = 0.779
-tau = 32: **${round(neighbor_corr(ou_long),  3)}** vs exp(-1/32) = 0.969
+**The dial-a-color.** Ornstein–Uhlenbeck noise has a memory knob τ, and a
+closed form to check the ruler against:
+```
+ou_short ~[n] signal::noise_ou(1, 4)
+ou_long  ~[n] signal::noise_ou(1, 32)
+short_memory = neighbor_corr(ou_short)
+long_memory  = neighbor_corr(ou_long)
+```latex
+\rho_1 = e^{-1/\tau}: \qquad
+\tau = 4:\ ${round(short_memory, 3)} \ \left(e^{-1/4} = ${round(exp(-1 / 4), 3)}\right), \qquad
+\tau = 32:\ ${round(long_memory, 3)} \ \left(e^{-1/32} = ${round(exp(-1 / 32), 3)}\right)
 ```
 
-// See the color: white noise is a jagged hiss, brown noise is a smooth wandering walk.
-plot::line(white);
-plot::line(brown);
-// And the structure behind it: white has no neighbor memory, brown's samples stay correlated
-// for a long stretch.
-white_64 ~[64] signal::noise_white(1);
-brown_64 ~[64] signal::noise_brown(1);
-plot::corr(white_64);
+```md
+**See the color.** White noise is a jagged hiss; brown noise is a smooth
+wandering walk. The correlation matrices show the structure behind it: white
+has no neighbor memory at all, brown's samples stay linked for long stretches.
+```
+plot::line(white)
+plot::line(brown)
+white_64 ~[64] signal::noise_white(1)
+brown_64 ~[64] signal::noise_brown(1)
+plot::corr(white_64)
 plot::corr(brown_64)

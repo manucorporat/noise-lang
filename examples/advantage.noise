@@ -8,13 +8,21 @@ abstract: >
 tags: [games, lifted if]
 ---
 
-A ~ rand::unif_int(1, 20);
-B ~ rand::unif_int(1, 20);
-higher = if A > B { A } else { B };
-p = P(higher >= 15);
+```md
+**The roll.** Two d20s, keep the higher. Drag the target number your character
+has to hit.
+```
+target = input::int(min: 2, max: 20, step: 1, default: 15)
+A ~ rand::unif_int(1, 20)
+B ~ rand::unif_int(1, 20)
+higher = if A > B { A } else { B }
+
+p_advantage = P(higher >= target)
+p_straight  = P(A >= target)
 
 ```md
-The chance an advantage roll lands **≥ 15** is **${p * 100}%**.
+Hitting **${target}+** with advantage: **${p_advantage * 100}%** — against
+${p_straight * 100}% on a straight roll.
 ```
 
 // Advantage leans the d20 toward the high end: big numbers get the tallest bars.

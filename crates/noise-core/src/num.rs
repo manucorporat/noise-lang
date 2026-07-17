@@ -117,6 +117,23 @@ pub fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
     sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
 }
 
+/// Standard error of the sample `q`-quantile of a **sorted, non-empty** sample, density-free: the
+/// rank of the true quantile among `n` draws is Binomial(n, q), sd `sqrt(n·q·(1−q))`, so the
+/// half-width between the order statistics one rank-sd either side of the center is a ±1σ band for
+/// the quantile — no density estimate needed. Degenerate cases collapse to 0 ("exact"): `q` at the
+/// ends (the min/max draw is exactly itself) and plateaus of a discrete sample.
+pub fn quantile_se_sorted(sorted: &[f64], q: f64) -> f64 {
+    let n = sorted.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let rank_sd = (n as f64 * q * (1.0 - q)).sqrt();
+    let center = q * (n - 1) as f64;
+    let lo = (center - rank_sd).floor().max(0.0) as usize;
+    let hi = ((center + rank_sd).ceil() as usize).min(n - 1);
+    (sorted[hi] - sorted[lo]) / 2.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

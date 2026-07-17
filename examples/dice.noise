@@ -8,11 +8,23 @@ abstract: >
 tags: [basics, discrete]
 ---
 
-Dice ~ rand::unif_int(1, 6);
-p = P(Dice == 4);
-
+```md
+**The die.** Six whole numbers, equally likely.
+```
+roll ~ rand::unif_int(1, 6)
+p_four = P(roll == 4)
 ```latex
-P(\text{rolling a } 4) = ${p * 100}\%
+P(\text{rolling a } 4) = ${p_four * 100}\%
 ```
 
-plot::histogram(Dice)
+```md
+**The trap.** Ask instead for a *continuous* value between 1 and 6 — a real
+number never lands exactly on a point, so the same question collapses to zero:
+```
+spot ~ rand::unif(1, 6)
+p_exactly_four = P(spot == 4)
+```latex
+P(\text{spot} = 4) = ${p_exactly_four}
+```
+
+plot::histogram(roll)

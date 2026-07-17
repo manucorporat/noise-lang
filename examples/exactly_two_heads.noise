@@ -8,12 +8,13 @@ abstract: >
 tags: [modeling, collections]
 ---
 
-coin  = rand::bernoulli(0.5);
-flips ~[3] coin;
-heads = vec::count(flips);
+coin  = rand::bernoulli(0.5)
+flips ~[3] coin
+heads = vec::count(flips)
+p_two = P(heads == 2)
 
 ```md
-P(exactly two heads of three) = **${P(heads == 2) * 100}%**
+P(exactly two heads of three) = **${p_two * 100}%**
 ```
 
 // The whole shape at a glance — the bar at two heads is the 3/8 we asked for.

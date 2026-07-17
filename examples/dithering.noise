@@ -8,39 +8,50 @@ abstract: >
 tags: [signals, dsp]
 ---
 
-use math;
-
-// A 1-bit quantizer reports only the SIGN (+1 / -1) of its input. Ask it about a fixed level v and
-// it's useless: it answers "+1" for any positive v, telling you nothing about HOW big v is.
-v = 0.3;
+use math
 
 ```md
-no dither: E[sign(v)] = **${E(sign(v))}** (stuck at +1 — says nothing about v = ${v})
+**A sensor with one bit.** It reports only the *sign* of its input. Ask it
+about a fixed positive level and every answer is identical — the average is
+pinned at +1, whether the level is 0.3 or 0.8.
 ```
-
-// Now add uniform dither in [-1, 1] BEFORE the comparator and average many comparisons. The noise
-// randomizes the threshold crossing so that, for |v| < 1, E[sign(v + u)] = v EXACTLY: the average
-// of the 1-bit answers reconstructs the analog level. One noisy bit, repeated, becomes a ruler.
-// Drag the dither amount: too little (< the level) and the comparator stays stuck; enough to span the
-// range and the average goes perfectly linear. At 1.0 the dither covers [-1, 1] and recovery is exact.
-dither = input::real(min: 0, max: 2, step: 0.1, default: 1);
-
-u ~ rand::unif(-dither, dither);
+level = 0.3
+stuck_average = E(sign(level))
 
 ```md
-dithered: E[sign(v + u)] = **${E(sign(v + u))}** (recovers v = ${v})
+Naked 1-bit average: **${stuck_average}** — says nothing about the level.
 ```
 
-// And it's not a fluke for one value — the response is LINEAR. Each level comes back on the nose.
 ```md
-linearity check (dithered average should equal the input):
-v = -0.5 -> **${E(sign(-0.5 + u))}**
-v =  0.0 -> **${E(sign( 0.0 + u))}**
-v =  0.8 -> **${E(sign( 0.8 + u))}**
+**Add noise, then ask.** Uniform dither randomizes the threshold crossing: as
+long as the dither spans the level, the average of many yes/no answers *is*
+the level. Drag it — too little and the sensor stays stuck; at 1 it covers the
+whole range and recovery is exact.
+```
+dither = input::real(min: 0, max: 2, step: 0.1, default: 1)
+u ~ rand::unif(-dither, dither)
+dithered_average = E(sign(level + u))
+```latex
+\mathbb{E}\left[\operatorname{sign}(v + u)\right] = v \approx ${dithered_average}
+\qquad (v = ${level})
 ```
 
-// Sweep the input from -1 to +1 and plot the dithered 1-bit average at each level: a clean straight
-// ramp, proof that the noisy comparator reconstructs the analog value linearly.
+```md
+**Not a fluke — it's linear.** Any level comes back on the nose:
+```
+recovered_low  = E(sign(-0.5 + u))
+recovered_zero = E(sign( 0.0 + u))
+recovered_high = E(sign( 0.8 + u))
+
+```md
+−0.5 → **${recovered_low}**, 0.0 → **${recovered_zero}**, 0.8 → **${recovered_high}**
+```
+
+```md
+**The whole ramp.** Sweep the input from −1 to +1: the dithered 1-bit average
+traces a straight line through every level. One noisy bit, repeated, becomes a
+ruler.
+```
 ramp = [sign(-1.0 + u), sign(-0.8 + u), sign(-0.6 + u), sign(-0.4 + u), sign(-0.2 + u),
-        sign( 0.0 + u), sign( 0.2 + u), sign( 0.4 + u), sign( 0.6 + u), sign( 0.8 + u), sign( 1.0 + u)];
+        sign( 0.0 + u), sign( 0.2 + u), sign( 0.4 + u), sign( 0.6 + u), sign( 0.8 + u), sign( 1.0 + u)]
 plot::line(ramp)

@@ -8,13 +8,16 @@ abstract: >
 tags: [continuous, collections]
 ---
 
-// Slide n: one draw is flat, two make a triangle, a dozen round into a bell — the CLT in miniature.
-n = input::int(min: 1, max: 12, step: 1, default: 3);
-
-draws ~[n] rand::unif_int(0, 1);
-total = vec::sum(draws);
+```md
+**Stack them up.** Drag n: one uniform is flat, two make a triangle, and a
+dozen round into a bell — the central limit theorem in miniature.
+```
+n = input::int(min: 1, max: 12, step: 1, default: 3)
+draws ~[n] rand::unif(0, 1)
+total = vec::sum(draws)
+p_big = P(total > 2)
 ```latex
-P(\text{sum of } ${n} \text{ uniforms} > 2) = ${P(total > 2) * 100}\%
+P(\text{sum of } ${n} \text{ uniforms} > 2) = ${p_big * 100}\%
 ```
 
 plot::histogram(total)

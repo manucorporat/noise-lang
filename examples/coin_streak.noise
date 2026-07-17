@@ -7,16 +7,23 @@ abstract: >
 tags: [independence, modeling]
 ---
 
-// How many coins we flip in a row — tune it and watch the all-heads chance halve each time.
-flip_count = input::int(min: 1, max: 20, step: 1, default: 3);
-
-flips  ~[flip_count] rand::bernoulli(0.5);
-streak = vec::all(flips);
-
 ```md
-P(all heads in a row) = **${P(streak) * 100}%**
+**The streak.** Every flip must land heads — one miss and it's over. Drag the
+length and watch each extra flip halve the odds.
+```
+flip_count = input::int(min: 1, max: 20, step: 1, default: 3)
+flips  ~[flip_count] rand::bernoulli(0.5)
+streak = vec::all(flips)
+p_streak = P(streak)
+
+```latex
+P(${flip_count} \text{ heads in a row}) = ${p_streak * 100}\%
+\qquad \left(2^{-k}\right)
 ```
 
-// The odds halve with every extra flip — the curve dives toward zero almost at once.
-odds_by_length = [for k in 1..11 { 0.5 ^ k }];
+```md
+**The dive.** Simulate every streak length from 1 to 10: the curve halves at
+each step and plunges toward zero almost at once.
+```
+odds_by_length = [for k in 1..11 { run ~[k] rand::bernoulli(0.5); P(vec::all(run), 50000) }]
 plot::line(odds_by_length)

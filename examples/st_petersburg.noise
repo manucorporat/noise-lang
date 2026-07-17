@@ -8,41 +8,51 @@ abstract: >
 tags: [paradox, expectation]
 ---
 
-// The trick behind the infinity: each round contributes exactly $1 to the expectation
-// (a 2^k prize paid with probability 1/2^k), so capping at N rounds gives E ≈ N — forever.
+```md
+**The game, capped.** Flip until the first head; heads on flip k pays 2^k.
+The trick behind the infinity: each round contributes exactly $1 to the
+expectation — a 2^k prize at 1-in-2^k odds — so a game allowed to run N
+rounds has a fair price of about $N.
+```
 play(rounds) = {
-  flips  ~[rounds] rand::bernoulli(0.5);
-  payout = 0;
-  live   = true;
+  flips  ~[rounds] rand::bernoulli(0.5)
+  payout = 0
+  live   = true
   for k in 0..rounds {
-    first  = flips[k] && live;            // the first head lands here — it ends the game
-    payout = if first { 2 ^ (k + 1) } else { payout };
-    live   = live && !flips[k];
-  };
+    first  = flips[k] && live
+    payout = if first { 2 ^ (k + 1) } else { payout }
+    live   = live && !flips[k]
+  }
   payout
-};
+}
 
 ```md
-Expected payout keeps growing as you allow more rounds (E ~ number of rounds):
+**The ladder.** Raise the cap and watch the fair price track it, a dollar per
+round, refusing to converge:
 ```
+e_short  = E(play(4))
+e_medium = E(play(8))
+e_long   = E(play(12))
 ```latex
-E[\text{payout up to 4 rounds}] = ${E(play(4))} \quad (\approx 4)
-E[\text{payout up to 8 rounds}] = ${E(play(8))} \quad (\approx 8)
-E[\text{payout up to 12 rounds}] = ${E(play(12))} \quad (\approx 12)
+E[\text{payout} \mid 4 \text{ rounds}] = ${e_short}, \quad
+E[\text{payout} \mid 8 \text{ rounds}] = ${e_medium}, \quad
+E[\text{payout} \mid 12 \text{ rounds}] = ${e_long} \qquad (E \approx N)
 ```
-
-// Drag the cap on rounds: the expected payout just keeps climbing (~$1 per round), never settling
-// on a finite fair price — the "infinite" expectation is real, watch it refuse to converge.
-rounds = input::int(min: 1, max: 20, step: 1, default: 8);
-
-```latex
-E[\text{payout up to } ${rounds} \text{ rounds}] = ${E(play(rounds))} \quad (\approx ${rounds})
-```
-
-// The mean hides in rare jackpots — the histogram shows that long, heavy tail.
-plot::histogram(play(rounds));
 
 ```md
-Each extra round adds about $1 of expected value forever, so no finite price is fair.
-(The mean lives in ever-rarer jackpots, so longer games need exponentially more samples.)
+**Your turn.** Drag the cap — the expected payout climbs about $1 per round,
+forever. The "infinite" expectation is real.
 ```
+rounds   = input::int(min: 1, max: 20, step: 1, default: 8)
+e_capped = E(play(rounds))
+```latex
+E[\text{payout} \mid ${rounds} \text{ rounds}] = ${e_capped} \qquad (\approx ${rounds})
+```
+
+```md
+**Where the mean hides.** Almost every game pays a pittance; the expectation
+lives in ever-rarer jackpots out in the long tail — which is exactly why no
+sane person pays the "fair" price. (It's also why longer games need
+exponentially more samples to pin down.)
+```
+plot::histogram(play(rounds))

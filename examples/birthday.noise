@@ -7,16 +7,24 @@ abstract: >
 tags: [collections, classic]
 ---
 
-n = input::int(min: 2, max: 100, step: 1, default: 23);
-
-share ~[n] rand::unif_int(1, 365);
-matched = vec::has_duplicates(share);
+```md
+**The room.** Everyone gets a uniformly random birthday, and the question is
+whether *any* two collide. Drag the head count.
+```
+people = input::int(min: 2, max: 100, step: 1, default: 23)
+birthdays ~[people] rand::unif_int(1, 365)
+matched = vec::has_duplicates(birthdays)
+p_match = P(matched)
 
 ```md
-With ${n} people, the chance that two share a birthday is **${P(matched) * 100}%**.
+With ${people} people, the chance that two share a birthday is
+**${p_match * 100}%**.
 ```
 
-// The exact odds against group size: a steep climb that clears 50% at just 23 people.
-chance(k) = { miss = 1.0; for i in 1..k { miss = miss * (365 - i) / 365 }; 1 - miss };
-odds_by_size = [for g in 1..61 { chance(g) }];
+```md
+**The exact curve.** The collision chance has a closed form — multiply out
+the survival odds person by person. Here it is for every room size up to 60:
+a climb far steeper than intuition expects, clearing 50% at just 23.
+```
+odds_by_size = [for k in 1..61 { miss = 1; for i in 1..k { miss = miss * (365 - i) / 365 }; 1 - miss }]
 plot::line(odds_by_size)

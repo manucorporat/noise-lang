@@ -297,19 +297,22 @@ fn dist1_chart(label: &str, d: &Dist1) -> Option<J> {
     if bins.is_empty() || !lo.is_finite() || !hi.is_finite() {
         return None;
     }
-    let value = field(label, &["count"]);
+    // Bars carry each bin's SHARE of the draws, not its raw count: a count axis leaks the sample
+    // budget (an implementation detail), while a 0–1 share reads the same at any budget.
+    let value = field(label, &["share"]);
+    let total = bins.iter().sum::<u64>().max(1) as f64;
     let rows = d
         .hist
         .midpoints(false)
         .into_iter()
         .zip(bins)
-        .map(|(mid, &count)| json!({ &value: mid, "count": count }))
+        .map(|(mid, &count)| json!({ &value: mid, "share": count as f64 / total }))
         .collect();
     Some(chart(
         rows,
-        json!({ &value: "Number", "count": "Count" }),
+        json!({ &value: "Number", "share": percentage() }),
         "Bar Chart",
-        json!({ "x": &value, "y": "count" }),
+        json!({ "x": &value, "y": "share" }),
         J::Null,
         CANVAS_W,
         CANVAS_H,
@@ -602,14 +605,16 @@ mod tests {
         assert_well_formed(&p.charts[0]);
         let c = &p.charts[0];
         assert_eq!(c["chart_spec"]["chartType"], "Bar Chart");
-        assert_eq!(c["semantic_types"]["count"], "Count");
+        // Bars encode each bin's share of the draws (0–1), not raw counts — a count axis would
+        // leak the sample budget.
+        assert_eq!(c["semantic_types"]["share"]["semanticType"], "Percentage");
         // 4 bins over [0, 4] ⇒ midpoints 0.5, 1.5, 2.5, 3.5 — never the bin edges.
         let rows = c["data"]["values"].as_array().unwrap();
         assert_eq!(rows.len(), 4);
         assert_eq!(rows[0]["st"], 0.5);
         assert_eq!(rows[3]["st"], 3.5);
-        assert_eq!(rows[0]["count"], 100);
-        // The text card carries every number the bars encode.
+        assert_eq!(rows[0]["share"], 0.1); // 100 of 1000 draws
+                                           // The text card carries every number the bars encode.
         assert!(
             p.text.contains("n=1000") && p.text.contains("mean=2") && p.text.contains("q95=3.5"),
             "{}",
@@ -863,11 +868,11 @@ mod tests {
             json!({ "x": "x", "y": "x_" })
         );
 
-        // A variable literally named `count` must not overwrite the histogram's count column.
-        let p = to_flint(&summary(View::Hist, "count", Payload::One(dist1(false))));
+        // A variable literally named `share` must not overwrite the histogram's share column.
+        let p = to_flint(&summary(View::Hist, "share", Payload::One(dist1(false))));
         assert_eq!(
             p.charts[0]["chart_spec"]["encodings"],
-            json!({ "x": "count_", "y": "count" })
+            json!({ "x": "share_", "y": "share" })
         );
         assert_well_formed(&p.charts[0]);
     }

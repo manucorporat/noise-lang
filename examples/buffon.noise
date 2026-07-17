@@ -7,21 +7,27 @@ abstract: >
   nothing but a needle and a tally. A 250-year-old Monte Carlo trick.
 tags: [monte carlo, geometry]
 ---
-use math;
+use math
 
-// When it lands, the needle's center falls a random distance from the nearest seam at a random tilt;
-// it crosses only when its half-length, leaning toward the line, reaches across that gap.
-d     ~ rand::unif(0, 0.5);      // center-to-nearest-line distance, spacing t = 1 so d lands in [0, 1/2]
-angle ~ rand::unif(0, pi / 2);   // tilt; by symmetry, [0, pi/2] already covers every case
-cross = d <= 0.5 * sin(angle);
+```md
+**One drop.** The needle's center lands a random distance from the nearest
+seam, at a random tilt (symmetry lets a quarter-turn cover every case). It
+crosses only when its half-length, leaning toward the seam, reaches across
+that gap.
+```
+distance ~ rand::unif(0, 0.5)
+tilt     ~ rand::unif(0, pi / 2)
+crosses  = distance <= 0.5 * sin(tilt)
 
-// Geometry pins the crossing chance to exactly 2/π, so inverting it turns a mere tally back into π.
-p = P(cross);
-
+```md
+**From tally to π.** Geometry pins the crossing chance at exactly 2/π — so
+inverting a mere tally of crossings measures π itself:
+```
+p_cross = P(crosses)
 ```latex
-P(\text{needle crosses a line}) = ${p} \approx \frac{2}{\pi} = ${2 / pi}
-\pi \approx \frac{2}{P(\text{cross})} \qquad (\text{true } \pi = ${pi})
+P(\text{cross}) = ${p_cross} \approx \frac{2}{\pi} = ${round(2 / pi, 4)},
+\qquad \pi \approx \frac{2}{P(\text{cross})} = ${2 / p_cross}
 ```
 
-// The π squeezed out of the needle, shown with only the error bar it has earned.
-plot::value(2 / p)
+// The π squeezed out of a needle, shown with only the error bar it has earned.
+plot::value(2 / p_cross)

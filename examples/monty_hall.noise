@@ -8,16 +8,23 @@ abstract: >
 tags: [classic, modeling]
 ---
 
-// Slide the doors: with 3, switching wins 2/3; crank it to 100 and you win 99 times out of 100.
-doors = input::int(min: 3, max: 100, step: 1, default: 3);
+```md
+**The setup.** A car behind one door, your blind first pick, and a host who
+then opens every other losing door. Crank the door count — at 100 doors the
+answer stops feeling like a coin toss.
+```
+doors = input::int(min: 3, max: 100, step: 1, default: 3)
+car  ~ rand::unif_int(1, doors)
+pick ~ rand::unif_int(1, doors)
 
-car  ~ rand::unif_int(1, doors);
-pick ~ rand::unif_int(1, doors);
+```md
+**The whole argument in one line.** After the host clears the field, switching
+wins in exactly the worlds where your blind first guess had missed the car.
+```
+switching_wins = P(pick != car)
+advice = if switching_wins > 0.5 { "Switch!" } else { "Stay." }
 
-// Switching wins in exactly the worlds where your first guess missed the car.
-p = P(pick != car);
-if p > 0.5 {
-  Print(`Switch! You win ${p * 100}% of the time.`)
-} else {
-  Print(`Stay. Switching only wins ${p * 100}% of the time.`)
-}
+```md
+**${advice}** With ${doors} doors, switching wins **${switching_wins * 100}%**
+of the time — staying wins only ${(1 - switching_wins) * 100}%.
+```

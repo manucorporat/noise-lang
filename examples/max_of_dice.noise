@@ -7,12 +7,13 @@ abstract: >
 tags: [lifted if]
 ---
 
-A ~ rand::unif_int(1, 6);
-B ~ rand::unif_int(1, 6);
-higher = if A > B { A } else { B };
-p = P(higher == 6);
+A ~ rand::unif_int(1, 6)
+B ~ rand::unif_int(1, 6)
+higher = if A > B { A } else { B }
+p_six  = P(higher == 6)
+
 ```md
-The chance the higher of 2d6 is a 6 is **${p * 100}%**.
+The chance the higher of 2d6 is a 6 is **${p_six * 100}%**.
 ```
 
 // Keeping the bigger die skews things high: 6 is by far the most common result.

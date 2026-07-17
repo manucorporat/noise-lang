@@ -8,16 +8,28 @@ abstract: >
 tags: [functions, language]
 ---
 
-max(a, b) = if a > b { a } else { b };
-roll() ~ rand::unif_int(1, 6);
-
-A ~ rand::unif_int(1, 6);
-B ~ rand::unif_int(1, 6);
+```md
+**Two kinds of function.** `max` is a pure rule — same inputs, same answer,
+every time. `roll()` is declared with `~`, so every *call* is a fresh,
+independent draw.
+```
+max(a, b) = if a > b { a } else { b }
+roll() ~ rand::unif_int(1, 6)
 
 ```md
-P(higher of two d6 is a 6) = **${P(max(A, B) == 6) * 100}%**
-P(two independent rolls sum to 7) = **${P(roll() + roll() == 7) * 100}%**
+**Both in action.** The pure rule applied to two dice, and one die function
+called twice — genuinely two dice, which is why a 7 keeps its 1-in-6 odds.
+```
+A ~ rand::unif_int(1, 6)
+B ~ rand::unif_int(1, 6)
+higher = max(A, B)
+p_high_six    = P(higher == 6)
+p_lucky_seven = P(roll() + roll() == 7)
+
+```md
+P(higher of two d6 is a 6) = **${p_high_six * 100}%**
+P(two independent rolls sum to 7) = **${p_lucky_seven * 100}%**
 ```
 
-// The max of two dice leans high: a 6 is far likelier than a 1, since either die can supply it.
-plot::histogram(max(A, B))
+// The max of two dice leans high: either die can supply the 6.
+plot::histogram(higher)

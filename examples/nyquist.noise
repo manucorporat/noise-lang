@@ -7,29 +7,37 @@ abstract: >
   and they separate again. The sampling theorem, something you can watch happen.
 tags: [signals, dsp]
 ---
-high = signal::cosine(7);   // a fast wave: 7 cycles per window
-low  = signal::cosine(3);   // a slow wave: 3 cycles per window  -- genuinely a different signal
-
-// Nyquist limit for the 7-cycle wave: you need > 2*7 = 14 samples per window.
-// Drag the sample count across 14: below it the fast wave aliases — at 10 its samples become
-// *identical* to the slow one's, so mse is 0 and the two are indistinguishable. Cross above 14 and
-// they pull apart. (7 folds to 10-7 = 3 exactly at 10, which is why that rate gives mse = 0.)
-samples = input::int(min: 4, max: 64, step: 1, default: 10);
 
 ```md
-undersampled (${samples} pts, Nyquist needs > 14): mse(fast, slow) = **${vec::mse(signal::sample(high, samples), signal::sample(low, samples))}**
+**Two genuinely different waves.** A fast one at 7 cycles per window, a slow
+one at 3.
+```
+fast = signal::cosine(7)
+slow = signal::cosine(3)
+
+```md
+**The snapshot rate.** Nyquist says the 7-cycle wave needs more than 2·7 = 14
+samples per window. Drag the count across that line — below it the fast wave
+folds down to a slower impostor, and at exactly 10 samples, 7 folds to
+10 − 7 = 3: its samples become *identical* to the slow wave's.
+```
+samples = input::int(min: 4, max: 64, step: 1, default: 10)
+fast_sampled = signal::sample(fast, samples)
+slow_sampled = signal::sample(slow, samples)
+fast_full    = signal::sample(fast, 64)
+twin_error   = vec::mse(fast_sampled, slow_sampled)
+full_error   = vec::mse(fast_full, signal::sample(slow, 64))
+
+```md
+Undersampled at ${samples} points: mse(fast, slow) = **${twin_error}** — when
+it reads 0, the two waves are indistinguishable. Oversampled at 64 points:
+mse = **${full_error}** — obviously different signals.
 ```
 
 ```md
-oversampled (64 > 14 pts): mse(fast, slow) = **${vec::mse(signal::sample(high, 64), signal::sample(low, 64))}**
+**Watch the disguise.** The fast wave's samples, the slow wave's samples —
+and then the fast wave again with 64 snapshots, all seven wiggles restored.
 ```
-
-```md
-Sample too slowly and a 7-cycle wave masquerades as a 3-cycle one (7 folds to 10-7 = 3).
-```
-
-// Undersampled (at 10): the fast 7-cycle wave and the slow 3-cycle wave land on the SAME points — twins.
-plot::line(signal::sample(high, samples));
-plot::line(signal::sample(low, samples));
-// Oversampled at 64: now the fast wave shows all 7 wiggles and is obviously a different signal.
-plot::line(signal::sample(high, 64))
+plot::line(fast_sampled)
+plot::line(slow_sampled)
+plot::line(fast_full)

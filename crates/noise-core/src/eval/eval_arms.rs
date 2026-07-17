@@ -233,6 +233,24 @@ impl Engine {
         if is_dist(&iv) {
             return self.gather(&xs, iv, arr.span, idx.span);
         }
+        // A deterministic *array* of indices selects into a new array — `xs[0..r]` is the slice
+        // of the first `r` elements (ranges are arrays), and any index list works: `xs[[2, 0, 0]]`
+        // reorders/repeats. Each index resolves under the scalar rules (constant non-negative
+        // integer, in bounds); an array of *random* indices is rejected element-wise.
+        if let Value::Array(indices) = &iv {
+            let mut out = Vec::with_capacity(indices.len());
+            for ix in indices.iter() {
+                let i = self.array_index(ix, idx.span)?;
+                if i >= xs.len() {
+                    return Err(NoiseError::runtime(
+                        format!("array index {i} out of bounds (len {})", xs.len()),
+                        idx.span,
+                    ));
+                }
+                out.push(xs[i].clone());
+            }
+            return Ok(Value::Array(out.into()));
+        }
         let i = self.array_index(&iv, idx.span)?;
         if i >= xs.len() {
             return Err(NoiseError::runtime(

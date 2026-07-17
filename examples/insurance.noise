@@ -8,17 +8,20 @@ abstract: >
 tags: [risk, lifted if]
 ---
 
-// The two dials of the policy: the loss range, and the deductible the customer eats first.
-deductible = input::real(min: 0,   max: 1000, step: 50,  default: 200);
-max_loss   = input::real(min: 100, max: 5000, step: 100, default: 1000);
+```md
+**The two dials of the policy.** How bad a loss can get, and the first slice
+of it the customer eats before the insurer pays a cent.
+```
+deductible = input::real(min: 0,   max: 1000, step: 50,  default: 200)
+max_loss   = input::real(min: 100, max: 5000, step: 100, default: 1000)
 
-loss ~ rand::unif_int(0, max_loss);
-claim = if loss > deductible { loss - deductible } else { 0 };
-p = P(claim > 0);
+loss  ~ rand::unif_int(0, max_loss)
+claim = if loss > deductible { loss - deductible } else { 0 }
+p_pays = P(claim > 0)
 
 ```md
-The chance the insurer pays a claim is **${p * 100}%**.
+The chance the insurer pays a claim is **${p_pays * 100}%**.
 ```
 
-// A big spike at $0 (small losses below the deductible) then a flat spread of real payouts.
+// A big spike at $0 (losses below the deductible) then a flat spread of real payouts.
 plot::histogram(claim)
