@@ -1,6 +1,6 @@
 {
   "name": "@noiselang/core",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "The Noise probabilistic language engine, compiled to WebAssembly. Parse and run .noise programs (with variable introspection) from any JS/TS project — the .wasm ships in the package and bundles into your build.",
   "license": "MIT",
   "author": "Manu Mtz.-Almeida <manu.valladolid@gmail.com>",
