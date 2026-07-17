@@ -10,34 +10,65 @@ tags: [signals, dsp]
 
 ```md
 **Two genuinely different waves.** A fast one at 7 cycles per window, a slow
-one at 3.
+one at 3. Seen in full, nobody could confuse them.
 ```
 fast = signal::cosine(7)
 slow = signal::cosine(3)
 
 ```md
-**The snapshot rate.** Nyquist says the 7-cycle wave needs more than 2·7 = 14
-samples per window. Drag the count across that line — below it the fast wave
-folds down to a slower impostor, and at exactly 10 samples, 7 folds to
-10 − 7 = 3: its samples become *identical* to the slow wave's.
+**The snapshot rate.** The one knob that matters. Nyquist's rule: to capture a
+7-cycle wave you need *more than* 2·7 = 14 snapshots per window. The slider
+starts below that line, at 10 — drag it across 14 and back.
 ```
 samples = input::int(min: 4, max: 64, step: 1, default: 10)
+
+```md
+**The impostor test.** Photograph both waves ${samples} times and measure the
+mean squared difference between the two sets of snapshots. When it reads 0 the
+camera *cannot tell the waves apart* — and at 10 snapshots it does read 0,
+because the 7-cycle wave folds down to 10 − 7 = 3 cycles, landing exactly on
+top of the slow wave.
+```
 fast_sampled = signal::sample(fast, samples)
 slow_sampled = signal::sample(slow, samples)
-fast_full    = signal::sample(fast, 64)
 twin_error   = vec::mse(fast_sampled, slow_sampled)
-full_error   = vec::mse(fast_full, signal::sample(slow, 64))
 
 ```md
-Undersampled at ${samples} points: mse(fast, slow) = **${twin_error}** — when
-it reads 0, the two waves are indistinguishable. Oversampled at 64 points:
-mse = **${full_error}** — obviously different signals.
+At ${samples} snapshots: mse(fast, slow) = **${math::round(twin_error, 3)}**.
 ```
 
 ```md
-**Watch the disguise.** The fast wave's samples, the slow wave's samples —
-and then the fast wave again with 64 snapshots, all seven wiggles restored.
+**What the camera saw — the fast wave.** ${samples} snapshots of the 7-cycle
+wave. Count the peaks: below the Nyquist line there are fewer than seven — at
+10 snapshots, exactly three. This is the impostor.
 ```
 plot::line(fast_sampled)
+
+```md
+**The slow wave, same camera.** ${samples} snapshots of the genuinely-3-cycle
+wave. At 10 snapshots this picture is point-for-point identical to the one
+above.
+```
 plot::line(slow_sampled)
+
+```md
+**The unmasking.** The same fast wave, photographed 64 times — comfortably past
+Nyquist. All seven cycles come back.
+```
+fast_full  = signal::sample(fast, 64)
+slow_full  = signal::sample(slow, 64)
+full_error = vec::mse(fast_full, slow_full)
 plot::line(fast_full)
+
+```md
+**The verdict.** At ${samples} snapshots, mse(fast, slow) =
+**${math::round(twin_error, 3)}** — and whenever it reads 0 the disguise is
+perfect. At 64 snapshots the two waves are worlds apart (mse
+**${math::round(full_error, 3)}**): aliasing only survives an undersampling
+camera. And the fold is an identity, not an approximation:
+```
+```latex
+f_s > 2 f_{\max} \;\; \text{or else} \;\;
+\cos\!\Big(2\pi f\,\tfrac{k}{f_s}\Big) = \cos\!\Big(2\pi (f_s - f)\,\tfrac{k}{f_s}\Big)
+\qquad \text{at } f_s = 10:\; 7 \mapsto 3
+```
