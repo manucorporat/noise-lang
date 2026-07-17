@@ -5,7 +5,7 @@
 //! those fields mean) — and a host compiles them to a backend (Vega-Lite, ECharts, Chart.js) with
 //! stock libraries. So there is exactly one place in this repo that knows what a histogram looks
 //! like, and it is not this file either: this file only says "a histogram is a pre-binned Bar Chart
-//! whose x is a `Number` and whose y is a `Count`".
+//! whose x is a `Number` and whose y is each bin's share of the draws (a `Percentage`)".
 //!
 //! Two things ride along with every plot:
 //!
