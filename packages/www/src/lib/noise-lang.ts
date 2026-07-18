@@ -17,7 +17,7 @@ const BUILTINS = [
   'sqrt', 'round', 'log', 'log10', 'sin', 'cos', 'atan', 'sign',
   'exp', 'abs', 'arg', 'conj', 're', 'im', 'floor', 'ceil', 'gcd', 'modpow',
   'sum', 'count', 'any', 'all', 'max', 'min', 'mean', 'dot', 'vdot', 'normsq', 'norm',
-  'transpose', 'adjoint', 'normalize', 'outer', 'quantize', 'has_duplicate', 'mse',
+  'transpose', 'adjoint', 'normalize', 'outer', 'quantize', 'onehot', 'has_duplicate', 'mse',
   'ones', 'zeros', 'iota', 'vsign', 'scale',
   'sine', 'cosine', 'noise_white', 'noise_white_complex', 'noise_brown', 'noise_pink',
   'noise_ou', 'sample',

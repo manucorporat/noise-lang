@@ -1,29 +1,58 @@
 ---
 title: "QJL in 1-D"
 abstract: >
-  How much of a number can you throw away and still recover it on average? Keep just
-  one bit — its sign — and you seem to have lost the magnitude entirely. Yet rescaling
-  by √(π/2) makes the average land exactly on the true size, with no bias. This one-bit
-  trick is the seed of the TurboQuant sketch.
+  A one-bit sketch keeps only the sign of a random projection. Rescaled by √(π/2) it becomes
+  an unbiased estimator of the number it was built from — move that number and the estimate
+  follows it. What the bit costs is not the mean but the spread: a single sketch carries a
+  76% relative error, and only averaging independent sketches buys it back. This is the
+  estimator TurboQuant leans on.
 tags: [research, continuous]
 ---
-use math   // sqrt, pi
+use math   // sqrt, pi, sign
+use vec    // mean
 
 ```md
-**Keep one bit.** Draw a standard normal, throw away everything but its sign,
-then rescale by √(π/2). The magnitude looks gone — but on average it isn't:
+**The number to recover.** A scalar the sketch never sees directly. Its magnitude is kept
+as an ordinary float — that part is not compressed. Everything the bits must carry is
+*which way it points*.
 ```
-s ~ rand::normal(0, 1)
-estimate = sqrt(pi / 2) * s * sign(s)
+x = input::real(min: -2, max: 2, step: 0.1, default: 0.7)
+magnitude = abs(x)
+
+```md
+**The sketch.** Draw independent standard normals, project x onto each, and keep only the
+sign of the result. Those signs are the entire stored payload: one bit per projection.
+```
+m = input::int(min: 1, max: 64, default: 1)
+g ~[m] rand::normal(0, 1)
+bits = sign(g * x)
+
+```md
+**The estimator.** Read every bit back against the Gaussian that produced it, average, and
+rescale by √(π/2). Since `E|g| = √(2/π)` the two constants cancel and the average lands on
+x — for *every* x, which is what makes the unbiasedness say something. Drag x through zero:
+the estimate follows it, sign and all, having only ever seen bits.
+```
+estimate = sqrt(pi / 2) * magnitude * mean(bits * g)
 mean_estimate = E(estimate)
 spread        = Var(estimate)
 ```latex
-E[\text{QJL 1-D estimate}] = ${mean_estimate} \qquad (\text{unbiased target} = 1.0),
-\qquad \mathrm{Var} = ${spread}
+E[\hat{x}] = ${mean_estimate} \qquad (\text{true } x = ${x}),
+\qquad \mathrm{Var}[\hat{x}] = \frac{(\pi/2 - 1)\,x^2}{m} \approx ${spread}
 ```
 
 ```md
-**The price of the bit.** A folded normal — skewed and spread — yet its
-average is pinned to 1. One bit throws away a lot, but not the mean.
+**The price of the bit.** A single sketch is a scaled folded normal — wide, skewed, and
+worth almost nothing on its own: its standard deviation is ${round(sqrt(pi / 2 - 1), 3)}
+times |x|. Averaging m of them shrinks that by √m. Drag **m** and watch the histogram
+collapse onto the true value.
 ```
 plot::histogram(estimate)
+
+```md
+**Why this scales.** In one dimension the bits are redundant — they all report the same
+sign — so averaging only cancels noise the sketch itself injected. In d dimensions the
+same d bits must also carry the *direction* of a whole vector, and the 1/√m gain becomes a
+1/√d gain over d genuinely different measurements. That is the step `turboquant.noise`
+takes, with exactly this √(π/2) out front.
+```

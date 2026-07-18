@@ -7,8 +7,8 @@ abstract: >
   reproduces that hidden bias from a recent paper, and the one-bit sketch that fixes it.
 tags: [research, capstone]
 ---
-use math     // pi, sqrt, sign, round
-use vec      // normalize, ones, iota, quantize, normsq, norm, transpose, zeros
+use math   // pi, sqrt, sign, round
+use vec
 
 // Each sample rotates and quantizes a 20-dimensional vector — a lot of work per draw. Ask for
 // the ~2 significant digits the paper comparison needs, and let every E() size itself.
@@ -18,6 +18,7 @@ engine::set_precision(5e-3)
 **The target.** A fixed unit vector x, a fixed unit query y, and the number
 we must preserve through compression: their inner product.
 ```
+
 d = 20
 x = normalize(ones(d))
 y = normalize(iota(d))
@@ -28,6 +29,7 @@ true_ip = y @ x
 so the optimal (Lloyd–Max) quantization levels are the standard unit-Gaussian
 ones, rescaled by 1/√d. One bit buys two levels — just the sign.
 ```
+
 s  = 1 / sqrt(d)
 L1 = [-0.7979, 0.7979] * s
 
@@ -36,6 +38,7 @@ L1 = [-0.7979, 0.7979] * s
 nearest level, rotate back — at one bit that is exactly its sign. Reconstruction
 distortion lands right on the paper's table:
 ```
+
 Pi  ~ rand::rotation(d)
 rot = Pi @ x
 PiT = transpose(Pi)
@@ -62,6 +65,7 @@ signs only, rescaled by ‖r‖ and √(π/2). Provably unbiased (Theorem 2). At
 the MSE stage is 0-bit — a codebook of {0}, so the residual is x itself and the
 scheme is plain QJL.
 ```
+
 tq_ip(x, y, m, S, dd) = {
   r      = x - m                              // the residual the MSE stage left behind
   base   = y @ m                              // query read against the MSE reconstruction m
@@ -78,8 +82,10 @@ prod1 = tq_ip(x, y, m1, S1, d)
 **The verdict.** The fix lands on 1 — unbiased — and its squared error stays
 under the plain-QJL bound π/(2d):
 ```
+
 unbias_ratio = E(prod1) / true_ip
 d_prod1 = E((prod1 - true_ip) ^ 2)
+
 ```latex
 \text{prod } b = 1: \quad \frac{E[\text{est}]}{\text{true}} = ${unbias_ratio} \qquad(\text{unbiased} \approx 1)
 D_{\text{prod}},\ b = 1 = ${d_prod1} \qquad(\text{plain QJL};\ \le \text{ bound } \tfrac{\pi}{2d} = ${round(pi / 2 / d, 4)})

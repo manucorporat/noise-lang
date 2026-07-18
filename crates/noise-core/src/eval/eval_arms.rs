@@ -132,7 +132,12 @@ impl Engine {
                         span,
                     )),
                     None => Err(NoiseError::runtime(
-                        format!("module '{m}' has no function '{base}'"),
+                        match nearest_name(base, module_fns(m)) {
+                            Some(near) => format!(
+                                "module '{m}' has no function '{base}' — did you mean '{m}::{near}'?"
+                            ),
+                            None => format!("module '{m}' has no function '{base}'"),
+                        },
                         span,
                     )),
                 }
@@ -1164,6 +1169,13 @@ fn cone_contains(
 /// Whether `base` is a distribution constructor whose numeric parameters are *values* (so a
 /// symbolic-input parameter lowers to a uniform, PLAN-UNIFORM-INPUTS). Excludes `rotation` /
 /// `permutation`, whose size argument is structural (handled by `count_arg`).
+///
+/// It must list exactly the recipes with a **dynamic-parameter** (`*Dyn`) form: lowering a `Sym`
+/// for a recipe that has none produced a `Value::Dist` its `as_num` then rejected ("expected a
+/// number, got dist"), so `poisson(slider)` / `geometric(slider)` / `normal_complex(slider)` were
+/// errors rather than sliders. Those three keep their `Sym` and fold it to the current value in
+/// `builtins::as_num` — a structural input that recompiles on change, which is correct and, more
+/// to the point, works.
 fn is_dist_ctor(base: &str) -> bool {
     matches!(
         base,
@@ -1172,11 +1184,8 @@ fn is_dist_ctor(base: &str) -> bool {
             | "bernoulli"
             | "normal"
             | "normal_int"
-            | "normal_complex"
             | "exponential"
             | "exponential_int"
-            | "poisson"
-            | "geometric"
     )
 }
 

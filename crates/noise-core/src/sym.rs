@@ -46,6 +46,13 @@ impl SymExpr {
         Rc::new(SymExpr::Input(idx))
     }
 
+    /// Defer a unary op, staying symbolic. Every real-valued math ufunc (`sqrt`/`sin`/`exp`/…)
+    /// routes its `Sym` arm through here, so a slider keeps its **value**-input status (no
+    /// recompile on drag) instead of folding — the whole point of `Sym` (PLAN-UNIFORM-INPUTS).
+    pub fn unary(op: UnOp, a: Rc<Self>) -> Rc<Self> {
+        Rc::new(SymExpr::Unary(op, a))
+    }
+
     /// Fold this tree to a single `f64` against the current input `values` (`values[idx]` for an
     /// `Input` leaf). This is the **structural** materialization — the caller uses the concrete value
     /// as an array size / sample count / loop bound / index, so the structure depends on it and the

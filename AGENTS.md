@@ -206,6 +206,25 @@ Modern toolchain; no future-incompat warnings (unlike `legacy/`). `Cargo.lock` i
 committed (reproducible CI and `cargo install`); CI is `.github/workflows/ci.yml`
 (tests native + `--features gpu`, clippy `-D warnings`, rustfmt, wasm32 build, `cargo audit`).
 
+## Releasing: every user-visible change needs a changeset
+
+If your change touches the **engine, the language, the CLI, or the WASM/npm surface** — anything a
+user would notice — add a changeset in the same commit:
+
+```sh
+pnpm changeset          # pick @noiselang/core, choose patch/minor/major, write one user-facing line
+```
+
+Changesets only understands npm, so **always pick `@noiselang/core` even for Rust-only changes** —
+it stands in for the whole release. One version is shared by `noise-core` + `noise-cli` (crates.io)
+and `@noiselang/core` (npm); they ship together. Commit the generated `.changeset/*.md` with the PR;
+merging it to `master` opens (or updates) the **📦 Release** PR, and merging that publishes.
+
+Skip the changeset only when nothing user-visible moved: docs, tests, refactors, `plans/`, and
+`packages/www` (the website is `private` and ignored by changesets — Netlify deploys it).
+
+Full details, including the OIDC publish chain and its failure modes, live in `CONTRIBUTE.md`.
+
 ## What works today (tested)
 
 ### Distributions, recipes, and the `~`/`=` split (core-model Steps 1–3)

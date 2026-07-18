@@ -166,7 +166,7 @@
     },
     "builtins": {
       "name": "support.function.noise",
-      "match": "\\b(pi|e|i|j|sqrt|exp|abs|arg|conj|re|im|floor|ceil|round|log10|log|sin|cos|atan|sign|gcd|modpow|sum|count_duplicates|count|any|all|max|min|mean|dot|vdot|normsq|norm|transpose|adjoint|normalize|has_duplicates|mse|ones|zeros|iota|outer|quantize|prod|cumsum|cumprod|cummax|cummin|sine|cosine|sample|noise_white_complex|noise_white|noise_brown|noise_pink|noise_ou|set_precision|set_resolution)\\b"
+      "match": "\\b(pi|e|i|j|sqrt|exp|abs|arg|conj|re|im|floor|ceil|round|log10|log|sin|cos|atan|sign|gcd|modpow|sum|count_duplicates|count|any|all|max|min|mean|dot|vdot|normsq|norm|transpose|adjoint|normalize|has_duplicates|mse|ones|zeros|iota|outer|quantize|onehot|prod|cumsum|cumprod|cummax|cummin|sine|cosine|sample|noise_white_complex|noise_white|noise_brown|noise_pink|noise_ou|set_precision|set_resolution)\\b"
     },
     "operators": {
       "patterns": [

@@ -717,7 +717,7 @@ The modules:
 | `builtin` | `P`, `Q`, `E`, `Var`, `Print`, `Len` (capital-only) | **always active** (no `use`) |
 | `rand`    | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `normal_complex`, `exponential`, `exponential_int`, `poisson`, `geometric`, `categorical`, `empirical`, `block_bootstrap`, `rotation`, `permutation` (batched sampling is the `~[shape]` operator, not a builtin) | needs `use rand;` |
 | `math`    | `pi`, `e`, `i`/`j` (imaginary unit), `sqrt`, `exp`, `abs`, `arg`, `conj`, `re`, `im`, `floor`, `ceil`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign`, `gcd`, `modpow` | needs `use math;` |
-| `vec`     | `sum`, `prod`, `count`, `any`, `all`, `max`, `min`, `mean`, `cumsum`, `cumprod`, `cummax`, `cummin`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` (vector `+`/`-` and `@` cover add/sub/matvec) | needs `use vec;` |
+| `vec`     | `sum`, `prod`, `count`, `any`, `all`, `max`, `min`, `mean`, `cumsum`, `cumprod`, `cummax`, `cummin`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `onehot`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` (vector `+`/`-` and `@` cover add/sub/matvec) | needs `use vec;` |
 | `signal`  | `sine`, `cosine` (lazy waveforms), `noise_white`, `noise_white_complex`, `noise_brown`, `noise_pink`, `noise_ou` (undrawn noise generators — drawn with `~`), `sample` | needs `use signal;` |
 | `plot`    | `histogram`, `line`, `scatter`, `heatmap`, `corr`, `fan`, `explain`, `value` (charts, pushed to the output stream like `Print`) | path-only (`plot::fan(...)`) |
 | `stats`   | `histogram`, `quantiles`, `moments`, `fan`, `corr` — the same computations as `plot::`, returned as numbers | path-only (`stats::fan(...)`) |
@@ -906,7 +906,8 @@ identically (e.g. `sum` over `dist` elements lifts to an Add-chain RV).
   `normalize`, the constructors `ones(n)`/`zeros(n)`/`iota(n)`,
   `mse(a, b)` (mean squared error between two equal-length signals), `quantize(v, centroids)` (snap
   each coordinate of `v` to its nearest value in a constant codebook — the optimal scalar/Lloyd–Max
-  quantizer), plus `has_duplicates(xs)` (true iff some pair is equal — the birthday predicate) and
+  quantizer), `onehot(v, width)` (the length-`width` indicator row: 1 at index `v`, 0 elsewhere;
+  a random `v` gives a row of indicator RVs), plus `has_duplicates(xs)` (true iff some pair is equal — the birthday predicate) and
   `count_duplicates(xs)` (how many pairs `i<j` are equal — the number of birthday collisions, of which
   `has_duplicates` is just the `> 0` case). `dot`/`mse` and vector `+`/`-` require equal-length vectors; `transpose` a rectangular matrix (array of
   equal-length rows).

@@ -991,6 +991,11 @@
           carried = [];
           return;
         }
+        // Drop `engine`-only import blocks — boilerplate that adds nothing to the typeset paper.
+        if (isEngineOnlyBlock(b.source)) {
+          carried = [];
+          return;
+        }
         carried = [];
         page.appendChild(renderCodeCard(b.source, annotsFor[i]));
       } else if (b.kind === 'note') {
@@ -1121,6 +1126,14 @@
       .map((l) => l.trim())
       .filter((l) => l.length > 0);
     return lines.length > 0 && lines.every((l) => /^use\b/.test(l));
+  }
+
+  function isEngineOnlyBlock(source: string): boolean {
+    const lines = stripComments(source)
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    return lines.length > 0 && lines.every((l) => /^engine\b/.test(l));
   }
 
   /** A code block whose every statement is an `input::` declaration (`name = input::…`). The inline
@@ -1256,7 +1269,12 @@
           const items = lines.map((l) => `<li>${inlineMd(escapeHtml(l.replace(/^\s*[-*]\s+/, '')))}</li>`).join('');
           return `<ul class="pg-md-ul">${items}</ul>`;
         }
-        return `<p class="pg-md-p">${inlineMd(escapeHtml(b)).replace(/\n/g, '<br>')}</p>`;
+        // CommonMark line breaks: a single newline is a *soft* break (renders as a space);
+        // only an explicit hard break — two trailing spaces or a trailing backslash — is a <br>.
+        const body = inlineMd(escapeHtml(b))
+          .replace(/(?: {2,}|\\)\n[ \t]*/g, '<br>')
+          .replace(/\n[ \t]*/g, ' ');
+        return `<p class="pg-md-p">${body}</p>`;
       })
       .join('');
   }

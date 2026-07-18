@@ -1,11 +1,10 @@
 ---
 title: "Shor's period-finding"
 abstract: >
-  RSA's security is a bet that nobody can factor a large number back into its primes fast enough to
-  matter. Shor's algorithm wins that bet by recasting factoring as a hunt for a repeating pattern —
-  the period of a^x mod N — which quantum interference pins down in a single shot. Here that
-  interference is reproduced exactly with complex arithmetic; pick a number and watch its factors
-  fall out.
+  RSA's security is a bet that nobody can factor a large number back into its primes fast enough
+  to matter. Shor's algorithm wins that bet by recasting factoring as a hunt for a repeating
+  pattern — the period of a^x mod N — which quantum interference pins down in a single shot. Pick
+  a number and watch it either split into its two factors or stand as a prime wall.
 tags: [quantum, classic]
 ---
 
@@ -13,67 +12,65 @@ use math
 use vec
 
 ```md
-**A toy quantum computer.** This is a full 2^n simulation — gorgeous for
-small N, never efficient. What's faithful is the *physics*: the amplitudes
-and their interference. (Efficient Shor needs the real machine.) Two pieces
-of plumbing: a one-hot row to encode a value, and the counting register — the
-smallest power of two that fits N.
+**Pick a number.** Choose an odd N to factor. Shor turns factoring into a hunt
+for the *period* of a^x mod N — the smallest r with a^r ≡ 1 — because that
+period, once known, gives away N's factors. Everything here is a full amplitude
+simulation: lovely at this size, hopeless for a real key.
 ```
-onehot(v, width) = [for w in 0..width { if v == w { 1 } else { 0 } }]
-reg_size(N) = { Q = 1; for i in 0..16 { if Q < N { Q = Q * 2 } }; Q }
+N = input::int(min: 15, max: 35, step: 2, default: 15)
 
 ```md
-**The quantum subroutine.** Superpose every input x, apply the oracle
-a^x mod N, and inverse-QFT the state. Amplitudes from the same residue
-*reinforce* while the rest *cancel* — the one place ℂ does real work — and
-the readout probabilities pile into a comb of exactly r equally-spaced
-spikes. The period is just the number of spikes.
+**The period, the slow way.** Fix a base a = 2 (coprime to any odd N). The
+plodding route to its period is to keep multiplying by 2 until you land back on
+1, counting the steps.
 ```
-interference(a, N, Q) = {
-  Psi = [for x in 0..Q { onehot(math::modpow(a, x, N), N) }] / Q ^ 0.5
-  QFT = math::exp(math::i * (-2 * math::pi / Q) * vec::outer(0..Q, 0..Q)) / Q ^ 0.5;
-  [for p in QFT @ Psi { vec::normsq(p) }]
-}
-period(a, N, Q) = vec::count(interference(a, N, Q) > 0.0001)
+a = 2
+r = 1
+power = a
+for step in 1..N { if power == 1 { continue }; power = (power * a) % N; r = r + 1 }
 
 ```md
-**The classical wrapper.** Try a handful of bases (a real machine picks them
-at random). A base already sharing a factor hands it over via gcd; otherwise
-the quantum period r — when even — reads out factors from gcd(a^(r/2) ± 1, N).
+**The period, the quantum way.** A real machine never takes that walk. It
+superposes a^x for *every* x at once and inverse-QFTs the result; amplitudes
+that share a residue *reinforce* while the rest cancel — the one place ℂ does
+real work. Sizing the register to the period lands the interference as a clean
+comb of spikes.
 ```
-shor(N) = {
-  Q = reg_size(N)
-  p = 1; q = N
-  for a in 2..14 { if a < N { if p == 1 {
-    if math::gcd(a, N) > 1 { p = math::gcd(a, N); q = N / p }
-    else {
-      r = period(a, N, Q)
-      if r % 2 == 0 {
-        s = math::modpow(a, r / 2, N)
-        g = math::gcd(s - 1, N)
-        if g > 1 { if g < N { p = g; q = N / g } }
-      }
-    }
-  } } };   // `;` needed: a line starting with `[` would otherwise index the loop above
-  [p, q]
-}
-
-```md
-**Pick a number.** Composites split into their two primes; a prime returns
-itself — nothing to break, which is exactly the wall RSA hides behind.
-```
-n_to_factor = input::int(min: 15, max: 35, step: 2, default: 15)
-
-```md
-**The comb.** The readout probabilities for base 2: amplitudes piled into
-evenly-spaced spikes, one per period step. Counting them *is* the quantum
-measurement the whole trick rests on.
-```
-Q = reg_size(n_to_factor)
-readout = interference(2, n_to_factor, Q)
+Q = 2 * r
+state  = [for x in 0..Q { vec::onehot(math::modpow(a, x, N), N) }] / Q ^ 0.5
+angles = -2 * math::pi / Q * vec::outer(0..Q, 0..Q)
+QFT    = math::exp(math::i * angles) / Q ^ 0.5
+readout = [for amplitudes in QFT @ state { vec::normsq(amplitudes) }]
+spikes = vec::count(readout > 0.0001)
 plot::line(readout)
 
-factors = shor(n_to_factor)
 ```md
-**The verdict.** Shor factors **${n_to_factor}** into **${factors}**.
+**Count the spikes.** The comb has **${spikes}** of them — exactly the period
+**r = ${r}** the slow walk found. On real hardware this one interference *is*
+the measurement; no walk required.
+```
+
+```md
+**From period to factors.** When r is even, a^(r/2) is a square root of 1 mod N.
+Unless it happens to be ±1, it betrays a factor: gcd(a^(r/2) − 1, N) shares a
+prime with N, and so does gcd(a^(r/2) + 1, N).
+```
+factor = if r % 2 != 0 {
+  1
+} else {
+  root = math::modpow(a, r / 2, N)
+  g = math::gcd(root - 1, N)
+  if g > 1 && g < N { g } else { math::gcd(root + 1, N) }
+}
+composite = vec::any([for d in 3..N { N % d == 0 }])
+
+verdict = if factor > 1 && factor < N {
+  "**" + N + "** splits into **" + factor + " × " + N / factor + "**"
+} else if composite {
+  "base 2's period came up short on **" + N + "** — a real run just picks another base and retries"
+} else {
+  "**" + N + "** is prime — nothing to factor, the very wall RSA hides behind"
+}
+```md
+**The verdict.** ${verdict}.
 ```

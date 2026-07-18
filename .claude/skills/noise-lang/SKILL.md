@@ -174,7 +174,7 @@ path). Start each program with the `use` lines you need.
 | `builtin` | always   | `P`, `Q`, `E`, `Var`, `Len` |
 | `rand`    | `use rand;` | `unif`, `unif_int`, `bernoulli`, `normal`, `normal_int`, `normal_complex`, `exponential`, `exponential_int`, `poisson`, `geometric`, `categorical`, `empirical`, `block_bootstrap`, `rotation`, `permutation` |
 | `math`    | `use math;` | `pi`, `e`, `i`/`j` (imaginary unit), `sqrt`, `exp`, `abs`, `arg`, `conj`, `re`, `im`, `floor`, `ceil`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign`, `gcd`, `modpow` — `exp`/`log`/`log10` lift over RVs like `sin`/`cos` |
-| `vec`     | `use vec;`  | `sum`, `prod`, `count`, `any`, `all`, `max`, `min`, `mean`, `cumsum`, `cumprod`, `cummax`, `cummin`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` |
+| `vec`     | `use vec;`  | `sum`, `prod`, `count`, `any`, `all`, `max`, `min`, `mean`, `cumsum`, `cumprod`, `cummax`, `cummin`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `onehot`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` |
 | `signal`  | `use signal;` | `sine`, `cosine`, `sample`, `noise_white`, `noise_white_complex`, `noise_brown`, `noise_pink`, `noise_ou` |
 | `plot`    | path-only | `histogram`, `line`, `scatter`, `heatmap`, `corr`, `fan` (quantile-band cone of a path), `explain`, `value` — write the path (`plot::fan(...)`); charts are pushed into the document at their statement's position |
 | `stats`   | path-only | `histogram(x[, bins])` → `[[midpoints],[counts]]`, `quantiles(x, [q…])`, `moments(x)` → `[n, mean, sd, min, max]`, `fan(path)` → 6×cols (`q05,q25,q50,q75,q95,mean`), `corr(a, b)` → number / `corr(v)` → n×n matrix. The numbers behind the `plot::` charts — same computation, so `stats::quantiles(x, [0.05])[0]` *is* the `q05` the card prints. Forces sampling; takes `x | cond`. |
@@ -456,6 +456,10 @@ two as the canonical models):
   its own cell in reading order (pool → cutoff → observe → hire → verdict), rather than one
   `trial()` blob. No orphan cells (`n = 20;` alone between prose) — group constants with the cell
   that uses them, or inline them.
+- **No brace/semicolon ugliness.** Never stack closers on one line (`} } }`) — flatten nested
+  `if`s with `&&` or a `continue` guard (`if a >= N || p > 1 { continue }`). Never end a block
+  with a bare `[...]` line that forces the `;`-before-`[` guard on the statement above — bind
+  the array to a name (`factors = [p, q]`) and return the name.
 - **End with a verdict.** A closing ```md that weaves the computed result into a sentence, plus —
   when a law/closed form exists — a ```latex display of it.
 

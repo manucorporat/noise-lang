@@ -450,7 +450,10 @@ impl Engine {
     pub(super) fn complex_parts(&self, v: Value, span: Span) -> Result<(Value, Value)> {
         match v {
             Value::Complex { re, im } => Ok((*re, *im)),
-            v @ (Value::Num(_) | Value::Est { .. }) => Ok((v, Value::Num(0.0))),
+            // A real scalar promotes to `x + 0i`. A `Sym` rides this path too, so `abs`/`re`/`im`/
+            // `conj` of a slider — and everything built on them (`norm`, `normsq`, `normalize`,
+            // `mse`) — stays symbolic instead of erroring.
+            v @ (Value::Num(_) | Value::Est { .. } | Value::Sym(_)) => Ok((v, Value::Num(0.0))),
             Value::Dist(id) if self.graph.kind(id) == RvKind::Num => {
                 Ok((Value::Dist(id), Value::Num(0.0)))
             }
@@ -592,6 +595,17 @@ impl Engine {
         match cond {
             Value::Bool(true) => Ok(a),
             Value::Bool(false) => Ok(b),
+            // A symbolic condition (`max([slider, 1])`, `if slider > 1 { … }`) is deterministic
+            // *given* the inputs, so picking the branch here is exact. It is a STRUCTURAL use —
+            // the branch is baked, so the program rebuilds when the slider crosses the boundary
+            // (correct: the two branches can be different shapes, `Sym` has no `Select` node).
+            Value::Sym(ref s) => {
+                if self.force_sym(s) != 0.0 {
+                    Ok(a)
+                } else {
+                    Ok(b)
+                }
+            }
             Value::Dist(c) if self.graph.kind(c) == RvKind::Bool => {
                 let (aid, ak) = self.operand_to_rv(a, span)?;
                 let (bid, bk) = self.operand_to_rv(b, span)?;
@@ -629,6 +643,9 @@ impl Engine {
             Value::Dist(id) if self.graph.kind(id) == RvKind::Bool => {
                 self.select(Value::Dist(id), Value::Num(1.0), Value::Num(0.0), span)
             }
+            // A `Sym` comparison tree already evaluates to a 0/1 indicator (`num::fold_binop`), so
+            // it *is* its own indicator — pass it through and it stays symbolic.
+            sym @ Value::Sym(_) => Ok(sym),
             other => Err(NoiseError::runtime(
                 format!("count expects boolean elements, got {}", other.type_name()),
                 span,
@@ -746,6 +763,9 @@ fn sym_operand(v: &Value, span: Span) -> Result<Rc<crate::sym::SymExpr>> {
         Value::Sym(s) => Ok(s.clone()),
         Value::Num(n) => Ok(Rc::new(SymExpr::Const(*n))),
         Value::Est { val, .. } => Ok(Rc::new(SymExpr::Const(*val))),
+        // A bool promotes to its 0/1 indicator — the same representation a `Sym` comparison tree
+        // folds to — so mixing them (`any([slider > 1, false])`) stays symbolic.
+        Value::Bool(b) => Ok(Rc::new(SymExpr::Const(if *b { 1.0 } else { 0.0 }))),
         other => Err(NoiseError::type_mismatch(
             format!("cannot combine a tunable input with {}", other.type_name()),
             span,

@@ -96,6 +96,7 @@ impl Engine {
             // `sample` needs `&mut self` and can't live in the pure `builtins::call`.
             "sample" => self.lib_sample(args, span),
             "quantize" => self.lib_quantize(args, span),
+            "onehot" => self.lib_onehot(args, span),
             "sum" => self.lib_sum(args, span),
             "prod" => self.lib_prod(args, span),
             // prefix scans (PLAN-FINANCE F3): array in → same-length array of running reductions.
@@ -614,6 +615,35 @@ impl Engine {
         Ok(Value::Array(Rc::new(out)))
     }
 
+    /// `onehot(v, width)` — the length-`width` indicator row of `v`: 1 at index `v`, 0 everywhere
+    /// else (all zeros when `v` falls outside `0..width`). Each lane lowers to
+    /// `select(v == w, 1, 0)`, so a random `v` yields a row of indicator RVs while a constant `v`
+    /// folds to a constant 0/1 array — the basis-state encoder of the quantum examples.
+    fn lib_onehot(&mut self, args: &[Value], span: Span) -> Result<Value> {
+        let [v, w] = arity2("onehot", args, span)?;
+        if matches!(v, Value::Array(_)) {
+            return Err(NoiseError::runtime(
+                "onehot encodes a scalar value, got an array".to_string(),
+                span,
+            ));
+        }
+        let width = match scalar_const(w) {
+            Some(n) if n.is_finite() && n.fract() == 0.0 && n >= 0.0 => n as usize,
+            _ => {
+                return Err(NoiseError::runtime(
+                    "onehot width must be a constant non-negative integer".to_string(),
+                    span,
+                ))
+            }
+        };
+        let mut out = Vec::with_capacity(width);
+        for i in 0..width {
+            let hit = self.binop(BinOp::Eq, v.clone(), Value::Num(i as f64), span)?;
+            out.push(self.select(hit, Value::Num(1.0), Value::Num(0.0), span)?);
+        }
+        Ok(Value::Array(Rc::new(out)))
+    }
+
     /// Snap a single value to the nearest of `levels` (sorted ascending) via a nested `select`
     /// over the midpoint thresholds. Outermost test wins, so `x < t₀ → levels[0]`, then
     /// `x < t₁ → levels[1]`, …, else the top level.
@@ -1101,6 +1131,8 @@ impl Engine {
                 SigUnOp::Un(op),
                 s.clone(),
             )))),
+            // A symbolic input defers the same way (stays a `Sym`, no recompile on drag).
+            Value::Sym(s) => Ok(Value::Sym(crate::sym::SymExpr::unary(op, s.clone()))),
             Value::Array(xs) => {
                 let mut out = Vec::with_capacity(xs.len());
                 for e in xs.iter() {
@@ -1149,6 +1181,17 @@ impl Engine {
             }
             Value::Dist(_) => {
                 let lnx = self.lift_unary(UnOp::Ln, x.clone(), span)?;
+                if base10 {
+                    self.binop(BinOp::Div, lnx, Value::Num(std::f64::consts::LN_10), span)
+                } else {
+                    Ok(lnx)
+                }
+            }
+            // A symbolic input takes the *lane* semantics, not the constant one: the slider can be
+            // dragged to a non-positive value at any time, so a build-time domain error would be
+            // wrong. `log(slider)` follows IEEE like `log(rv)` does (0 → -inf, negative → NaN).
+            Value::Sym(s) => {
+                let lnx = Value::Sym(crate::sym::SymExpr::unary(UnOp::Ln, s.clone()));
                 if base10 {
                     self.binop(BinOp::Div, lnx, Value::Num(std::f64::consts::LN_10), span)
                 } else {
@@ -1239,6 +1282,7 @@ impl Engine {
             Value::Est { val, .. } => Ok(Value::Num(val.exp())),
             Value::Signal(s) => Ok(Value::Signal(Rc::new(SigExpr::Unary(SigUnOp::Exp, s)))),
             x @ Value::Dist(_) => self.lift_unary(UnOp::Exp, x, span),
+            Value::Sym(s) => Ok(Value::Sym(crate::sym::SymExpr::unary(UnOp::Exp, s))),
             Value::Complex { re, im } => {
                 // The magnitude factor e^a: folds for a constant, defers for a signal, and
                 // errors for a random real part (the recursive call enforces all three).
@@ -1272,6 +1316,7 @@ impl Engine {
             Value::Num(n) => Ok(Value::Num(n.sqrt())),
             Value::Est { val, .. } => Ok(Value::Num(val.sqrt())),
             x @ Value::Dist(_) => self.lift_unary(UnOp::Sqrt, x, span),
+            Value::Sym(s) => Ok(Value::Sym(crate::sym::SymExpr::unary(UnOp::Sqrt, s))),
             // A lazy signal defers the same `Sqrt` step (materializes via `signal::apply_unary`;
             // a noisy lane lifts to the same `UnOp::Sqrt` node through `sig_unary`).
             Value::Signal(s) => Ok(Value::Signal(Rc::new(SigExpr::Unary(
@@ -1318,8 +1363,9 @@ impl Engine {
                 let neg = self.binop(BinOp::Lt, Value::Dist(id), Value::Num(0.0), span)?;
                 self.select(neg, Value::Num(std::f64::consts::PI), Value::Num(0.0), span)
             }
-            // A real lazy signal defers as `π·(x < 0)` (signal comparisons are 0/1).
-            sig @ Value::Signal(_) => {
+            // A real lazy signal defers as `π·(x < 0)` (signal comparisons are 0/1). A symbolic
+            // input takes the same form — `Sym` comparisons are 0/1 indicators too.
+            sig @ (Value::Signal(_) | Value::Sym(_)) => {
                 let neg = self.binop(BinOp::Lt, sig, Value::Num(0.0), span)?;
                 self.binop(BinOp::Mul, Value::Num(std::f64::consts::PI), neg, span)
             }
@@ -1369,6 +1415,7 @@ impl Engine {
             }
             // A lazy signal defers the rounding into its tree.
             Value::Signal(s) => Ok(Value::Signal(Rc::new(SigExpr::Unary(SigUnOp::Un(op), s)))),
+            Value::Sym(s) => Ok(Value::Sym(crate::sym::SymExpr::unary(op, s))),
             Value::Complex { .. } => Err(NoiseError::runtime(
                 format!(
                     "{} is real-only — it has no meaning on a complex number",

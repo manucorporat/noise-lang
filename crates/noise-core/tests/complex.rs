@@ -194,11 +194,10 @@ fn shor_factors_via_quantum_period_finding() {
     // quantum step `period(a, N, Q)` reads the period of a^x mod N off the interference comb (its
     // number of spikes), and the factors fall out of gcd(a^(r/2) +- 1, N).
     let lib = "
-        onehot(v, width) = [for w in 0..width { if v == w { 1 } else { 0 } }];
         period(a, N, Q) = {
             ks = 0..Q;
             fx = [for x in 0..Q { math::modpow(a, x, N) }];
-            Psi = [for x in 0..Q { onehot(fx[x], N) }] / Q^0.5;
+            Psi = [for x in 0..Q { vec::onehot(fx[x], N) }] / Q^0.5;
             QFT = math::exp(math::i * (-2*math::pi/Q) * vec::outer(ks, ks)) / Q^0.5;
             vec::count([for p in QFT @ Psi { vec::normsq(p) > 0.0001 }])
         };
@@ -206,14 +205,10 @@ fn shor_factors_via_quantum_period_finding() {
             Q = 1; for i in 0..16 { if Q < N { Q = Q * 2 } };
             p = 1; q = N;
             for a in 2..N {
-                if p == 1 {
-                    if math::gcd(a, N) > 1 { p = math::gcd(a, N); q = N / p }
-                    else {
-                        r = period(a, N, Q);
-                        if r % 2 == 0 { s = math::modpow(a, r/2, N); g = math::gcd(s - 1, N);
-                            if g > 1 { if g < N { p = g; q = N / g } } }
-                    }
-                }
+                if p > 1 || math::gcd(a, N) > 1 { continue }
+                r = period(a, N, Q);
+                if r % 2 == 0 { s = math::modpow(a, r/2, N); g = math::gcd(s - 1, N);
+                    if g > 1 && g < N { p = g; q = N / g } }
             };
             [p, q]
         };";

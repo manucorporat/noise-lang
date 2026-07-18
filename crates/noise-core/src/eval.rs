@@ -872,6 +872,20 @@ impl Engine {
                         "if condition is a dist<number>, expected an event (bool)".to_string(),
                         cond.span,
                     )),
+                    // A symbolic condition (`if slider > 1 { … }`) is deterministic given the
+                    // inputs — a 0/1 indicator tree — so it short-circuits like a plain bool.
+                    // Structural: the branch is baked, so the program rebuilds when the slider
+                    // crosses the boundary (see `Engine::select`'s matching arm).
+                    Value::Sym(ref s) => {
+                        if self.force_sym(s) != 0.0 {
+                            self.eval(then_b)
+                        } else {
+                            match else_b {
+                                Some(eb) => self.eval(eb),
+                                None => Ok(Value::Unit),
+                            }
+                        }
+                    }
                     other => Err(NoiseError::runtime(
                         format!("if condition must be a bool, got {}", other.type_name()),
                         cond.span,
@@ -1253,6 +1267,7 @@ const BUILTINS: &[(&str, &str)] = &[
     ("iota", "vec"),
     ("outer", "vec"),
     ("quantize", "vec"),
+    ("onehot", "vec"),
     // prefix scans + the product reducer (PLAN-FINANCE F3): paths as fixed-horizon arrays.
     ("prod", "vec"),
     ("cumsum", "vec"),
@@ -1294,6 +1309,45 @@ fn module_of(name: &str) -> Option<&'static str> {
     BUILTINS
         .iter()
         .find_map(|&(n, m)| if n == name { Some(m) } else { None })
+}
+
+/// The names registered under module `m` — the "did you mean?" candidate set for an unknown
+/// `m::base` call.
+fn module_fns(m: &str) -> impl Iterator<Item = &'static str> + '_ {
+    BUILTINS
+        .iter()
+        .filter_map(move |&(n, module)| (module == m).then_some(n))
+}
+
+/// The closest name in `candidates` to `misspelled`, if one is near enough to be worth
+/// suggesting. The budget scales with the typo's length (~one edit per three characters, at
+/// least one), so a genuinely unrelated name yields `None` rather than a misleading hint.
+fn nearest_name<'a>(
+    misspelled: &str,
+    candidates: impl Iterator<Item = &'a str>,
+) -> Option<&'a str> {
+    let budget = (misspelled.chars().count() / 3).max(1);
+    candidates
+        .map(|c| (edit_distance(misspelled, c), c))
+        .filter(|&(d, _)| d <= budget)
+        .min_by_key(|&(d, _)| d)
+        .map(|(_, c)| c)
+}
+
+/// Levenshtein edit distance (insert/delete/substitute), for the "did you mean?" suggester.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 /// Pragmas deleted by PLAN-PRECISION, each with the error naming its replacement. Calling one —
@@ -1673,6 +1727,202 @@ mod registry_coverage {
 
     const CONSTANTS: [&str; 4] = ["pi", "e", "i", "j"];
 
+    /// How to exercise each `math`/`vec`/`rand` name with a **symbolic input** in its numeric slot:
+    /// `(name, program, tolerance)`, where every `V` in the program is substituted twice — once
+    /// with the slider `x` and once with the literal `2.5` — and the two runs must agree.
+    ///
+    /// Its reason to exist: `input::real` evaluates to a [`Value::Sym`](crate::value::Value::Sym),
+    /// a *fourth* scalar shape beside `Num`/`Est`/`Dist`, and for a long time each new builtin
+    /// arrived with `Num`/`Est`/`Dist`/`Signal`/`Array` arms and no `Sym` one. That is invisible
+    /// until someone puts a slider in front of the function, so it kept shipping: every `math::`
+    /// ufunc, `norm`/`normsq`/`normalize`/`mse`, `max`/`min`/`cummax`/`cummin`/`quantize`,
+    /// `count`/`any`/`all`, and `poisson`/`geometric`/`normal_complex` all rejected a slider.
+    /// [`sym_support_is_complete`] makes an untabulated name a test failure, so the next builtin
+    /// cannot repeat it.
+    ///
+    /// A **deterministic** probe must match to `1e-12` (the `Sym` defers symbolically, so it is the
+    /// same arithmetic). A **Monte-Carlo** probe gets a relative tolerance: a lowered `Sym` is an
+    /// `RvNode::Input` uniform where the constant is a baked literal, so the two graphs legitimately
+    /// consume the RNG stream differently — the point is that both estimate the same quantity.
+    const SYM_PROBES: &[(&str, &str, f64)] = &[
+        // --- math: the real ufuncs defer as `SymExpr::Unary`; the complex-aware ones ride the
+        // real-promotion path in `complex_parts`. `abs`/`arg` take a negative so they do work.
+        ("sqrt", "y = sqrt(V)", 1e-12),
+        ("sin", "y = sin(V)", 1e-12),
+        ("cos", "y = cos(V)", 1e-12),
+        ("atan", "y = atan(V)", 1e-12),
+        ("sign", "y = sign(0 - V)", 1e-12),
+        ("exp", "y = exp(V)", 1e-12),
+        ("log", "y = log(V)", 1e-12),
+        ("log10", "y = log10(V)", 1e-12),
+        ("abs", "y = abs(0 - V)", 1e-12),
+        ("floor", "y = floor(V)", 1e-12),
+        ("ceil", "y = ceil(V)", 1e-12),
+        ("arg", "y = arg(0 - V)", 1e-12),
+        ("conj", "y = conj(V)", 1e-12),
+        ("re", "y = re(V)", 1e-12),
+        ("im", "y = im(V)", 1e-12),
+        ("round", "y = round(V, 1)", 1e-12),
+        ("gcd", "y = gcd(floor(V), 6)", 1e-12),
+        ("modpow", "y = modpow(floor(V), 3, 5)", 1e-12),
+        // --- vec: reducers, linear algebra, scans. The bool-returning ones go through a lifted
+        // `if` so both runs yield a number (a `Sym` predicate is a 0/1 indicator, not a `Bool`).
+        ("sum", "y = sum([V, 1])", 1e-12),
+        ("prod", "y = prod([V, 2])", 1e-12),
+        ("mean", "y = mean([V, 1])", 1e-12),
+        ("max", "y = max([V, 1])", 1e-12),
+        ("min", "y = min([V, 1])", 1e-12),
+        ("count", "y = count([V > 1, false])", 1e-12),
+        ("any", "y = if any([V > 1]) { 1 } else { 0 }", 1e-12),
+        ("all", "y = if all([V > 1]) { 1 } else { 0 }", 1e-12),
+        ("dot", "y = dot([V, 1], [1, 2])", 1e-12),
+        ("vdot", "y = vdot([V, 1], [1, 2])", 1e-12),
+        ("norm", "y = norm([V, 1])", 1e-12),
+        ("normsq", "y = normsq([V, 1])", 1e-12),
+        ("normalize", "y = normalize([V, 1])[0]", 1e-12),
+        ("mse", "y = mse([V, 1], [1, 2])", 1e-12),
+        ("transpose", "y = transpose([[V, 1], [2, 3]])[1][0]", 1e-12),
+        ("adjoint", "y = adjoint([[V, 1], [2, 3]])[1][0]", 1e-12),
+        ("outer", "y = outer([V, 1], [1, 2])[0][1]", 1e-12),
+        ("onehot", "y = sum(onehot(1, 3) * V)", 1e-12),
+        ("quantize", "y = quantize([V], [0, 1, 3])[0]", 1e-12),
+        ("cumsum", "y = cumsum([V, 1])[1]", 1e-12),
+        ("cumprod", "y = cumprod([V, 2])[1]", 1e-12),
+        ("cummax", "y = cummax([V, 1])[1]", 1e-12),
+        ("cummin", "y = cummin([V, 1])[1]", 1e-12),
+        (
+            "has_duplicates",
+            "y = if has_duplicates([V, 2.5]) { 1 } else { 0 }",
+            1e-12,
+        ),
+        ("count_duplicates", "y = count_duplicates([V, 2.5])", 1e-12),
+        // Size/shape constructors are STRUCTURAL — the `Sym` folds to its current value, which is
+        // correct (a different size is a different program) but must still not error.
+        ("ones", "y = sum(ones(floor(V)))", 1e-12),
+        ("zeros", "y = sum(zeros(floor(V)) + V)", 1e-12),
+        ("iota", "y = sum(iota(floor(V)))", 1e-12),
+        // --- rand: a slider in a distribution parameter. Monte-Carlo, so relative tolerance.
+        ("unif", "X ~ unif(0, V)\ny = E(X)", 0.02),
+        ("unif_int", "X ~ unif_int(1, floor(V))\ny = E(X)", 0.02),
+        ("bernoulli", "X ~ bernoulli(V / 10)\ny = P(X)", 0.05),
+        ("normal", "X ~ normal(0, V)\ny = Var(X)", 0.02),
+        ("normal_int", "X ~ normal_int(V, 1)\ny = E(X)", 0.02),
+        ("normal_complex", "Z ~ normal_complex(V)\ny = E(abs(Z))", 0.02),
+        ("exponential", "X ~ exponential(V)\ny = E(X)", 0.02),
+        ("exponential_int", "X ~ exponential_int(V)\ny = E(X)", 0.05),
+        ("poisson", "X ~ poisson(V)\ny = E(X)", 0.02),
+        ("geometric", "X ~ geometric(V / 10)\ny = E(X)", 0.05),
+        ("categorical", "X ~ categorical([V, 1])\ny = E(X)", 0.05),
+        ("empirical", "X ~ empirical([1, V])\ny = E(X)", 0.02),
+        (
+            "block_bootstrap",
+            "X ~ block_bootstrap([1, 2, 3, V], 2)\ny = E(sum(X))",
+            0.02,
+        ),
+        ("rotation", "R ~ rotation(2)\ny = E(norm(R @ [V, 0]))", 0.02),
+        (
+            "permutation",
+            "p ~ permutation(floor(V))\ny = E(sum(p) + V)",
+            0.02,
+        ),
+    ];
+
+    /// Names in `math`/`vec`/`rand` that [`SYM_PROBES`] deliberately does not cover, each with the
+    /// reason. Anything else must be tabulated — see [`sym_support_is_complete`].
+    const SYM_EXEMPT: &[(&str, &str)] = &[
+        ("pi", "a constant, not a function — it takes no argument"),
+        ("e", "a constant, not a function"),
+        ("i", "a constant (the imaginary unit)"),
+        ("j", "a constant (alias of `i`)"),
+    ];
+
+    /// Build the two programs a probe compares: the slider one and the constant one.
+    fn sym_probe_pair(body: &str) -> (String, String) {
+        let head = "use math\nuse vec\nuse rand\n\
+                    x = input::real(min: 0.5, max: 9, step: 0.5, default: 2.5)\n";
+        // The constant program keeps the (unused) input declaration so both runs see the same
+        // input manifest — only the *use* of the value differs, which is what is under test.
+        (
+            format!("{head}{}\ny", subst_v(body, "x")),
+            format!("{head}{}\ny", subst_v(body, "2.5")),
+        )
+    }
+
+    /// Replace the standalone `V` placeholder — a bare `V`, not the one inside `Var` — with `with`.
+    fn subst_v(body: &str, with: &str) -> String {
+        let bytes = body.as_bytes();
+        let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        let mut out = String::with_capacity(body.len());
+        for (i, &c) in bytes.iter().enumerate() {
+            let prev_is_ident = i > 0 && ident(bytes[i - 1]);
+            let alone =
+                c == b'V' && !prev_is_ident && !bytes.get(i + 1).is_some_and(|&n| ident(n));
+            if alone {
+                out.push_str(with);
+            } else {
+                out.push(c as char);
+            }
+        }
+        out
+    }
+
+    /// Run a probe program and return its final numeric value.
+    fn sym_probe_value(src: &str, label: &str) -> f64 {
+        match Engine::new().run(src) {
+            Ok(Value::Num(n)) => n,
+            Ok(Value::Est { val, .. }) => val,
+            Ok(other) => panic!("{label}: expected a number, got {other:?}\n--- program:\n{src}"),
+            Err(e) => panic!("{label}: {e}\n--- program:\n{src}"),
+        }
+    }
+
+    /// A slider (`input::real` → `Value::Sym`) must be accepted wherever a number is, and give the
+    /// same answer as the constant it currently holds.
+    #[test]
+    fn every_builtin_accepts_a_symbolic_input() {
+        for &(name, body, tol) in SYM_PROBES {
+            let (sym_src, const_src) = sym_probe_pair(body);
+            let got = sym_probe_value(&sym_src, &format!("{name} (with a slider)"));
+            let want = sym_probe_value(&const_src, &format!("{name} (with a constant)"));
+            let ok = if tol < 1e-9 {
+                (got - want).abs() <= tol
+            } else {
+                // Monte-Carlo probe: relative agreement (guard the want == 0 case).
+                (got - want).abs() <= tol * want.abs().max(1.0)
+            };
+            assert!(
+                ok,
+                "`{name}` disagrees with a slider in its numeric slot: \
+                 got {got} with `input::real`, {want} with the same value as a constant\n\
+                 --- program:\n{sym_src}"
+            );
+        }
+    }
+
+    /// The completeness half: every registered `math`/`vec`/`rand` name is either probed by
+    /// [`SYM_PROBES`] or explicitly exempt with a reason. Adding a builtin without teaching it
+    /// `Value::Sym` — the bug this pair of tests exists to stop — fails right here.
+    #[test]
+    fn sym_support_is_complete() {
+        let mut untabulated = Vec::new();
+        for &(name, module) in BUILTINS {
+            if !matches!(module, "math" | "vec" | "rand") {
+                continue;
+            }
+            let probed = SYM_PROBES.iter().any(|&(n, _, _)| n == name);
+            let exempt = SYM_EXEMPT.iter().any(|&(n, _)| n == name);
+            if !probed && !exempt {
+                untabulated.push(format!("{module}::{name}"));
+            }
+        }
+        assert!(
+            untabulated.is_empty(),
+            "these builtins have no `input::real` (Value::Sym) coverage: {untabulated:?}\n\
+             Add a probe to SYM_PROBES (or an entry with a reason to SYM_EXEMPT) — and make it pass, \
+             which usually means adding the missing `Value::Sym` arm to the function."
+        );
+    }
+
     #[test]
     fn every_registered_name_dispatches() {
         for &(name, module) in BUILTINS {
@@ -1744,5 +1994,29 @@ mod registry_coverage {
             "these registered builtins are not highlighted by the TextMate grammar \
              (editors/vscode-noise/syntaxes/noise.tmLanguage.json): {missing:?}"
         );
+    }
+
+    #[test]
+    fn unknown_module_call_suggests_the_nearest_name() {
+        // A near-miss typo points at the intended function...
+        let msg = err_of("use vec\nvec::onehott(2, 4)");
+        assert!(
+            msg.contains("has no function 'onehott'") && msg.contains("did you mean 'vec::onehot'"),
+            "expected a did-you-mean suggestion, got: {msg}"
+        );
+        // ...while an unrelated name gets the bare error, not a misleading guess.
+        let msg = err_of("use vec\nvec::zzzzzz(2, 4)");
+        assert!(
+            msg.contains("has no function 'zzzzzz'") && !msg.contains("did you mean"),
+            "expected no suggestion for an unrelated name, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn nearest_name_stays_within_its_edit_budget() {
+        let vec_fns = || module_fns("vec");
+        assert_eq!(nearest_name("summ", vec_fns()), Some("sum")); // 1 insertion
+        assert_eq!(nearest_name("transpoze", vec_fns()), Some("transpose")); // 1 substitution
+        assert_eq!(nearest_name("xyz", vec_fns()), None); // nothing close
     }
 }
