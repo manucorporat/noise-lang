@@ -9,6 +9,7 @@
     "build:www": "pnpm --filter noise-www run build",
     "build": "pnpm run build:core && pnpm run build:www",
     "dev": "pnpm --filter noise-www run dev",
+    "validate": "bash scripts/validate.sh",
     "changeset": "changeset",
     "ci:version": "changeset version && node scripts/sync-cargo-version.mjs",
     "ci:publish": "node scripts/publish-crates.mjs && changeset publish"

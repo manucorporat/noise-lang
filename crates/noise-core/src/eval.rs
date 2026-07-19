@@ -1807,7 +1807,11 @@ mod registry_coverage {
         ("bernoulli", "X ~ bernoulli(V / 10)\ny = P(X)", 0.05),
         ("normal", "X ~ normal(0, V)\ny = Var(X)", 0.02),
         ("normal_int", "X ~ normal_int(V, 1)\ny = E(X)", 0.02),
-        ("normal_complex", "Z ~ normal_complex(V)\ny = E(abs(Z))", 0.02),
+        (
+            "normal_complex",
+            "Z ~ normal_complex(V)\ny = E(abs(Z))",
+            0.02,
+        ),
         ("exponential", "X ~ exponential(V)\ny = E(X)", 0.02),
         ("exponential_int", "X ~ exponential_int(V)\ny = E(X)", 0.05),
         ("poisson", "X ~ poisson(V)\ny = E(X)", 0.02),
@@ -1855,8 +1859,7 @@ mod registry_coverage {
         let mut out = String::with_capacity(body.len());
         for (i, &c) in bytes.iter().enumerate() {
             let prev_is_ident = i > 0 && ident(bytes[i - 1]);
-            let alone =
-                c == b'V' && !prev_is_ident && !bytes.get(i + 1).is_some_and(|&n| ident(n));
+            let alone = c == b'V' && !prev_is_ident && !bytes.get(i + 1).is_some_and(|&n| ident(n));
             if alone {
                 out.push_str(with);
             } else {
