@@ -273,6 +273,8 @@
   .pg-output-wrap { display: flex; flex-direction: column; overflow: hidden; min-height: 260px; }
 
   .pg-output-head {
+    /* `relative` so the metrics detail panel can anchor to the full header row on phones. */
+    position: relative;
     display: flex; align-items: center; justify-content: space-between; gap: 0.6rem 1rem;
     flex-wrap: wrap;
     min-height: var(--pg-head, 2.3rem);
@@ -432,6 +434,20 @@
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.14); white-space: normal; line-height: 1.85;
   }
   #pg-metrics:hover .pg-metrics-detail { display: block; }
+  /* Phone-width Render header: only time · backend stay in the readout (the samples chip and its
+     separator hide), and the details panel re-anchors to the header row itself — spanning its full
+     width and scrolling internally — instead of hanging off the left edge of the screen. */
+  @media (max-width: 680px) {
+    #pg-metrics .m-wide { display: none; }
+    /* Extra ancestor for specificity: the scoped `#pg-metrics { position: relative }` compiles to
+       `#pg-metrics[data-astro-cid]` (1,1,0), which a bare `.pg-output-head #pg-metrics` only ties. */
+    .pg-output-head .pg-head-right #pg-metrics { position: static; }
+    #pg-metrics .pg-metrics-detail {
+      left: 0.4rem; right: 0.4rem;
+      min-width: 0; max-width: none;
+      max-height: min(65dvh, 30rem); overflow-y: auto;
+    }
+  }
   #pg-metrics .pg-metrics-detail .mm-sec + .mm-sec {
     margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--rule);
   }
@@ -1318,9 +1334,15 @@
     const warn = !!d && (d.gpu.shaderFailures > 0 || !d.crossOriginIsolated);
 
     // --- compact summary (always visible) ---
-    const summary: string[] = [chip('time', fmtMs(res.elapsedMs))];
-    if (s.samples > 0) summary.push(chip('samples', fmtCount(s.samples)));
-    summary.push(chip('backend', backend, onGpu ? 'm-rate' : 'm-diag'));
+    // The samples chip travels with its separator inside `.m-wide` so narrow screens can drop the
+    // pair — the phone header keeps to one line: time · backend · details.
+    const summaryHtml =
+      chip('time', fmtMs(res.elapsedMs)) +
+      (s.samples > 0
+        ? `<span class="m-wide"><span class="m-sep"> · </span>${chip('samples', fmtCount(s.samples))}</span>`
+        : '') +
+      `<span class="m-sep"> · </span>` +
+      chip('backend', backend, onGpu ? 'm-rate' : 'm-diag');
 
     // --- hover detail (everything) ---
     const section = (title: string, rows: string) =>
@@ -1373,7 +1395,7 @@
       section('Engine notes', noteRows);
 
     metricsEl.innerHTML =
-      `<span class="pg-metrics-summary ${warn ? 'has-warn' : ''}">${join(summary)}` +
+      `<span class="pg-metrics-summary ${warn ? 'has-warn' : ''}">${summaryHtml}` +
       `<span class="mm-more">details ▾</span></span>` +
       `<span class="pg-metrics-detail">${detail}</span>`;
     metricsEl.hidden = false;
