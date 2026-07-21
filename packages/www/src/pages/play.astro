@@ -1,5 +1,6 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import TopBar from '../components/TopBar.astro';
 import Playground from '../components/Playground.astro';
 
 // The embed snippet is plain text (TS, not Noise) — kept in frontmatter so no braces/backticks
@@ -20,18 +21,7 @@ console.log(result.output);  // everything Print(...) emitted`;
   title="Noise playground — run Noise in your browser"
   description="The Noise playground: write probabilistic programs and run them in your browser on the real WebAssembly engine. Pick an example or share your own via link."
 >
-  <header class="topbar">
-    <div class="wide topbar-inner">
-      <a class="brand" href="/"><img class="brand-mark" src="/favicon.svg" alt="" width="24" height="24" />noise<span class="brand-tilde">~</span><span class="brand-dim">lang</span></a>
-      <nav class="topbar-links">
-        <a href="/#ideas">How it works</a>
-        <a href="/play" aria-current="page">Playground</a>
-        <a href="/skill">Skills</a>
-        <a href="/#author">About</a>
-        <a href="https://github.com/manucorporat/noise-lang">GitHub</a>
-      </nav>
-    </div>
-  </header>
+  <TopBar current="play" />
 
   <main class="play-main">
     <div class="play-host">
@@ -72,39 +62,6 @@ console.log(result.output);  // everything Print(...) emitted`;
 </Layout>
 
 <style>
-  /* Topbar — mirrors the home page (src/pages/index.astro). */
-  .topbar {
-    position: sticky;
-    top: 0;
-    z-index: 30;
-    background: rgba(251, 250, 246, 0.88);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-    border-bottom: 1px solid var(--rule);
-  }
-  .topbar-inner {
-    display: flex; align-items: baseline; justify-content: space-between;
-    padding-top: 0.7rem; padding-bottom: 0.7rem;
-  }
-  .brand { display: inline-flex; align-items: center; font-family: var(--serif); font-weight: 700; font-size: 1.1rem; color: var(--ink); }
-  .brand:hover { text-decoration: none; }
-  .brand-mark { display: block; width: 1.4em; height: 1.4em; margin-right: 0.5rem; }
-  .brand-dim { color: var(--ink-dim); }
-  .brand-tilde {
-    font-family: var(--mono);
-    font-weight: 500;
-    color: var(--accent);
-    margin: 0 0.04em;
-    vertical-align: baseline;
-    position: relative;
-    top: 0.02em;
-  }
-  .topbar-links { display: flex; gap: 1.3rem; }
-  .topbar-links a { color: var(--ink-dim); font-size: 0.92rem; }
-  .topbar-links a:hover { color: var(--ink); text-decoration: none; }
-  .topbar-links a[aria-current='page'] { color: var(--ink); }
-  @media (max-width: 680px) { .topbar-links a:not(:last-child):not([aria-current='page']) { display: none; } }
-
   .play-main { padding: 1.6rem 0 1rem; }
   /* the playground claims most of the viewport width (wider than the prose `.wide` column) */
   .play-host { max-width: min(1720px, 98vw); margin: 0 auto; padding: 0 0.75rem; }

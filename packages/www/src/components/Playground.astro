@@ -113,7 +113,7 @@
      header rows (never its own bar, to save vertical space): a copy in the editor toolbar carries it
      in Code view, and a copy in the Render header carries it in Split/Render — exactly one shows per
      view, so there's always one control, pinned to the far right. Both drive the same persisted state.
-     The Split segment is hidden on narrow screens where a two-pane split can't breathe. */
+     On narrow screens Split stacks the two panes into one scrolling column instead. */
   .pg-viewtabs {
     display: inline-flex; align-items: stretch; gap: 2px;
     padding: 1px; border: 1px solid var(--rule); border-radius: 8px; background: var(--paper-2);
@@ -167,10 +167,18 @@
   .pg-split[data-view='render'] .pg-resizer,
   .pg-split[data-view='render'] .pg-editor-wrap { display: none; }
 
+  /* Narrow screens: the split stacks into one column (editor above, render below) and the whole
+     page scrolls — no fixed-height panes, no nested scrolling. */
   @media (max-width: 880px) {
     .pg-split { grid-template-columns: 1fr; height: auto; gap: 1rem; }
+    .pg-split[data-view='split'] .pg-viewtabs-out { display: inline-flex; }
     .pg-resizer { display: none; }
-    .pg-viewtab-split { display: none; }
+  }
+  /* Phone-width toolbar: the view tabs drop their labels (icons + `title` remain) so the example
+     selector keeps enough width to stay readable next to Run. */
+  @media (max-width: 680px) {
+    .pg-viewtab span { display: none; }
+    .pg-viewtab { padding: 0.22rem 0.5rem; }
   }
 
   .pg-resizer {
@@ -205,6 +213,8 @@
     flex-wrap: nowrap;
   }
   .pg-editor { flex: 1; min-height: 0; height: auto; width: 100%; }
+  /* Pre-JS fallback height only — once Monaco mounts, the script sizes the editor to its content
+     on narrow screens (see fitEditorHeight) so it never becomes a nested touch-scroll trap. */
   @media (max-width: 880px) { .pg-editor { flex: none; height: 320px; } }
 
   .pg-select-wrap { position: relative; display: inline-flex; }
@@ -679,7 +689,9 @@
     renderLineHighlight: 'line',
     smoothScrolling: true,
     automaticLayout: true,
-    scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
+    // `alwaysConsumeMouseWheel: false` lets a wheel/trackpad scroll reach the page once the
+    // editor is at its own scroll limit — otherwise the editor is a scroll trap.
+    scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8, alwaysConsumeMouseWheel: false },
   });
 
   /** Paint the pre-run page: the paper header (from the frontmatter `meta`) + a "press run" body.
@@ -1448,21 +1460,34 @@
 
   // --- layout view switcher (Code / Split / Render) ---
   // `viewPref` / `readView` are declared up top so the fragment carries the view and reloads restore
-  // it. The choice is also persisted so it survives a link with no `v=`. On narrow screens a
-  // side-by-side split doesn't fit, so `split` resolves to a single pane there while the stored
-  // preference is left intact for when the reader is back on a wide screen. There are two copies of
-  // the control (one per header row); both are wired here and only one shows per view.
+  // it. The choice is also persisted so it survives a link with no `v=`. On narrow screens the CSS
+  // stacks the split's panes into one column (editor above, render below), so all three views work
+  // everywhere. There are two copies of the control (one per header row); both are wired here and
+  // only one shows per view.
   const narrow = window.matchMedia('(max-width: 880px)');
   const viewTabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.pg-viewtab'));
 
-  // What actually renders: `split` isn't offered on narrow screens, so it resolves to `code` there.
-  const effectiveView = (): ViewMode => (narrow.matches && viewPref === 'split' ? 'code' : viewPref);
+  // On a phone the editor must NOT be its own scroll box: a fixed-height Monaco swallows touch
+  // swipes, so a finger on the code scrolls the listing instead of the page. Narrow screens size
+  // the editor to its content (the page scrolls as one column); wide screens clear the inline
+  // height so the split's fixed-height flex layout rules again.
+  const editorEl = $('editor');
+  function fitEditorHeight() {
+    if (narrow.matches) {
+      editorEl.style.height = `${Math.max(220, Math.ceil(editor.getContentHeight()) + 2)}px`;
+      editor.layout();
+    } else if (editorEl.style.height) {
+      editorEl.style.height = '';
+      editor.layout();
+    }
+  }
+  editor.onDidContentSizeChange(fitEditorHeight);
 
   function applyView() {
-    const eff = effectiveView();
-    split.dataset.view = eff;
-    for (const btn of viewTabs) btn.setAttribute('aria-pressed', String(btn.dataset.view === eff));
+    split.dataset.view = viewPref;
+    for (const btn of viewTabs) btn.setAttribute('aria-pressed', String(btn.dataset.view === viewPref));
     // Re-fit the editor and any charts now that a pane may have just (dis)appeared.
+    fitEditorHeight();
     editor.layout();
     for (const card of liveCards) drawCard(card.mount, card.charts);
   }
