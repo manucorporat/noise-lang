@@ -65,6 +65,13 @@ console.log(result.output);  // everything Print(...) emitted`;
   .play-main { padding: 1.6rem 0 1rem; }
   /* the playground claims most of the viewport width (wider than the prose `.wide` column) */
   .play-host { max-width: min(1720px, 98vw); margin: 0 auto; padding: 0 0.75rem; }
+  /* Mobile is just the playground, app-style: the pane fills the viewport below the topbar (its
+     height budget is set in Playground.astro — keep the two in sync) and everything after it (the
+     embed prose, the footer) is dropped so there's nothing else to scroll to. */
+  @media (max-width: 880px) {
+    .play-main { padding: 0.75rem 0; }
+    .embed, .doc-footer { display: none; }
+  }
   @media (max-width: 680px) { .play-host { padding: 0 0.4rem; } }
 
   /* "Put Noise in your own site" — quiet prose column under the playground. */
