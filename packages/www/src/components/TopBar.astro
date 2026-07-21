@@ -1,0 +1,151 @@
+---
+// The shared site header (every page carries the same one): brand on the left, links on the
+// right. On small screens the link row can't fit next to the brand, so it collapses behind a
+// burger button that drops the links down as a full-width panel under the bar.
+interface Props {
+  current?: 'play' | 'skill';
+}
+const { current } = Astro.props;
+
+const links: { href: string; label: string; key?: 'play' | 'skill' }[] = [
+  { href: '/#ideas', label: 'How it works' },
+  { href: '/play', label: 'Playground', key: 'play' },
+  { href: '/skill', label: 'Skills', key: 'skill' },
+  { href: '/#author', label: 'About' },
+  { href: 'https://github.com/manucorporat/noise-lang', label: 'GitHub' },
+];
+---
+
+<header class="topbar" id="topbar">
+  <div class="wide topbar-inner">
+    <a class="brand" href="/"><img class="brand-mark" src="/favicon.svg" alt="" width="24" height="24" />noise<span class="brand-tilde">~</span><span class="brand-dim">lang</span></a>
+    <button
+      class="topbar-burger"
+      id="topbar-burger"
+      type="button"
+      aria-label="Open menu"
+      aria-expanded="false"
+      aria-controls="topbar-menu"
+    >
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        <g class="burger-lines">
+          <line x1="4" y1="7" x2="20" y2="7"></line>
+          <line x1="4" y1="12" x2="20" y2="12"></line>
+          <line x1="4" y1="17" x2="20" y2="17"></line>
+        </g>
+        <g class="burger-close">
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+        </g>
+      </svg>
+    </button>
+    <nav class="topbar-links" id="topbar-menu">
+      {links.map((l) => (
+        <a href={l.href} aria-current={l.key && l.key === current ? 'page' : undefined}>{l.label}</a>
+      ))}
+    </nav>
+  </div>
+</header>
+
+<style>
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    background: rgba(251, 250, 246, 0.88);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--rule);
+  }
+  .topbar-inner {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding-top: 0.7rem; padding-bottom: 0.7rem;
+  }
+  .brand { display: inline-flex; align-items: center; font-family: var(--serif); font-weight: 700; font-size: 1.1rem; color: var(--ink); }
+  .brand:hover { text-decoration: none; }
+  .brand-mark { display: block; width: 1.4em; height: 1.4em; margin-right: 0.5rem; }
+  .brand-dim { color: var(--ink-dim); }
+  .brand-tilde {
+    font-family: var(--mono);
+    font-weight: 500;
+    color: var(--accent);
+    margin: 0 0.04em;
+    vertical-align: baseline;
+    position: relative;
+    top: 0.02em;
+  }
+  .topbar-links { display: flex; gap: 1.3rem; }
+  .topbar-links a { color: var(--ink-dim); font-size: 0.92rem; }
+  .topbar-links a:hover { color: var(--ink); text-decoration: none; }
+  .topbar-links a[aria-current='page'] { color: var(--ink); }
+
+  /* The burger: hidden on wide screens, swaps its icon to an × while the menu is open. */
+  .topbar-burger {
+    display: none;
+    align-self: center;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0.25rem 0.35rem;
+    cursor: pointer;
+    color: var(--ink);
+    line-height: 0;
+  }
+  .topbar-burger svg { stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; fill: none; }
+  .topbar-burger:focus-visible { outline: 2px solid var(--link); }
+  .topbar-burger .burger-close { display: none; }
+  .topbar.menu-open .topbar-burger .burger-lines { display: none; }
+  .topbar.menu-open .topbar-burger .burger-close { display: block; }
+
+  @media (max-width: 680px) {
+    .topbar-burger { display: inline-flex; }
+    /* The links become a dropdown panel under the (sticky) bar, toggled by the burger. */
+    .topbar-links {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      flex-direction: column;
+      gap: 0;
+      padding: 0.3rem 0 0.5rem;
+      background: var(--paper);
+      border-bottom: 1px solid var(--rule);
+      box-shadow: 0 12px 24px -14px rgba(0, 0, 0, 0.25);
+    }
+    .topbar.menu-open .topbar-links { display: flex; }
+    .topbar-links a {
+      padding: 0.7rem 1.5rem;
+      font-size: 1rem;
+      border-top: 1px solid var(--rule);
+    }
+    .topbar-links a:first-child { border-top: none; }
+  }
+</style>
+
+<script>
+  const bar = document.getElementById('topbar')!;
+  const burger = document.getElementById('topbar-burger')!;
+  const menu = document.getElementById('topbar-menu')!;
+
+  const setOpen = (open: boolean) => {
+    bar.classList.toggle('menu-open', open);
+    burger.setAttribute('aria-expanded', String(open));
+    burger.setAttribute('aria-label', open ? 'Close menu' : 'Open menu');
+  };
+
+  burger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setOpen(!bar.classList.contains('menu-open'));
+  });
+  // Following a link (including a same-page #anchor) should fold the menu away.
+  menu.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).closest('a')) setOpen(false);
+  });
+  document.addEventListener('click', (e) => {
+    if (bar.classList.contains('menu-open') && !bar.contains(e.target as Node)) setOpen(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') setOpen(false);
+  });
+</script>
