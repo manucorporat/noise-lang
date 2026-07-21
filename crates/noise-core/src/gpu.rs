@@ -337,7 +337,8 @@ impl Device {
 
     /// Dispatch lanes `lane0 .. lane0 + n` and read back what the shader wrote — see
     /// [`dispatch_shape`] for the two output layouts (`cols >= 1` column mode, `cols == 0` reduce
-    /// mode).
+    /// mode). `inputs` is the forcing's input-uniform block ([`input_uniforms`]) — the P1 channel
+    /// that lets a slider change re-dispatch a cached pipeline instead of recompiling it.
     fn dispatch(
         &self,
         pipe: &wgpu::ComputePipeline,
@@ -345,20 +346,19 @@ impl Device {
         lane0: u32,
         n: u32,
         cols: u32,
+        inputs: &[f32; wgsl_emit::INPUT_SLOTS],
     ) -> Vec<f32> {
         let (out_len, workgroups) = dispatch_shape(n, cols);
         let bytes = out_len as u64 * 4;
-        let params: [u32; 4] = [key.k0, key.k1, lane0, n];
-        // SAFETY: `[u32; 4]` is 16 contiguous bytes, no padding; every bit pattern is a valid `u8`.
-        let pbytes = unsafe { std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), 16) };
+        let pbytes = params_bytes(key, lane0, n, inputs);
 
         let ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: 16,
+            size: wgsl_emit::PARAMS_BYTES as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.queue.write_buffer(&ubuf, 0, pbytes);
+        self.queue.write_buffer(&ubuf, 0, &pbytes);
         let out = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: bytes,
@@ -421,6 +421,40 @@ impl Device {
 // only device-touching operations, implemented once per target.
 // ---------------------------------------------------------------------------
 
+/// The `Params` uniform buffer, byte for byte (`wgsl_emit::PARAMS_BYTES`): `key` (two u32 words),
+/// `lane0`, `n`, then the [`wgsl_emit::INPUT_SLOTS`] input f32s. The browser host (`gpu-host.ts`)
+/// mirrors this layout — if one drifts, the answers diverge.
+#[cfg(not(target_arch = "wasm32"))]
+fn params_bytes(
+    key: crate::rng::Key,
+    lane0: u32,
+    n: u32,
+    inputs: &[f32; wgsl_emit::INPUT_SLOTS],
+) -> [u8; wgsl_emit::PARAMS_BYTES] {
+    let mut out = [0u8; wgsl_emit::PARAMS_BYTES];
+    for (i, w) in [key.k0, key.k1, lane0, n].into_iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    for (i, v) in inputs.iter().enumerate() {
+        out[16 + i * 4..20 + i * 4].copy_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+/// Snapshot this forcing's host input values into the fixed uniform block, narrowed to the f32 the
+/// lanes carry (`val as f32` — the same rounding `Inst::Input` applies, so the GPU reads the exact
+/// value the interpreter would). Taken ONCE per forcing on the driver thread, where the engine's
+/// values are installed (`input_rt`); unused slots stay 0 and are never read (the emitter declines
+/// any cone referencing a slot past the block).
+fn input_uniforms() -> [f32; wgsl_emit::INPUT_SLOTS] {
+    let vals = crate::input_rt::current();
+    let mut out = [0.0f32; wgsl_emit::INPUT_SLOTS];
+    for (slot, v) in out.iter_mut().zip(vals.iter()) {
+        *slot = *v as f32;
+    }
+    out
+}
+
 /// The output length and workgroup count of one dispatch, from the `cols` word that already rides
 /// the wasm bridge (`gpu-host.ts` mirrors this function — if one drifts, the answers diverge):
 ///
@@ -473,22 +507,37 @@ fn prepare(wgsl: &str) -> Option<(Prepared, bool)> {
 }
 
 /// Dispatch lanes `lane0 .. lane0 + n` and read back what the shader wrote — [`dispatch_shape`]
-/// gives the layout per `cols` (`>= 1` column mode, `== 0` reduce mode).
+/// gives the layout per `cols` (`>= 1` column mode, `== 0` reduce mode). `inputs` is the forcing's
+/// input-uniform block ([`input_uniforms`]).
 #[cfg(not(target_arch = "wasm32"))]
-fn dispatch(prep: &Prepared, key: crate::rng::Key, lane0: u32, n: u32, cols: u32) -> Vec<f32> {
+fn dispatch(
+    prep: &Prepared,
+    key: crate::rng::Key,
+    lane0: u32,
+    n: u32,
+    cols: u32,
+    inputs: &[f32; wgsl_emit::INPUT_SLOTS],
+) -> Vec<f32> {
     device()
         .expect("available() was true")
-        .dispatch(&prep.0, key, lane0, n, cols)
+        .dispatch(&prep.0, key, lane0, n, cols, inputs)
 }
 #[cfg(target_arch = "wasm32")]
-fn dispatch(prep: &Prepared, key: crate::rng::Key, lane0: u32, n: u32, cols: u32) -> Vec<f32> {
+fn dispatch(
+    prep: &Prepared,
+    key: crate::rng::Key,
+    lane0: u32,
+    n: u32,
+    cols: u32,
+    inputs: &[f32; wgsl_emit::INPUT_SLOTS],
+) -> Vec<f32> {
     // One span covers the whole round-trip — write request, wake the main thread, block on
     // `Atomics.wait`, copy the column back — since the worker is blocked for all of it (the native
     // path splits this into `gpu.dispatch` + `gpu.readback`, which don't exist as phases here).
     let _s = crate::profile::span("gpu.dispatch");
     let (out_len, _wgs) = dispatch_shape(n, cols);
     let mut out = vec![0.0f32; out_len];
-    let ok = nz_gpu_dispatch(&prep.0, &mut out, n, cols, key.k0, key.k1, lane0);
+    let ok = nz_gpu_dispatch(&prep.0, &mut out, n, cols, key.k0, key.k1, lane0, inputs);
     debug_assert_eq!(
         ok, 1,
         "nz_gpu_dispatch failed after prepare succeeded (device loss?)"
@@ -504,14 +553,15 @@ fn dispatch(prep: &Prepared, key: crate::rng::Key, lane0: u32, n: u32, cols: u32
 #[wasm_bindgen::prelude::wasm_bindgen(inline_js = r#"
 export function nz_gpu_available() { const g = globalThis.__noiseGpu; return g ? g.available() : 0; }
 export function nz_gpu_prepare(wgsl) { const g = globalThis.__noiseGpu; return g ? g.prepare(wgsl) : 0; }
-export function nz_gpu_dispatch(wgsl, out, n, cols, k0, k1, lane0) {
+export function nz_gpu_dispatch(wgsl, out, n, cols, k0, k1, lane0, inputs) {
   const g = globalThis.__noiseGpu;
-  return g ? g.dispatch(wgsl, out, n, cols, k0, k1, lane0) : 0;
+  return g ? g.dispatch(wgsl, out, n, cols, k0, k1, lane0, inputs) : 0;
 }
 "#)]
 extern "C" {
     fn nz_gpu_available() -> i32;
     fn nz_gpu_prepare(wgsl: &str) -> i32;
+    #[allow(clippy::too_many_arguments)]
     fn nz_gpu_dispatch(
         wgsl: &str,
         out: &mut [f32],
@@ -520,6 +570,7 @@ extern "C" {
         k0: u32,
         k1: u32,
         lane0: u32,
+        inputs: &[f32],
     ) -> i32;
 }
 
@@ -581,9 +632,14 @@ pub fn try_reduce<R: Reducer>(
         let _s = crate::profile::span("gpu.emit");
         wgsl_emit::emit(&g, &[root])
     };
-    let Ok(wgsl) = emitted else {
-        crate::profile::note("gpu: cone unsupported (Poisson/Rotation) → cpu");
-        return Ok(GpuReduce::Declined(carry)); // Poisson / Rotation (f64 Gram–Schmidt) → CPU
+    let wgsl = match emitted {
+        Ok(wgsl) => wgsl,
+        // e.g. Poisson or Rotation (f64 Gram–Schmidt) — the note names the culprit so a decline
+        // is diagnosable.
+        Err(unsupported) => {
+            crate::profile::note(format!("gpu: cone unsupported ({}) → cpu", unsupported.0));
+            return Ok(GpuReduce::Declined(carry));
+        }
     };
 
     let n = (lanes.end - lanes.start) as usize;
@@ -613,6 +669,9 @@ pub fn try_reduce<R: Reducer>(
     // ops / random-numbers readout doesn't change just because the GPU took the query.
     crate::stats::record(n, cost.ops, cost.sources);
 
+    // Snapshot this forcing's input values ONCE, on the driver thread (PLAN-UNIFORM-INPUTS P1) —
+    // the same moment the CPU drivers snapshot for their runners.
+    let inputs = input_uniforms();
     let key = crate::rng::Key::from_seed(seed);
     let mut acc = carry;
     let mut done = 0usize;
@@ -631,7 +690,7 @@ pub fn try_reduce<R: Reducer>(
         // Epoch-local lanes fit u32 by construction (the reduce driver split at 2³² boundaries).
         let lane0 =
             u32::try_from(lanes.start + done as u64).expect("epoch-local lane exceeds 2^32");
-        let col = dispatch(&pipe, key, lane0, take as u32, 1);
+        let col = dispatch(&pipe, key, lane0, take as u32, 1, &inputs);
 
         // Fold on the reducer's OWN chunk boundaries, in order, into the running carry — so the
         // accumulation is the same sequence of `absorb`/`merge` calls the CPU reducer would have
@@ -673,9 +732,12 @@ fn reduce_on_gpu<R: Reducer>(
         let _s = crate::profile::span("gpu.emit");
         wgsl_emit::emit_reduce(g, root, mode == MomentsMode::SkipNan)
     };
-    let Ok(wgsl) = emitted else {
-        crate::profile::note("gpu: cone unsupported (Poisson/Input) → cpu");
-        return Ok(GpuReduce::Declined(carry));
+    let wgsl = match emitted {
+        Ok(wgsl) => wgsl,
+        Err(unsupported) => {
+            crate::profile::note(format!("gpu: cone unsupported ({}) → cpu", unsupported.0));
+            return Ok(GpuReduce::Declined(carry));
+        }
     };
 
     let n = (lanes.end - lanes.start) as usize;
@@ -711,6 +773,8 @@ fn reduce_on_gpu<R: Reducer>(
         / CHUNK_SAMPLES
         * CHUNK_SAMPLES;
 
+    // Snapshot this forcing's input values ONCE, on the driver thread (PLAN-UNIFORM-INPUTS P1).
+    let inputs = input_uniforms();
     let key = crate::rng::Key::from_seed(seed);
     let mut acc = carry;
     let mut done = 0usize;
@@ -727,7 +791,7 @@ fn reduce_on_gpu<R: Reducer>(
         // Epoch-local lanes fit u32 by construction (the reduce driver split at 2³² boundaries).
         let lane0 =
             u32::try_from(lanes.start + done as u64).expect("epoch-local lane exceeds 2^32");
-        let partials = dispatch(&pipe, key, lane0, take as u32, 0);
+        let partials = dispatch(&pipe, key, lane0, take as u32, 0, &inputs);
 
         // One `(Σx, Σx², count)` triple per workgroup, in workgroup order — which IS lane order,
         // so folding them sequentially into the carry keeps the fold a pure function of the lane
@@ -784,9 +848,15 @@ pub fn try_joint<F: FnMut(&[&[f32]], usize)>(
         let _s = crate::profile::span("gpu.emit");
         wgsl_emit::emit(&g, &roots)
     };
-    let Ok(wgsl) = emitted else {
-        crate::profile::note("gpu(joint): cone unsupported → cpu");
-        return Ok(None);
+    let wgsl = match emitted {
+        Ok(wgsl) => wgsl,
+        Err(unsupported) => {
+            crate::profile::note(format!(
+                "gpu(joint): cone unsupported ({}) → cpu",
+                unsupported.0
+            ));
+            return Ok(None);
+        }
     };
     let cost = crate::kernel::cost_roots(&g, &roots);
     crate::profile::set_ops(cost.ops);
@@ -815,6 +885,8 @@ pub fn try_joint<F: FnMut(&[&[f32]], usize)>(
     };
     crate::stats::record(n, cost.ops, cost.sources);
 
+    // Snapshot this forcing's input values ONCE, on the driver thread (PLAN-UNIFORM-INPUTS P1).
+    let inputs = input_uniforms();
     let key = crate::rng::Key::from_seed(seed);
     // Fewer lanes per dispatch when there are more columns, so the `k × take` readback stays bounded.
     let max_lanes = (GPU_JOINT_ELEMS / k.max(1)).max(wgsl_emit::WORKGROUP as usize);
@@ -830,7 +902,7 @@ pub fn try_joint<F: FnMut(&[&[f32]], usize)>(
         }
         let take = max_lanes.min(n - done);
         let lane0 = u32::try_from(done).expect("forcing exceeds 2^32 lanes");
-        let buf = dispatch(&pipe, key, lane0, take as u32, k as u32);
+        let buf = dispatch(&pipe, key, lane0, take as u32, k as u32, &inputs);
         // `buf[j*take + i]` is root `j`, lane `i` — present the k columns for this chunk (lane order
         // preserved), and hand them to the caller's fold exactly as the CPU batch loop would.
         let _s = crate::profile::span("gpu.fold");
@@ -902,6 +974,56 @@ mod tests {
             (a.mean - std::f64::consts::FRAC_PI_4).abs() < 1e-4,
             "mean = {}",
             a.mean
+        );
+    }
+
+    /// The PLAN-UNIFORM-INPUTS P1 gate: forcing an input-carrying cone at two different slider
+    /// values compiles ONE pipeline — the shader text is a pure function of the structure, and the
+    /// value rides the params block — and each forcing's answer tracks the dispatched value.
+    #[test]
+    fn an_input_value_change_redispatches_a_cached_pipeline() {
+        if !available() {
+            return; // no adapter: nothing to test, and try_reduce would just decline
+        }
+        let mut eng = crate::eval::Engine::new();
+        let v = eng
+            .run_rv("use rand; X ~ unif(0, 1); d = input::real(default: 0.5, name: \"d\"); X < d")
+            .unwrap();
+        let crate::Value::Dist(root) = v else {
+            panic!("expected a dist")
+        };
+        let g = eng.graph();
+        let r = MomentsReducer;
+        let seed = 7u64;
+        let end = 1u64 << 29; // a thin cone, but ~1.6e9 work: the reduce-mode gate accepts naturally
+
+        let cell = crate::input_rt::new_inputs();
+        cell.borrow_mut().push(0.5);
+        let run_at = |val: f64| {
+            cell.borrow_mut()[0] = val;
+            let _guard = crate::input_rt::install(&cell);
+            match try_reduce(g, root, 0..end, seed, &r, None, None, r.identity()).unwrap() {
+                GpuReduce::Done(out) => {
+                    assert!(out.stopped.is_none());
+                    out.acc.into_moments().mean
+                }
+                GpuReduce::Declined(_) => panic!("the reduce-mode gate must accept 5e8 lanes"),
+            }
+        };
+        let at_25 = run_at(0.25);
+        // The artifact the first forcing compiled IS what the second will look up: same structure,
+        // same shader text (the value is not in it), so it must already sit in the pipeline cache.
+        let (sg, sroot) = crate::simplify::simplify(g, root);
+        let skip = r.moments_mode() == Some(MomentsMode::SkipNan);
+        let wgsl = wgsl_emit::emit_reduce(&sg, sroot, skip).expect("an input cone must lower");
+        assert!(
+            device().unwrap().pipeline_cached(&wgsl),
+            "the first forcing must have compiled exactly the value-independent shader text"
+        );
+        let at_60 = run_at(0.6);
+        assert!(
+            (at_25 - 0.25).abs() < 1e-3 && (at_60 - 0.6).abs() < 1e-3,
+            "P(X < d) must track the dispatched uniform: got {at_25} and {at_60}"
         );
     }
 }

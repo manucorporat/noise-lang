@@ -220,6 +220,9 @@ pub struct DistGrid {
     pub cols: usize,
     pub mean: Vec<f64>,
     pub sd: Vec<f64>,
+    /// Explicit x-axis values for a series (`plot::line(xs, ys)`), length `cols`. `None` means the
+    /// element index is the x-axis (the one-argument form). Only meaningful when `is_series()`.
+    pub x: Option<Vec<f64>>,
 }
 
 impl DistGrid {
@@ -330,10 +333,12 @@ pub fn draws(
     n: usize,
     seed: u64,
 ) -> crate::error::Result<Vec<f64>> {
+    // The parallel drivers draw the identical stream to their sequential twins (chunk-seeded, so
+    // the fan-out is invisible) — a histogram of a fat cone costs wall-clock, not determinism.
     if conditional {
-        sampler::cond_sample_n(graph, root, n, seed)
+        sampler::cond_sample_n_par(graph, root, n, seed)
     } else {
-        sampler::sample_n(graph, root, n, seed)
+        sampler::sample_n_par(graph, root, n, seed)
     }
 }
 
@@ -370,6 +375,7 @@ pub fn grid(
         cols,
         mean: moments.iter().map(|m| m.mean).collect(),
         sd: moments.iter().map(|m| m.variance.sqrt()).collect(),
+        x: None,
     })
 }
 

@@ -5,10 +5,19 @@
 // WebGPU dispatch, writes the result column back, and `Atomics.notify`s the blocked worker.
 //
 // The buffer layout below mirrors the native `Device::dispatch` in `gpu.rs` byte-for-byte (uniform
-// `[k0, k1, lane0, n]`, one `array<f32>` output of `cols × n`, `@workgroup_size(64)`), because both
-// consume the exact same WGSL that `wgsl_emit::emit` produces. If one drifts, the answers diverge.
+// `[k0, k1, lane0, n]` + the 16-slot input block, one `array<f32>` output of `cols × n`,
+// `@workgroup_size(64)`), because both consume the exact same WGSL that `wgsl_emit::emit`
+// produces. If one drifts, the answers diverge.
 
-import { Ctrl, Op, Signal, WGSL_OFFSET, RESULT_OFFSET } from './gpu-protocol.js';
+import {
+  Ctrl,
+  Op,
+  Signal,
+  INPUT_SLOTS,
+  INPUTS_OFFSET,
+  WGSL_OFFSET,
+  RESULT_OFFSET,
+} from './gpu-protocol.js';
 
 // WebGPU types aren't in the default TS lib and we don't want to pull `@webgpu/types` + a tsconfig
 // change just for this. The surface we use is tiny; alias it loosely and keep the boundary honest.
@@ -145,7 +154,9 @@ function readWgsl(sab: SharedArrayBuffer, ctrl: Int32Array): string {
 }
 
 /** Run one dispatch: build the buffers (native layout), dispatch, read back `cols × n` f32. Returns
- *  the result column(s) as a plain `Float32Array`, or `null` on failure. */
+ *  the result column(s) as a plain `Float32Array`, or `null` on failure. `inputs` is the forcing's
+ *  input-slider block (PLAN-UNIFORM-INPUTS P1) — per-dispatch data, so one cached pipeline serves
+ *  every slider value. */
 async function runDispatch(
   host: GpuHost,
   pipeline: GpuPipeline,
@@ -154,15 +165,20 @@ async function runDispatch(
   k0: number,
   k1: number,
   lane0: number,
+  inputs: Float32Array,
 ): Promise<Float32Array | null> {
   try {
     const { device, queue } = host;
     const { outCount, workgroups } = dispatchShape(n, cols);
     const bytes = outCount * 4;
 
-    // Uniform `Params { key: vec2<u32>, lane0: u32, n: u32 }` — 16 bytes, same order as native.
-    const ubuf = device.createBuffer({ size: 16, usage: 0x40 | 0x8 }); // UNIFORM | COPY_DST
-    queue.writeBuffer(ubuf, 0, new Uint32Array([k0 >>> 0, k1 >>> 0, lane0 >>> 0, n >>> 0]));
+    // Uniform `Params { key: vec2<u32>, lane0: u32, n: u32, inputs: array<vec4<f32>, 4> }` —
+    // 80 bytes (`wgsl_emit::PARAMS_BYTES`), same byte layout as native `params_bytes` in `gpu.rs`.
+    const params = new ArrayBuffer(16 + INPUT_SLOTS * 4);
+    new Uint32Array(params, 0, 4).set([k0 >>> 0, k1 >>> 0, lane0 >>> 0, n >>> 0]);
+    new Float32Array(params, 16, INPUT_SLOTS).set(inputs.subarray(0, INPUT_SLOTS));
+    const ubuf = device.createBuffer({ size: params.byteLength, usage: 0x40 | 0x8 }); // UNIFORM | COPY_DST
+    queue.writeBuffer(ubuf, 0, params);
 
     const out = device.createBuffer({ size: bytes, usage: 0x80 | 0x4 }); // STORAGE | COPY_SRC
     const staging = device.createBuffer({ size: bytes, usage: 0x1 | 0x8 }); // MAP_READ | COPY_DST
@@ -220,7 +236,9 @@ export async function serviceGpuRequest(host: GpuHost, sab: SharedArrayBuffer): 
         const k0 = Atomics.load(ctrl, Ctrl.K0);
         const k1 = Atomics.load(ctrl, Ctrl.K1);
         const lane0 = Atomics.load(ctrl, Ctrl.LANE0);
-        const col = await runDispatch(host, pipeline, n, cols, k0, k1, lane0);
+        // Copy the input block out of shared memory (writeBuffer can't take a SAB-backed view).
+        const inputs = new Float32Array(sab, INPUTS_OFFSET, INPUT_SLOTS).slice();
+        const col = await runDispatch(host, pipeline, n, cols, k0, k1, lane0, inputs);
         if (!col) console.log(`[noise-gpu][main] dispatch failed (n=${n} cols=${cols})`);
         if (col) {
           new Float32Array(sab, RESULT_OFFSET, col.length).set(col);

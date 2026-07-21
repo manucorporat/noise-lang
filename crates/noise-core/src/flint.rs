@@ -266,7 +266,7 @@ fn charts(s: &Summary) -> Vec<J> {
             .collect(),
         Payload::Explain(e) => explain_chart(e).into_iter().collect(),
         Payload::Value(v) => value_chart(&s.label, v).into_iter().collect(),
-        Payload::Grid(g) => grid_charts(&s.label, g),
+        Payload::Grid(g) => grid_charts(&s.label, s.label_b.as_deref(), g),
         Payload::CorrMatrix(c) => corr_chart(c).into_iter().collect(),
         Payload::Fan(c) => fan_charts(&s.label, c),
     }
@@ -368,8 +368,9 @@ fn explain_chart(e: &Explain) -> Option<J> {
 
 /// An array of random variables → a per-index mean line, banded by ±1 sd when there *is* spread
 /// (two specs, layered by the host — the same recipe as the fan). A matrix has no index to walk, so
-/// it becomes a Heatmap of the cell means.
-fn grid_charts(label: &str, g: &DistGrid) -> Vec<J> {
+/// it becomes a Heatmap of the cell means. An explicit x-axis (`plot::line(xs, ys)`) replaces the
+/// index with the given values and names the axis after its source (`x_label`).
+fn grid_charts(label: &str, x_label: Option<&str>, g: &DistGrid) -> Vec<J> {
     if g.mean.is_empty() {
         return vec![];
     }
@@ -391,15 +392,21 @@ fn grid_charts(label: &str, g: &DistGrid) -> Vec<J> {
             height,
         )];
     }
-    let mean = field(label, &["index", "lo", "hi"]);
+    // The explicit-x form names its axis after the source array; the plain form walks the index.
+    let x_name = match (&g.x, x_label) {
+        (Some(_), Some(name)) => field(name, &["lo", "hi"]),
+        _ => "index".to_string(),
+    };
+    let x_at = |i: usize| g.x.as_ref().map_or(i as f64, |xs| xs[i]);
+    let mean = field(label, &[&x_name, "lo", "hi"]);
     let banded = g.sd.iter().any(|&s| s > 0.0);
     let line = chart(
         (0..g.mean.len())
-            .map(|i| json!({ "index": i, &mean: g.mean[i] }))
+            .map(|i| json!({ &x_name: x_at(i), &mean: g.mean[i] }))
             .collect(),
-        json!({ "index": "Number", &mean: "Number" }),
+        json!({ &x_name: "Number", &mean: "Number" }),
         "Line Chart",
-        json!({ "x": "index", "y": &mean }),
+        json!({ "x": &x_name, "y": &mean }),
         if banded { no_zero_baseline() } else { J::Null },
         CANVAS_W,
         CANVAS_H,
@@ -409,11 +416,11 @@ fn grid_charts(label: &str, g: &DistGrid) -> Vec<J> {
     }
     let band = chart(
         (0..g.mean.len())
-            .map(|i| json!({ "index": i, "lo": g.mean[i] - g.sd[i], "hi": g.mean[i] + g.sd[i] }))
+            .map(|i| json!({ &x_name: x_at(i), "lo": g.mean[i] - g.sd[i], "hi": g.mean[i] + g.sd[i] }))
             .collect(),
-        json!({ "index": "Number", "lo": "Number", "hi": "Number" }),
+        json!({ &x_name: "Number", "lo": "Number", "hi": "Number" }),
         "Range Area Chart",
-        json!({ "x": "index", "y": "lo", "y2": "hi" }),
+        json!({ "x": &x_name, "y": "lo", "y2": "hi" }),
         json!({ "opacity": 0.25 }),
         CANVAS_W,
         CANVAS_H,
@@ -733,6 +740,7 @@ mod tests {
             cols: 3,
             mean: vec![1.0, 2.0, 3.0],
             sd: vec![0.1, 0.2, 0.3],
+            x: None,
         };
         let p = to_flint(&summary(View::Grid, "path", Payload::Grid(spread)));
         assert_eq!(p.charts.len(), 2);
@@ -749,12 +757,36 @@ mod tests {
             cols: 3,
             mean: vec![1.0, 2.0, 3.0],
             sd: vec![0.0, 0.0, 0.0],
+            x: None,
         };
         let p = to_flint(&summary(View::Grid, "xs", Payload::Grid(flat)));
         assert_eq!(p.charts.len(), 1);
         assert_eq!(p.charts[0]["chart_spec"]["chartType"], "Line Chart");
         // Unlayered, Flint's own zero-baseline judgment stands.
         assert!(p.charts[0]["chart_spec"]["chartProperties"].is_null());
+    }
+
+    /// `plot::line(xs, ys)` — an explicit x-axis replaces the index in every layer and the axis is
+    /// named after its source array.
+    #[test]
+    fn an_explicit_x_series_plots_against_its_x_values() {
+        let g = DistGrid {
+            rows: 1,
+            cols: 3,
+            mean: vec![1.0, 2.0, 3.0],
+            sd: vec![0.1, 0.2, 0.3],
+            x: Some(vec![1.0, 2.0, 4.0]),
+        };
+        let mut s = summary(View::Grid, "err", Payload::Grid(g));
+        s.label_b = Some("bits".into());
+        let p = to_flint(&s);
+        assert_eq!(p.charts.len(), 2);
+        for chart in &p.charts {
+            assert_well_formed(chart);
+            assert_eq!(chart["chart_spec"]["encodings"]["x"], "bits");
+            assert_eq!(chart["data"]["values"][2]["bits"], 4.0);
+        }
+        assert_eq!(p.charts[1]["data"]["values"][2]["err"], 3.0);
     }
 
     #[test]
@@ -764,6 +796,7 @@ mod tests {
             cols: 3,
             mean: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
             sd: vec![0.0; 6],
+            x: None,
         };
         let p = to_flint(&summary(View::Grid, "M", Payload::Grid(g)));
         assert_eq!(p.charts.len(), 1);

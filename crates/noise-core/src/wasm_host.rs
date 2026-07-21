@@ -100,10 +100,14 @@ export function nz_kernel_new(bytes) {
 // Status-returning: 0 on success, -1 if the instance is gone (evicted). The Rust caller falls back
 // to the interpreter on -1 instead of the host throwing (finding C5). The kernel is stateless:
 // key words + starting lane arrive per call (i32 wrap of the u32 values is fine — the kernel
-// treats them as raw 32-bit words).
-export function nz_kernel_run(handle, out, n, k0, k1, lane0) {
+// treats them as raw 32-bit words). `inputs` is the forcing's input-slider values, written into
+// the kernel's first-page input region (bytes 0.., PLAN-UNIFORM-INPUTS P1) before every call —
+// per-call because instances are content-addressed and shared, so two programs (or two forcings
+// at different slider values) can drive one instance.
+export function nz_kernel_run(handle, out, n, k0, k1, lane0, inputs) {
   const inst = _byId.get(handle);
   if (inst === undefined) return -1;
+  if (inputs.length) new Float32Array(inst.exports.memory.buffer, 0, inputs.length).set(inputs);
   inst.exports.kernel(4096, n, k0, k1, lane0); // kernel(out_ptr, n, key_lo, key_hi, lane0)
   // `out` is a live Float32Array view over wasm memory (from Rust `&mut [f32]` — lanes are f32,
   // PLAN-PREGPU Track B); fill it directly.
@@ -114,9 +118,10 @@ export function nz_kernel_run(handle, out, n, k0, k1, lane0) {
 // Multi-column twin of nz_kernel_run for a joint (multi-root) kernel: the kernel fills `n` lanes
 // of each BATCH-strided column at 4096, and `out` (length k*BATCH) receives all columns in one
 // copy. Same status contract: -1 if the instance is gone (finding C5).
-export function nz_kernel_run_cols(handle, out, n, k0, k1, lane0) {
+export function nz_kernel_run_cols(handle, out, n, k0, k1, lane0, inputs) {
   const inst = _byId.get(handle);
   if (inst === undefined) return -1;
+  if (inputs.length) new Float32Array(inst.exports.memory.buffer, 0, inputs.length).set(inputs);
   inst.exports.kernel(4096, n, k0, k1, lane0);
   out.set(new Float32Array(inst.exports.memory.buffer, 4096, out.length));
   return 0;
@@ -124,7 +129,17 @@ export function nz_kernel_run_cols(handle, out, n, k0, k1, lane0) {
 "#)]
 extern "C" {
     fn nz_kernel_new(bytes: &[u8]) -> i32;
-    fn nz_kernel_run(handle: i32, out: &mut [f32], n: u32, k0: u32, k1: u32, lane0: u32) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn nz_kernel_run(
+        handle: i32,
+        out: &mut [f32],
+        n: u32,
+        k0: u32,
+        k1: u32,
+        lane0: u32,
+        inputs: &[f32],
+    ) -> i32;
+    #[allow(clippy::too_many_arguments)]
     fn nz_kernel_run_cols(
         handle: i32,
         out: &mut [f32],
@@ -132,6 +147,7 @@ extern "C" {
         k0: u32,
         k1: u32,
         lane0: u32,
+        inputs: &[f32],
     ) -> i32;
 }
 
@@ -218,6 +234,9 @@ impl Program for WasmProgram {
         if handle < 0 {
             return self.fallback.runner(inputs);
         }
+        // Narrow the input values to the f32 the kernel's input region holds (P1) — the same
+        // `val as f32` an `Inst::Input` lane fill applies, so kernel and fallback agree bitwise.
+        let inputs32 = inputs.iter().map(|&v| v as f32).collect();
         Box::new(WasmRunner {
             handle,
             key: Key::from_seed(0),
@@ -226,6 +245,7 @@ impl Program for WasmProgram {
             buf: vec![0.0f32; BATCH],
             fallback: self.fallback.clone(),
             inputs,
+            inputs32,
             fell_back: None,
         })
     }
@@ -245,6 +265,8 @@ struct WasmRunner {
     fallback: Arc<dyn Program>,
     /// This forcing's host input values, forwarded to the interpreter fallback if it engages.
     inputs: Arc<[f64]>,
+    /// The same values narrowed to f32 — written into the kernel's input region every call (P1).
+    inputs32: Vec<f32>,
     fell_back: Option<Box<dyn Runner>>,
 }
 
@@ -278,6 +300,7 @@ impl Runner for WasmRunner {
                 self.key.k0,
                 self.key.k1,
                 self.lane,
+                &self.inputs32,
             ) >= 0;
             if ok {
                 self.lane = self.lane.wrapping_add(BATCH as u32);
@@ -312,6 +335,8 @@ impl JointProgram for WasmJointProgram {
         if handle < 0 {
             return self.fallback.runner(inputs);
         }
+        // Same f32 narrowing as the single-root runner (P1).
+        let inputs32 = inputs.iter().map(|&v| v as f32).collect();
         Box::new(WasmJointRunner {
             handle,
             key: Key::from_seed(0),
@@ -320,6 +345,7 @@ impl JointProgram for WasmJointProgram {
             buf: vec![0.0f32; self.k * BATCH],
             fallback: self.fallback.clone(),
             inputs,
+            inputs32,
             fell_back: None,
         })
     }
@@ -337,6 +363,8 @@ struct WasmJointRunner {
     buf: Vec<f32>,
     fallback: Arc<dyn JointProgram>,
     inputs: Arc<[f64]>,
+    /// The same values narrowed to f32 — written into the kernel's input region every call (P1).
+    inputs32: Vec<f32>,
     fell_back: Option<Box<dyn JointRunner>>,
 }
 
@@ -367,6 +395,7 @@ impl JointRunner for WasmJointRunner {
                 self.key.k0,
                 self.key.k1,
                 self.lane,
+                &self.inputs32,
             ) >= 0;
             if ok {
                 self.lane = self.lane.wrapping_add(BATCH as u32);

@@ -98,6 +98,11 @@ code, pre { font-family: var(--mono); }
 .code-body .o { color: #a23e6a; }
 .code-body .c { color: #8a8473; font-style: italic; }
 .code-body .n { color: #6a6356; font-style: italic; }
+.code-body .f { color: #2a5a9c; }
+.code-body .t { color: #9a5b00; font-style: italic; }
+.code-body .m { color: #9a5b00; }
+.code-body .s { color: #4f7a2e; }
+.code-body .h { color: #b5651d; font-weight: 700; }
 /* scrollytelling line states: not-yet-revealed lines dim; newly-added lines get an accent rule */
 .code-body .cl { transition: opacity 0.35s ease, background 0.35s ease; }
 .code-body.progressive .cl { opacity: 0.18; }

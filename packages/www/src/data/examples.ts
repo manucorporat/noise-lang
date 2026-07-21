@@ -94,8 +94,8 @@ const gallery: GalleryEntry[] = [
   { id: "dithering", blurb: "How noise buys resolution for a 1-bit sensor.", category: "Signals & DSP" },
   { id: "noise_colors", blurb: "White, pink, brown — sorted by how much each sample remembers the last.", category: "Signals & DSP" },
   { id: "functions", blurb: "Deterministic (=) vs stochastic (~) functions.", category: "Functions & research" },
-  { id: "qjl_scalar", blurb: "An unbiased 1-bit quantizer (TurboQuant building block).", category: "Functions & research" },
-  { id: "turboquant", blurb: "Reproducing a quantization bias (and its fix) from an arXiv paper.", category: "Functions & research", analytic: "bias 2/π ≈ 0.637" },
+  { id: "qjl_scalar", blurb: "One bit per projection, answering inner products it never saw (TurboQuant building block).", category: "Functions & research" },
+  { id: "turboquant", blurb: "TurboQuant's extreme vector compression, rebuilt as an interactive article: the hidden 2/π bias and the sketch that fixes it.", category: "Functions & research", analytic: "bias 2/π ≈ 0.637" },
   { id: "shor_period", blurb: "How a quantum computer factors numbers — and breaks RSA.", category: "Quantum" },
 ];
 

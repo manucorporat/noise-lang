@@ -5,26 +5,44 @@ import type * as Monaco from 'monaco-editor';
 export const LANGUAGE_ID = 'noise';
 export const THEME_ID = 'noise-paper';
 
-// Module-scoped builtin names, by role, so the highlighter can color them distinctly.
-const DISTRIBUTIONS = [
+// Module-scoped builtin names, by role, so the highlighter can color them distinctly. Exported so
+// the static listing highlighter (`./highlight`) tokenizes against the SAME vocabulary as the
+// editor — two lists drift, one does not. Keep in step with `crates/noise-core/src/eval/library.rs`.
+export const DISTRIBUTIONS = [
   'unif', 'unif_int', 'bernoulli', 'normal', 'normal_int', 'normal_complex',
   'exponential', 'exponential_int', 'poisson', 'geometric', 'categorical',
-  'rotation', 'permutation',
+  'rotation', 'permutation', 'empirical', 'block_bootstrap',
 ];
-const QUERIES = ['P', 'Q', 'E', 'Var']; // probability / moment / quantile queries
-const BUILTINS = [
+export const QUERIES = ['P', 'Q', 'E', 'Var']; // probability / moment / quantile queries
+export const BUILTINS = [
   'Print', 'Len',
   'sqrt', 'round', 'log', 'log10', 'sin', 'cos', 'atan', 'sign',
   'exp', 'abs', 'arg', 'conj', 're', 'im', 'floor', 'ceil', 'gcd', 'modpow',
-  'sum', 'count', 'any', 'all', 'max', 'min', 'mean', 'dot', 'vdot', 'normsq', 'norm',
-  'transpose', 'adjoint', 'normalize', 'outer', 'quantize', 'onehot', 'has_duplicate', 'mse',
-  'ones', 'zeros', 'iota', 'vsign', 'scale',
+  'sum', 'prod', 'count', 'any', 'all', 'max', 'min', 'mean', 'dot', 'vdot', 'normsq', 'norm',
+  'cumsum', 'cumprod', 'cummax', 'cummin',
+  'transpose', 'adjoint', 'normalize', 'outer', 'quantize', 'onehot', 'mse',
+  'has_duplicates', 'count_duplicates',
+  'ones', 'zeros', 'iota',
   'sine', 'cosine', 'noise_white', 'noise_white_complex', 'noise_brown', 'noise_pink',
   'noise_ou', 'sample',
-  'set_precision', 'set_resolution',
+  'set_precision', 'set_resolution', 'set_max_samples', 'set_max_opts', 'set_max_ops',
 ];
-const CONSTANTS = ['pi', 'e', 'i', 'j'];
-const MODULES = ['builtin', 'rand', 'math', 'vec', 'signal', 'engine', 'plot', 'stats'];
+export const CONSTANTS = ['pi', 'e', 'i', 'j'];
+export const MODULES = [
+  'builtin', 'rand', 'math', 'vec', 'signal', 'engine', 'plot', 'stats', 'input',
+];
+export const KEYWORDS = ['if', 'else', 'for', 'in', 'continue', 'use', 'true', 'false'];
+
+/** Longest-first, so `==`/`..`/`::`/`&&` win over their one-character prefixes. Noise has no `**`
+ *  — exponentiation is `^` — and `%` is floored modulo. */
+export const OPERATORS = [
+  '==', '!=', '<=', '>=', '&&', '||', '..', '::',
+  '+', '-', '*', '/', '^', '%', '<', '>', '!', '=', '~', '@', '|',
+];
+
+/** Integer or decimal, with the optional exponent the lexer accepts (`1e6`, `1.5e-3`, `2E10`).
+ *  A leading `-` is unary minus, never part of the literal. */
+export const NUMBER_RE = /(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?/;
 
 let registered = false;
 
@@ -59,18 +77,14 @@ export function registerNoise(monaco: typeof Monaco): void {
 
   monaco.languages.setMonarchTokensProvider(LANGUAGE_ID, {
     defaultToken: '',
-    keywords: ['if', 'else', 'for', 'in', 'continue', 'use', 'true', 'false'],
+    keywords: KEYWORDS,
     distributions: DISTRIBUTIONS,
     queries: QUERIES,
     builtins: BUILTINS,
     constants: CONSTANTS,
     modules: MODULES,
-    // longest-first so `**`, `==`, `..`, `::`, `&&` win over their prefixes
-    operators: [
-      '**', '==', '!=', '<=', '>=', '&&', '||', '..', '::',
-      '+', '-', '*', '/', '<', '>', '!', '=', '~', '@', '|',
-    ],
-    symbols: /[=~!<>+\-*/&|.:@]+/,
+    operators: OPERATORS,
+    symbols: /[=~!<>+\-*/&|.:@^%]+/,
     tokenizer: {
       root: [
         // `#!` shebang (only legal on line 1; the lexer skips it as trivia)
@@ -86,10 +100,9 @@ export function registerNoise(monaco: typeof Monaco): void {
         [/`/, { token: 'string.template.delim', next: '@inlineTemplate' }],
         // strings (no escapes in Noise yet)
         [/"[^"]*"/, 'string'],
-        // numbers (float or int)
-        [/\d*\.\d+/, 'number.float'],
-        [/\d+\.\d*/, 'number.float'],
-        [/\d+/, 'number'],
+        // numbers: float or int, each with the optional exponent the lexer accepts (`1e6`, `1.5e-3`)
+        [/(?:\d*\.\d+|\d+\.\d*)(?:[eE][+-]?\d+)?/, 'number.float'],
+        [/\d+(?:[eE][+-]?\d+)?/, 'number'],
         // module path qualifier:  rand::unif
         [/[A-Za-z_]\w*(?=\s*::)/, { cases: { '@modules': 'namespace', '@default': 'identifier' } }],
         // identifiers / keywords / builtins

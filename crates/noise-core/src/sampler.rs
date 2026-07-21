@@ -393,27 +393,16 @@ pub fn moments(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Result<Momen
 // [`crate::reduce::CondMomentsReducer`].)
 
 /// Collect the in-condition draws of a conditioning root `select(C, quantity, NaN)` — every
-/// non-NaN lane, in stream order — for a conditional quantile `Q(· | C)`. NaN lanes (where `C` is
-/// false) are dropped, so the returned vector holds exactly the `m ≈ n·P(C)` draws from the
-/// subpopulation where `C` holds (unsorted; the caller sorts).
+/// non-NaN lane, in stream order — for a conditional quantile `Q(· | C)` or a conditional
+/// introspection. NaN lanes (where `C` is false) are dropped, so the returned vector holds exactly
+/// the `m ≈ n·P(C)` draws from the subpopulation where `C` holds (unsorted; the caller sorts).
+/// Chunked like [`sample_n_par`], and the kept draws per chunk are fixed by `(seed, n)` alone, so
+/// the result stays bit-identical for any thread count.
 ///
-/// KNOWN HOLE (finding B2): like [`cond_moments`], the NaN filter can't tell "condition false" from
-/// "the quantity is NaN on an in-condition lane" — an in-condition NaN quantity is dropped rather
-/// than propagated, biasing the conditional quantile sample. The fix is a dedicated condition column
-/// (see `Engine::query_cond`); deferred for the same interface-ripple reason.
-pub fn cond_sample_n(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Result<Vec<f64>> {
-    let mut out = Vec::new();
-    for_each_batch(graph, root, n, seed, |col| {
-        out.extend(col.iter().filter(|x| !x.is_nan()).map(|&x| x as f64));
-    })?;
-    Ok(out)
-}
-
-/// Parallel twin of [`cond_sample_n`] — the forcing path behind `Q(x | C, q)`. Same chunked
-/// reduction as [`sample_n_par`], with each chunk dropping its NaN (condition-false) lanes before
-/// the index-ordered concatenation — the kept draws per chunk are fixed by `(seed, n)` alone, so
-/// the result stays bit-identical for any thread count. Same KNOWN HOLE (finding B2) as
-/// [`cond_sample_n`]: an in-condition NaN quantity is dropped rather than propagated.
+/// KNOWN HOLE (finding B2): the NaN filter can't tell "condition false" from "the quantity is NaN
+/// on an in-condition lane" — an in-condition NaN quantity is dropped rather than propagated,
+/// biasing the conditional quantile sample. The fix is a dedicated condition column (see
+/// `Engine::query_cond`); deferred for the same interface-ripple reason.
 pub fn cond_sample_n_par(graph: &RvGraph, root: RvId, n: usize, seed: u64) -> Result<Vec<f64>> {
     crate::reduce::run_reduction(
         graph,

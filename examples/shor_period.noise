@@ -17,60 +17,86 @@ for the *period* of a^x mod N — the smallest r with a^r ≡ 1 — because that
 period, once known, gives away N's factors. Everything here is a full amplitude
 simulation: lovely at this size, hopeless for a real key.
 ```
-N = input::int(min: 15, max: 35, step: 2, default: 15)
-
-```md
-**The period, the slow way.** Fix a base a = 2 (coprime to any odd N). The
-plodding route to its period is to keep multiplying by 2 until you land back on
-1, counting the steps.
-```
+N = input::int(min: 15, max: 21, step: 2, default: 15)
 a = 2
-r = 1
-power = a
-for step in 1..N { if power == 1 { continue }; power = (power * a) % N; r = r + 1 }
+Q = 2 ^ math::ceil(math::log(N * N) / math::log(2))
 
 ```md
-**The period, the quantum way.** A real machine never takes that walk. It
-superposes a^x for *every* x at once and inverse-QFTs the result; amplitudes
-that share a residue *reinforce* while the rest cancel — the one place ℂ does
-real work. Sizing the register to the period lands the interference as a clean
-comb of spikes.
+**The function that hides the period.** Walk the powers of a = 2 mod N and they
+cycle: the sequence repeats forever with some period r. The whole difficulty is
+that *reading* r off this curve means walking it, and a real N is too big to walk.
 ```
-Q = 2 * r
-state  = [for x in 0..Q { vec::onehot(math::modpow(a, x, N), N) }] / Q ^ 0.5
-angles = -2 * math::pi / Q * vec::outer(0..Q, 0..Q)
-QFT    = math::exp(math::i * angles) / Q ^ 0.5
+cycle = [for x in 0..Q { math::modpow(a, x, N) }]
+plot::line(cycle[0..48])
+
+```md
+**Superpose every x at once.** A quantum machine never walks. It builds one
+state holding a^x for *every* x below Q simultaneously — Q sized past N² so the
+interference below has room to resolve.
+```
+state = [for x in 0..Q { vec::onehot(cycle[x], N) }] / Q ^ 0.5
+
+```md
+**Interfere.** The inverse QFT makes amplitudes that share a residue *reinforce*
+and the rest cancel — the one place ℂ does real work. What survives is a comb of
+spikes spaced Q/r apart, smeared because r almost never divides Q evenly.
+```
+angles  = -2 * math::pi / Q * vec::outer(0..Q, 0..Q)
+QFT     = math::exp(math::i * angles) / Q ^ 0.5
 readout = [for amplitudes in QFT @ state { vec::normsq(amplitudes) }]
-spikes = vec::count(readout > 0.0001)
 plot::line(readout)
 
 ```md
-**Count the spikes.** The comb has **${spikes}** of them — exactly the period
-**r = ${r}** the slow walk found. On real hardware this one interference *is*
-the measurement; no walk required.
+**Measure.** One look collapses the comb to a single spike. A real run lands on
+a random one and retries when the draw is unhelpful; here we read the first,
+which sits at Q/r.
 ```
+tallest = vec::max(readout[1..Q])
+peak = 0
+for k in 1..Q { if peak > 0 || readout[k] < tallest / 2 { continue }; peak = k }
 
 ```md
-**From period to factors.** When r is even, a^(r/2) is a square root of 1 mod N.
-Unless it happens to be ±1, it betrays a factor: gcd(a^(r/2) − 1, N) shares a
-prime with N, and so does gcd(a^(r/2) + 1, N).
+**Continued fractions.** The measurement is only an *approximation* to a multiple
+of 1/r, so the period is recovered by expanding **${peak}/${Q}** as a continued
+fraction and keeping the last convergent whose denominator stays under N. Sizing
+Q past N² is exactly what makes that convergent provably unique.
 ```
-factor = if r % 2 != 0 {
-  1
-} else {
-  root = math::modpow(a, r / 2, N)
-  g = math::gcd(root - 1, N)
-  if g > 1 && g < N { g } else { math::gcd(root + 1, N) }
+numer = peak
+denom = Q
+prev  = 1
+r     = 0
+done  = false
+for step in 0..20 {
+  if done || denom == 0 { continue }
+  term = math::floor(numer / denom)
+  next = term * r + prev
+  if next >= N { done = true; continue }
+  prev  = r
+  r     = next
+  rest  = numer - term * denom
+  numer = denom
+  denom = rest
 }
-composite = vec::any([for d in 3..N { N % d == 0 }])
 
-verdict = if factor > 1 && factor < N {
-  "**" + N + "** splits into **" + factor + " × " + N / factor + "**"
-} else if composite {
-  "base 2's period came up short on **" + N + "** — a real run just picks another base and retries"
-} else {
-  "**" + N + "** is prime — nothing to factor, the very wall RSA hides behind"
-}
 ```md
-**The verdict.** ${verdict}.
+**Repair the candidate.** When the measured spike shares a factor with the
+period, the convergent comes back a *divisor* of r rather than r itself — the
+usual reason a real run has to retry. Multiplying up until a^r ≡ 1 rescues the
+measurement instead of discarding it.
+```
+mult = 0
+for m in 1..12 { if mult > 0 || math::modpow(a, r * m, N) != 1 { continue }; mult = m }
+r = r * mult
+
+```md
+**From period to factors.** With r = **${r}** in hand, a^(r/2) is a square root of
+1 mod N. Unless it happens to be ±1 it betrays a factor: gcd(a^(r/2) ∓ 1, N) each
+share a prime with N.
+```
+root = math::modpow(a, r / 2, N)
+p = math::gcd(root - 1, N)
+q = math::gcd(root + 1, N)
+
+```md
+**The verdict.** ${N} = ${p} × ${q}
 ```

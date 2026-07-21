@@ -1,6 +1,6 @@
 # PLAN-UNIFORM-INPUTS — inputs as shader uniforms via symbolic scalar values
 
-**Date:** 2026-07-15 · **Status: P0 LANDED** (interpreter + cache); P1–P3 pending. Grounded by a full seam map (file:line below).
+**Date:** 2026-07-15 · **Status: P0 + P1 LANDED** (interpreter + cache; both emitters + dispatch plumbing, 2026-07-19); P2–P3 pending. Grounded by a full seam map (file:line below).
 **Depends on** the landed PLAN-DROP-JIT cost model (`set_prefer_runtime`) — this plan is what makes
 that cost model *pay* for input-driven interactivity.
 
@@ -250,6 +250,45 @@ integration suite, CLI, corpus end-to-end). Deviations worth recording:
   Const(2))`; the value never re-bakes.
 - CLI: `barrier_option --input barrier=90` → 49% knocked out vs 19% at 80 vs 0.6% at 60 — the uniform is
   read at dispatch through the parallel forcing path, no recompile.
+
+## P1 landed — what shipped and the deviations from the draft (2026-07-19)
+
+Both emitters plus the full dispatch plumbing, native and browser. Deviations and pins worth recording:
+
+- **WGSL:** `Params` gained a fixed, padded input block — `inputs: array<vec4<f32>, 4>` = 16 slots
+  (`wgsl_emit::INPUT_SLOTS`), present in EVERY shader so the 80-byte buffer layout
+  (`wgsl_emit::PARAMS_BYTES`, pinned by a const assert against the PRELUDE text) never forks.
+  `RvNode::Input { idx }` emits `P.inputs[idx/4].{xyzw}[idx%4]`; a slot ≥ 16 declines
+  (`Unsupported("input slot beyond uniform capacity")`) — unreachable for real documents since `idx`
+  is the manifest position.
+- **Dispatch:** the three drivers (`try_reduce`, `reduce_on_gpu`, `try_joint`) snapshot
+  `input_rt::current()` ONCE on the driver thread (`gpu::input_uniforms`, `val as f32` — the same
+  narrowing `Inst::Input` applies) and hand the block to every dispatch. Native writes it into the
+  uniform buffer (`gpu::params_bytes`); the browser rides a new 64-byte SAB region
+  (`INPUTS_OFFSET`, `gpu-protocol.ts`) — worker writes per dispatch, `gpu-host.ts` copies it into
+  the 80-byte `Params` buffer.
+- **WASM:** no signature change — the kernel still takes 5 params. Input values live in the
+  **first-page input region** (bytes `0..4096`, `wasm_emit::INPUT_SLOTS = 1024` f32 slots — the page
+  was always reserved and unused); `RvNode::Input` is one aligned `f32.load`. The host
+  (`nz_kernel_run`/`_cols`) writes the values before EVERY call, because instances are
+  content-addressed and shared across programs/forcings. `WasmRunner`/`WasmJointRunner` carry the
+  f64→f32-narrowed snapshot; the interpreter fallback keeps the f64 `Arc`, so kernel and fallback
+  agree bitwise.
+- `kernel::walk_cost` now charges `Input` as neutral (a load ≈ a constant) instead of declining, so
+  the wasm gate accepts slider cones.
+
+**Gate (proven by tests):**
+- `gpu::tests::an_input_value_change_redispatches_a_cached_pipeline` — on-device: two forcings of
+  `P(X < d)` at different `d` compile ONE pipeline (the value-independent shader text is already
+  `pipeline_cached` before the second run) and each answer tracks the dispatched uniform.
+- `wgsl_emit::gpu_tests::an_input_cone_reads_the_dispatch_value_not_a_baked_one` — the event column
+  is bit-identical to the interpreter at each value, and the shader text is identical across values.
+- `wasm_emit::tests::an_input_cone_reads_the_host_written_region_bit_identically` — wasmi: the
+  kernel column matches the interpreter runner bit-for-bit at each value, and the module BYTES are
+  identical across values (the instance-cache key).
+- Measured (M4 Pro, shipped CLI): `turboquant.noise` 13.8 s → **0.09 s** on defaults and 36 s →
+  **0.8 s** at d=40/m=128 — every heavy forcing sat behind an Input cone, and all of them now run
+  on the GPU with cached pipelines.
 
 ## Determinism / the two-tier contract
 

@@ -49,6 +49,22 @@ use crate::kernel::{const_int_exponent, elem_ordinal, elem_source, source_ordina
 /// Invocations per workgroup. 64 = two SIMD groups on Apple silicon and a safe divisor everywhere.
 pub const WORKGROUP: u32 = 64;
 
+/// Host-input uniform slots every shader carries (PLAN-UNIFORM-INPUTS P1). An [`RvNode::Input`]
+/// lowers to a read of `P.inputs` — the *value* is supplied per dispatch, never spelled in the
+/// shader text, so the text (= the pipeline-cache key) is stable across slider drags and a value
+/// change re-dispatches with no pipeline compile. Fixed and padded because a uniform-block array
+/// needs a 16-byte stride: four `vec4<f32>` = 16 slots, plenty for a document's sliders (`idx` is
+/// the input-manifest position); a cone referencing a later slot declines to the interpreter.
+pub const INPUT_SLOTS: usize = 16;
+
+/// Bytes of the `Params` uniform buffer: `key` (8) + `lane0` (4) + `n` (4) + [`INPUT_SLOTS`] f32.
+/// Every dispatcher (native `gpu.rs`, the browser's `gpu-host.ts`) must write exactly this layout.
+pub const PARAMS_BYTES: usize = 16 + INPUT_SLOTS * 4;
+
+// The PRELUDE spells the padded array as a literal `array<vec4<f32>, 4>`; pin the numbers so the
+// constants above can't drift from the WGSL text.
+const _: () = assert!(INPUT_SLOTS == 16 && PARAMS_BYTES == 80);
+
 /// Least number of element reads of one [`RvNode::ArrDraw`] block that earns a draw **loop**.
 ///
 /// Below it the loop's own overhead (and the fact that it must draw the *whole* block, including
@@ -253,9 +269,14 @@ fn plan_blocks(graph: &RvGraph, roots: &[RvId]) -> Result<Plan, Unsupported> {
                 stack.push(*arr);
             }
             RvNode::Src(_) | RvNode::ConstNum(_) | RvNode::ConstBool(_) => {}
-            // Host input uniforms lower to a WGSL uniform read in P1; for now the GPU declines any
-            // cone that carries one and falls back to the interpreter (PLAN-UNIFORM-INPUTS P0).
-            RvNode::Input { .. } => return Err(Unsupported("input")),
+            // A host input uniform (PLAN-UNIFORM-INPUTS P1): lowers to a `P.inputs` read, so it is
+            // supported up to the fixed uniform capacity — a later slot (unreachable for any sane
+            // document; `idx` is the manifest position) declines to the interpreter.
+            RvNode::Input { idx } => {
+                if *idx as usize >= INPUT_SLOTS {
+                    return Err(Unsupported("input slot beyond uniform capacity"));
+                }
+            }
             RvNode::Unary(_, a) => stack.push(*a),
             RvNode::Binary(_, a, b) => {
                 stack.push(*a);
@@ -630,6 +651,18 @@ impl Emitter<'_> {
             RvNode::ConstNum(x) => f32c(x as f32),
             RvNode::ConstBool(b) => if b { "1.0" } else { "0.0" }.to_string(),
 
+            // A host input uniform (PLAN-UNIFORM-INPUTS P1): the value is read from the params
+            // block at dispatch, never spelled into the shader text — that is what keeps the
+            // pipeline cache warm across slider drags. The slot index is a compile-time constant,
+            // so the read is a plain component access into the padded `vec4` array.
+            RvNode::Input { idx } => {
+                format!(
+                    "P.inputs[{}u].{}",
+                    idx / 4,
+                    ["x", "y", "z", "w"][idx as usize % 4]
+                )
+            }
+
             // A scalar source: its ordinal is fixed, so the counter is a compile-time constant.
             RvNode::Src(src) => draw_expr(&src, &format!("{}u", self.ords[id.0 as usize]), "lane"),
 
@@ -832,10 +865,14 @@ fn f32c(x: f32) -> String {
 /// half", so `draw48`'s two 24-bit halves are just `w.x >> 8` and `w.y >> 8` — the 48-bit value is
 /// never assembled at all for the pair-shared sources.
 const PRELUDE: &str = r#"
+// `inputs` carries the host's current input-slider values (PLAN-UNIFORM-INPUTS P1): INPUT_SLOTS
+// f32 slots packed as vec4s (a uniform-block array needs 16-byte stride). Always present — even
+// input-free shaders bind the same 80-byte params buffer — so the layout never forks.
 struct Params {
     key: vec2<u32>,
     lane0: u32,
     n: u32,
+    inputs: array<vec4<f32>, 4>,
 };
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read_write> out: array<f32>;
@@ -1257,6 +1294,41 @@ mod tests {
         assert_eq!(emit(&g, &[root]), Err(Unsupported("poisson")));
     }
 
+    /// A host input lowers to a `P.inputs` component read (PLAN-UNIFORM-INPUTS P1) — the value is
+    /// NEVER in the shader text, which is the whole point: the text is the pipeline-cache key, so
+    /// a slider change re-dispatches a cached pipeline instead of compiling a new one. Slots past
+    /// the fixed uniform block decline to the interpreter.
+    #[test]
+    fn an_input_reads_the_params_block_not_a_baked_constant() {
+        let (g, root) = g_with(|g| {
+            let u = g.push(
+                RvNode::Src(Source::Uniform(Uniform { lo: 0.0, hi: 1.0 })),
+                RvKind::Num,
+            );
+            let d = g.push(RvNode::Input { idx: 5 }, RvKind::Num);
+            g.push(RvNode::Binary(BinOp::Lt, u, d), RvKind::Num)
+        });
+        let src = emit(&g, &[root]).expect("an input cone must lower now, not decline");
+        assert!(
+            body(&src).contains("P.inputs[1u].y"),
+            "slot 5 must read the params block (vec4 1, component y):\n{src}"
+        );
+
+        let (g, root) = g_with(|g| {
+            g.push(
+                RvNode::Input {
+                    idx: INPUT_SLOTS as u32,
+                },
+                RvKind::Num,
+            )
+        });
+        assert_eq!(
+            emit(&g, &[root]),
+            Err(Unsupported("input slot beyond uniform capacity")),
+            "a slot past the fixed uniform block must decline, not mis-index"
+        );
+    }
+
     /// A `Permutation` read through `ArrIndex` lowers to a Fisher–Yates fill plus an array read — the
     /// G4 unlock for `prisoners`. Integer-only, so it is bit-identical to the interpreter (proved on
     /// device by `a_permutation_kernel_matches_the_interpreter`); this pins the emitted shape.
@@ -1496,8 +1568,16 @@ mod gpu_tests {
         Some(Gpu { device, queue })
     }
 
-    /// Compile and dispatch a generated shader; return its column.
-    fn run(gpu: &Gpu, wgsl: &str, key: crate::rng::Key, lane0: u32, n: u32) -> Vec<f32> {
+    /// Compile and dispatch a generated shader; return its column. Input-free cones pass an empty
+    /// `inputs` (the params block's slots stay 0 and are never read).
+    fn run(
+        gpu: &Gpu,
+        wgsl: &str,
+        key: crate::rng::Key,
+        lane0: u32,
+        n: u32,
+        inputs: &[f32],
+    ) -> Vec<f32> {
         gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let module = gpu
             .device
@@ -1520,16 +1600,22 @@ mod gpu_tests {
         }
 
         let bytes = u64::from(n) * 4;
-        let params: [u32; 4] = [key.k0, key.k1, lane0, n];
-        // SAFETY: `[u32; 4]` is 16 contiguous bytes, no padding, every bit pattern valid as `u8`.
-        let pbytes = unsafe { std::slice::from_raw_parts(params.as_ptr().cast::<u8>(), 16) };
+        // The PARAMS_BYTES layout every dispatcher writes: key words, lane0, n, then the padded
+        // input block (PLAN-UNIFORM-INPUTS P1).
+        let mut pbytes = [0u8; PARAMS_BYTES];
+        for (i, w) in [key.k0, key.k1, lane0, n].into_iter().enumerate() {
+            pbytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        for (i, v) in inputs.iter().enumerate() {
+            pbytes[16 + i * 4..20 + i * 4].copy_from_slice(&v.to_le_bytes());
+        }
         let ubuf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: 16,
+            size: PARAMS_BYTES as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        gpu.queue.write_buffer(&ubuf, 0, pbytes);
+        gpu.queue.write_buffer(&ubuf, 0, &pbytes);
         let out = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: bytes,
@@ -1578,11 +1664,12 @@ mod gpu_tests {
         col
     }
 
-    /// The interpreter's column for the same program and lanes — the oracle.
-    fn interp_col(eng: &Engine, root: RvId, seed: u64, n: usize) -> Vec<f32> {
+    /// The interpreter's column for the same program and lanes — the oracle. `inputs` carries the
+    /// forcing's input-slider values (empty for the input-free corpus).
+    fn interp_col(eng: &Engine, root: RvId, seed: u64, n: usize, inputs: &[f64]) -> Vec<f32> {
         let g = eng.graph();
         let prog = InterpBackend.compile(g, root, n);
-        let mut r = prog.runner(std::sync::Arc::from(&[] as &[f64]));
+        let mut r = prog.runner(std::sync::Arc::from(inputs));
         let mut out = Vec::with_capacity(n);
         let cap = r.batch_cap();
         let mut lane = 0u32;
@@ -1597,6 +1684,17 @@ mod gpu_tests {
 
     /// Emit `src`'s cone as WGSL and run it, alongside the interpreter's answer for the same lanes.
     fn both(gpu: &Gpu, src: &str, seed: u64) -> Option<(Vec<f32>, Vec<f32>)> {
+        both_with_inputs(gpu, src, seed, &[])
+    }
+
+    /// [`both`] for a program with `input::` sliders: `inputs` is handed to the interpreter runner
+    /// as f64 and to the GPU params block narrowed to f32 — exactly the two production channels.
+    fn both_with_inputs(
+        gpu: &Gpu,
+        src: &str,
+        seed: u64,
+        inputs: &[f64],
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
         let mut eng = Engine::new();
         let root = match eng.run_rv(src).expect("program builds") {
             crate::Value::Dist(id) => id,
@@ -1604,8 +1702,16 @@ mod gpu_tests {
         };
         let (sg, sroot) = simplify(eng.graph(), root);
         let wgsl = emit(&sg, &[sroot]).ok()?; // declined cones are not a failure
-        let gpu_col = run(gpu, &wgsl, crate::rng::Key::from_seed(seed), 0, LANES);
-        let cpu_col = interp_col(&eng, root, seed, LANES as usize);
+        let inputs32: Vec<f32> = inputs.iter().map(|&v| v as f32).collect();
+        let gpu_col = run(
+            gpu,
+            &wgsl,
+            crate::rng::Key::from_seed(seed),
+            0,
+            LANES,
+            &inputs32,
+        );
+        let cpu_col = interp_col(&eng, root, seed, LANES as usize, inputs);
         Some((gpu_col, cpu_col))
     }
 
@@ -1642,6 +1748,52 @@ mod gpu_tests {
                  DIFFERENT stream than the interpreter, which would void the RNG certification"
             );
         }
+    }
+
+    /// An input-carrying cone on the device (PLAN-UNIFORM-INPUTS P1): ONE shader text serves every
+    /// slider value — the value rides the params block — and each dispatch matches the interpreter
+    /// given the same values. The cone is a threshold event (`X < d`): the draw is tier-1 and a
+    /// comparison of identical f32s against an identical f32 uniform is exact, so the whole column
+    /// is asserted bit-identical.
+    #[test]
+    fn an_input_cone_reads_the_dispatch_value_not_a_baked_one() {
+        let Some(gpu) = gpu() else {
+            eprintln!("no GPU adapter — skipping");
+            return;
+        };
+        let src = "use rand; X ~ unif(0, 1); d = input::real(default: 0.5, name: \"d\"); X < d";
+        let mut texts = Vec::new();
+        for d in [0.25f64, 0.75] {
+            // Re-derive the shader per value to pin the P1 invariant: the text must not change.
+            let mut eng = Engine::new();
+            let root = match eng.run_rv(src).expect("program builds") {
+                crate::Value::Dist(id) => id,
+                other => panic!("expected a random variable, got {other:?}"),
+            };
+            let (sg, sroot) = simplify(eng.graph(), root);
+            texts.push(emit(&sg, &[sroot]).expect("an input cone must lower"));
+
+            let (g, c) = both_with_inputs(&gpu, src, 13, &[d])
+                .expect("an input cone must lower, not decline");
+            let hits = g
+                .iter()
+                .zip(&c)
+                .filter(|(a, b)| a.to_bits() == b.to_bits())
+                .count();
+            assert_eq!(
+                hits, LANES as usize,
+                "d = {d}: the GPU event column must be bit-identical to the interpreter's"
+            );
+            let mean = g.iter().map(|&v| f64::from(v)).sum::<f64>() / f64::from(LANES);
+            assert!(
+                (mean - d).abs() < 0.05,
+                "d = {d}: P(X < d) must track the dispatched value, got {mean}"
+            );
+        }
+        assert_eq!(
+            texts[0], texts[1],
+            "the shader text must be identical across input values — it is the pipeline-cache key"
+        );
     }
 
     /// **Tier 2.** Everything built on top of the draws, over the shared cross-backend corpus.

@@ -110,6 +110,8 @@ import {
   Ctrl,
   Op,
   Signal,
+  INPUT_SLOTS,
+  INPUTS_OFFSET,
   WGSL_OFFSET,
   WGSL_CAP_BYTES,
   RESULT_OFFSET,
@@ -128,6 +130,7 @@ interface NoiseGpu {
     k0: number,
     k1: number,
     lane0: number,
+    inputs: Float32Array,
   ): number;
 }
 
@@ -159,8 +162,13 @@ function installGpuBridge(sab: SharedArrayBuffer, ready: boolean): void {
       Atomics.store(ctrl, Ctrl.OP, Op.PREPARE);
       return roundTrip(ctrl);
     },
-    dispatch(wgsl, out, n, cols, k0, k1, lane0) {
+    dispatch(wgsl, out, n, cols, k0, k1, lane0, inputs) {
       writeWgsl(sab, ctrl, wgsl);
+      // The forcing's input-slider values (PLAN-UNIFORM-INPUTS P1) — the per-dispatch data that
+      // lets one cached pipeline serve every slider value. Unused slots stay 0 (never read).
+      const inRegion = new Float32Array(sab, INPUTS_OFFSET, INPUT_SLOTS);
+      inRegion.fill(0);
+      inRegion.set(inputs.subarray(0, INPUT_SLOTS));
       Atomics.store(ctrl, Ctrl.OP, Op.DISPATCH);
       Atomics.store(ctrl, Ctrl.N, n);
       Atomics.store(ctrl, Ctrl.COLS, cols);

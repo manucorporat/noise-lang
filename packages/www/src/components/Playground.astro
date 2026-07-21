@@ -525,12 +525,30 @@
   /* Inline input control (`input::…`): a small framed widget sitting in the paper flow, right after
      the code that declares it. A slider + number box (or a checkbox), so a reader tunes the
      parameter and the page re-runs in place. */
+  /* Sticky: a control pins to the top of the pane once scrolled past, so a reader can drag it while
+     watching a chart further down the paper. `top` is assigned per-control at render time
+     (`layoutStickyInputs`) so successive controls stack flush instead of overlapping. */
   #pg-output .pg-input {
-    position: relative;
+    position: sticky;
+    top: 0;
+    z-index: 6;
     display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap;
     margin: 1.1rem 0; padding: 0.5rem 0.75rem;
     border: 1px solid var(--rule); border-radius: 6px; background: var(--paper-2);
     font-family: var(--sans); font-size: 0.82rem; color: var(--ink-dim);
+    transition: box-shadow 0.15s ease, border-color 0.15s ease;
+  }
+  #pg-output .pg-input.is-pinned {
+    border-color: var(--accent);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.09);
+  }
+  /* Below the split breakpoint the pane stops being the scroller (the window scrolls instead), and
+     in print there is no scrollport at all — in both, pinning would strand the control. */
+  @media (max-width: 880px) {
+    #pg-output .pg-input { position: relative; top: auto !important; }
+  }
+  @media print {
+    #pg-output .pg-input { position: relative; top: auto !important; box-shadow: none; }
   }
   #pg-output .pg-input.has-note { cursor: help; box-shadow: inset 3px 0 0 var(--accent); }
   #pg-output .pg-input-name { font-variant: small-caps; letter-spacing: 0.03em; color: var(--ink); }
@@ -943,6 +961,47 @@
    * as numbered figures, and code as clean listings whose comments are stripped from the page and
    * revealed on hover (the way a paper hides its source annotations). Blocks are already in reading
    * order; each code listing gathers the comments that annotate it (from the comment layer). */
+  /* A pinned stack taller than this fraction of the pane would hide the very charts it exists to
+     keep in view, so controls past the budget stay in the flow. */
+  const STICKY_INPUT_BUDGET = 0.4;
+
+  /**
+   * Stack the sticky `input::` controls so each pins flush beneath the ones declared before it.
+   * Heights are measured rather than assumed — a control wraps to two rows on a narrow pane. A
+   * sticky offset constrains the *margin* box, so each control's own margin-top comes back off the
+   * offset to land its border box against the one above.
+   */
+  function layoutStickyInputs(page: HTMLElement) {
+    const budget = outEl.clientHeight * STICKY_INPUT_BUDGET;
+    let stack = 0;
+    for (const el of page.querySelectorAll<HTMLElement>('.pg-input')) {
+      const height = el.offsetHeight;
+      if (stack + height > budget) {
+        el.style.position = 'static';
+        delete el.dataset.stickyTop;
+        continue;
+      }
+      el.style.position = '';
+      el.style.top = `${stack - (parseFloat(getComputedStyle(el).marginTop) || 0)}px`;
+      el.dataset.stickyTop = String(stack);
+      stack += height;
+    }
+    markPinnedInputs();
+  }
+
+  /** Flag the controls currently held at the top, so they read as an overlay rather than as flowing
+   *  paper. Cheap enough to run on every scroll frame — a document has a handful of controls. */
+  function markPinnedInputs() {
+    const paneTop = outEl.getBoundingClientRect().top + outEl.clientTop;
+    for (const el of outEl.querySelectorAll<HTMLElement>('.pg-input')) {
+      const stickyTop = el.dataset.stickyTop;
+      const pinned =
+        stickyTop !== undefined &&
+        el.getBoundingClientRect().top <= paneTop + Number(stickyTop) + 1;
+      el.classList.toggle('is-pinned', pinned);
+    }
+  }
+
   function renderPreview(res: NoiseIntrospectResult) {
     outEl.innerHTML = '';
     liveCards.length = 0;
@@ -1081,6 +1140,8 @@
       t.textContent = `… ${res.result.truncated.dropped} more emissions not shown (output capped)`;
       page.appendChild(t);
     }
+
+    layoutStickyInputs(page);
   }
 
   /** The paper's header block: a centered title, a justified abstract, and a keywords line — all from
@@ -1441,12 +1502,29 @@
   new ResizeObserver(() => {
     window.clearTimeout(resizeTimer);
     resizeTimer = window.setTimeout(() => {
+      // Both the stack budget (pane height) and each control's height (wrapping) move with the pane,
+      // so the sticky offsets are re-measured even when the chart redraw below bails out.
+      const page = outEl.querySelector<HTMLElement>('.pg-paper');
+      if (page) layoutStickyInputs(page);
       const width = outEl.clientWidth;
       if (width === lastWidth || liveCards.length === 0) return;
       lastWidth = width;
       for (const card of liveCards) drawCard(card.mount, card.charts);
     }, 180);
   }).observe(outEl);
+
+  let pinFrame = 0;
+  outEl.addEventListener(
+    'scroll',
+    () => {
+      if (pinFrame) return;
+      pinFrame = requestAnimationFrame(() => {
+        pinFrame = 0;
+        markPinnedInputs();
+      });
+    },
+    { passive: true },
+  );
 
   // --- resizable split ---
   const split = $('pg-split');

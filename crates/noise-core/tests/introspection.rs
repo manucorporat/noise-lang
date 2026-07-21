@@ -286,6 +286,42 @@ fn plot_calls_capture_charts_and_yield_unit() {
     assert!(eng.take_output().is_empty());
 }
 
+/// `plot::line(xs, ys)` — the explicit-x series: the x values ride into the grid payload, the
+/// axis is named after its source array, and mismatched lengths are a friendly error.
+#[test]
+fn plot_line_with_explicit_x_carries_the_x_axis() {
+    let mut eng = Engine::new();
+    eng.run("use rand; bits = [1, 2, 4]; err ~[3] normal(0, 1); plot::line(bits, err)")
+        .unwrap();
+    let s = eng
+        .take_output()
+        .into_iter()
+        .find_map(|o| match o.output {
+            noise_core::Output::Plot(s) => Some(s),
+            _ => None,
+        })
+        .expect("plot::line emits a chart");
+    assert_eq!(s.label, "err");
+    assert_eq!(s.label_b.as_deref(), Some("bits"));
+    match &s.payload {
+        Payload::Grid(g) => {
+            assert!(g.is_series());
+            assert_eq!(g.x.as_deref(), Some(&[1.0, 2.0, 4.0][..]));
+            assert_eq!(g.mean.len(), 3);
+        }
+        other => panic!("expected a grid, got {other:?}"),
+    }
+
+    let err = run("plot::line([1, 2], [1, 2, 3])")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("matching lengths"), "got: {err}");
+    let err = run("X ~ rand::normal(0, 1); plot::line([X, 2], [1, 2])")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("deterministic numeric x-axis"), "got: {err}");
+}
+
 /// `describe`/`heatmap` of a 2-D draw → a rectangular grid (rows × cols), one mean per cell.
 #[test]
 fn describe_of_a_matrix_is_a_grid() {

@@ -1,58 +1,76 @@
 ---
-title: "QJL in 1-D"
+title: "QJL in the small"
 abstract: >
-  A one-bit sketch keeps only the sign of a random projection. Rescaled by √(π/2) it becomes
-  an unbiased estimator of the number it was built from — move that number and the estimate
-  follows it. What the bit costs is not the mean but the spread: a single sketch carries a
-  76% relative error, and only averaging independent sketches buys it back. This is the
-  estimator TurboQuant leans on.
+  Store a vector as its length plus one bit per random projection, and throw the coordinates
+  away. Rescaled by √(π/2) those bits still answer inner-product questions against directions
+  the sketch never saw — unbiased for every one of them. What the bits cost is not the mean
+  but the spread, and the only way to buy it back is more bits. This is the estimator
+  TurboQuant leans on.
 tags: [research, continuous]
 ---
-use math   // sqrt, pi, sign
-use vec    // mean
+use math   // pi, sqrt, sign, cos, sin, round
+use vec    // norm, transpose
+use rand
 
 ```md
-**The number to recover.** A scalar the sketch never sees directly. Its magnitude is kept
-as an ordinary float — that part is not compressed. Everything the bits must carry is
-*which way it points*.
+**The vector.** Two coordinates, read once and then discarded. Its *length* survives
+compression as an ordinary float — that part is never quantized. Everything the bits have to
+carry is which way it points.
 ```
-x = input::real(min: -2, max: 2, step: 0.1, default: 0.7)
-magnitude = abs(x)
+x = [2, 0]
+magnitude = norm(x)
 
 ```md
-**The sketch.** Draw independent standard normals, project x onto each, and keep only the
-sign of the result. Those signs are the entire stored payload: one bit per projection.
+**The query.** A direction the sketch never sees. Swing it around x and the true inner
+product sweeps from the full magnitude down through zero and out the far side — the answer
+the bits must reproduce, for a question asked long after they were written.
 ```
-m = input::int(min: 1, max: 64, default: 1)
-g ~[m] rand::normal(0, 1)
-bits = sign(g * x)
+query_angle = input::real(min: 0, max: 180, step: 5, default: 60, label: "query angle (degrees)")
+radians = query_angle * pi / 180
+y = [cos(radians), sin(radians)]
+true_ip = y @ x
+
+```md
+**The sketch.** Draw independent Gaussian directions, project x onto each, and keep only the
+sign of the result. Those signs are the entire stored payload — one bit apiece — and the
+coordinates of x are now gone.
+```
+n_bits = input::int(min: 1, max: 64, default: 8)
+S ~[n_bits, 2] rand::normal(0, 1)
+bits = sign(S @ x)
 
 ```md
 **The estimator.** Read every bit back against the Gaussian that produced it, average, and
-rescale by √(π/2). Since `E|g| = √(2/π)` the two constants cancel and the average lands on
-x — for *every* x, which is what makes the unbiasedness say something. Drag x through zero:
-the estimate follows it, sign and all, having only ever seen bits.
+rescale by √(π/2) times the stored length. Since `E[g · sign(g·x)] = √(2/π) x̂` the two
+constants cancel and the average lands on `y @ x` — for *every* y, which is what makes the
+unbiasedness say something. Swing the query through 90° and the estimate changes sign with
+it, having only ever seen bits about x.
 ```
-estimate = sqrt(pi / 2) * magnitude * mean(bits * g)
+// Flipping each Gaussian to match its own bit makes them agree about which side x is on, so they
+// reinforce instead of cancelling — the sum leans towards x with no coordinate ever stored.
+rebuilt_direction = transpose(S) @ bits
+gain              = sqrt(pi / 2) * magnitude / n_bits
+estimate          = gain * (y @ rebuilt_direction)
 mean_estimate = E(estimate)
-spread        = Var(estimate)
+squared_error = E((estimate - true_ip) ^ 2)
+bound = pi / (2 * n_bits) * magnitude ^ 2
 ```latex
-E[\hat{x}] = ${mean_estimate} \qquad (\text{true } x = ${x}),
-\qquad \mathrm{Var}[\hat{x}] = \frac{(\pi/2 - 1)\,x^2}{m} \approx ${spread}
+E[\widehat{y^\top x}] = ${mean_estimate} \qquad (\text{true } y^\top x = ${round(true_ip, 4)})
+\qquad E\big[(\widehat{y^\top x} - y^\top x)^2\big] = ${squared_error} \;\le\; \frac{\pi}{2\,n_{\text{bits}}}\|x\|^2 = ${round(bound, 4)}
 ```
 
 ```md
-**The price of the bit.** A single sketch is a scaled folded normal — wide, skewed, and
-worth almost nothing on its own: its standard deviation is ${round(sqrt(pi / 2 - 1), 3)}
-times |x|. Averaging m of them shrinks that by √m. Drag **m** and watch the histogram
-collapse onto the true value.
+**The price of the bit.** A single sign is nearly worthless on its own — its estimate is a
+scaled Gaussian projection, wide enough to land on the wrong side of zero. Averaging shrinks
+that spread by the square root of the bit count while leaving the centre exactly where it was.
+Drag **n_bits** and watch the histogram collapse onto the true value.
 ```
 plot::histogram(estimate)
 
 ```md
-**Why this scales.** In one dimension the bits are redundant — they all report the same
-sign — so averaging only cancels noise the sketch itself injected. In d dimensions the
-same d bits must also carry the *direction* of a whole vector, and the 1/√m gain becomes a
-1/√d gain over d genuinely different measurements. That is the step `turboquant.noise`
-takes, with exactly this √(π/2) out front.
+**Why this scales.** Two dimensions need barely any bits — one sign already pins a half-plane,
+and the rest only average away noise the sketch injected. In d dimensions the same signs must
+locate a direction on a d-sphere, so each one buys genuinely new information and the gain from
+averaging becomes a real 1/√d gain over d measurements. That is the step `turboquant.noise`
+takes at d = 20, with exactly this √(π/2) out front.
 ```

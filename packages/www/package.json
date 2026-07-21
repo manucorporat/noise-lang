@@ -12,7 +12,7 @@
     "check:flint": "node scripts/check-flint-names.mjs"
   },
   "dependencies": {
-    "@noiselang/core": "^0.7.0",
+    "@noiselang/core": "workspace:*",
     "astro": "^5.13.0",
     "flint-chart": "0.2.0",
     "monaco-editor": "^0.52.2",

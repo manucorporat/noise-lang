@@ -13,7 +13,10 @@
 //!   * `kernel(out: i32, n: i32, key_lo: i32, key_hi: i32, lane0: i32)` — fills `out[0..n]` with
 //!     the root draws for global lanes `lane0 .. lane0 + n`, as **f32** (PLAN-PREGPU Track B).
 //!     Stateless — same arguments, same column, bit-identical to the interpreter and the other
-//!     codegen backends under the same seed.
+//!     codegen backends under the same seed. The one piece of ambient state is the **input
+//!     region** ([`INPUT_SLOTS`]): a kernel whose cone carries `input::` sliders reads their
+//!     current values from bytes `0..` of memory, which the host writes before each call
+//!     (PLAN-UNIFORM-INPUTS P1 — the values are per-call data, never baked into the bytes).
 //!
 //! **f32 lanes.** Values are `f32` throughout and one squares64 draw feeds a whole lane PAIR (48
 //! consumed bits = two 24-bit uniforms), so the pair-unrolled loop hashes once per two lanes for
@@ -120,6 +123,13 @@ fn f32c(x: f32) -> Ieee32 {
 const T_I64: u32 = 4;
 const T_F32: u32 = 8;
 
+/// Host-input slots the kernel can read (PLAN-UNIFORM-INPUTS P1): the host writes the current
+/// input values — one f32 per manifest slot — at bytes `0 .. 4*INPUT_SLOTS` of linear memory
+/// before each `kernel` call (the first page below the output columns at 4096, which was always
+/// reserved and unused). An [`RvNode::Input`] is then one aligned load, and the value is never in
+/// the module bytes — so the content-addressed instance cache stays warm across slider changes.
+pub const INPUT_SLOTS: usize = 1024;
+
 /// Cones at most this many nodes pair-unroll the kernel loop (two lanes per iteration, so a
 /// `Normal`'s hash + ln + trig pair is computed once and split across the even/odd lane); larger
 /// ones keep the single-lane parity-select loop — the unroll doubles the value-slot local pool,
@@ -221,8 +231,7 @@ fn collect_gather_tables(
             RvNode::Src(_)
             | RvNode::ConstNum(_)
             | RvNode::ConstBool(_)
-            // A host input never reaches the wasm emitter in P0 — `kernel::walk_cost` declines any
-            // cone carrying one — but keep this table-collection walk total (it draws no table).
+            // A host input reads the first-page input region (P1), not a gather table — a leaf here.
             | RvNode::Input { .. }
             | RvNode::ArrDraw { .. }
             | RvNode::ArrElem { .. } => {}
@@ -305,10 +314,11 @@ pub(crate) fn emit_roots(graph: &RvGraph, roots: &[RvId]) -> Vec<u8> {
     functions.function(2);
 
     // --- one linear memory: one BATCH-f32 column per root at/after 4096, then gather tables ---
-    // Host convention: columns at/after 4096 (the counter kernel keeps no state region; the first
-    // page stays reserved so the host layout is unchanged). Const gather tables live after the
-    // columns — `cols_end` is 4-aligned by construction — initialized by an active data segment,
-    // so the host needs no wiring at all.
+    // Host convention: columns at/after 4096; the first page below them holds the host-written
+    // input values at bytes 0..4*INPUT_SLOTS (PLAN-UNIFORM-INPUTS P1 — zero until the host writes,
+    // and only Input-carrying kernels read it). Const gather tables live after the columns —
+    // `cols_end` is 4-aligned by construction — initialized by an active data segment, so the host
+    // needs no wiring at all.
     let mut memories = MemorySection::new();
     let cols_end = 4096 + roots.len() * BATCH * 4;
     let (gather_tables, table_data) = collect_gather_tables(graph, roots, cols_end as u64);
@@ -668,10 +678,12 @@ fn emit_node(
         RvNode::ConstBool(b) => {
             s.f32_const(f32c(if *b { 1.0 } else { 0.0 }));
         }
-        // The WASM emit of a host input uniform is P1; for P0 `walk_cost` declines any cone with one,
-        // so this backend never sees it (the interpreter, reading `input_values`, takes it instead).
-        RvNode::Input { .. } => {
-            unreachable!("walk_cost excludes Input cones from wasm codegen (P0)")
+        // A host input uniform (PLAN-UNIFORM-INPUTS P1): one aligned load from the first-page
+        // input region the host wrote before this call ([`INPUT_SLOTS`]). The value never enters
+        // the module bytes, so the content-addressed instance cache holds across slider changes.
+        RvNode::Input { idx } => {
+            s.i32_const(0);
+            s.f32_load(mem4(u64::from(*idx) * 4));
         }
         RvNode::Unary(op, a) => {
             let la = emit_node(s, ctx, *a, memo, slot, pair);
@@ -1397,6 +1409,12 @@ mod tests {
     /// the even/odd lanes take different paths in the pair-unrolled loop, so `out[0]` alone
     /// would only ever exercise the cos branch.
     fn first_batch_emitted(bytes: &[u8], seed: u64) -> Vec<f32> {
+        first_batch_emitted_with_inputs(bytes, seed, &[])
+    }
+
+    /// [`first_batch_emitted`] with host input values written into the first-page input region
+    /// before the call — exactly what `nz_kernel_run` does in the browser (P1).
+    fn first_batch_emitted_with_inputs(bytes: &[u8], seed: u64, inputs: &[f32]) -> Vec<f32> {
         let engine = Engine::default();
         let module = WasmModule::new(&engine, bytes).expect("emitted module must validate");
         let mut store = Store::new(&engine, ());
@@ -1417,6 +1435,11 @@ mod tests {
             .unwrap();
         let out_ptr = 4096i32;
         let key = Key::from_seed(seed);
+        // The host convention P1 adds: current input values at bytes 0.., written before the call.
+        if !inputs.is_empty() {
+            let bytes: Vec<u8> = inputs.iter().flat_map(|v| v.to_le_bytes()).collect();
+            memory.write(&mut store, 0, &bytes).unwrap();
+        }
         kernel
             .call(
                 &mut store,
@@ -1455,6 +1478,43 @@ mod tests {
                 wasm.to_bits()
             );
         }
+    }
+
+    /// A host-input cone (PLAN-UNIFORM-INPUTS P1): the kernel reads the value the host wrote into
+    /// the first-page input region, bit-identically to the interpreter runner given the same
+    /// values — and the module BYTES are identical across values, which is what keeps the browser's
+    /// content-addressed instance cache warm across slider drags.
+    #[test]
+    fn an_input_cone_reads_the_host_written_region_bit_identically() {
+        let src = "use rand; X ~ unif(0, 1); d = input::real(default: 0.5, name: \"d\"); X < d";
+        let mut modules = Vec::new();
+        for d in [0.25f64, 0.75] {
+            let (eng, id) = graph_of(src);
+            let graph = eng.graph();
+            assert!(
+                supported(graph, id),
+                "an input cone must be codegen-supported"
+            );
+            let bytes = emit(graph, id);
+
+            let mut ir = InterpBackend
+                .compile(graph, id, ENOUGH_DRAWS)
+                .runner(std::sync::Arc::from(&[d][..]));
+            ir.position(0, 0);
+            let interp_col: Vec<f32> = ir.next_batch(BATCH).to_vec();
+            let wasm_col = first_batch_emitted_with_inputs(&bytes, 0, &[d as f32]);
+            assert_eq!(interp_col, wasm_col, "d = {d}: kernel must read the region");
+            let mean = wasm_col.iter().map(|&v| f64::from(v)).sum::<f64>() / wasm_col.len() as f64;
+            assert!(
+                (mean - d).abs() < 0.1,
+                "d = {d}: P(X < d) must track the written value, got {mean}"
+            );
+            modules.push(bytes);
+        }
+        assert_eq!(
+            modules[0], modules[1],
+            "the module bytes must be identical across input values — they are the instance-cache key"
+        );
     }
 
     /// The RNG half of the shared corpus: the emitted WASM kernel must agree with the interpreter in

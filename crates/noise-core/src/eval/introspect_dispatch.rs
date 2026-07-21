@@ -83,7 +83,7 @@ impl Engine {
         // distinct from the sentinel; it is deferred because the single-root reduce/backend path
         // (`reduce`/`Runner`, incl. wasm/WGSL) produces one column per batch, and re-routing to a
         // two-root interpreter pass would change RNG consumption order. See the matching notes on
-        // `reduce::CondMomentsReducer` and `sampler::cond_sample_n`.
+        // `reduce::CondMomentsReducer` and `sampler::cond_sample_n_par`.
         let nan = self.graph.push(RvNode::ConstNum(f64::NAN), RvKind::Num);
         let root = self.graph.push(
             RvNode::Select {
@@ -409,6 +409,7 @@ impl Engine {
                 cols,
                 mean: vec![],
                 sd: vec![],
+                x: None,
             }));
         }
         let n = INTROSPECT_N;
@@ -420,6 +421,104 @@ impl Engine {
             n,
             INTROSPECT_SEED,
         )?))
+    }
+
+    /// `plot::line(xs, ys)` → the explicit-x series. `xs` is a deterministic numeric array (the
+    /// x-axis), `ys` a same-length vector of numbers/estimates/RVs (sampled jointly, banded when it
+    /// has spread — the same grid the one-argument form draws, with `xs` in place of the index).
+    fn line_xy_summary(
+        &mut self,
+        args: &[Spanned],
+        arg_vals: &[Value],
+        span: Span,
+    ) -> Result<Value> {
+        use crate::introspect::{
+            grid, DistGrid, Payload, Summary, View, INTROSPECT_N, INTROSPECT_SEED,
+        };
+        let xs = match &arg_vals[0] {
+            Value::Array(cells) => {
+                let mut nums = Vec::with_capacity(cells.len());
+                for cell in cells.iter() {
+                    match cell {
+                        Value::Num(x) | Value::Est { val: x, .. } => nums.push(*x),
+                        other => {
+                            return Err(NoiseError::runtime(
+                                format!("plot::line(xs, ys) wants a deterministic numeric x-axis, got a {} element", other.type_name()),
+                                span,
+                            ))
+                        }
+                    }
+                }
+                nums
+            }
+            other => {
+                return Err(NoiseError::runtime(
+                    format!(
+                        "plot::line(xs, ys) wants an array of x values first, got {}",
+                        other.type_name()
+                    ),
+                    span,
+                ))
+            }
+        };
+        let ys = match &arg_vals[1] {
+            Value::Array(ys) if !ys.iter().any(|y| matches!(y, Value::Array(_))) => ys.clone(),
+            Value::Array(_) => {
+                return Err(NoiseError::runtime(
+                    "plot::line(xs, ys) wants a vector of y values, not a matrix".to_string(),
+                    span,
+                ))
+            }
+            other => {
+                return Err(NoiseError::runtime(
+                    format!(
+                        "plot::line(xs, ys) wants an array of y values second, got {}",
+                        other.type_name()
+                    ),
+                    span,
+                ))
+            }
+        };
+        if xs.len() != ys.len() {
+            return Err(NoiseError::runtime(
+                format!(
+                    "plot::line(xs, ys) wants matching lengths, got {} x values and {} y values",
+                    xs.len(),
+                    ys.len()
+                ),
+                span,
+            ));
+        }
+        let label = label_of(&args[1]);
+        let label_b = Some(label_of(&args[0]));
+        let wrap = |g| {
+            Value::Summary(Rc::new(Summary {
+                view: View::Grid,
+                label,
+                label_b,
+                payload: Payload::Grid(g),
+            }))
+        };
+        let roots = self.vector_roots(&ys, span)?;
+        if self.check_mode {
+            return Ok(wrap(DistGrid {
+                rows: 1,
+                cols: roots.len(),
+                mean: vec![],
+                sd: vec![],
+                x: None,
+            }));
+        }
+        let mut g = grid(
+            &self.graph,
+            &roots,
+            1,
+            roots.len(),
+            INTROSPECT_N,
+            INTROSPECT_SEED,
+        )?;
+        g.x = Some(xs);
+        Ok(wrap(g))
     }
 
     /// `corr(vec)` → the element×element correlation heatmap, sampled in one joint pass.
@@ -576,6 +675,16 @@ impl Engine {
         // dispatches to its own summary builder rather than the `introspect_call` core.
         if base == "fan" {
             let summary = self.fan_summary(args, arg_vals, span)?;
+            if let Value::Summary(s) = &summary {
+                self.emit(Output::Plot(s.clone()));
+            }
+            return Ok(Value::Unit);
+        }
+        // `line(xs, ys)` — the explicit-x series: `xs` is the deterministic x-axis, `ys` the values
+        // (numbers or RVs, banded like the one-argument form). The two-argument shape exists only
+        // here — `describe` stays single-argument.
+        if base == "line" && arg_vals.len() == 2 {
+            let summary = self.line_xy_summary(args, arg_vals, span)?;
             if let Value::Summary(s) = &summary {
                 self.emit(Output::Plot(s.clone()));
             }

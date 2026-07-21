@@ -435,9 +435,15 @@ pub fn walk_cost(
             // uniform / uniform_int: cheap inline draw everywhere.
             RvNode::Src(Source::Uniform(_) | Source::UniformInt { .. }) => *fusible += 1,
             RvNode::ConstNum(_) | RvNode::ConstBool(_) => {} // neutral
-            // A host input uniform: the WASM/GPU emit is P1. For P0 the codegen backends decline any
-            // cone that carries one (the interpreter, which reads `input_values`, takes it instead).
-            RvNode::Input { .. } => return false,
+            // A host input uniform (PLAN-UNIFORM-INPUTS P1): one aligned f32 load from the
+            // first-page input region the host writes before each kernel call — as cheap as a
+            // constant, so neutral. A slot past the region can't be addressed and declines (a
+            // document would need >1024 inputs; unreachable in practice).
+            RvNode::Input { idx } => {
+                if *idx as usize >= crate::wasm_emit::INPUT_SLOTS {
+                    return false;
+                }
+            }
             RvNode::Unary(op, a) => {
                 match op {
                     // Inlined on both backends (trig/ln polynomials). `Sqrt` rides the same

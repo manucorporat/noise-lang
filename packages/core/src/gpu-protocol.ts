@@ -49,6 +49,15 @@ export const Signal = { IDLE: 0, PENDING: 1 } as const;
 /** Bytes reserved for the Int32 control header (a whole 64-byte line; only ~10 words are used). */
 export const HEADER_BYTES = 64;
 
+/** Input-uniform slots per dispatch — must equal `wgsl_emit::INPUT_SLOTS` (PLAN-UNIFORM-INPUTS P1).
+ *  The worker writes the forcing's current `input::` slider values (f32) into the inputs region
+ *  before each dispatch; the main thread copies them into the `Params` uniform buffer. This is what
+ *  lets a slider change re-dispatch a cached pipeline instead of compiling a new shader. */
+export const INPUT_SLOTS = 16;
+
+/** Bytes of the inputs region (one f32 per slot, its own 64-byte line after the header). */
+export const INPUTS_BYTES = INPUT_SLOTS * 4;
+
 /** Bytes reserved for the WGSL shader text. The gate caps a shader at ~8000 emitted instructions;
  *  512 KiB is far above any shader that clears it. */
 export const WGSL_CAP_BYTES = 512 * 1024;
@@ -58,7 +67,8 @@ export const WGSL_CAP_BYTES = 512 * 1024;
  *  in sync with those two constants. */
 export const RESULT_CAP_F32 = 8 << 20;
 
-export const WGSL_OFFSET = HEADER_BYTES;
+export const INPUTS_OFFSET = HEADER_BYTES;
+export const WGSL_OFFSET = INPUTS_OFFSET + INPUTS_BYTES;
 export const RESULT_OFFSET = WGSL_OFFSET + WGSL_CAP_BYTES;
 export const SAB_BYTES = RESULT_OFFSET + RESULT_CAP_F32 * 4;
 

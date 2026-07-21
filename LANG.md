@@ -719,7 +719,7 @@ The modules:
 | `math`    | `pi`, `e`, `i`/`j` (imaginary unit), `sqrt`, `exp`, `abs`, `arg`, `conj`, `re`, `im`, `floor`, `ceil`, `round`, `log` (natural), `log10`, `sin`, `cos`, `atan`, `sign`, `gcd`, `modpow` | needs `use math;` |
 | `vec`     | `sum`, `prod`, `count`, `any`, `all`, `max`, `min`, `mean`, `cumsum`, `cumprod`, `cummax`, `cummin`, `dot`, `vdot`, `normsq`, `norm`, `transpose`, `adjoint`, `normalize`, `outer`, `quantize`, `onehot`, `has_duplicates`, `count_duplicates`, `mse`, `ones`, `zeros`, `iota` (vector `+`/`-` and `@` cover add/sub/matvec) | needs `use vec;` |
 | `signal`  | `sine`, `cosine` (lazy waveforms), `noise_white`, `noise_white_complex`, `noise_brown`, `noise_pink`, `noise_ou` (undrawn noise generators — drawn with `~`), `sample` | needs `use signal;` |
-| `plot`    | `histogram`, `line`, `scatter`, `heatmap`, `corr`, `fan`, `explain`, `value` (charts, pushed to the output stream like `Print`) | path-only (`plot::fan(...)`) |
+| `plot`    | `histogram`, `line` (also `line(xs, ys)` — a deterministic numeric x-axis for a same-length vector of values), `scatter`, `heatmap`, `corr`, `fan`, `explain`, `value` (charts, pushed to the output stream like `Print`) | path-only (`plot::fan(...)`) |
 | `stats`   | `histogram`, `quantiles`, `moments`, `fan`, `corr` — the same computations as `plot::`, returned as numbers | path-only (`stats::fan(...)`) |
 | `engine`  | `set_precision`, `set_resolution` (program-declared settings) | needs `use engine;` |
 

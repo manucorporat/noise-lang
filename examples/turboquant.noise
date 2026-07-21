@@ -1,92 +1,190 @@
 ---
 title: "TurboQuant"
 abstract: >
-  To save memory you compress each vector down to a single bit per coordinate — but do
-  the dot products between them survive? The obvious scheme, rounding every coordinate
-  to its nearest level, quietly shrinks every inner product by a factor of 2/π. This
-  reproduces that hidden bias from a recent paper, and the one-bit sketch that fixes it.
+  TurboQuant (arXiv:2504.19874) is a recent compression algorithm that shrinks the memory
+  behind LLM attention and vector search several-fold: vectors stored at a few bits per
+  coordinate, no retraining, provably near-optimal error. This article rebuilds its one-bit
+  core and shows why the design is subtle — the obvious compressor, rounding every
+  coordinate to its nearest level, is *optimal* for reconstruction yet quietly scales every
+  dot product by 2/π. Watch the bias appear in a histogram, then build the sketch that
+  removes it on the same bit budget.
 tags: [research, capstone]
 ---
-use math   // pi, sqrt, sign, round
+use math   // pi, sqrt, sign, round, cos, sin
 use vec
 
-// Each sample rotates and quantizes a 20-dimensional vector — a lot of work per draw. Ask for
-// the ~2 significant digits the paper comparison needs, and let every E() size itself.
-engine::set_precision(5e-3)
-
 ```md
-**The target.** A fixed unit vector x, a fixed unit query y, and the number
-we must preserve through compression: their inner product.
+**The library.** A search engine's "understanding" of a sentence is an *embedding*: an
+arrow in d-dimensional space. Similar meanings point in similar directions, and the number
+behind every search result is a dot product — large when a stored vector and a query agree,
+zero when they are unrelated. Here is one stored vector: a simple ramp, scaled to length 1
+so scores stay comparable.
 ```
 
-d = 20
-x = normalize(ones(d))
-y = normalize(iota(d))
-true_ip = y @ x
+d = input::int(min: 8, max: 40, step: 4, default: 20, label: "dimension d")
+x = normalize(1 + iota(d))
 
 ```md
-**The codebook.** After a random rotation each coordinate is ~Normal(0, 1/d),
-so the optimal (Lloyd–Max) quantization levels are the standard unit-Gaussian
-ones, rescaled by 1/√d. One bit buys two levels — just the sign.
+**The query.** Instead of fixing one query, put it on a dial: the query y is a unit vector
+sitting at an angle θ from x. Both arrows have length 1, so the true score is exactly cos θ
+— 1 at 0°, 0 at 90°, negative beyond. Whatever compression does to x, this is the number
+it must preserve, at *every* angle.
 ```
 
-s  = 1 / sqrt(d)
-L1 = [-0.7979, 0.7979] * s
-
-```md
-**Algorithm 1 — the obvious quantizer.** Rotate, snap every coordinate to its
-nearest level, rotate back — at one bit that is exactly its sign. Reconstruction
-distortion lands right on the paper's table:
-```
-
-Pi  ~ rand::rotation(d)
-rot = Pi @ x
-PiT = transpose(Pi)
-mse1 = PiT @ quantize(rot, L1)
-d_mse1 = E(normsq(x - mse1))
+angle = input::real(min: 0, max: 180, step: 5, default: 40, label: "query angle θ (degrees)")
+theta = angle * pi / 180
+true_ip = cos(theta)
 ```latex
-D_{\text{mse}},\ b = 1 = ${d_mse1} \qquad(\text{paper } 0.36)
+y^\top x = \cos\theta = ${round(true_ip, 4)}
 ```
 
 ```md
-**The catch.** Great at reconstruction — yet for *inner products* the 1-bit
-MSE quantizer is biased by exactly 2/π:
+**One bit, naively.** The budget is brutal: each stored number becomes a single bit, so
+each coordinate must round to one of just two values, ±0.7979/√d (where those levels come
+from in a moment). Feed the ramp in coordinate by coordinate and look at what comes out:
+every coordinate of x points up, so every one of the d bits says *up* — the output is a
+flat line. The whole shape of the vector is gone, and no rescaling brings it back.
 ```
-bias_ratio = E(y @ mse1) / true_ip
+
+levels = [-0.7979, 0.7979] / sqrt(d)
+naive_copy = quantize(x, levels)
+plot::line(x, naive_copy)
+
+```md
+**The spin.** The fix for wasted bits is a *random rotation* Π: spin the whole space before
+rounding (and remember Π, so you can spin back). Rotation changes no length and no dot
+product — it only scrambles coordinates — but after it, no coordinate is special: Πx is
+simply a random direction, equally likely to point anywhere. So model exactly that — a
+random unit vector — and magnify one coordinate by √d: a standard bell curve. *That* is why
+the two levels sit at ±0.7979/√d — they are the best possible pair for a Gaussian (the
+Lloyd–Max codebook), and what they keep of each coordinate is its sign.
+```
+
+g ~[d] rand::normal(0, 1)
+spun_x = normalize(g)
+one_coordinate = sqrt(d) * spun_x[0]
+plot::histogram(one_coordinate)
+
+```md
+**Rounding, done right.** Snap every rotated coordinate to its nearest level and measure
+what the compressed copy gets wrong. The average squared reconstruction error lands next to
+the paper's one-bit table — rotate, round, and you have the *best possible* one-bit
+reconstruction:
+```
+
+snapped = quantize(spun_x, levels)
+d_mse = E(normsq(spun_x - snapped))
 ```latex
-\text{MSE } b = 1: \quad \frac{E[\text{est}]}{\text{true}} = ${bias_ratio}
-\qquad(\text{biased: } \tfrac{2}{\pi} = ${round(2 / pi, 4)})
+D_{\text{mse}},\ b = 1 \;=\; E\,\lVert x - \hat{x} \rVert^2 = ${d_mse} \qquad (\text{paper: } 0.36)
 ```
 
 ```md
-**Algorithm 2 — TurboQuant.** Spend b−1 bits on an MSE stage, then sketch its
-*residual* with the one-bit QJL trick: an independent Gaussian projection S,
-signs only, rescaled by ‖r‖ and √(π/2). Provably unbiased (Theorem 2). At b = 1
-the MSE stage is 0-bit — a codebook of {0}, so the residual is x itself and the
-scheme is plain QJL.
+**The catch.** Now score the query against the compressed vector. The query rides through
+the same rotation (rotations preserve the angle θ), and the histogram of its score should
+pile up around the true answer ${round(true_ip, 3)}. It piles up short — at 2/π of it.
+Drag θ anywhere: the shortfall follows the score, always the same fraction.
 ```
 
-tq_ip(x, y, m, S, dd) = {
-  r      = x - m                              // the residual the MSE stage left behind
-  base   = y @ m                              // query read against the MSE reconstruction m
-  gain   = sqrt(pi / 2) / dd * norm(r)        // QJL rescaling: √(π/2)/d times the residual norm ‖r‖
-  sketch = y @ (transpose(S) @ sign(S @ r))   // 1-bit sketch of r: signs of a Gaussian projection, read back against y
-  base + gain * sketch                        // MSE estimate + the unbiased residual correction
-}
-
-S1 ~[d, d] rand::normal(0, 1)
-m1 = zeros(d)
-prod1 = tq_ip(x, y, m1, S1, d)
-
-```md
-**The verdict.** The fix lands on 1 — unbiased — and its squared error stays
-under the plain-QJL bound π/(2d):
-```
-
-unbias_ratio = E(prod1) / true_ip
-d_prod1 = E((prod1 - true_ip) ^ 2)
-
+g2 ~[d] rand::normal(0, 1)
+sideways = normalize(g2 - (g2 @ spun_x) * spun_x)
+spun_y = cos(theta) * spun_x + sin(theta) * sideways
+rounded_score = spun_y @ snapped
+plot::histogram(rounded_score)
+mean_rounded = E(rounded_score)
 ```latex
-\text{prod } b = 1: \quad \frac{E[\text{est}]}{\text{true}} = ${unbias_ratio} \qquad(\text{unbiased} \approx 1)
-D_{\text{prod}},\ b = 1 = ${d_prod1} \qquad(\text{plain QJL};\ \le \text{ bound } \tfrac{\pi}{2d} = ${round(pi / 2 / d, 4)})
+E[\,y^\top \hat{x}\,] = ${mean_rounded} \qquad \tfrac{2}{\pi}\, y^\top x = ${round(2 / pi * true_ip, 4)} \qquad \big(y^\top x = ${round(true_ip, 4)}\big)
+```
+
+```md
+**Why 2/π, exactly.** A sign remembers a Gaussian's direction but forgets its size: for
+z ~ Normal(0, 1), E[z · sign(z)] = E|z| = √(2/π) ≈ 0.798. Rounding pays that factor once
+because each kept coordinate agrees with the true one only in direction — and once more
+because the codebook level 0.7979 *is* √(2/π), chosen to minimize *reconstruction* error
+with no regard for dot products. The two factors multiply to exactly 2/π, independent of d,
+of the query, of everything. And no amount of averaging repairs a shifted mean: the
+estimator is *biased*.
+```
+
+```md
+**The fix — sketch, don't round.** TurboQuant spends the same bits differently. Instead of
+rounding x's own coordinates, project x onto m random directions and store one sign each —
+*was the projection up or down?* — plus x's length as one ordinary float. To score a query,
+read each stored sign against the query's own projection onto the same direction: add it
+when the bit said up, subtract when it said down, rescale by √(π/2) — precisely the size the
+signs forgot. Geometry keeps the estimate honest, because the query's projections are tied
+to x's by exactly cos θ. At m = d this stores the same bit budget rounding used. (In the
+paper this sketch, QJL, compresses the *residual* of a multi-bit first stage; at a one-bit
+budget that stage stores nothing and the residual is x itself.)
+```
+
+m = input::int(min: 1, max: 128, default: 20, label: "sketch size m (bits stored)")
+// Projections of two fixed unit vectors onto one random Gaussian direction are correlated
+// Gaussians — correlation cos θ. Noise draws those pairs directly; no d×m matrix needed.
+onto_x ~[m] rand::normal(0, 1)
+unrelated ~[m] rand::normal(0, 1)
+onto_y = cos(theta) * onto_x + sin(theta) * unrelated
+stored_bits = sign(onto_x)
+sketch_score = sqrt(pi / 2) / m * (onto_y @ stored_bits)
+
+```md
+**Centered.** Same one-bit hardware, and the histogram now sits *on* the true score. Drag θ
+and it follows; drag m and it tightens without ever drifting off. The spread is the price of
+one-bit compression — the position no longer is.
+```
+
+plot::histogram(sketch_score)
+mean_sketch = E(sketch_score)
+sketch_err = E((sketch_score - true_ip) ^ 2)
+```latex
+E[\widehat{y^\top x}] = ${mean_sketch} \qquad \big(y^\top x = ${round(true_ip, 4)}\big)
+\qquad E\big[(\widehat{y^\top x} - y^\top x)^2\big] = ${sketch_err} \;\le\; \tfrac{\pi}{2m} = ${round(pi / 2 / m, 4)}
+```
+
+```md
+**Every query at once.** The dial tested one direction at a time; a real index is asked
+about directions it has never seen. So throw queries from *random* directions at the same
+compressed bits, and plot estimated score against true score. The rounded copy answers
+every question on a line of slope 2/π — systematically short, never recovering. The sketch
+scatters wider, but its cloud is centered on the diagonal: right on average, for every
+question.
+```
+
+probe ~[d] rand::normal(0, 1)
+any_query = normalize(probe)
+true_score = any_query @ spun_x
+rounded_of_query = any_query @ snapped
+query_noise ~[m] rand::normal(0, 1)
+onto_query = true_score * onto_x + sqrt(1 - true_score ^ 2) * query_noise
+sketch_of_query = sqrt(pi / 2) / m * (onto_query @ stored_bits)
+plot::scatter(true_score, rounded_of_query)
+plot::scatter(true_score, sketch_of_query)
+
+```md
+**Buying precision.** The bias was fixable by cleverness; the spread must be bought with
+bits. Double the sketch and the squared error halves — the 1/m law, with the paper's
+guarantee π/(2m) riding just above it:
+```
+
+bit_counts = [5, 10, 20, 40, 80]
+sketch_errs = [for mm in bit_counts {
+  proj_x ~[mm] rand::normal(0, 1)
+  fresh ~[mm] rand::normal(0, 1)
+  proj_y = cos(theta) * proj_x + sin(theta) * fresh
+  E((sqrt(pi / 2) / mm * (proj_y @ sign(proj_x)) - true_ip) ^ 2)
+}]
+plot::line(bit_counts, sketch_errs)
+
+```md
+**The verdict.** Rounding to the nearest level is the *best possible* one-bit compressor
+for rebuilding a vector — and a systematically dishonest one for scoring it. With the dial
+at θ = ${angle}°, rounding returns ${mean_rounded} for a true score of
+${round(true_ip, 3)}; the sketch returns ${mean_sketch} from the same number of bits. That
+unbiased sketch is the estimator riding inside TurboQuant's residual stage — the design
+that lets it compress the memory behind LLM attention and vector search several-fold with
+no systematic error to propagate downstream.
+```
+```latex
+E[\,y^\top \hat{x}_{\text{mse}}\,] = \tfrac{2}{\pi}\, y^\top x \qquad
+E[\,\widehat{y^\top x}_{\text{qjl}}\,] = y^\top x \qquad
+E\big[(\widehat{y^\top x} - y^\top x)^2\big] \le \tfrac{\pi}{2m}
 ```
