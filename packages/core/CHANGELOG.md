@@ -1,5 +1,12 @@
 # @noiselang/core
 
+## 0.8.0
+
+### Minor Changes
+
+- 7744ce7: `plot::line(xs, ys)` — the two-argument form plots a vector of values (numbers, estimates, or random variables, banded by ±1 sd like the one-argument form) against an explicit deterministic numeric x-axis, with the axis named after its source array. Histogram/introspection draw collection now runs on the parallel sampling driver (bit-identical stream, multicore wall-clock).
+- 7744ce7: Slider values are now true runtime uniforms in every backend (PLAN-UNIFORM-INPUTS P1): the WGSL and WASM emitters lower `input::` cones instead of declining them, and the value rides the dispatch (a GPU params block / a host-written memory region) rather than the compiled artifact. Dragging a slider re-dispatches cached pipelines and cached kernel instances with zero recompiles, and slider-heavy documents GPU-accelerate — `turboquant.noise` drops from ~14 s to under 0.1 s on the GPU CLI.
+
 ## 0.7.0
 
 ### Minor Changes
