@@ -27,8 +27,8 @@ importers:
   packages/www:
     dependencies:
       '@noiselang/core':
-        specifier: workspace:*
-        version: link:../core
+        specifier: ^0.8.0
+        version: 0.8.0
       astro:
         specifier: ^5.13.0
         version: 5.18.2(@types/node@26.1.1)(rollup@4.62.2)(typescript@5.9.3)
@@ -657,6 +657,9 @@ packages:
   '@nodelib/fs.walk@1.2.8':
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
+
+  '@noiselang/core@0.8.0':
+    resolution: {integrity: sha512-JrIzoP+tugxhpzoEjW2F0XZoRS2cdcVOJNpRm7zVHzaUUq6xYZh8GRGH2lYM66R4A6cS15P7eLr2N9vLNLfOFA==}
 
   '@oslojs/encoding@1.1.0':
     resolution: {integrity: sha512-70wQhgYmndg4GCPxPPxPGevRKqTIJ2Nh4OkiMWmDAVYsTQ+Ta7Sq+rPevXyXGdzr30/qZBnyOalCszoMxlyldQ==}
@@ -2904,6 +2907,8 @@ snapshots:
     dependencies:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.1
+
+  '@noiselang/core@0.8.0': {}
 
   '@oslojs/encoding@1.1.0': {}
 
