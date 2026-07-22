@@ -9,32 +9,34 @@ import BirthdayDemo from '../components/BirthdayDemo.astro';
 import BellDemo from '../components/BellDemo.astro';
 import AmFmDemo from '../components/AmFmDemo.astro';
 import PrisonersDemo from '../components/PrisonersDemo.astro';
+import DocDemo from '../components/DocDemo.astro';
 
 const ideas = [
   {
     k: 'Everything is a distribution',
-    d: 'A number is just a distribution with all its weight on a single point — a Dirac delta. Operators lift over random variables automatically — so X below is random, and Y is random too, with no special syntax. Propagating uncertainty reads exactly like ordinary arithmetic.',
-    code: 'X ~ unif(-1, 1)\nY = 2 * X + 3   // Y is a distribution too',
-  },
-  {
-    k: 'The tilde draws; equals transforms',
-    d: 'A name bound with ~ is one fixed random draw that every mention reuses — so X − X is exactly 0, never "two samples." Independence comes from separate ~ bindings, exactly like writing X₁, X₂ on paper. No hidden re-draws, no surprises.',
-    code: 'A ~ unif_int(1, 6)\nB ~ unif_int(1, 6)   // two independent dice\nA + B                // a genuine 2d6 distribution',
+    d: 'A number is just a distribution with all its weight on a single point, a Dirac delta. Operators lift over random variables automatically, so X below is random and Y is random too, with no special syntax. Propagating uncertainty reads exactly like ordinary arithmetic.',
+    code: 'X ~ rand::unif(-1, 1)\nY = 2 * X + 3   // Y is a distribution too',
   },
   {
     k: 'Lazy until queried: P, E, Var, Q',
-    d: 'Nothing is sampled until you ask. A query runs a fast columnar Monte-Carlo pass and reports an honest estimate — the printed digits reflect the standard error, and that error propagates through arithmetic, so 4·P(C) rounds itself correctly.',
+    d: 'Nothing is sampled until you ask. A query runs a fast columnar Monte-Carlo pass and reports an honest estimate: the printed digits reflect the standard error, and that error propagates through arithmetic, so 4·P(C) rounds itself correctly.',
     code: 'C = X^2 + Y^2 < 1\n4 * P(C)   // ≈ 3.14',
   },
   {
     k: 'Independence is a shape',
-    d: 'Put a shape on the tilde to draw a whole batch at once: ~[n] is an iid vector, ~[n, m] a matrix. A reducer collapses it back to one number — so the birthday paradox over 23 people, all 253 pairwise comparisons, is a single expression.',
-    code: 'days ~[23] unif_int(1, 365)\nP(has_duplicates(days))   // ≈ 0.51',
+    d: 'Put a shape on the tilde to draw a whole batch at once: ~[n] is an iid vector, ~[n, m] a matrix. A reducer collapses it back to one number, so the birthday paradox over 23 people, all 253 pairwise comparisons, fits in a single expression.',
+    code: 'days ~[23] rand::unif_int(1, 365)\nP(has_duplicates(days))   // ≈ 0.51',
   },
   {
     k: 'Branches are random variables',
-    d: 'When the condition is random, if c { a } else { b } does not take a path — it builds a new random variable, choosing a or b per sample. That single rule hands you max, min, abs, clamps and payoffs over distributions for free.',
+    d: 'When the condition is random, if c { a } else { b } builds a new random variable instead of taking a path, and each sample picks a or b on its own. That single rule hands you max, min, abs, clamps and payoffs over distributions for free.',
     code: 'RandomVariableToo = if A > B { A } else { B }   // the larger of two dice',
+  },
+  {
+    k: 'A program is a document',
+    d: 'A .noise file compiles to a live article: frontmatter names it, markdown blocks become prose, a latex block typesets itself around live values, and an input::… call renders as a slider the reader can drag, and the whole document re-runs as it moves. Every example on this site is one. Here is the program, and right below it, the document it compiles to, rendered live by the engine in your browser:',
+    code: '---\ntitle: "Roll a die"\n---\nsides = input::int(min: 2, max: 100, default: 6)\n\nDie ~ rand::unif_int(1, sides)\np = P(Die == sides)\n\n```latex\nP(\\text{rolling a } ${sides}) = ${p * 100}\\%\n```',
+    doc: true,
   },
 ];
 ---
@@ -47,32 +49,32 @@ const ideas = [
       <h1 class="doc-title" data-reveal>The Noise Programming Language</h1>
       <p class="doc-meta" data-reveal style="--reveal-delay: 60ms">
         A small, expression-based, stochastic language: write random variables like ordinary
-        variables. JIT-compiled, massively parallelizable, blazing fast.
+        variables. GPU-compiled, massively parallel, blazing fast.
       </p>
       <div class="abstract" data-reveal style="--reveal-delay: 120ms">
         <p>
           <span class="abstract-label">Abstract.</span>
-          In Noise, every value is a probability distribution: a number is the degenerate case, a
-          point mass. Operators lift over random variables and a
-          query such as <code class="code-inline">P(event)</code> estimates a probability by simulation.
+          In Noise, every value is a probability distribution: a number is a delta generatorl.
+          Operators lift over random variables and a query such as <code class="code-inline">P(event)</code> estimates a probability by simulation.
           The result is a small language in which propagating uncertainty and running Monte-Carlo
-          experiments reads like ordinary mathematics, highly optimized.
+          experiments reads like ordinary mathematics, compiled to run on the GPU and multi-core, on both native and web.
         </p>
       </div>
     </div>
 
     <div class="wide" data-reveal>
-      <ShaderFigure n={1} caption="the noise field this language is named for — a fractal-noise surface drawn as ink contours. Move your cursor to disturb it." />
+      <ShaderFigure n={1} caption="the noise field this language is named for: a fractal-noise surface drawn as ink contours. Move your cursor to disturb it." />
     </div>
 
     <section id="tour" class="section">
       <div class="measure">
         <h2 class="sec" data-reveal>Keep scrolling</h2>
         <p data-reveal>
-          The best way to learn a language is to watch it unfold in front of you — so keep scrolling.
+          The best way to learn a language is to watch it unfold in front of you, so keep scrolling.
           Six small programs, each one idea past the last, animate as you read them, then run for real
-          on the compiled engine in your browser. It has a touch of magic to it: every variable here
-          is a whole wave of possibility, and a query is what collapses it to a single number.
+          on the compiled engine in your browser. It has a touch of magic to it, because every
+          variable here is a whole wave of possibility, and a query is what collapses it to a single
+          number.
         </p>
       </div>
 
@@ -90,7 +92,7 @@ const ideas = [
         <p data-reveal>
           A catalogue of short programs, each a Monte-Carlo experiment with a known closed form, so
           the printed answer can be checked. Open any one in the
-          <a href="/play">playground</a> to run and edit it — the real Noise compiler, built to
+          <a href="/play">playground</a> to run and edit it on the real Noise compiler, built to
           WebAssembly and running in your browser. Each program gets its own shareable link.
         </p>
       </div>
@@ -111,6 +113,7 @@ const ideas = [
             <h3 class="subsec" data-reveal>{i.k}</h3>
             <p data-reveal>{i.d}</p>
             <pre class="listing" data-reveal><code>{i.code}</code></pre>
+            {i.doc && <DocDemo code={i.code} />}
           </div>
         ))}
       </div>
@@ -121,75 +124,103 @@ const ideas = [
         <h2 class="sec" data-reveal>Performance</h2>
         <p data-reveal>
           Almost every Noise program ends in “evaluate this expression over a few million random
-          draws.” That loop is compiled, not interpreted. <code class="code-inline">~</code> and the
-          distribution constructors build a graph IR that lowers three ways — a portable columnar
-          interpreter, a native JIT via <a href="https://cranelift.dev/">Cranelift</a>, and a
-          WebAssembly emitter for the browser — all sharing one cost model, so the backend only ever
-          changes speed, never results (bit-identical across core counts).
+          draws.” That loop is compiled, not interpreted. A query like
+          <code class="code-inline">P(...)</code> is secretly a compute shader with a map/reduce
+          attached: one pure kernel evaluated over millions of independent lanes, then folded down
+          to a single number. You never write that shader. The <code class="code-inline">~</code>
+          bindings and the distribution constructors build a graph IR of it under the hood.
         </p>
         <p data-reveal>
-          You write a one-line <code class="code-inline">P(...)</code> and get an expert kernel for
-          free. It is built from a stack of techniques, each with its own measured win:
+          The engine then picks how to run each query, like a SQL query planner picks an execution
+          plan: a cost model keeps small queries on the vectorized columnar interpreter, fans
+          medium ones out across every core with a work-stealing reducer, and compiles the heavy
+          ones into a single fused WGSL compute shader for the GPU, on native and in the browser
+          through WebGPU. Switching paths can only ever change the speed, because the draws are
+          bit-identical on every backend.
+        </p>
+        <p data-reveal>
+          So you write a one-line <code class="code-inline">P(...)</code> and get an expert kernel
+          for free. It is built from a stack of techniques, each with its own measured win:
         </p>
         <ul class="perf-techniques" data-reveal>
           <li>
-            <b>Kernel fusion</b> — the codegen backends emit one loop that draws its sources, computes
-            the whole expression in registers, and stores only the result, erasing the interpreter's
-            intermediate memory traffic.
+            <b>Kernel fusion:</b> the codegen backends emit one loop that draws its sources, computes
+            the whole expression in registers, and stores only the result, so the interpreter's
+            intermediate memory traffic disappears.
           </li>
           <li>
-            <b>Graph simplification</b> — constant folding, finite-safe algebraic identities, and
+            <b>Graph simplification:</b> constant folding, finite-safe algebraic identities, and
             common-subexpression elimination shrink the DAG before any code is generated (so
             <code class="code-inline">X + X</code> is one draw, not two).
           </li>
           <li>
-            <b>Inlined xoshiro256++ PRNG</b> — the generator is emitted straight into the kernel as a
-            handful of shifts/xors/rotates, with zero call overhead on native and in WASM alike.
+            <b>Counter-based RNG (squares64):</b> inlined straight into the kernel, and stateless
+            by construction. A draw is a pure function of (seed, lane, source), so any slice of the
+            sample space can run on any core or any GPU thread and still land bit-identical. The
+            generator is certified, too: it passes a seven-test statistical battery and a 1&nbsp;TB
+            <a href="https://pracrand.sourceforge.net/">PractRand</a> run over the engine's exact
+            draw stream with zero anomalies.
           </li>
           <li>
-            <b>Inlined transcendentals</b> — <code class="code-inline">ln</code>/<code class="code-inline">sin</code>/<code class="code-inline">cos</code>
+            <b>Inlined transcendentals:</b> <code class="code-inline">ln</code>/<code class="code-inline">sin</code>/<code class="code-inline">cos</code>
             (the heart of <code class="code-inline">normal</code>, <code class="code-inline">exp</code>,
-            and signals) become straight-line polynomial approximations (~1e-9 vs libm), roughly
-            doubling transcendental-bound kernels and skipping a per-draw crossing of the JS boundary
-            in the browser.
+            and signals) become straight-line polynomial approximations that roughly double
+            transcendental-bound kernels and skip a per-draw crossing of the JS boundary in the
+            browser. On the GPU they map to the hardware transcendental units, so they run super fast.
           </li>
           <li>
-            <b>Multi-stream RNG</b> — four independent xoshiro streams run at once to hide the
-            generator's serial-dependency latency (the scalar form of SIMD), switched on only where
-            the graph is latency-bound.
+            <b>GPU dispatch:</b> a heavy query lowers to a WGSL compute shader. Array draws and
+            <code class="code-inline">for</code> loops emit as real loops rather than unrolling,
+            permutations and rotations run natively per lane, and one dispatch covers millions of
+            lanes. Thanks to <a href="https://wgpu.rs/">wgpu</a>, the one emitter reaches Metal,
+            Vulkan, and DirectX&nbsp;12 natively and WebGPU in the browser, so there is a single
+            GPU backend to maintain instead of one per platform.
           </li>
           <li>
-            <b>Columnar batches</b> — the interpreter runs 1024 lanes through one instruction at a
-            time: a tight, cache-friendly, auto-vectorizing pass over contiguous <code class="code-inline">f64</code>s.
+            <b>Columnar batches:</b> the interpreter runs 1024 lanes through one instruction at a
+            time, a tight, cache-friendly, auto-vectorizing pass over contiguous
+            <code class="code-inline">f32</code> lanes (aggregation stays <code class="code-inline">f64</code>).
           </li>
           <li>
-            <b>Vectorized power-sum reduction</b> — moments accumulate as raw power sums across eight
-            unrolled lanes with no per-element divide: ~9.5× faster than a streaming Welford update,
-            turning the reduction from the ceiling into a rounding error.
+            <b>Vectorized power-sum reduction:</b> moments accumulate as raw power sums across eight
+            unrolled lanes with no per-element divide. That is ~9.5× faster than a streaming Welford
+            update, and it turns the reduction from the ceiling into a rounding error.
           </li>
           <li>
-            <b>Deterministic multicore</b> — sampling fans out with a work-stealing loop whose
+            <b>Deterministic multicore:</b> sampling fans out with a work-stealing loop whose
             per-chunk accumulators merge as an exactly-associative monoid, so the answer is
             bit-identical regardless of thread count, and reproducible from a seed.
           </li>
           <li>
-            <b>Profitability gate</b> — a cost model emits a fused kernel only where it beats the
-            vectorized interpreter, so codegen can change the speed but never lose.
+            <b>Profitability gate:</b> a cost model sends a query to the GPU (or emits a fused
+            kernel) only where it beats the vectorized interpreter, so codegen can change the speed
+            but never lose. Anything a backend can't lower falls back to the interpreter, which is
+            correct and a bit slower.
           </li>
         </ul>
         <p data-reveal>The payoff, measured on a 14-core M4 Pro:</p>
         <ul class="perf-stats" data-reveal>
           <li>
-            <b>~5.8 billion</b> samples/sec (π Monte&nbsp;Carlo, generate + reduce, all cores),
-            scaling <b>~9.6×</b> from one core to all of them.
+            <b>~5.8 billion</b> samples/sec (π Monte&nbsp;Carlo, generate + reduce, all cores), and
+            it scales <b>~9.6×</b> from one core to all of them.
           </li>
           <li>
-            Within <b>~1.15×</b> of hand-written, LLVM-compiled Rust per core — and faster end to end,
-            because the one-liner fuses and fans out across every core with no flags or annotations.
+            The GPU backend runs the full example corpus <b>~4.2×</b> faster end to end than the
+            interpreter, and the heaviest simulations gain far more: the random-rotation
+            quantization study drops from 1474&nbsp;ms to <b>55&nbsp;ms (~26×)</b> and the
+            100-prisoners simulation from 59&nbsp;ms to <b>2.8&nbsp;ms (~21×)</b>, with the same
+            seeds and the same answers.
           </li>
           <li>
-            In the browser the emitted WASM kernel runs the same fused loop at <b>~0.5–0.75×</b> of
-            native codegen — hundreds of millions of samples/sec, client-side.
+            On GPU-shaped work it beats hand-written CPU code outright: a 100-million-draw normal
+            kernel takes 96&nbsp;ms on a hand-tuned multicore CPU implementation and
+            <b>5&nbsp;ms</b> as a single GPU dispatch.
+          </li>
+          <li>
+            The browser gets the same treatment: the emitted WASM kernel runs the fused loop at
+            <b>~0.5–0.75×</b> of native codegen, and WebGPU runs the heavy compute shaders in the
+            playground, so dragging a slider on the heaviest example re-runs the whole document in
+            about <b>90&nbsp;ms</b> where the CPU path took 14 seconds.
           </li>
         </ul>
         <p data-reveal>
@@ -229,7 +260,7 @@ const ideas = [
             </p>
             <p>
               I started Noise nine years ago and never quite finished it. The idea grew out of
-              my telecommunications degree — a world of signals, noise, and probability — where
+              my telecommunications degree, a world of signals, noise, and probability, where
               I kept wishing for a language that could express uncertainty as naturally as it
               expresses arithmetic. This is that wish.
             </p>
@@ -247,7 +278,7 @@ const ideas = [
 
     <footer class="doc-footer measure">
       <hr />
-      <p class="muted" id="footer-version">noise~lang — running on WebAssembly.</p>
+      <p class="muted" id="footer-version">noise~lang · running on WebAssembly.</p>
     </footer>
   </article>
 </Layout>
@@ -310,7 +341,7 @@ const ideas = [
   .doc-footer { padding-bottom: 3rem; }
   .doc-footer p { font-size: 0.92rem; }
 
-  /* about the author — a journal-style author note, typeset like the end of a paper */
+  /* about the author: a journal-style author note, typeset like the end of a paper */
   .author {
     display: flex;
     gap: 1.6rem;
@@ -371,7 +402,7 @@ const ideas = [
   noiseVersion()
     .then((v) => {
       const el = document.getElementById('footer-version');
-      if (el) el.textContent = `noise~lang v${v} — running on WebAssembly.`;
+      if (el) el.textContent = `noise~lang v${v} · running on WebAssembly.`;
     })
     .catch(() => {});
 </script>

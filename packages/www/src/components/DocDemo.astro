@@ -1,0 +1,233 @@
+---
+// The "A program is a document" card, made literal: the snippet above it runs through the real
+// engine and renders here the way the playground preview renders it (paper title, code listings,
+// an inline slider, a KaTeX equation), so the reader can drag the slider and watch the document
+// re-run. Engine + KaTeX load lazily, on first scroll into view.
+import { encodeCode } from '../lib/share';
+
+interface Props {
+  code: string;
+}
+const { code } = Astro.props;
+const playHref = `/play#c=${encodeCode(code)}`;
+---
+
+<div class="docdemo" data-code={code}>
+  <div class="docdemo-head">
+    <span class="docdemo-name">compiled document</span>
+    <a class="docdemo-open" href={playHref} target="_blank" rel="noopener" title="Open this program in the playground">
+      open in playground <span aria-hidden="true">↗</span>
+    </a>
+  </div>
+  <div class="docdemo-page"><span class="docdemo-wait">rendering…</span></div>
+</div>
+
+<!-- The page DOM is built in JS, so Astro's scoped styles never reach it. Everything lives in a
+     global block scoped under .docdemo, same trick the playground uses with #pg-output. -->
+<style is:global>
+  .docdemo {
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--paper);
+    margin-top: 0.8rem;
+  }
+  .docdemo-head {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--ink-dim);
+    padding: 0.45rem 0.9rem;
+    border-bottom: 1px solid var(--rule);
+    background: rgba(0, 0, 0, 0.025);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  .docdemo-name::before { content: '⇣\00a0'; color: var(--accent); }
+  .docdemo-open { color: var(--ink-dim); white-space: nowrap; transition: color 0.15s ease; }
+  .docdemo-open:hover { color: var(--accent); text-decoration: none; }
+  .docdemo-page {
+    font-family: var(--serif);
+    padding: 1.1rem 1.4rem 1.2rem;
+  }
+  .docdemo-wait { color: var(--ink-dim); font-style: italic; font-size: 0.92rem; }
+  .docdemo-title {
+    text-align: center;
+    font-size: 1.25rem;
+    font-weight: 700;
+    margin: 0.2rem 0 0.9rem;
+  }
+  .docdemo-code {
+    background: var(--paper-2);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 0.6rem 0.8rem;
+    margin: 0.7rem 0;
+    font-size: 0.85rem;
+    line-height: 1.55;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .docdemo-input {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: var(--paper-2);
+    padding: 0.45rem 0.8rem;
+    margin: 0.7rem 0;
+    font-size: 0.9rem;
+  }
+  .docdemo-input-name {
+    font-variant: small-caps;
+    letter-spacing: 0.03em;
+    color: var(--ink);
+  }
+  .docdemo-input input[type='range'] { flex: 1; min-width: 100px; accent-color: var(--accent); cursor: pointer; }
+  .docdemo-input-num {
+    width: 4.2em;
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: var(--paper);
+    color: var(--ink);
+    padding: 0.1rem 0.3rem;
+  }
+  .docdemo-latex { margin: 0.9rem 0 0.2rem; }
+  .docdemo-latex-eq { overflow-x: auto; overflow-y: hidden; padding: 0.15rem 0; }
+  .docdemo-latex-eq > .katex-display { margin: 0.35rem 0; text-align: left; }
+  .docdemo-latex-eq > .katex-display > .katex { text-align: left; }
+  .docdemo-note { margin: 0.9rem 0 0.2rem; white-space: pre-wrap; }
+  .docdemo-err { color: var(--accent); font-family: var(--mono); font-size: 0.85rem; }
+</style>
+
+<script>
+  import { runNoise, type NoiseResult, type InputBlock, type InputValue } from '../lib/noise';
+  import { LISTING_HL } from '../lib/highlight';
+
+  const root = document.querySelector<HTMLElement>('.docdemo');
+  if (root) {
+    const page = root.querySelector<HTMLElement>('.docdemo-page')!;
+    const src = root.dataset.code ?? '';
+    const values: Record<string, InputValue> = {};
+    let katex: typeof import('katex').default | null = null;
+    let timer = 0;
+
+    /** A code group that is nothing but `name = input::…` lines: the slider stands in for it,
+     * so the listing is dropped, exactly like the playground preview does. */
+    const isInputOnly = (source: string) =>
+      source
+        .split('\n')
+        .map((l) => l.trim().replace(/;$/, ''))
+        .filter((l) => l.length > 0)
+        .every((l) => /^[A-Za-z_]\w*\s*=\s*input\s*::/.test(l));
+
+    function inputControl(b: InputBlock): HTMLElement {
+      const row = document.createElement('label');
+      row.className = 'docdemo-input';
+      const name = document.createElement('span');
+      name.className = 'docdemo-input-name';
+      name.textContent = b.label ?? b.name;
+      row.appendChild(name);
+      const val = values[b.name] ?? b.value;
+      const step = b.step !== undefined ? String(b.step) : b.type === 'int' ? '1' : 'any';
+      const range = document.createElement('input');
+      range.type = 'range';
+      if (b.min !== undefined) range.min = String(b.min);
+      if (b.max !== undefined) range.max = String(b.max);
+      range.step = step;
+      range.value = String(val);
+      const num = document.createElement('input');
+      num.type = 'number';
+      num.className = 'docdemo-input-num';
+      num.step = step;
+      num.value = String(val);
+      const sync = (v: number) => {
+        range.value = String(v);
+        num.value = String(v);
+        values[b.name] = v;
+        window.clearTimeout(timer);
+        timer = window.setTimeout(execute, 180);
+      };
+      range.addEventListener('input', () => sync(Number(range.value)));
+      num.addEventListener('change', () => sync(Number(num.value)));
+      row.appendChild(range);
+      row.appendChild(num);
+      return row;
+    }
+
+    function render(res: NoiseResult) {
+      page.innerHTML = '';
+      if (!res.ok) {
+        const err = document.createElement('div');
+        err.className = 'docdemo-err';
+        err.textContent = res.error ?? 'error';
+        page.appendChild(err);
+        return;
+      }
+      if (res.meta.title) {
+        const h = document.createElement('div');
+        h.className = 'docdemo-title';
+        h.textContent = res.meta.title;
+        page.appendChild(h);
+      }
+      for (const b of res.blocks) {
+        if (b.kind === 'code') {
+          if (isInputOnly(b.source)) continue;
+          const pre = document.createElement('pre');
+          pre.className = 'code-body docdemo-code';
+          pre.innerHTML = LISTING_HL(b.source);
+          page.appendChild(pre);
+        } else if (b.kind === 'input') {
+          page.appendChild(inputControl(b));
+        } else if (b.kind === 'note') {
+          const el = document.createElement('div');
+          if (b.syntax === 'latex' && katex) {
+            el.className = 'docdemo-latex';
+            for (const line of b.text.split('\n').map((l) => l.trim()).filter(Boolean)) {
+              const row = document.createElement('div');
+              row.className = 'docdemo-latex-eq';
+              katex.render(line, row, { displayMode: true, throwOnError: false });
+              el.appendChild(row);
+            }
+          } else {
+            el.className = 'docdemo-note';
+            el.textContent = b.text;
+          }
+          page.appendChild(el);
+        }
+      }
+    }
+
+    async function execute() {
+      try {
+        if (!katex) {
+          const [k] = await Promise.all([import('katex'), import('katex/dist/katex.min.css')]);
+          katex = k.default;
+        }
+        render(await runNoise(src, { inputs: values }));
+      } catch (e) {
+        page.innerHTML = '';
+        const err = document.createElement('div');
+        err.className = 'docdemo-err';
+        err.textContent = String(e);
+        page.appendChild(err);
+      }
+    }
+
+    // Engine + KaTeX are lazy: nothing loads until the card scrolls into view.
+    const io = new IntersectionObserver(
+      (es) => {
+        if (es.some((e) => e.isIntersecting)) {
+          io.disconnect();
+          void execute();
+        }
+      },
+      { rootMargin: '200px 0px' },
+    );
+    io.observe(root);
+  }
+</script>
